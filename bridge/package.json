@@ -3,7 +3,10 @@
   "private": true,
   "type": "module",
   "engines": { "node": ">=22.19.0" },
-  "scripts": { "start": "node --env-file-if-exists=.env worker.mjs" },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env worker.mjs",
+    "test:navigation": "node --env-file-if-exists=.env --test test/web-navigation.test.mjs"
+  },
   "dependencies": {
     "wechaty": "1.20.2",
     "wechaty-puppet-wechat": "1.18.4",

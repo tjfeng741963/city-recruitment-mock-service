@@ -157,7 +157,7 @@ async function main() {
         if (online) approvedAccount = accountId;
       }
     }
-    catch { online = false; console.error('Device heartbeat rejected; check pairing/account binding'); }
+    catch (error) { online = false; console.error('Device heartbeat failed:', Number.isInteger(error?.statusCode) ? `HTTP ${error.statusCode}` : 'network or timeout'); }
   });
   const heartbeat = setInterval(async () => {
     if (heartbeatBusy) return;
@@ -170,7 +170,7 @@ async function main() {
         if (online) approvedAccount = accountId;
       }
     }
-    catch { if (change === generation) online = false; console.error('Gateway heartbeat failed'); }
+    catch (error) { if (change === generation) online = false; console.error('Gateway heartbeat failed:', Number.isInteger(error?.statusCode) ? `HTTP ${error.statusCode}` : 'network or timeout'); }
     finally { heartbeatBusy = false; }
   }, 15_000);
   try { await driver.start(); }
