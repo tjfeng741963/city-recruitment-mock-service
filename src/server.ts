@@ -20,6 +20,7 @@ import { registerActivationRoutes } from "./modules/activation/activation.routes
 import { registerRelationRoutes } from "./modules/relations/relations.routes.js";
 import { registerPermissionRoutes } from "./modules/permissions/permission.routes.js";
 import { registerAdminRoutes } from "./modules/admin/admin.routes.js";
+import { registerDeviceBridgeRoutes } from "./modules/messaging/device-bridge.routes.js";
 
 declare module "fastify" {
   interface FastifyInstance { db: DatabaseSync }
@@ -31,6 +32,7 @@ declare module "fastify" {
  * Verified 2026-10-21 against http://47.107.245.246:8080 — these returned 200
  * with real payloads while every other contract returned 403.
  */
+const DEVICE_TOKEN_ROUTES = new Set(["heartbeat", "claim", "receipts", "inbound"].map(action => `POST /api/v1/bridge/devices/:code/${action}`));
 const PUBLIC_ROUTES = new Set([
   "POST /api/v1/auth/login",
   "GET /api/v1/agent/reminder-config",
@@ -38,6 +40,7 @@ const PUBLIC_ROUTES = new Set([
   "GET /api/v1/agent/report/account-summary",
   // External message bridges authenticate callbacks with the HMAC header.
   "POST /api/v1/webhooks/dify",
+  ...DEVICE_TOKEN_ROUTES,
   // Device-called endpoints: device_code is a required query parameter, not a
   // secret. The target answers 422 when it is absent and 404 for an unknown
   // conversation even when the value is fake, with or without a bearer token.
@@ -60,6 +63,9 @@ export function buildServer() {
   const db = openDatabase(process.env.REA_DATABASE_PATH ?? config.databasePath);
   migrateDatabase(db);
   seedDatabase(db);
+  // This deployment uses one app process per SQLite database. Keep bridge command
+  // leases intact; retrying a recovered delivery reuses its durable command id.
+  db.prepare("UPDATE message_deliveries SET status='failed',last_error='Application restarted before delivery was finalized' WHERE status='sending'").run();
   const auth = new AuthService(db, config.jwtSecret);
   app.decorate("db", db);
   app.decorateRequest("authToken", "");
@@ -86,6 +92,7 @@ export function buildServer() {
   registerResourceRoutes(app, db);
   registerFileRoutes(app, db);
   registerAgentRoutes(app, db);
+  registerDeviceBridgeRoutes(app, db);
   registerActivationRoutes(app, db);
   registerRelationRoutes(app, db);
   registerPermissionRoutes(app);
@@ -121,6 +128,8 @@ export function buildServer() {
         const issues = collectValidationErrors(contract, request.body, request.query, isMultipart);
         if (issues.length) return reply.code(422).send({ detail: issues });
       }
+      // These four routes authenticate their own per-device tokens, never user JWTs.
+      if (DEVICE_TOKEN_ROUTES.has(`${request.method} ${request.routeOptions.url}`)) return;
       // Device endpoints are callable anonymously, but a supplied bearer token
       // still identifies the operator and must participate in scope checks.
       // Keep the login endpoint credential-agnostic.

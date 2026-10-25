@@ -26,6 +26,14 @@ export interface DifyProvider {
   healthCheck(input: Pick<DifyMessageInput, "baseUrl" | "apiKey">): Promise<DifyHealthResult>;
 }
 
+export function deviceDifyConfig(data: Record<string, unknown>): { baseUrl: string; apiKey: string } {
+  const keyEnv = typeof data.dify_key_env === "string" ? data.dify_key_env : "REA_DIFY_API_KEY";
+  return {
+    baseUrl: String(data.dify_url || process.env.REA_DIFY_BASE_URL || "mock://local"),
+    apiKey: process.env[keyEnv] || String(data.dify_key ?? ""),
+  };
+}
+
 function normalizeBaseUrl(value: string): string {
   return value.replace(/\/+$/, "");
 }

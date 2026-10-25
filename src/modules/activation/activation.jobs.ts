@@ -3,8 +3,9 @@ import { JobExecutor } from "../scheduler/scheduler.js";
 import { JobStore, type Clock, type JobRecord } from "../scheduler/job-store.js";
 import { evaluateActivationRule, type ActivationRuleContext, type ActivationStrategyCode } from "./activation.rules.js";
 import { ACTIVATION_STRATEGY_DEFAULTS, activationStrategyDefault } from "./activation.strategies.js";
-import { MockDifyProvider, type DifyProvider } from "../dify/dify-provider.js";
+import { deviceDifyConfig, MockDifyProvider, type DifyProvider } from "../dify/dify-provider.js";
 import { MessageEventService } from "../messaging/message-events.js";
+import { MockMessageChannelProvider, type MessageChannelProvider } from "../messaging/message-channel-provider.js";
 
 const STRATEGIES = ACTIVATION_STRATEGY_DEFAULTS.map((strategy) => strategy.code);
 
@@ -29,7 +30,7 @@ export class ActivationJobService {
   private readonly provider: DifyProvider;
   private readonly events: MessageEventService;
 
-  constructor(private readonly db: DatabaseSync, private readonly store: JobStore, private readonly clock: Clock, provider?: DifyProvider, events?: MessageEventService) {
+  constructor(private readonly db: DatabaseSync, private readonly store: JobStore, private readonly clock: Clock, provider?: DifyProvider, events?: MessageEventService, private readonly channel: MessageChannelProvider = new MockMessageChannelProvider()) {
     this.provider = provider ?? new MockDifyProvider();
     this.events = events ?? new MessageEventService(db, { webhookSecret: process.env.REA_WEBHOOK_SECRET ?? "local-webhook-secret" });
   }
@@ -80,7 +81,10 @@ export class ActivationJobService {
   }
 
   private async runMessageSend(job: JobRecord): Promise<void> {
-    const recordId = Number(job.payload.activation_record_id);
+    return this.sendRecord(Number(job.payload.activation_record_id));
+  }
+
+  async sendRecord(recordId: number): Promise<void> {
     const record = this.db.prepare("SELECT id,customer_id,device_code,status,script,tier FROM activation_records WHERE id=?").get(recordId) as { id: number; customer_id: number; device_code: string; status: string; script: string; tier: number } | undefined;
     if (!record) throw new Error(`Activation record not found: ${recordId}`);
     if (record.status === "sent" || record.status === "replied") return;
@@ -90,12 +94,12 @@ export class ActivationJobService {
     const eventId = `activation-send:${record.id}:${record.tier + 1}`;
     this.events.recordEvent({ eventId, eventType: "message.sent", direction: "outbound", deviceCode: record.device_code, customerId: record.customer_id, payload: { activation_record_id: record.id, query_length: message.length } });
     const delivery = this.events.createDelivery({ eventId, deviceCode: record.device_code, customerId: record.customer_id, content: message });
-    this.events.markDeliverySending(delivery.delivery_id);
+    const saved = this.db.prepare("SELECT status,generated_content,provider_message_id FROM message_deliveries WHERE id=?").get(delivery.delivery_id) as { status: string; generated_content: string | null; provider_message_id: string | null };
+    if (saved.status !== 'succeeded') this.events.markDeliverySending(delivery.delivery_id);
     const device = this.db.prepare("SELECT data_json FROM agent_devices WHERE json_extract(data_json,'$.device_code')=? LIMIT 1").get(record.device_code) as { data_json: string } | undefined;
     const deviceData = device && typeof device.data_json === "string" ? JSON.parse(device.data_json) as Record<string, unknown> : {};
-    const providerResult = await this.provider.sendMessage({
-      baseUrl: String(deviceData.dify_url ?? "mock://local"),
-      apiKey: String(deviceData.dify_key ?? ""),
+    const providerResult = saved.generated_content ? { success: true, message: saved.generated_content } : await this.provider.sendMessage({
+      ...deviceDifyConfig(deviceData),
       user: String(record.customer_id),
       query: message,
     });
@@ -104,9 +108,17 @@ export class ActivationJobService {
       throw new Error(providerResult.error ?? "Dify provider failed");
     }
     const outgoing = providerResult.message || message;
+    this.db.prepare("UPDATE message_deliveries SET generated_content=? WHERE id=?").run(outgoing, delivery.delivery_id);
+    const sent = saved.status === 'succeeded' ? { success: true, message_id: saved.provider_message_id ?? undefined } : await this.channel.sendMessage({
+      deviceCode: record.device_code, customerId: record.customer_id, content: outgoing, idempotencyKey: eventId,
+    });
+    if (!sent.success) {
+      this.events.markDeliveryFailed(delivery.delivery_id, sent.error ?? "Message channel failed");
+      throw new Error(sent.error ?? "Message channel failed");
+    }
     const exists = this.db.prepare("SELECT id FROM agent_messages WHERE device_code=? AND customer_id=? AND direction='outbound' AND content=? AND created_at>=datetime('now','-1 day') LIMIT 1").get(record.device_code, record.customer_id, outgoing);
-    if (!exists) this.db.prepare("INSERT INTO agent_messages(device_code,customer_id,direction,content,status,created_at) VALUES (?,?, 'outbound',?,'sent',?)").run(record.device_code, record.customer_id, outgoing, iso(this.clock));
-    this.events.markDeliverySucceeded(delivery.delivery_id, providerResult.message_id);
+    if (!exists) this.db.prepare("INSERT INTO agent_messages(device_code,customer_id,direction,content,status,created_at) VALUES (?,?, 'outbound',?,?,?)").run(record.device_code, record.customer_id, outgoing, 'simulated' in sent && sent.simulated ? 'simulated' : 'sent', iso(this.clock));
+    this.events.markDeliverySucceeded(delivery.delivery_id, sent.message_id);
     this.db.prepare("UPDATE activation_records SET status='sent',script=?,tier=tier+1,updated_at=? WHERE id=? AND status IN ('pending_send','pending_review')").run(outgoing, iso(this.clock), recordId);
   }
 

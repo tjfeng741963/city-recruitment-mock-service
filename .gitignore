@@ -7,3 +7,6 @@ data/*.sqlite-journal
 过程文件/parity/evidence/
 .playwright-cli/
 *.log
+.env*
+bridge/node_modules/
+bridge/过程文件/

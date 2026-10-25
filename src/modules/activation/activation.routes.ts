@@ -16,13 +16,24 @@ export async function registerActivationRoutes(app: FastifyInstance, db: Databas
   const deviceScope = (auth: NonNullable<import("fastify").FastifyRequest["auth"]>) => getUserScope(db, auth);
   const jobClock = { now: () => new Date() };
   const jobStore = new JobStore(db, jobClock);
-  const jobScheduler = new Scheduler(jobStore, jobClock);
+  const jobScheduler = new Scheduler(jobStore, jobClock, { lockTtlMs: 120_000 });
   const difyProvider = process.env.REA_DIFY_PROVIDER === "http" ? new HttpDifyProvider() : new MockDifyProvider();
-  const activationJobs = new ActivationJobService(db, jobStore, jobClock, difyProvider);
+  const messageEvents = new MessageEventService(db, { webhookSecret: process.env.REA_WEBHOOK_SECRET ?? "local-webhook-secret" });
+  const channel = createMessageChannelProvider(undefined, db);
+  const activationJobs = new ActivationJobService(db, jobStore, jobClock, difyProvider, messageEvents, channel);
   const jobExecutor = new JobExecutor();
   activationJobs.registerExecutors(jobExecutor);
-  const messageEvents = new MessageEventService(db, { webhookSecret: process.env.REA_WEBHOOK_SECRET ?? "local-webhook-secret" });
-  const messageAutomation = new MessageAutomationService(db, messageEvents, difyProvider, createMessageChannelProvider());
+  const messageAutomation = new MessageAutomationService(db, messageEvents, difyProvider, channel);
+  if (process.env.REA_SCHEDULER_ENABLED === "true") {
+    let running: Promise<unknown> | null = null;
+    const timer = setInterval(() => {
+      if (running) return;
+      running = jobScheduler.runOnce("local-worker", job => jobExecutor.execute(job)).catch(() => {
+        app.log.error("Local scheduler iteration failed");
+      }).finally(() => { running = null; });
+    }, 1000);
+    app.addHook("onClose", async () => { clearInterval(timer); await running; });
+  }
   type RuntimeStrategy = Omit<ActivationStrategyDefinition, "config" | "enabled"> & Record<string, unknown> & { enabled: boolean };
   const readStrategyConfig = (code: ActivationStrategyCode) => {
     const definition = activationStrategyDefault(code) as ActivationStrategyDefinition;
@@ -109,7 +120,12 @@ export async function registerActivationRoutes(app: FastifyInstance, db: Databas
     app.post<{ Params: { id: string }; Body: { days?: number; reason?: string; script_id?: number } }>(`/api/v1/activation/records/:id/${action}`, async (request, reply) => {
       const record = db.prepare("SELECT device_code FROM activation_records WHERE id=?").get(Number(request.params.id)) as { device_code: string } | undefined;
       if (!record || !canAccessDevice(deviceScope(request.auth!), record.device_code)) return reply.code(404).send({ detail: "激活记录不存在" });
-      const status = action === "approve" ? "pending_send" : action === "skip" ? "skipped" : action === "freeze" ? "frozen" : "sent";
+      if (action === "run") {
+        try { await activationJobs.sendRecord(Number(request.params.id)); }
+        catch { return reply.code(502).send({ detail: "Activation delivery pending or failed; inspect delivery and device status" }); }
+        return db.prepare("SELECT * FROM activation_records WHERE id=?").get(Number(request.params.id));
+      }
+      const status = action === "approve" ? "pending_send" : action === "skip" ? "skipped" : "frozen";
       const result = db.prepare("UPDATE activation_records SET status=?,reason=COALESCE(?,reason),tier=CASE WHEN ?='sent' THEN tier+1 ELSE tier END,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(status, request.body?.reason ?? null, status, Number(request.params.id));
       return result.changes ? db.prepare("SELECT * FROM activation_records WHERE id=?").get(Number(request.params.id)) : reply.code(404).send({ detail: "激活记录不存在" });
     });

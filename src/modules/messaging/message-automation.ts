@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { DifyProvider } from "../dify/dify-provider.js";
+import { deviceDifyConfig, type DifyProvider } from "../dify/dify-provider.js";
 import type { MessageEventService } from "./message-events.js";
 import type { MessageChannelProvider } from "./message-channel-provider.js";
 
@@ -28,7 +28,7 @@ interface DeliveryRow {
 export interface InboundMessageResult {
   status: "processed" | "duplicate";
   event_id: string;
-  reply_status: "simulated" | "sent" | "human_takeover" | "failed";
+  reply_status: "simulated" | "sent" | "human_takeover" | "failed" | "pending";
   error?: string;
 }
 
@@ -86,6 +86,7 @@ export class MessageAutomationService {
     if (delivery?.status === "succeeded") {
       return { status: "duplicate", event_id: input.eventId, reply_status: "sent" };
     }
+    if (delivery?.status === "sending") return { status: "duplicate", event_id: input.eventId, reply_status: "pending" };
     if (!delivery) {
       const created = this.events.createDelivery({
         eventId: replyEventId,
@@ -100,8 +101,7 @@ export class MessageAutomationService {
     let reply = delivery.content;
     if (!reply) {
       const result = await this.dify.sendMessage({
-        baseUrl: String(deviceData.dify_url ?? "mock://local"),
-        apiKey: String(deviceData.dify_key ?? ""),
+        ...deviceDifyConfig(deviceData),
         user: String(input.customerId),
         query: input.content,
         ...(conversation?.external_conversation_id ? { conversationId: conversation.external_conversation_id } : {}),
@@ -118,6 +118,12 @@ export class MessageAutomationService {
       }
     }
 
+    // A recruiter may take over while the model is generating its answer.
+    const latest = this.db.prepare("SELECT takeover FROM agent_conversations WHERE device_code=? AND customer_id=?").get(input.deviceCode, input.customerId) as { takeover: number };
+    if (latest.takeover) {
+      this.events.markDeliveryFailed(delivery.id, "Human takeover before send");
+      return { status: "processed", event_id: input.eventId, reply_status: "human_takeover" };
+    }
     const sent = await this.channel.sendMessage({
       deviceCode: input.deviceCode,
       customerId: input.customerId,

@@ -115,6 +115,25 @@ describe("activation scheduler business wiring", () => {
     expect(database.prepare("SELECT content FROM agent_messages WHERE customer_id=506 AND direction='outbound'").get()).toMatchObject({ content: "Dify provider reply" });
   });
 
+  it("keeps activation pending until the message channel confirms delivery, reusing the generated reply on retry", async () => {
+    const { db: database, store, scheduler } = setup();
+    let fail = true;
+    const provider = new RecordingProvider();
+    const channel = { sendMessage: async () => fail ? { success: false, error: "device offline" } : { success: true, message_id: "device-send-1" } };
+    const jobs = new ActivationJobService(database, store, new FakeClock(), provider, undefined, channel);
+    const executor = new JobExecutor(); jobs.registerExecutors(executor);
+    database.prepare("INSERT INTO activation_records(id,customer_id,device_code,status,script) VALUES (702,507,'device','pending_send','提醒')").run();
+    const job = jobs.enqueueMessageSend(702);
+    await scheduler.runOnce("worker", claimed => executor.execute(claimed));
+    expect(database.prepare("SELECT status,tier FROM activation_records WHERE id=702").get()).toMatchObject({ status: "pending_send", tier: 0 });
+    expect(database.prepare("SELECT COUNT(*) n FROM agent_messages WHERE customer_id=507 AND status='sent'").get()).toMatchObject({ n: 0 });
+    fail = false;
+    await executor.execute(job);
+    expect(provider.inputs).toHaveLength(1);
+    expect(database.prepare("SELECT provider_message_id FROM message_deliveries").get()).toMatchObject({ provider_message_id: "device-send-1" });
+    expect(database.prepare("SELECT status,tier FROM activation_records WHERE id=702").get()).toMatchObject({ status: "sent", tier: 1 });
+  });
+
   it("exposes an admin-only HTTP trigger for a local scheduler scan", async () => {
     const { db: database } = setup();
     seedSilentCustomer(database, 504);

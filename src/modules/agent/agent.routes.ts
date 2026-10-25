@@ -2,8 +2,13 @@ import type { FastifyInstance } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
 import { serializeAgentDevice, serializeCandidate, serializeMetrics, serializeStatusDashboard } from "../../shared/response-serializers.js";
 import { canAccessDevice, deviceConstraint, getUserScope } from "../../auth/user-scopes.js";
+import { createHash, randomUUID } from "node:crypto";
+import { MessageEventService } from "../messaging/message-events.js";
+import { createMessageChannelProvider } from "../messaging/message-channel-provider.js";
 
 export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync) {
+  const messageChannel = createMessageChannelProvider(undefined, db);
+  const messageEvents = new MessageEventService(db, { webhookSecret: process.env.REA_WEBHOOK_SECRET ?? "local-webhook-secret" });
   const canAccessDeviceForRequest = (request: import("fastify").FastifyRequest, deviceCode: string) =>
     !request.auth || canAccessDevice(getUserScope(db, request.auth), deviceCode);
   // Target envelope has no `total`; each item carries the Dify config fields:
@@ -29,7 +34,49 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
   app.get<{ Querystring: { device_code?: string } }>("/api/v1/agent/conversations", async (request, reply) => { const deviceCode = request.query.device_code ?? ""; if (!canAccessDevice(getUserScope(db, request.auth!), deviceCode)) return reply.code(403).send({ detail: "Device scope required" }); const rows = db.prepare("SELECT * FROM agent_conversations WHERE device_code=? ORDER BY updated_at DESC").all(deviceCode); return { items: rows, total_unread: (rows as Array<Record<string, unknown>>).reduce((sum, row) => sum + Number(row.unread ?? 0), 0) }; });
   app.get<{ Querystring: { device_code?: string; customer_id?: string; after_id?: string } }>("/api/v1/agent/messages", async (request, reply) => { const deviceCode = request.query.device_code ?? ""; if (!canAccessDevice(getUserScope(db, request.auth!), deviceCode)) return reply.code(403).send({ detail: "Device scope required" }); return { items: db.prepare("SELECT * FROM agent_messages WHERE device_code=? AND customer_id=? AND id>? ORDER BY id").all(deviceCode, Number(request.query.customer_id ?? 0), Number(request.query.after_id ?? 0)), takeover: false }; });
   app.post<{ Body: { device_code?: string; customer_id?: number; takeover?: boolean } }>("/api/v1/agent/takeover", async (request, reply) => { const deviceCode = request.body?.device_code ?? ""; if (!canAccessDevice(getUserScope(db, request.auth!), deviceCode)) return reply.code(403).send({ detail: "Device scope required" }); const result = db.prepare("UPDATE agent_conversations SET takeover=? WHERE device_code=? AND customer_id=?").run(request.body?.takeover ? 1 : 0, deviceCode, request.body?.customer_id ?? 0); return result.changes ? { success: true } : reply.code(404).send({ detail: "Conversation not found" }); });
-  app.post<{ Body: { device_code?: string; customer_id?: number; content?: string } }>("/api/v1/agent/manual-reply", async (request, reply) => { const deviceCode = request.body?.device_code ?? ""; if (!canAccessDevice(getUserScope(db, request.auth!), deviceCode)) return reply.code(403).send({ detail: "Device scope required" }); const customerId = request.body?.customer_id ?? 0; if (!db.prepare("SELECT id FROM agent_conversations WHERE device_code=? AND customer_id=?").get(deviceCode, customerId)) return reply.code(404).send({ detail: "Conversation not found" }); const result = db.prepare("INSERT INTO agent_messages(device_code,customer_id,direction,content) VALUES (?,?,?,?)").run(deviceCode, customerId, "outbound", request.body?.content ?? ""); return db.prepare("SELECT * FROM agent_messages WHERE id=?").get(Number(result.lastInsertRowid)); });
+  app.post<{ Body: { device_code?: string; customer_id?: number; content?: string } }>("/api/v1/agent/manual-reply", async (request, reply) => {
+    const deviceCode = request.body?.device_code ?? "";
+    if (!canAccessDevice(getUserScope(db, request.auth!), deviceCode)) return reply.code(403).send({ detail: "Device scope required" });
+    const customerId = request.body?.customer_id ?? 0;
+    const content = request.body?.content ?? "";
+    if (!db.prepare("SELECT id FROM agent_conversations WHERE device_code=? AND customer_id=?").get(deviceCode, customerId)) return reply.code(404).send({ detail: "Conversation not found" });
+
+    const suppliedKey = request.headers["idempotency-key"];
+    const idempotencyKey = typeof suppliedKey === "string" && suppliedKey.trim() ? suppliedKey.trim() : randomUUID();
+    const eventId = `manual-reply:${createHash("sha256").update(`${deviceCode}\0${customerId}\0${idempotencyKey}`).digest("hex")}`;
+    messageEvents.recordEvent({ eventId, eventType: "agent.manual_reply", direction: "outbound", deviceCode, customerId, payload: { device_code: deviceCode, customer_id: customerId, content } });
+
+    let delivery = db.prepare("SELECT id,status,content FROM message_deliveries WHERE event_id=? AND customer_id=? ORDER BY id LIMIT 1").get(eventId, customerId) as { id: number; status: string; content: string } | undefined;
+    if (delivery && delivery.content !== content) return reply.code(409).send({ detail: "Idempotency key was already used with different content" });
+    if (!delivery) {
+      const created = messageEvents.createDelivery({ eventId, deviceCode, customerId, content });
+      delivery = db.prepare("SELECT id,status,content FROM message_deliveries WHERE id=?").get(created.delivery_id) as { id: number; status: string; content: string };
+    }
+    const sourceEventId = `${eventId}:outbound`;
+    if (delivery.status === "sending") return reply.code(409).send({ detail: "Delivery is pending; retry with the same idempotency key" });
+    if (delivery.status === "succeeded") {
+      const existing = db.prepare("SELECT id,device_code,customer_id,direction,content,status,created_at FROM agent_messages WHERE source_event_id=? AND direction='outbound'").get(sourceEventId);
+      if (existing) return existing;
+    }
+
+    messageEvents.markDeliverySending(delivery.id);
+    const sent = await messageChannel.sendMessage({ deviceCode, customerId, content, idempotencyKey: eventId });
+    const status = sent.success ? sent.simulated ? "simulated" : "sent" : "failed";
+    db.prepare(`INSERT OR IGNORE INTO agent_messages(device_code,customer_id,direction,content,status,source_event_id)
+      VALUES (?,?,'outbound',?,?,?)`).run(deviceCode, customerId, content, status, sourceEventId);
+    db.prepare("UPDATE agent_messages SET content=?,status=? WHERE source_event_id=? AND direction='outbound'").run(content, status, sourceEventId);
+
+    if (!sent.success) {
+      messageEvents.markDeliveryFailed(delivery.id, sent.error ?? "Message channel send failed");
+      return reply.code(502).send({ detail: "Message channel delivery failed", error: sent.error ?? "Message channel send failed" });
+    }
+
+    const sentAt = new Date().toISOString();
+    db.prepare("UPDATE agent_conversations SET last_msg=?,last_msg_at=?,updated_at=? WHERE device_code=? AND customer_id=?")
+      .run(content, sentAt, sentAt, deviceCode, customerId);
+    messageEvents.markDeliverySucceeded(delivery.id, sent.message_id);
+    return db.prepare("SELECT id,device_code,customer_id,direction,content,status,created_at FROM agent_messages WHERE source_event_id=? AND direction='outbound'").get(sourceEventId);
+  });
   app.get<{ Querystring: { event_type?: string; page?: string; page_size?: string } }>("/api/v1/agent/candidates", async (request) => {
     const page = Math.max(1, Number(request.query.page) || 1), pageSize = Math.min(1000, Math.max(1, Number(request.query.page_size) || 50));
     const scopeFilter = deviceConstraint(getUserScope(db, request.auth!), "device_code");
