@@ -169,7 +169,17 @@ export async function registerActivationRoutes(app: FastifyInstance, db: Databas
     // Target rejects non-admin device writes with 403 before any lookup.
     if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "无权操作该设备" });
     const body = request.body ?? {}; const result = db.prepare("UPDATE activation_devices SET device_name=COALESCE(?,device_name),status=COALESCE(?,status),data_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(typeof body.name === "string" ? body.name : null, typeof body.enabled === "boolean" ? (body.enabled ? "enabled" : "disabled") : null, JSON.stringify(body), Number(request.params.id)); return result.changes ? { success: true, ...body } : reply.code(404).send({ detail: "激活设备不存在" }); });
-  app.post<{ Body: { device_codes?: string[]; enabled?: boolean } }>("/api/v1/activation/devices/batch-toggle", async (request, reply) => { if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin access required" }); return { success: true, updated: Array.isArray(request.body?.device_codes) ? request.body.device_codes.length : 0 }; });
+  app.post<{ Body: { device_codes?: string[]; enabled?: boolean } }>("/api/v1/activation/devices/batch-toggle", async (request, reply) => {
+    if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin access required" });
+    const codes = Array.isArray(request.body?.device_codes) ? request.body.device_codes.filter((c): c is string => typeof c === "string") : [];
+    if (codes.length === 0) return { success: true, updated: 0 };
+    const nextStatus = request.body?.enabled === false ? "disabled" : "enabled";
+    const placeholders = codes.map(() => "?").join(",");
+    const result = db
+      .prepare(`UPDATE activation_devices SET status=?, updated_at=CURRENT_TIMESTAMP WHERE json_extract(data_json,'$.device_code') IN (${placeholders})`)
+      .run(nextStatus, ...codes);
+    return { success: true, updated: result.changes };
+  });
   app.post<{ Body: Record<string, unknown> }>("/api/v1/activation/scripts", async (request, reply) => { if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin access required" }); const body = request.body ?? {}; const result = db.prepare("INSERT INTO activation_scripts(script_name,content,status,data_json) VALUES (?,?,?,?) RETURNING *").get(String(body.category ?? "语料"), String(body.content ?? ""), body.is_active === false ? "disabled" : "enabled", JSON.stringify(body)); return result; });
   app.put<{ Params: { id: string }; Body: Record<string, unknown> }>("/api/v1/activation/scripts/:id", async (request, reply) => { if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin access required" }); const body = request.body ?? {}; const result = db.prepare("UPDATE activation_scripts SET content=COALESCE(?,content),status=COALESCE(?,status),data_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(typeof body.content === "string" ? body.content : null, typeof body.is_active === "boolean" ? (body.is_active ? "enabled" : "disabled") : null, JSON.stringify(body), Number(request.params.id)); return result.changes ? db.prepare("SELECT id,content,status,data_json FROM activation_scripts WHERE id=?").get(Number(request.params.id)) : reply.code(404).send({ detail: "语料不存在" }); });
   app.delete<{ Params: { id: string } }>("/api/v1/activation/scripts/:id", async (request, reply) => {
