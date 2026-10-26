@@ -61,7 +61,7 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
 
     messageEvents.markDeliverySending(delivery.id);
     const sent = await messageChannel.sendMessage({ deviceCode, customerId, content, idempotencyKey: eventId });
-    const status = sent.success ? sent.simulated ? "simulated" : "sent" : "failed";
+    const status = sent.success ? sent.simulated ? "simulated" : sent.accepted ? 'api_accepted' : "sent" : "failed";
     db.prepare(`INSERT OR IGNORE INTO agent_messages(device_code,customer_id,direction,content,status,source_event_id)
       VALUES (?,?,'outbound',?,?,?)`).run(deviceCode, customerId, content, status, sourceEventId);
     db.prepare("UPDATE agent_messages SET content=?,status=? WHERE source_event_id=? AND direction='outbound'").run(content, status, sourceEventId);

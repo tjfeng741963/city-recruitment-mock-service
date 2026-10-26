@@ -21,6 +21,7 @@ import { registerRelationRoutes } from "./modules/relations/relations.routes.js"
 import { registerPermissionRoutes } from "./modules/permissions/permission.routes.js";
 import { registerAdminRoutes } from "./modules/admin/admin.routes.js";
 import { registerDeviceBridgeRoutes } from "./modules/messaging/device-bridge.routes.js";
+import { registerWeComRoutes } from "./modules/wecom/wecom.routes.js";
 
 declare module "fastify" {
   interface FastifyInstance { db: DatabaseSync }
@@ -41,6 +42,8 @@ const PUBLIC_ROUTES = new Set([
   // External message bridges authenticate callbacks with the HMAC header.
   "POST /api/v1/webhooks/dify",
   ...DEVICE_TOKEN_ROUTES,
+  "GET /api/v1/channels/wecom-kf/callback",
+  "POST /api/v1/channels/wecom-kf/callback",
   // Device-called endpoints: device_code is a required query parameter, not a
   // secret. The target answers 422 when it is absent and 404 for an unknown
   // conversation even when the value is fake, with or without a bearer token.
@@ -93,6 +96,7 @@ export function buildServer() {
   registerFileRoutes(app, db);
   registerAgentRoutes(app, db);
   registerDeviceBridgeRoutes(app, db);
+  registerWeComRoutes(app, db);
   registerActivationRoutes(app, db);
   registerRelationRoutes(app, db);
   registerPermissionRoutes(app);

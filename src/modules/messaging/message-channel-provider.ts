@@ -1,5 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { DeviceBridgeChannelProvider, DeviceBridgeStore } from "./device-bridge.js";
+import { readWeComConfig } from "../wecom/wecom-config.js";
+import { getWeComChannel } from "../wecom/wecom-channel.js";
 
 export interface OutboundMessageInput {
   deviceCode: string;
@@ -12,6 +14,7 @@ export interface OutboundMessageResult {
   success: boolean;
   message_id?: string;
   simulated?: boolean;
+  accepted?: boolean;
   error?: string;
 }
 
@@ -102,6 +105,15 @@ export class HttpMessageChannelProvider implements MessageChannelProvider {
 }
 
 export function createMessageChannelProvider(mode = process.env.REA_MESSAGE_CHANNEL_PROVIDER ?? "mock", db?: DatabaseSync): MessageChannelProvider {
+  const wecom = readWeComConfig();
+  if (wecom && db) {
+    const channel = getWeComChannel(db,wecom);
+    const fallback = createFallbackProvider(mode,db);
+    return { sendMessage: input => input.deviceCode === wecom.deviceCode ? channel.sendMessage(input) : fallback.sendMessage(input) };
+  }
+  return createFallbackProvider(mode,db);
+}
+function createFallbackProvider(mode: string, db?: DatabaseSync): MessageChannelProvider {
   if (mode === "mock") return new MockMessageChannelProvider();
   if (mode === "bridge") {
     if (!db) throw new Error("bridge provider requires a database");

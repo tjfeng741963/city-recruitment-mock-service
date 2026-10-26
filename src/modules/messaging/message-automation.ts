@@ -28,7 +28,7 @@ interface DeliveryRow {
 export interface InboundMessageResult {
   status: "processed" | "duplicate";
   event_id: string;
-  reply_status: "simulated" | "sent" | "human_takeover" | "failed" | "pending";
+  reply_status: "simulated" | "sent" | "api_accepted" | "human_takeover" | "failed" | "pending";
   error?: string;
 }
 
@@ -84,7 +84,8 @@ export class MessageAutomationService {
       "SELECT id,status,content FROM message_deliveries WHERE event_id=? ORDER BY id LIMIT 1",
     ).get(replyEventId) as DeliveryRow | undefined;
     if (delivery?.status === "succeeded") {
-      return { status: "duplicate", event_id: input.eventId, reply_status: "sent" };
+      const prior = this.db.prepare("SELECT status FROM agent_messages WHERE source_event_id=?").get(`${input.eventId}:outbound`) as {status:string}|undefined;
+      return { status: "duplicate", event_id: input.eventId, reply_status: prior?.status === 'api_accepted' ? 'api_accepted' : "sent" };
     }
     if (delivery?.status === "sending") return { status: "duplicate", event_id: input.eventId, reply_status: "pending" };
     if (!delivery) {
@@ -135,12 +136,12 @@ export class MessageAutomationService {
     const outboundEventId = `${input.eventId}:outbound`;
     this.db.prepare(
       "INSERT OR IGNORE INTO agent_messages(device_code,customer_id,direction,content,status,created_at,source_event_id) VALUES (?,?, 'outbound',?,?,?,?)",
-    ).run(input.deviceCode, input.customerId, reply, sent.simulated ? "simulated" : "sent", new Date().toISOString(), outboundEventId);
+    ).run(input.deviceCode, input.customerId, reply, sent.simulated ? "simulated" : sent.accepted ? 'api_accepted' : "sent", new Date().toISOString(), outboundEventId);
     this.db.prepare("UPDATE agent_conversations SET last_msg=?,last_msg_at=?,updated_at=? WHERE device_code=? AND customer_id=?")
       .run(reply, new Date().toISOString(), new Date().toISOString(), input.deviceCode, input.customerId);
     this.events.markDeliverySucceeded(delivery.id, sent.message_id);
 
-    return { status: "processed", event_id: input.eventId, reply_status: sent.simulated ? "simulated" : "sent" };
+    return { status: "processed", event_id: input.eventId, reply_status: sent.simulated ? "simulated" : sent.accepted ? 'api_accepted' : "sent" };
   }
 
   private failed(eventId: string, error: string, deliveryId?: number): InboundMessageResult {
