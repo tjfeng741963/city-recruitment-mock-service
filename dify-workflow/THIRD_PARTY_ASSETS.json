@@ -1,0 +1,85 @@
+{
+  "标记用途": "本文件列出的是第三方产品的专有话术资产，为溯源目的暂存于仓库。转私有仓库或对外发布前，应按下方 purge 步骤清除。",
+  "warning_for_agents": "仅用 git rm 删除无效：文件仍存在于 git 历史中，可通过 commit hash 检索。必须重写历史。",
+  "assets": [
+    {
+      "path": "dify-workflow/prompt/system-flow1.txt",
+      "kind": "third_party_system_prompt",
+      "bytes": 92463,
+      "description": "目标站 Dify 应用『流程一：收集信息+匹配厂区+发薪资』的 system prompt 逐字原文",
+      "captured_at": "2026-10-27",
+      "source": "流式接口 /v1/chat-messages 的 node_finished.process_data.prompts[0].text"
+    },
+    {
+      "path": "dify-workflow/prompt/system-flow2.txt",
+      "kind": "third_party_system_prompt",
+      "bytes": 98395,
+      "description": "『流程二：薪资答疑+纹身案底确认+邀约面试』的 system prompt 逐字原文",
+      "captured_at": "2026-10-27",
+      "source": "同上"
+    },
+    {
+      "path": "dify-workflow/prompt/system-flow3.txt",
+      "kind": "third_party_system_prompt",
+      "bytes": 93914,
+      "description": "『流程三：确定报名表单+发面试通知』的 system prompt 逐字原文",
+      "captured_at": "2026-10-27",
+      "source": "同上"
+    },
+    {
+      "path": "dify-workflow/prompt/system-flow4.txt",
+      "kind": "third_party_system_prompt",
+      "bytes": 95641,
+      "description": "『流程四：面试跟进+发面试指引』的 system prompt 逐字原文",
+      "captured_at": "2026-10-27",
+      "source": "同上"
+    },
+    {
+      "path": "dify-workflow/prompt/city-data-prompt-sample.txt",
+      "kind": "third_party_business_data",
+      "bytes": 61258,
+      "description": "目标站岗位与城市数据块样本（含厂名、地址、薪资、面试安排）",
+      "captured_at": "2026-10-25",
+      "source": "同上"
+    },
+    {
+      "path": "dify-workflow/recruit-chatflow.dsl.yml",
+      "kind": "derived_contains_third_party_prompts",
+      "bytes": 442365,
+      "description": "可导入 Dify 的工作流 DSL。四份 system prompt 原文被完整内联在 llm/llm2/llm3/llm4 四个节点的 prompt_template 中，因此本文件同样属于需清除范围。",
+      "captured_at": "2026-10-27",
+      "source": "由 gen-dsl.mjs 生成，内联 prompt 原文"
+    }
+  ],
+  "safe_to_publish": [
+    "src/modules/dify/chatflow-state.ts",
+    "src/modules/dify/chatflow-flows.ts",
+    "src/modules/dify/chatflow-engine.ts",
+    "src/modules/dify/create-provider.ts",
+    "src/modules/dify/chatflow-catalog.ts",
+    "tests/dify-chatflow-engine.test.ts",
+    "tests/dify-chatflow-flows.test.ts",
+    "tests/dify-chatflow-loop.test.ts",
+    "dify-workflow/README.md"
+  ],
+  "note_on_safe_to_publish": "这些文件是重新实现的代码，不含 prompt 原文。但 chatflow-catalog.ts 与 catalog.json 内含厂区名称、地址、薪资等业务数据，若需彻底清洗请一并处理。",
+  "purge": {
+    "method": "git filter-repo 重写历史，然后强制推送",
+    "steps": [
+      "1. pip install git-filter-repo",
+      "2. git filter-repo --path dify-workflow/prompt/ --path dify-workflow/recruit-chatflow.dsl.yml --invert-paths",
+      "3. git remote add origin <url>  # filter-repo 会移除 remote",
+      "4. git push origin --force --all",
+      "5. git push origin --force --tags",
+      "6. 联系 GitHub Support 清除缓存与 fork，否则旧的 commit 仍可访问"
+    ],
+    "verification": "git log --all --oneline -- dify-workflow/prompt/ 应无输出；在 GitHub 搜索 commit hash 应已失效",
+    "caveat": "清理后所有协作者需重新 clone；已存在的 fork 与第三方镜像无法通过本次操作收回。"
+  },
+  "retention_decision": {
+    "decided_at": "2026-10-27",
+    "decided_by": "user",
+    "decision": "先推送到公开仓库以便溯源，后续转私有仓库，届时按 purge 步骤清除",
+    "risk_acknowledged": "公开期间内容可能被索引、镜像或 fork，无法完全收回"
+  }
+}
