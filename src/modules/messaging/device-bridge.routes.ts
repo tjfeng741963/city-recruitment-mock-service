@@ -5,7 +5,7 @@ import { DeviceBridgeStore } from "./device-bridge.js";
 import { MessageAutomationService } from "./message-automation.js";
 import { MessageEventService } from "./message-events.js";
 import { createMessageChannelProvider } from "./message-channel-provider.js";
-import { HttpDifyProvider, MockDifyProvider } from "../dify/dify-provider.js";
+import { createDifyProvider } from "../dify/create-provider.js";
 
 type DeviceRequest = { Params: { code: string }; Body: Record<string, unknown> };
 const field = (body: Record<string, unknown>, key: string, max = 1000) => typeof body[key] === "string" && String(body[key]).length <= max ? String(body[key]) : "";
@@ -13,7 +13,7 @@ const field = (body: Record<string, unknown>, key: string, max = 1000) => typeof
 export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSync): void {
   const store = new DeviceBridgeStore(db);
   const events = new MessageEventService(db, { webhookSecret: process.env.REA_WEBHOOK_SECRET ?? "local-webhook-secret" });
-  const automation = new MessageAutomationService(db, events, process.env.REA_DIFY_PROVIDER === "http" ? new HttpDifyProvider() : new MockDifyProvider(), createMessageChannelProvider(undefined, db));
+  const automation = new MessageAutomationService(db, events, createDifyProvider(), createMessageChannelProvider(undefined, db));
 
   app.post<DeviceRequest>("/api/v1/bridge/devices/:code/pair", async (req, reply) => {
     if (req.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin required" });

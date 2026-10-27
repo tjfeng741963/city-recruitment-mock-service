@@ -10,3 +10,8 @@ data/*.sqlite-journal
 .env*
 bridge/node_modules/
 bridge/过程文件/
+
+# 目标站 Dify 应用的 system prompt 原文与内联了原文的 DSL——
+# 属对方产品的话术资产，只保留在本地与桌面备份，不进公开仓库。
+dify-workflow/prompt/
+dify-workflow/recruit-chatflow.dsl.yml

@@ -9,7 +9,7 @@ import { ActivationJobService } from "./activation.jobs.js";
 import { MessageEventService } from "../messaging/message-events.js";
 import { MessageAutomationService } from "../messaging/message-automation.js";
 import { createMessageChannelProvider } from "../messaging/message-channel-provider.js";
-import { HttpDifyProvider, MockDifyProvider } from "../dify/dify-provider.js";
+import { createDifyProvider } from "../dify/create-provider.js";
 import { canAccessDevice, deviceConstraint, getUserScope } from "../../auth/user-scopes.js";
 
 export async function registerActivationRoutes(app: FastifyInstance, db: DatabaseSync) {
@@ -17,7 +17,7 @@ export async function registerActivationRoutes(app: FastifyInstance, db: Databas
   const jobClock = { now: () => new Date() };
   const jobStore = new JobStore(db, jobClock);
   const jobScheduler = new Scheduler(jobStore, jobClock, { lockTtlMs: 120_000 });
-  const difyProvider = process.env.REA_DIFY_PROVIDER === "http" ? new HttpDifyProvider() : new MockDifyProvider();
+  const difyProvider = createDifyProvider();
   const messageEvents = new MessageEventService(db, { webhookSecret: process.env.REA_WEBHOOK_SECRET ?? "local-webhook-secret" });
   const channel = createMessageChannelProvider(undefined, db);
   const activationJobs = new ActivationJobService(db, jobStore, jobClock, difyProvider, messageEvents, channel);

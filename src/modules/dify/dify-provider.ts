@@ -13,6 +13,10 @@ export interface DifyMessageResult {
   message_id?: string;
   conversation_id?: string;
   error?: string;
+  /** 可选：按 ### 切分后的多条气泡。仅 ChatflowDifyProvider 提供。 */
+  bubbles?: string[];
+  /** 可选：会话状态快照（JSON 字符串）。仅 ChatflowDifyProvider 提供，供上层持久化。 */
+  state_json?: string;
 }
 
 export interface DifyHealthResult {
