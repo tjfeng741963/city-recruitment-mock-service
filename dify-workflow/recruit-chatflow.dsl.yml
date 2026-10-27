@@ -8,7 +8,7 @@
     "use_icon_as_answer_icon": false
   },
   "kind": "app",
-  "version": "0.1.5",
+  "version": "0.7.0",
   "workflow": {
     "conversation_variables": [
       {

@@ -107,6 +107,13 @@ export function isTattooAcceptable(query: string): boolean {
 
 const TATTOO_ASK = "###另外，这边问一下有没有纹身案底呀？";
 
+/**
+ * 同意参加面试的判定。
+ * 刻意排除裸「过去」——抓包第 28 轮「那我什么时候能过去面试呢？」含该词但只是询问，
+ * 真实系统并没有推进流程。
+ */
+const ACCEPTANCE = /可以(?!.{0,2}吗)|行的|行，|行啊|好的|好，|好啊|没问题|能来|愿意|ok|OK/;
+
 /** 薪资答疑的简短回答。原实现由 LLM 自由回答，这里用确定性话术等价。 */
 function answerSalaryQuestion(query: string): string {
   if (/加班|几点|时长|上班时间/.test(query)) return "长白班为主，一天八小时，加班自愿，想多赚可以多加";
@@ -117,15 +124,29 @@ function answerSalaryQuestion(query: string): string {
   return "这个我回头详细跟你说，先看看还有啥想问的不";
 }
 
-/** 阶段三执行：确认面试日期并发送报名表单，等价于原实现的 ##FLOW_DONE##。 */
-function enterInvite(
+/**
+ * 阶段三第一步：只发邀约问句，**不推进流程**。
+ * 抓包实测第 22 轮：系统问「…可以过来面试吗？」时 flow_step 仍是 2，
+ * 直到第 29 轮求职者确认后才发报名表单并推进到 3。
+ */
+function askInterview(
   state: HualinState,
   factory: ChatflowFactory,
   now: Date,
-  patch: Partial<HualinState>,
+  patch: Partial<HualinState> = {},
 ): FlowReply {
   const { date } = nextInterviewDate(now, factory);
   const label = formatDateLabel(now, date);
+  return {
+    reply: `###看看有啥问题不，没问题${label}${factory.interviewTime}可以过来面试吗？`,
+    state: { ...state, ...patch, interview_date: isoDate(date), interview_asked: true },
+    advanced: false,
+  };
+}
+
+/** 阶段三第二步：求职者确认后发报名表单，等价于原实现的 ##FLOW_DONE##。 */
+function sendSignupForm(state: HualinState, factory: ChatflowFactory, now: Date): FlowReply {
+  const date = state.interview_date ? new Date(`${state.interview_date}T00:00:00`) : nextInterviewDate(now, factory).date;
   // 厂区数据里的[报名表单]自带以 ### 开头，需先剥掉，否则会叠出多个分隔符
   const form = (factory.signupForm || "麻烦填一下报名信息，好了发给我哈~（姓名和电话填一下就行）").replace(/^#+\s*/, "");
   const formWithDate = form.includes("面试入职日期")
@@ -133,8 +154,8 @@ function enterInvite(
     : `${form}\n面试入职日期：${isoDate(date)}（${WEEKDAYS[date.getDay()]}）`;
 
   return {
-    reply: `###看看有啥问题不，没问题${label}${factory.interviewTime}可以过来面试吗？\n\n###${formWithDate}`,
-    state: { ...state, ...patch, interview_date: isoDate(date), flow_step: state.flow_step + 1 },
+    reply: `###${formWithDate}`,
+    state: { ...state, interview_date: isoDate(date), flow_step: state.flow_step + 1 },
     advanced: true,
   };
 }
@@ -148,20 +169,25 @@ export function generateFlowTwoReply(
 ): FlowReply {
   const turns = state.flow2_turns ?? 0;
 
-  // 已确认过纹身案底：等待求职者对邀约作出回应
-  if (state.tattoo_record !== undefined) {
-    if (/可以|行|好|没问题|能来|过去|ok/i.test(query)) {
-      return enterInvite(state, factory, now, {});
+  // 已确认过纹身案底（或已放弃追问）：等待求职者对邀约作出回应
+  if (state.tattoo_record !== undefined || state.tattoo_skipped) {
+    // 已发出过邀约问句 → 对方明确答应才发表单并推进。
+    // 注意不能只匹配「过去」：抓包第 28 轮求职者问「那我什么时候能过去面试呢？」
+    // 含「过去」但只是提问，真实系统仍停在流程二、只重发邀约问句。
+    if (state.interview_asked && ACCEPTANCE.test(query)) {
+      return sendSignupForm(state, factory, now);
     }
-    if (state.interview_date) {
-      const date = new Date(`${state.interview_date}T00:00:00`);
-      return {
-        reply: `###${formatDateLabel(now, date)}${factory.interviewTime}可以过来面试吗？`,
-        state,
-        advanced: false,
-      };
+    // 还没问过 → 只发问句，不推进
+    if (!state.interview_asked) {
+      return askInterview(state, factory, now);
     }
-    return enterInvite(state, factory, now, {});
+    // 问过了但对方没确认 → 再问一次，仍不推进
+    const date = new Date(`${state.interview_date}T00:00:00`);
+    return {
+      reply: `###${formatDateLabel(now, date)}${factory.interviewTime}可以过来面试吗？`,
+      state,
+      advanced: false,
+    };
   }
 
   // 阶段二：正在等纹身案底的回答（turns 已到达追问阈值，或对方回了确认类）
@@ -175,19 +201,35 @@ export function generateFlowTwoReply(
     };
   }
   if (verdict === "tattoo") {
-    if (isTattooAcceptable(query)) return enterInvite(state, factory, now, { tattoo_record: "tattoo" });
+    if (isTattooAcceptable(query)) return askInterview(state, factory, now, { tattoo_record: "tattoo" });
     return {
       reply: "###穿短袖不外露，或者手臂上外露部分不超过身份证大小那就没问题",
       state: { ...state, tattoo_record: "tattoo", flow2_turns: turns + 1 },
       advanced: false,
     };
   }
-  if (verdict === "none") return enterInvite(state, factory, now, { tattoo_record: "none" });
+  if (verdict === "none") return askInterview(state, factory, now, { tattoo_record: "none" });
 
   // 阶段一：薪资答疑。确认性回复直接跳到阶段二；否则满 3 轮才带出提问
   const nextTurns = turns + 1;
+
+  // 抓包实测第 22 轮：连问 3 轮纹身都没被正面回答后，系统自己放弃追问，
+  // 改口「行，那不纠结这个了…你直接过来就行」并转向邀约。这里同构实现。
+  const asks = state.tattoo_asks ?? 0;
+  if (asks >= 3 && !state.tattoo_skipped) {
+    const invited = askInterview(state, factory, now, { tattoo_skipped: true });
+    return {
+      ...invited,
+      reply: `###行，那不纠结这个了，我们这岗位本身不查纹身也不查案底的，你直接过来就行。${invited.reply.replace(/^###/, "")}`,
+    };
+  }
+
   if (isAcknowledgement(query) || nextTurns >= 3) {
-    return { reply: TATTOO_ASK, state: { ...state, flow2_turns: nextTurns }, advanced: false };
+    return {
+      reply: TATTOO_ASK,
+      state: { ...state, flow2_turns: nextTurns, tattoo_asks: asks + 1 },
+      advanced: false,
+    };
   }
   return { reply: `###${answerSalaryQuestion(query)}`, state: { ...state, flow2_turns: nextTurns }, advanced: false };
 }
@@ -218,9 +260,11 @@ export function generateFlowThreeReply(
   );
   const address = factory.address.replace(/^#+\s*/, "").replace(/\s*#+$/, "");
 
+  const phone = query.match(/1[3-9]\d{9}/)?.[0];
   return {
     reply: `${notice}\n\n###${address}`,
-    state: { ...state, form_received: true, flow_step: state.flow_step + 1 },
+    // 抓包实测：第 30 轮（报名表单送达后）状态里出现 phone 字段
+    state: { ...state, ...(phone ? { phone } : {}), form_received: true, flow_step: state.flow_step + 1 },
     advanced: true,
   };
 }

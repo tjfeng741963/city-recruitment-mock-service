@@ -309,4 +309,67 @@ describe("ChatflowDifyProvider", () => {
     const provider = new ChatflowDifyProvider();
     await expect(provider.healthCheck()).resolves.toEqual({ healthy: true, latency_ms: 0 });
   });
+
+  it("recommends the nearest city and marks user_type=2 for out-of-region candidates", async () => {
+    // 抓包实录（branch-probe/type2-turn-2）：求职者在湖南长沙 →
+    // 回复「###我们广州厂区离你比较近，是打算过来这边吗？」，状态写入 user_type:"2"
+    const provider = new ChatflowDifyProvider({ now: () => 1 });
+    const first = await provider.sendMessage({ baseUrl: "x", apiKey: "", user: "t2", query: "你好，我在网上看到你们招人" });
+    const second = await provider.sendMessage({
+      baseUrl: "x",
+      apiKey: "",
+      user: "t2",
+      query: "我不是广东的，我人在湖南长沙",
+      conversationId: first.conversation_id,
+    });
+
+    expect(second.message).toContain("广州厂区离你比较近");
+    expect(second.message).toContain("是打算过来这边吗");
+
+    const state = parseState(provider.exportState(second.conversation_id!));
+    expect(state.user_type).toBe("2");
+    expect(state.flow_step).toBe(1);
+    expect(state.current_city).toBeUndefined();
+    // ##TYPE_2## 必须已被剥离，不能泄漏给客户
+    expect(second.message).not.toContain("##TYPE_2##");
+  });
+
+  it("switches the matched factory when the candidate names another one", async () => {
+    // 抓包实录（branch-probe/switchFactory-turn-5）：已匹配「新造物东莞玩具厂」后，
+    // 求职者说「我想去东莞鑫联达那个厂」→ 改 matched_factory，重发该厂薪资，flow_step 保持 2
+    const provider = new ChatflowDifyProvider({ now: () => 1 });
+    let conversationId: string | undefined;
+    // 与抓包逐轮一致：先说长安，后改口清溪，最终匹配清溪的新造物
+    for (const query of ["你好，你们还招人吗", "我在东莞长安", "清溪那边啊", "25，男的"]) {
+      const result = await provider.sendMessage({
+        baseUrl: "x",
+        apiKey: "",
+        user: "sw",
+        query,
+        ...(conversationId ? { conversationId } : {}),
+      });
+      conversationId = result.conversation_id;
+    }
+
+    const before = parseState(provider.exportState(conversationId!));
+    expect(before.flow_step).toBe(2);
+    expect(before.matched_factory).toBe("新造物东莞玩具厂");
+
+    const switched = await provider.sendMessage({
+      baseUrl: "x",
+      apiKey: "",
+      user: "sw",
+      query: "我想去东莞鑫联达那个厂",
+      conversationId,
+    });
+
+    // 重发的是新厂的薪资原文
+    expect(switched.message).toContain("底薪2520");
+
+    const after = parseState(provider.exportState(conversationId!));
+    expect(after.matched_factory).toBe("东莞鑫联达");
+    // 抓包实测：换厂不推进流程，也不记录到 switched_factories
+    expect(after.flow_step).toBe(2);
+    expect(after.switched_factories).toEqual([]);
+  });
 });

@@ -19,14 +19,40 @@ export interface HualinState {
   seeker_age?: string;
   /** 流程二阶段一的交互轮数，满 3 轮才允许提纹身案底（抓包 prompt 硬规则）。 */
   flow2_turns?: number;
+  /**
+   * 求职者类型。抓包实测：只有 "2"（人在招聘城市之外）会被写入，
+   * 一类求职者（本地）不写这个字段。注意不是 ##TYPE_2## 标记——
+   * prompt 里写的是标记，实际实现落成了状态字段。
+   */
+  user_type?: "2";
   /** 纹身案底结论：none=都没有，tattoo=有纹身，record=有案底。 */
   tattoo_record?: "none" | "tattoo" | "record";
+  /** 纹身案底已追问的轮数。 */
+  tattoo_asks?: number;
+  /**
+   * 求职者连续回避纹身提问后放弃追问。
+   * 抓包实测第 22 轮：系统说「行，那不纠结这个了…你直接过来就行」并转向邀约。
+   * 这是 LLM 的判断，prompt 里没有明确规则；此处按观察到的行为近似——
+   * 连续 3 轮未正面回答即放弃，进入邀约。
+   */
+  tattoo_skipped?: boolean;
   /** 流程二阶段三确认下来的面试日期，YYYY-MM-DD。 */
   interview_date?: string;
+  /**
+   * 是否已发出面试邀约问句（"…可以过来面试吗？"）。
+   * 抓包实测第 22 轮：放弃纹身追问后只发邀约问句，不发表单、不推进 flow_step；
+   * 直到第 29 轮求职者确认后，才发报名表单并推进到流程三。
+   */
+  interview_asked?: boolean;
   /** 流程三：报名表单（姓名+电话）是否已收到。 */
   form_received?: boolean;
   /** 流程四：是否已确认到达。 */
   arrived?: boolean;
+  /**
+   * 联系电话。抓包实测：流程三收到报名表单后写入（第 30 轮出现该字段）。
+   * 注意这是 PII，本实现只在会话内存中保留，不落盘、不导出到日志。
+   */
+  phone?: string;
 }
 
 export const INITIAL_STATE: HualinState = {
@@ -54,12 +80,16 @@ export function parseState(raw: string | null | undefined): HualinState {
       ...(typeof parsed.seeker_gender === "string" ? { seeker_gender: parsed.seeker_gender } : {}),
       ...(typeof parsed.seeker_age === "string" ? { seeker_age: parsed.seeker_age } : {}),
       ...(typeof parsed.flow2_turns === "number" ? { flow2_turns: parsed.flow2_turns } : {}),
+      ...(parsed.user_type === "2" ? { user_type: "2" as const } : {}),
       ...(parsed.tattoo_record === "none" || parsed.tattoo_record === "tattoo" || parsed.tattoo_record === "record"
         ? { tattoo_record: parsed.tattoo_record }
         : {}),
+      ...(typeof parsed.tattoo_asks === "number" ? { tattoo_asks: parsed.tattoo_asks } : {}),
+      ...(parsed.tattoo_skipped === true ? { tattoo_skipped: true } : {}),
       ...(typeof parsed.interview_date === "string" ? { interview_date: parsed.interview_date } : {}),
       ...(parsed.form_received === true ? { form_received: true } : {}),
       ...(parsed.arrived === true ? { arrived: true } : {}),
+      ...(typeof parsed.phone === "string" ? { phone: parsed.phone } : {}),
     };
   } catch {
     return emptyState();
@@ -130,6 +160,8 @@ export function applyMarkers(state: HualinState, markers: ChatflowMarkers): Hual
   if (markers.age) next.seeker_age = markers.age;
   if (markers.gender) next.seeker_gender = markers.gender;
   if (markers.matched) next.matched_factory = markers.matched;
+  // 抓包实测：LLM 输出的 ##TYPE_2## 被 code 节点消费成状态字段，而不是留在回复文本里
+  if (markers.type2) next.user_type = "2";
   if (markers.flowDone) next.flow_step = state.flow_step + 1;
   return next;
 }

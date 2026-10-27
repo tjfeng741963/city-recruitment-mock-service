@@ -195,6 +195,43 @@ export function matchFactory(state: HualinState): ChatflowFactory | null {
   return eligible[0];
 }
 
+/**
+ * 招聘城市之外的地点 → 就近推荐城市。
+ * 抓包实测：求职者在「湖南长沙」时，对方推荐「广州厂区离你比较近」。
+ * 原实现由 LLM 用广东地理常识判断，这里用确定性映射近似。
+ */
+const OUT_OF_REGION_NEAREST: ReadonlyArray<readonly [RegExp, string]> = [
+  [/湖南|长沙|株洲|湘潭|衡阳|郴州/, "广州"],
+  [/广西|南宁|桂林|柳州|梧州/, "广州"],
+  [/福建|福州|泉州|莆田|漳州/, "厦门"],
+  [/江西|南昌|赣州|吉安|抚州/, "广州"],
+  [/湖北|武汉|黄石|宜昌/, "广州"],
+  [/四川|重庆|成都|达州/, "广州"],
+  [/河南|郑州|南阳|驻马店/, "广州"],
+  [/贵州|贵阳|遵义/, "广州"],
+  [/云南|昆明|昭通/, "广州"],
+  [/浙江|杭州|温州|义乌/, "厦门"],
+  [/上海|江苏|南京|苏州/, "厦门"],
+];
+
+/** 识别「人不在招聘城市内」并给出就近城市。 */
+export function detectOutOfRegion(query: string): string | undefined {
+  for (const [pattern, city] of OUT_OF_REGION_NEAREST) {
+    if (pattern.test(query)) return city;
+  }
+  return undefined;
+}
+
+/** 是否表达了愿意过来（用于 TYPE_2 的第二轮确认）。 */
+export function acceptsRelocation(query: string): boolean {
+  return /可以|愿意|行|好|没问题|过去|过来/.test(query);
+}
+
+/** 从原话里点名要的厂区（全称匹配）。 */
+export function detectNamedFactory(query: string): ChatflowFactory | undefined {
+  return CHATFLOW_CATALOG.find((f) => query.includes(f.factory));
+}
+
 function replyForMissingDistrict(city: string): string {
   return `${city}挺好的呀～###你在${city}哪个镇或者哪个区呢？我好看看离你远不远`;
 }
@@ -211,7 +248,15 @@ function replyForMissingProfile(district: string, state: HualinState): string {
 /**
  * 生成流程一的一轮回复。返回值可能含隐藏标记，调用方应先 stripMarkers 再发送。
  */
-export function generateFlowOneReply(state: HualinState): string {
+export function generateFlowOneReply(state: HualinState, query = ""): string {
+  // TYPE_2：求职者人不在招聘城市内。抓包实测：推荐就近城市 + 写入状态 user_type=2，
+  // 且不推进 flow_step，等对方确认意愿后再继续收集信息。
+  if (!state.current_city && state.user_type !== "2") {
+    const nearest = detectOutOfRegion(query);
+    if (nearest) {
+      return `###我们${nearest}厂区离你比较近，是打算过来这边吗？\n##TYPE_2##`;
+    }
+  }
   if (!state.current_city) {
     return "你好呀～###你现在在哪个区呢？等会发详细的给你看看";
   }
@@ -288,11 +333,21 @@ export class ChatflowDifyProvider implements DifyProvider {
     let nextState: HualinState;
     let visible: string;
 
+    // 换厂：求职者点名要另一家厂。抓包实测：直接改 matched_factory，
+    // 重发该厂薪资详情，flow_step 不变（不会退回流程一重收信息）。
+    const named = detectNamedFactory(query);
+    if (named && withProfile.matched_factory && withProfile.matched_factory !== named.factory) {
+      const salary = named.salaryDetail || `${named.factory}的岗位信息我稍后发你哈`;
+      nextState = { ...withProfile, matched_factory: named.factory };
+      visible = stripMarkers(`${salary}\n\n###${FLOW_CONSTANTS.salaryTail}`);
+      return this.persist(conversationId, nextState, history, query, visible);
+    }
+
     if (withProfile.flow_step >= 2 && withProfile.matched_factory) {
       const factory = CHATFLOW_CATALOG.find((f) => f.factory === withProfile.matched_factory);
       if (!factory) {
         // 已锁定的厂区在最新目录里找不到了：不臆造回复，交回流程一重新收口
-        const rawReply = generateFlowOneReply(withProfile);
+        const rawReply = generateFlowOneReply(withProfile, query);
         nextState = applyMarkers(withProfile, extractMarkers(rawReply));
         visible = stripMarkers(rawReply);
       } else {
@@ -301,11 +356,22 @@ export class ChatflowDifyProvider implements DifyProvider {
         visible = stripMarkers(result.reply);
       }
     } else {
-      const rawReply = generateFlowOneReply(withProfile);
+      const rawReply = generateFlowOneReply(withProfile, query);
       nextState = applyMarkers(withProfile, extractMarkers(rawReply));
       visible = stripMarkers(rawReply);
     }
 
+    return this.persist(conversationId, nextState, history, query, visible);
+  }
+
+  /** 会话落库 + 组装返回值。换厂分支与主路径共用。 */
+  private persist(
+    conversationId: string,
+    nextState: HualinState,
+    history: string,
+    query: string,
+    visible: string,
+  ): DifyMessageResult {
     const bubbles = splitBubbles(visible);
 
     const nextSession: ChatflowSession = {

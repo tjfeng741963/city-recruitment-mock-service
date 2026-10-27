@@ -120,21 +120,37 @@ describe("flow two", () => {
     expect(result.state.tattoo_record).toBe("record");
   });
 
-  it("advances to the form with a concrete interview date once cleared", () => {
+  it("only asks for the interview after clearing, without advancing", () => {
+    // 抓包实测第 22 轮：纹身问清后只发「…可以过来面试吗？」，flow_step 仍为 2
     const result = generateFlowTwoReply(state2({ flow2_turns: 3 }), "没有纹身也没有案底", factory, TUESDAY_EARLY);
+    expect(result.advanced).toBe(false);
+    expect(result.state.flow_step).toBe(2);
+    expect(result.state.tattoo_record).toBe("none");
+    expect(result.state.interview_asked).toBe(true);
+    expect(result.state.interview_date).toBe("2026-10-27");
+    expect(result.reply).toContain("可以过来面试吗");
+  });
+
+  it("re-asks the invitation instead of sending the form when the candidate only asks a question", () => {
+    // 抓包实录第 28 轮：「那我什么时候能过去面试呢？」含「过去」二字但只是提问，
+    // 真实系统重发邀约问句，flow_step 保持 2
+    const asked = state2({ tattoo_record: "none", interview_asked: true, interview_date: "2026-10-27" });
+    const result = generateFlowTwoReply(asked, "那我什么时候能过去面试呢？", factory, TUESDAY_EARLY);
+    expect(result.advanced).toBe(false);
+    expect(result.state.flow_step).toBe(2);
+    expect(result.reply).toContain("可以过来面试吗");
+    expect(result.reply).not.toContain("预约面试信息");
+  });
+
+  it("sends the form only after the candidate confirms the invitation", () => {
+    // 抓包实测第 29 轮：求职者确认后发报名表单，此时才推进到流程三
+    const asked = state2({ tattoo_record: "none", interview_asked: true, interview_date: "2026-10-27" });
+    const result = generateFlowTwoReply(asked, "可以的，我明天上午过去", factory, TUESDAY_EARLY);
     expect(result.advanced).toBe(true);
     expect(result.state.flow_step).toBe(3);
-    expect(result.state.tattoo_record).toBe("none");
-    expect(result.state.interview_date).toBe("2026-10-27");
     // 该厂[报名表单]原文是「麻烦填一下预约面试信息」，逐字来自数据块
     expect(result.reply).toContain("预约面试信息");
     expect(result.reply).toContain("2026-10-27");
-  });
-
-  it("sends the form when the candidate agrees after clearing", () => {
-    const result = generateFlowTwoReply(state2({ tattoo_record: "none" }), "可以，我过去", factory, TUESDAY_EARLY);
-    expect(result.advanced).toBe(true);
-    expect(result.state.flow_step).toBe(3);
   });
 });
 
