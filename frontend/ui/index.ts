@@ -13,3 +13,6 @@ export * from "./components/Display";
 export * from "./components/Overlay";
 export * from "./components/Navigation";
 export * from "./components/DataTable";
+export * from "./components/Motion";
+export * from "./components/Feedback";
+export * from "./components/Data";

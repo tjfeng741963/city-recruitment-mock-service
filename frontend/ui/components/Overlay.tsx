@@ -1,5 +1,8 @@
 import { useEffect, useId, useRef, useState, type ReactNode, type RefObject } from "react";
+import { createPortal } from "react-dom";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { Icon, type IconName } from "./Icon";
+import { EASE_SIGNATURE } from "./Motion";
 import type { Tone } from "./Display";
 
 function useEscape(open: boolean, onClose: () => void) {
@@ -35,24 +38,52 @@ export interface DialogProps {
 export function Dialog({ open, onClose, title, description, children, footer, variant = "dialog" }: DialogProps) {
   const titleId = useId();
   const panel = useRef<HTMLDivElement>(null);
+  const reduce = useReducedMotion();
   useEscape(open, onClose);
   useFocusReturn(open, panel);
-  if (!open) return null;
 
-  return (
-    <div className={`ui-overlay ui-overlay-${variant}`} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div ref={panel} className={`ui-${variant}`} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}>
-        <header className="ui-dialog-head">
-          <h3 id={titleId}>{title}</h3>
-          <button type="button" className="ui-icon-btn" aria-label="关闭" onClick={onClose}>
-            <Icon name="x" size={16} />
-          </button>
-        </header>
-        {description && <p className="ui-dialog-desc">{description}</p>}
-        {children && <div className="ui-dialog-body">{children}</div>}
-        {footer && <footer className="ui-dialog-foot">{footer}</footer>}
-      </div>
-    </div>
+  const panelMotion =
+    variant === "sheet"
+      ? { initial: { x: "100%" }, animate: { x: 0 }, exit: { x: "100%" } }
+      : { initial: { opacity: 0, scale: 0.94, y: 8 }, animate: { opacity: 1, scale: 1, y: 0 }, exit: { opacity: 0, scale: 0.97, y: 4 } };
+
+  return createPortal(
+    <AnimatePresence>
+      {open && (
+        <motion.div
+          className={`ui-overlay ui-overlay-${variant}`}
+          onMouseDown={(e) => e.target === e.currentTarget && onClose()}
+          initial={reduce ? false : { opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: reduce ? 0 : 0.22 }}
+        >
+          <motion.div
+            ref={panel}
+            className={`ui-${variant}`}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={titleId}
+            tabIndex={-1}
+            initial={reduce ? false : panelMotion.initial}
+            animate={panelMotion.animate}
+            exit={reduce ? undefined : panelMotion.exit}
+            transition={{ duration: reduce ? 0 : 0.38, ease: EASE_SIGNATURE }}
+          >
+            <header className="ui-dialog-head">
+              <h3 id={titleId}>{title}</h3>
+              <button type="button" className="ui-icon-btn" aria-label="关闭" onClick={onClose}>
+                <Icon name="x" size={16} />
+              </button>
+            </header>
+            {description && <p className="ui-dialog-desc">{description}</p>}
+            {children && <div className="ui-dialog-body">{children}</div>}
+            {footer && <footer className="ui-dialog-foot">{footer}</footer>}
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>,
+    document.body,
   );
 }
 
@@ -87,23 +118,34 @@ export interface ToastItem {
 }
 
 export function ToastViewport({ items, onDismiss }: { items: ToastItem[]; onDismiss: (id: number) => void }) {
-  return (
+  return createPortal(
     <div className="ui-toast-viewport" aria-live="polite">
-      {items.map((t) => (
-        <div key={t.id} className={`ui-toast ui-tone-${t.tone}`}>
-          <Icon name={TONE_ICON[t.tone]} size={16} />
-          <span>{t.title}</span>
-          {t.undo && (
-            <button type="button" className="ui-toast-action" onClick={() => onDismiss(t.id)}>
-              撤销
+      <AnimatePresence initial={false}>
+        {items.map((t) => (
+          <motion.div
+            key={t.id}
+            layout
+            className={`ui-toast ui-tone-${t.tone}`}
+            initial={{ opacity: 0, y: 16, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 8, scale: 0.98, transition: { duration: 0.18 } }}
+            transition={{ duration: 0.36, ease: EASE_SIGNATURE }}
+          >
+            <Icon name={TONE_ICON[t.tone]} size={16} />
+            <span>{t.title}</span>
+            {t.undo && (
+              <button type="button" className="ui-toast-action" onClick={() => onDismiss(t.id)}>
+                撤销
+              </button>
+            )}
+            <button type="button" className="ui-icon-btn ui-icon-btn-sm" aria-label="关闭通知" onClick={() => onDismiss(t.id)}>
+              <Icon name="x" size={14} />
             </button>
-          )}
-          <button type="button" className="ui-icon-btn ui-icon-btn-sm" aria-label="关闭通知" onClick={() => onDismiss(t.id)}>
-            <Icon name="x" size={14} />
-          </button>
-        </div>
-      ))}
-    </div>
+          </motion.div>
+        ))}
+      </AnimatePresence>
+    </div>,
+    document.body,
   );
 }
 

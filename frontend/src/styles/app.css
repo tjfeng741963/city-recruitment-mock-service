@@ -168,10 +168,30 @@ body {
   background: var(--rail-2);
 }
 
+.rail-item {
+  position: relative;
+  isolation: isolate;
+}
+
 .rail-item.is-active {
-  background: var(--rail-active);
   color: var(--rail-ink-active);
   font-weight: 600;
+}
+
+.rail-pill {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--rail-active);
+}
+
+.content-page {
+  min-width: 0;
+}
+
+.content.is-full-bleed > .content-page {
+  height: 100%;
 }
 
 a.rail-item {

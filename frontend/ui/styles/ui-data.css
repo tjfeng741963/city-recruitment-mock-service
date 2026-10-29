@@ -1,0 +1,321 @@
+/* finesse · component library (data + feedback) · register=product
+ * tokens: inherited (tokens.css) — no literal colors */
+
+.ui-panel {
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--r);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+}
+.ui-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  padding: var(--s-4) var(--s-5) 0;
+}
+.ui-panel-head h2 {
+  margin: 0;
+  font-size: var(--t-headline);
+  font-weight: 600;
+  color: var(--ink-1);
+}
+.ui-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+.ui-panel-body {
+  padding: var(--s-4) var(--s-5) var(--s-5);
+  min-width: 0;
+}
+.ui-panel.is-flush .ui-panel-body {
+  padding: var(--s-2) 0 0;
+}
+
+.ui-filterbar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--s-3);
+  flex-wrap: wrap;
+}
+.ui-filterbar-fields {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--s-3);
+  flex-wrap: wrap;
+}
+.ui-filterbar-fields .ui-field {
+  min-width: 160px;
+  margin: 0;
+}
+.ui-filterbar-fields .ui-field-message:empty {
+  display: none;
+}
+.ui-filterbar-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  font-size: var(--t-subhead);
+  color: var(--ink-3);
+}
+.ui-link-btn {
+  padding: 4px 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent-ink);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  outline: 2px solid transparent;
+}
+.ui-link-btn:hover {
+  background: var(--accent-soft);
+}
+.ui-link-btn:focus-visible {
+  outline-color: var(--focus);
+}
+
+.ui-desc {
+  display: grid;
+  gap: var(--s-3) var(--s-6);
+  margin: 0;
+}
+.ui-desc-1 {
+  grid-template-columns: 1fr;
+}
+.ui-desc-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.ui-desc-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.ui-desc-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.ui-desc-item dt {
+  font-size: var(--t-footnote);
+  color: var(--ink-3);
+}
+.ui-desc-item dd {
+  margin: 0;
+  font-size: var(--t-callout);
+  color: var(--ink-1);
+  overflow-wrap: anywhere;
+}
+@media (max-width: 720px) {
+  .ui-desc-2,
+  .ui-desc-3 {
+    grid-template-columns: 1fr;
+  }
+}
+
+.ui-timeline {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+  margin: 0;
+  padding: 0 0 0 22px;
+  list-style: none;
+}
+.ui-timeline::before {
+  content: "";
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  left: 5px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--border-strong);
+}
+.ui-timeline-item {
+  position: relative;
+}
+.ui-timeline-dot {
+  position: absolute;
+  top: 5px;
+  left: -22px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--bg);
+  border: 3px solid var(--tone);
+}
+.ui-timeline-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s-3);
+}
+.ui-timeline-head strong {
+  font-size: var(--t-callout);
+  font-weight: 600;
+  color: var(--ink-1);
+}
+.ui-timeline-head time {
+  flex-shrink: 0;
+  font-size: var(--t-footnote);
+  color: var(--ink-3);
+}
+.ui-timeline-body {
+  margin-top: 4px;
+  font-size: var(--t-callout);
+  line-height: 1.6;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+}
+
+.ui-drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: var(--s-6) var(--s-4);
+  border-radius: var(--r);
+  border: 1.5px dashed var(--border-strong);
+  background: var(--panel-2);
+  text-align: center;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) var(--ease-standard),
+    background-color var(--dur-fast) var(--ease-standard),
+    transform var(--dur-base) var(--ease-signature);
+}
+.ui-drop:hover,
+.ui-drop:focus-within {
+  border-color: var(--accent);
+}
+.ui-drop:focus-within {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.ui-drop.is-over {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  transform: scale(1.01);
+}
+.ui-drop.is-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.ui-drop-icon {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--bg);
+  color: var(--accent-ink);
+  box-shadow: var(--shadow);
+}
+.ui-drop-label {
+  font-size: var(--t-callout);
+  font-weight: 600;
+  color: var(--ink-1);
+}
+.ui-drop-hint {
+  font-size: var(--t-footnote);
+  color: var(--ink-3);
+}
+
+.ui-bars,
+.ui-trend {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+}
+.ui-bars-plot {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  height: 160px;
+  padding-top: 18px;
+  border-bottom: 1px solid var(--border-strong);
+}
+.ui-bars-col {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  height: 100%;
+  max-width: 56px;
+  margin: 0 auto;
+}
+.ui-bars-fill {
+  display: block;
+  width: 100%;
+  min-height: 2px;
+  border-radius: 6px 6px 0 0;
+  background: var(--grad-primary);
+}
+.ui-bars-value {
+  margin-bottom: 4px;
+  font-size: var(--t-caption);
+  color: var(--ink-3);
+}
+.ui-bars-axis {
+  display: flex;
+  gap: 10px;
+}
+.ui-bars-axis span {
+  flex: 1;
+  max-width: 56px;
+  margin: 0 auto;
+  overflow: hidden;
+  font-size: var(--t-caption);
+  color: var(--ink-3);
+  text-align: center;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.ui-trend svg {
+  width: 100%;
+  height: 140px;
+  overflow: visible;
+}
+.ui-trend-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.ui-trend-area {
+  fill: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.ui-trend .ui-bars-axis span {
+  max-width: none;
+}
+
+/* ---------- Page enter · nav indicator ---------- */
+
+.ui-page-enter {
+  animation: ui-page-in var(--dur-slow) var(--ease-signature) backwards;
+}
+@keyframes ui-page-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-page-enter {
+    animation: none;
+  }
+  .ui-drop.is-over {
+    transform: none;
+  }
+}
