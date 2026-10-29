@@ -119,12 +119,12 @@ export function ParamsDialog({ strategy, onClose, onSaved }: { strategy: Strateg
                     />
                   ))}
                 </div>
-                {daysError && <p className="mod-error" role="alert">{daysError}</p>}
+                {daysError && <Alert tone="danger" title={daysError} />}
               </fieldset>
             )}
           </>
         )}
-        {error && <p className="mod-error" role="alert">{error}</p>}
+        {error && <Alert tone="danger" title={error} />}
       </form>
     </Dialog>
   );
@@ -179,7 +179,7 @@ export function TestDialog({ code, onClose }: { code: string; onClose: () => voi
             onChange={(e) => setCustomerId(e.target.value)}
           />
         </form>
-        {error && <p className="mod-error" role="alert">{error}</p>}
+        {error && <Alert tone="danger" title={error} />}
         {result && (
           <>
             <section className="ac-stack-sm">

@@ -61,7 +61,7 @@ export function ScriptDialog({ script, onClose, onSaved }: { script: Script | nu
         />
         <Input id="ac-script-category" label="分类" placeholder="选填，便于分组管理（如：开场白、岗位推荐）" value={category} onChange={(e) => setCategory(e.target.value)} />
         <Switch id="ac-script-active" label="启用" description="停用后不参与随机抽取" checked={active} onChange={(e) => setActive(e.target.checked)} />
-        {error && <p className="mod-error" role="alert">{error}</p>}
+        {error && <Alert tone="danger" title={error} />}
       </form>
     </Dialog>
   );
@@ -149,7 +149,7 @@ export function ImportExportDialog({ onClose, onImported }: { onClose: () => voi
         <section className="ac-stack-sm">
           <h4 className="ac-label">导入</h4>
           <FileDrop accept=".xlsx" label="拖拽 .xlsx 文件到这里，或点击选择" hint="只能上传一个 .xlsx 文件" onFile={pickFile} />
-          {fileError && <p className="mod-error" role="alert">{fileError}</p>}
+          {fileError && <Alert tone="danger" title={fileError} />}
         </section>
         {result && (
           <Alert tone={hasErrors ? "warning" : "success"} title={hasErrors ? "导入完成，部分数据有问题" : "导入成功"}>

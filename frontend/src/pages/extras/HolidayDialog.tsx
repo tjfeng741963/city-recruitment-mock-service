@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { Button, Dialog, Input, Select, Switch, Textarea, useFeedback } from "@ui";
+import { Alert, Button, Dialog, Input, Select, Switch, Textarea, useFeedback } from "@ui";
 import { holidayApi, type HolidayInput, type HolidaySchedule, type MyCity } from "../../api/extras";
 import { errorText } from "./model";
 
@@ -129,7 +129,7 @@ export function HolidayDialog({
         </div>
         <Input id="hd-sort" type="number" min={0} label="排序" helperText="数字小的排在前面" value={String(form.sort_order)} onChange={(e) => set("sort_order", Math.max(0, Number(e.target.value) || 0))} />
         <Textarea id="hd-note" label="特殊说明" rows={2} placeholder="如：面试时间以应聘者回复为准" value={form.special_note} onChange={(e) => set("special_note", e.target.value)} />
-        {failure && <p className="mod-error" role="alert">{failure}</p>}
+        {failure && <Alert tone="danger" title={failure} />}
         <button type="submit" hidden aria-hidden="true" tabIndex={-1} />
       </form>
     </Dialog>

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import {
+  Alert,
   BarChart,
   Button,
   CountUp,
@@ -11,6 +12,7 @@ import {
   RevealItem,
   SegmentedControl,
   Skeleton,
+  StatTile,
   TrendChart,
   useFeedback,
   type IconName,
@@ -31,16 +33,7 @@ const formatPercent = (n: number) => `${n.toFixed(1)}`;
 
 function Kpi({ icon, label, value, unit, format }: { icon: IconName; label: string; value: number; unit?: string; format?: (n: number) => string }) {
   return (
-    <div className="ui-stat">
-      <div className="ui-stat-top">
-        <span className="ui-stat-icon"><Icon name={icon} size={17} /></span>
-      </div>
-      <span className="ui-stat-label">{label}</span>
-      <span className="ui-stat-value ui-num">
-        <CountUp value={value} format={format} />
-        {unit && <small>{unit}</small>}
-      </span>
-    </div>
+    <StatTile icon={icon} label={label} value={<CountUp value={value} format={format} />} unit={unit} />
   );
 }
 
@@ -147,7 +140,7 @@ function EffectPanel({ effects }: { effects: StrategyEffect[] | null }) {
 function FeedPanel({ items, error }: { items: FeedItem[] | null; error: string | null }) {
   return (
     <Panel title="实时动态" actions={<span className="ac-muted">每 30 秒刷新</span>}>
-      {error && <p className="mod-error" role="alert">{error}</p>}
+      {error && <Alert tone="danger" title={error} />}
       {!items ? (
         <div className="ac-stack">{[0, 1, 2].map((i) => <Skeleton key={i} height={36} />)}</div>
       ) : items.length === 0 ? (

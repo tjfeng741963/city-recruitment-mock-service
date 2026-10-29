@@ -109,7 +109,7 @@ function ReminderForm({ initial, canEdit }: { initial: ReminderConfig; canEdit: 
         value={cfg.script}
         onChange={(e) => setCfg({ ...cfg, script: e.target.value })}
       />
-      {error && <p className="mod-error" role="alert">{error}</p>}
+      {error && <Alert tone="danger" title={error} />}
       {canEdit && (
         <div className="st-actions">
           <Button type="submit" loading={saving}>保存面试提醒</Button>
@@ -174,7 +174,7 @@ function FollowupForm({ initial, canEdit }: { initial: FollowupConfig; canEdit: 
           <Button size="sm" variant="secondary" onClick={() => setCfg({ ...cfg, scripts: [...cfg.scripts, ""] })}>添加话术</Button>
         </div>
       </fieldset>
-      {error && <p className="mod-error" role="alert">{error}</p>}
+      {error && <Alert tone="danger" title={error} />}
       {canEdit && (
         <div className="st-actions">
           <Button type="submit" loading={saving}>保存自动追问</Button>

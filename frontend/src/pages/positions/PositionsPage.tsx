@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { positionsApi, type Position } from "../../api/admin";
 import { ApiError, type City } from "../../api/client";
 import { navigate } from "../../app/router";
-import { Badge, Button, EmptyState, SearchField, SegmentedControl, Skeleton, Switch } from "@ui";
+import { Alert, Badge, Button, EmptyState, SearchField, SegmentedControl, Skeleton, Switch } from "@ui";
 import { useAuth } from "../../context/AuthContext";
 import { CreateCityDialog, CreatePositionDialog } from "./PositionDialogs";
 import { groupByStore, isCityActive, isOnHoliday, localDate } from "./model";
@@ -114,7 +114,7 @@ export function PositionsPage({ cityId, featuredOnly = false }: { cityId?: numbe
     return (
       <div className="mod-page">
         <Head />
-        {error ? <p className="mod-error" role="alert">{error}</p> : <Skeleton width="50%" height={22} />}
+        {error ? <Alert tone="danger" title={error} /> : <Skeleton width="50%" height={22} />}
       </div>
     );
   }
@@ -137,7 +137,7 @@ export function PositionsPage({ cityId, featuredOnly = false }: { cityId?: numbe
   return (
     <div className="mod-page ps-page">
       <Head />
-      {(error || actionError) && <p className="mod-error" role="alert">{actionError ?? `${error}（显示的是上一次的数据）`}</p>}
+      {(error || actionError) && <Alert tone="danger" title={actionError ?? `${error}（显示的是上一次的数据）`} />}
 
       <div className="ps-split">
         <aside className="ps-side">

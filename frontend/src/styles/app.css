@@ -62,60 +62,19 @@ body {
   font-size: 13px;
 }
 
-.field {
+.login-fields {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-bottom: 16px;
-  font-size: 13px;
-  color: var(--ink-3);
-}
-
-.field input {
-  height: 40px;
-  padding: 0 12px;
-  border-radius: var(--r-sm);
-  border: 1px solid var(--border);
-  background: var(--panel-2);
-  color: var(--ink-1);
-  font-size: 14px;
-  outline: none;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
-}
-
-.field input:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
+  gap: 4px;
+  margin-bottom: 8px;
 }
 
 .login-error {
   margin: 0 0 14px;
-  font-size: 12.5px;
-  color: var(--down);
 }
 
-.primary-button {
+.login-submit {
   width: 100%;
-  height: 42px;
-  border: none;
-  border-radius: var(--r-sm);
-  background: var(--grad-primary);
-  background-size: 160% 100%;
-  color: var(--on-accent);
-  font-size: 14px;
-  font-weight: 600;
-  cursor: pointer;
-  box-shadow: var(--grad-primary-glow);
-  transition: background-position var(--dur-base) var(--ease-standard);
-}
-
-.primary-button:hover:not(:disabled) {
-  background-position: 100% 0;
-}
-
-.primary-button:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
 }
 
 /* ---------- Shell ---------- */

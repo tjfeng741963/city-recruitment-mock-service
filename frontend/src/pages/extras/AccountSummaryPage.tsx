@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Alert, BarChart, Button, CountUp, DataTable, EmptyState, Icon, Input, Panel, Reveal, RevealItem, SegmentedControl, Skeleton, TrendChart, type Column, type IconName } from "@ui";
+import { Alert, BarChart, Button, CountUp, DataTable, EmptyState, Input, Panel, Reveal, RevealItem, SegmentedControl, Skeleton, StatTile, TrendChart, type Column, type IconName } from "@ui";
 import { summaryApi, type AccountSummary, type SummaryAccount, type SummaryTotal } from "../../api/extras";
 import { SettingsHead } from "./Heads";
 import { errorText, localDate } from "./model";
@@ -33,20 +33,8 @@ const TILES: Array<{ key: keyof SummaryTotal; label: string; icon: IconName; uni
 
 const formatRate = (n: number) => n.toFixed(1);
 
-// Same markup as StatTile; StatTile's value only accepts a string, so CountUp cannot go inside it.
 function CountTile({ icon, label, value, unit }: { icon: IconName; label: string; value: number; unit?: string }) {
-  return (
-    <div className="ui-stat">
-      <div className="ui-stat-top">
-        <span className="ui-stat-icon"><Icon name={icon} size={17} /></span>
-      </div>
-      <span className="ui-stat-label">{label}</span>
-      <span className="ui-stat-value ui-num">
-        <CountUp value={value} format={unit === "%" ? formatRate : undefined} />
-        {unit && <small>{unit}</small>}
-      </span>
-    </div>
-  );
+  return <StatTile icon={icon} label={label} value={<CountUp value={value} format={unit === "%" ? formatRate : undefined} />} unit={unit} />;
 }
 
 type AccountRow = SummaryAccount & { id: string; rate: string };

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { positionsApi, settingsApi, type AdminUser, type Recruiter } from "../../api/admin";
 import { ApiError, type City } from "../../api/client";
-import { Badge, Button, Dialog, EmptyState, Input, Select, Skeleton, Tag } from "@ui";
+import { Alert, Badge, Button, Dialog, EmptyState, Input, Select, Skeleton, Tag } from "@ui";
 
 const ROLE_LABEL: Record<AdminUser["role"], string> = { admin: "管理员", customer: "运营", recruiter: "招聘员" };
 
@@ -109,7 +109,7 @@ function NewRecruiterDialog({ onClose, onCreated }: { onClose: () => void; onCre
       <form id="st-new-rec" className="mod-form" onSubmit={submit}>
         <Input id="st-rec-code" label="招聘员编号" placeholder="zhangsan" value={code} onChange={(e) => setCode(e.target.value)} required autoFocus />
         <Input id="st-rec-name" label="名字" placeholder="张三" value={name} onChange={(e) => setName(e.target.value)} />
-        {error && <p className="mod-error" role="alert">{error}</p>}
+        {error && <Alert tone="danger" title={error} />}
       </form>
     </Dialog>
   );
@@ -128,7 +128,7 @@ export function RecruitersTab({ isAdmin }: { isAdmin: boolean }) {
     }
   }
 
-  if (!data) return error ? <p className="mod-error" role="alert">{error}</p> : <Skeleton width="60%" height={22} />;
+  if (!data) return error ? <Alert tone="danger" title={error} /> : <Skeleton width="60%" height={22} />;
 
   return (
     <section className="st-section">
@@ -136,7 +136,7 @@ export function RecruitersTab({ isAdmin }: { isAdmin: boolean }) {
         <p className="st-note">招聘员只能看到分配给他的城市里的岗位和会话。</p>
         {isAdmin && <Button size="sm" onClick={() => setCreating(true)}>新建招聘员</Button>}
       </div>
-      {error && <p className="mod-error" role="alert">{error}</p>}
+      {error && <Alert tone="danger" title={error} />}
       {data.recruiters.length === 0 ? (
         <EmptyState icon="users" title="还没有招聘员" description="只有一个运营管所有号和城市时，不需要建招聘员。" />
       ) : (
@@ -217,7 +217,7 @@ function NewAccountDialog({ recruiters, onClose, onCreated }: { recruiters: Recr
             required
           />
         )}
-        {error && <p className="mod-error" role="alert">{error}</p>}
+        {error && <Alert tone="danger" title={error} />}
       </form>
     </Dialog>
   );
@@ -242,7 +242,7 @@ export function AccountsTab({ selfName }: { selfName: string }) {
     }
   }
 
-  if (!data) return error ? <p className="mod-error" role="alert">{error}</p> : <Skeleton width="60%" height={22} />;
+  if (!data) return error ? <Alert tone="danger" title={error} /> : <Skeleton width="60%" height={22} />;
 
   return (
     <section className="st-section">
@@ -250,7 +250,7 @@ export function AccountsTab({ selfName }: { selfName: string }) {
         <p className="st-note">这一页只有管理员能看到。</p>
         <Button size="sm" onClick={() => setCreating(true)}>开账号</Button>
       </div>
-      {error && <p className="mod-error" role="alert">{error}</p>}
+      {error && <Alert tone="danger" title={error} />}
       <ul className="st-list">
         {data.users.map((u) => (
           <li key={u.id} className={`st-item st-item-row ${u.is_active ? "" : "is-off"}`}>

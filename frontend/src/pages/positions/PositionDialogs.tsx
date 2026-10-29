@@ -1,7 +1,7 @@
 import { useState, type FormEvent, type ReactNode } from "react";
 import { positionsApi, type Position } from "../../api/admin";
 import { ApiError, type City } from "../../api/client";
-import { Button, Dialog, Input } from "@ui";
+import { Alert, Button, Dialog, Input } from "@ui";
 import { UNGROUPED } from "./model";
 
 function FormDialog({
@@ -52,7 +52,7 @@ function FormDialog({
     >
       <form id={id} className="mod-form" onSubmit={submit}>
         {children}
-        {error && <p className="mod-error" role="alert">{error}</p>}
+        {error && <Alert tone="danger" title={error} />}
       </form>
     </Dialog>
   );

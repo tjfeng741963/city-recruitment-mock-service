@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent, type KeyboardEvent } from "react";
-import { Badge, Button, Icon, Menu, Skeleton, useFeedback, type MenuItem } from "@ui";
+import { Alert, Badge, Button, Icon, Menu, Skeleton, useFeedback, type MenuItem } from "@ui";
 import { agentApi } from "../../../api/agent";
 import { mobileApi, type MobileConversation, type MobileDevice, type MobileMessage } from "../../../api/extras";
 import { errorText } from "../model";
@@ -190,7 +190,7 @@ export function MobileChatDetail({
             <Skeleton width="70%" height={36} />
           </div>
         )}
-        {error && <p className="mod-error" role="alert">{error}，3 秒后自动重试</p>}
+        {error && <Alert tone="danger" title={`${error}，3 秒后自动重试`} />}
         {messages?.length === 0 && <p className="mx-empty">还没有消息</p>}
         {messages?.map((m) => <Bubble key={m.id} m={m} />)}
       </div>

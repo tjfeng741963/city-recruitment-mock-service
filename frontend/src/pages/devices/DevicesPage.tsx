@@ -3,7 +3,7 @@ import { agentApi, type Conversation } from "../../api/agent";
 import { devicesApi, type BridgeCommand, type DeviceDetail } from "../../api/admin";
 import { ApiError } from "../../api/client";
 import { navigate } from "../../app/router";
-import { Badge, Button, EmptyState, Skeleton } from "@ui";
+import { Alert, Badge, Button, EmptyState, Skeleton } from "@ui";
 import { useAuth } from "../../context/AuthContext";
 import type { DeviceState } from "../reception/useReception";
 import { formatWait, minutesSince } from "../reception/triage";
@@ -108,7 +108,7 @@ export function DevicesPage({ deviceId }: { deviceId?: number }) {
         <h1>微信号</h1>
         {isAdmin && cards && cards.length > 0 && <Button size="sm" onClick={() => setBinding(true)}>绑定新号</Button>}
       </header>
-      {error && <p className="mod-error" role="alert">{error}</p>}
+      {error && <Alert tone="danger" title={error} />}
       {!cards ? (
         <div className="dv-wall">{[0, 1, 2].map((i) => <Skeleton key={i} height={132} />)}</div>
       ) : sorted.length === 0 ? (

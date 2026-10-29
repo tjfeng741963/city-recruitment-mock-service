@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { settingsApi, type Settings } from "../../api/admin";
 import { ApiError } from "../../api/client";
-import { Button, Input, Skeleton } from "@ui";
+import { Alert, Button, Input, Skeleton } from "@ui";
 import { useAuth } from "../../context/AuthContext";
 import { AccountsTab, RecruitersTab } from "./SettingsLists";
 
@@ -39,7 +39,7 @@ function GeneralTab({ canEdit }: { canEdit: boolean }) {
       .catch((err) => setError(err instanceof ApiError ? err.detail : "加载失败"));
   }, []);
 
-  if (!settings || !draft) return error ? <p className="mod-error" role="alert">{error}</p> : <Skeleton width="60%" height={22} />;
+  if (!settings || !draft) return error ? <Alert tone="danger" title={error} /> : <Skeleton width="60%" height={22} />;
 
   const current = draft;
   const min = Number(current.ageMin || 0);
@@ -102,7 +102,7 @@ function GeneralTab({ canEdit }: { canEdit: boolean }) {
           {...field("newKey")}
         />
       </fieldset>
-      {error && <p className="mod-error" role="alert">{error}</p>}
+      {error && <Alert tone="danger" title={error} />}
       {canEdit && (
         <div className="st-actions">
           {saved && <span className="ps-saved" role="status">已保存</span>}

@@ -147,7 +147,7 @@ export function KnowledgeEditDialog({ id, onClose, onSaved }: { id?: number; onC
             checked={form.is_active}
             onChange={(e) => patch({ is_active: e.target.checked })}
           />
-          {saveError && <p className="mod-error" role="alert">{saveError}</p>}
+          {saveError && <Alert tone="danger" title={saveError} />}
         </form>
       )}
     </Dialog>

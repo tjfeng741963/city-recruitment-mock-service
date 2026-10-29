@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Alert, Button, CountUp, Icon, Select, type IconName, type Tone } from "@ui";
+import { Alert, Button, CountUp, Select, StatTile, type IconName, type Tone } from "@ui";
 import { ApiError } from "../../api/client";
 import { candidatesApi, type MyDevice } from "../../api/candidates";
 
@@ -45,10 +45,6 @@ export function LoadError({ message, onRetry }: { message: string; onRetry: () =
   );
 }
 
-/**
- * Same markup as the library StatTile, but the value slot takes a CountUp.
- * StatTile only accepts a string value, so it can't animate the number.
- */
 export function CountTile({
   icon,
   label,
@@ -67,17 +63,14 @@ export function CountTile({
   format?: (n: number) => string;
 }) {
   return (
-    <div className="ui-stat">
-      <div className="ui-stat-top">
-        <span className="ui-stat-icon"><Icon name={icon} size={17} /></span>
-        {note && <span className={`ui-badge ui-tone-${noteTone}`}>{note}</span>}
-      </div>
-      <span className="ui-stat-label">{label}</span>
-      <span className="ui-stat-value ui-num">
-        {value === null ? "—" : <CountUp value={value} format={format} />}
-        {unit && value !== null && <small>{unit}</small>}
-      </span>
-    </div>
+    <StatTile
+      icon={icon}
+      label={label}
+      value={value === null ? "—" : <CountUp value={value} format={format} />}
+      unit={value === null ? undefined : unit}
+      delta={note}
+      deltaTone={noteTone}
+    />
   );
 }
 

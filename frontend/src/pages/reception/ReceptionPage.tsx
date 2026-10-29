@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Button, EmptyState, Skeleton } from "@ui";
+import { Button, EmptyState, Select, Skeleton } from "@ui";
 import { CandidateCard } from "./CandidateCard";
 import { ChatPane } from "./ChatPane";
 import { ConversationList } from "./ConversationList";
@@ -127,14 +127,18 @@ export function ReceptionPage() {
         <div className="rc-panes">
           <div className="rc-pane-list">
             {data.devices.length > 1 && (
-              <select className="rc-device-filter" aria-label="按微信号筛选" value={deviceFilter} onChange={(e) => setDeviceFilter(e.target.value)}>
-                <option value="">全部微信号</option>
-                {data.devices.map((d) => (
-                  <option key={d.device.device_code} value={d.device.device_code}>
-                    {d.device.name || d.device.device_code}
-                  </option>
-                ))}
-              </select>
+              <div className="rc-device-filter">
+                <Select
+                  id="rc-device-filter"
+                  aria-label="按微信号筛选"
+                  value={deviceFilter}
+                  onChange={(e) => setDeviceFilter(e.target.value)}
+                  options={[
+                    { value: "", label: "全部微信号" },
+                    ...data.devices.map((d) => ({ value: d.device.device_code, label: d.device.name || d.device.device_code })),
+                  ]}
+                />
+              </div>
             )}
             <ConversationList items={visible} selectedKey={selected?.key ?? null} onSelect={setSelectedKey} />
           </div>

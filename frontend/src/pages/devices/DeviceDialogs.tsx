@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { devicesApi, type DeviceDetail } from "../../api/admin";
 import { ApiError } from "../../api/client";
-import { Button, Dialog, Input } from "@ui";
+import { Alert, Button, Dialog, Input } from "@ui";
 
 const CODE_PATTERN = /^[A-Za-z0-9_-]{3,64}$/;
 
@@ -51,7 +51,7 @@ export function BindDialog({ onClose, onCreated }: { onClose: () => void; onCrea
           error={codeError}
           required
         />
-        {error && <p className="mod-error" role="alert">{error}</p>}
+        {error && <Alert tone="danger" title={error} />}
       </form>
     </Dialog>
   );
@@ -110,7 +110,7 @@ export function PairDialog({ device, onClose }: { device: DeviceDetail; onClose:
       }
     >
       {token && <pre className="dv-env">{envText}</pre>}
-      {error && <p className="mod-error" role="alert">{error}</p>}
+      {error && <Alert tone="danger" title={error} />}
     </Dialog>
   );
 }

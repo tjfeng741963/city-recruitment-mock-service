@@ -63,7 +63,7 @@ function ConvertDialog({ row, onClose, onDone }: { row: Row; onClose: () => void
         <Input id="uq-question" label="问题" required value={question} error={errors.question} onChange={(e) => setQuestion(e.target.value)} />
         <Textarea id="uq-answer" label="回答" required rows={5} placeholder="输入标准回答" value={answer} error={errors.answer} onChange={(e) => setAnswer(e.target.value)} autoFocus />
         <KeywordInput id="uq-keywords" value={keywords} onChange={setKeywords} />
-        {error && <p className="mod-error" role="alert">{error}</p>}
+        {error && <Alert tone="danger" title={error} />}
       </form>
     </Dialog>
   );

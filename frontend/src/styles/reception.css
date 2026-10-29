@@ -89,13 +89,8 @@
 }
 .rc-device-filter {
   margin: 10px 12px 0;
-  height: var(--control-h-sm, 30px);
-  border: 1px solid var(--control-border, var(--border));
-  border-radius: var(--r-sm, 6px);
-  background: var(--bg);
-  color: var(--ink-1);
-  padding: 0 8px;
 }
+.rc-device-filter .ui-field-message:empty { display: none; }
 .rc-list { display: flex; flex-direction: column; min-height: 0; flex: 1; }
 .rc-list-search { padding: 10px 12px; }
 .rc-list-scroll { flex: 1; overflow-y: auto; padding-bottom: 12px; }

@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { positionsApi, type Position } from "../../api/admin";
 import { ApiError } from "../../api/client";
-import { Button, EmptyState, Input, ListGroup, ListRow, Skeleton, Switch, Textarea } from "@ui";
+import { Alert, Button, EmptyState, Input, ListGroup, ListRow, Skeleton, Switch, Textarea } from "@ui";
 import { EDITABLE_SECTIONS, localDate, positionPayload, upcomingHolidays } from "./model";
 import { useHolidays } from "./usePositions";
 
@@ -68,7 +68,7 @@ function HolidaySection({ positionId }: { positionId: number }) {
         <Input id="ps-hol-label" label="说明" placeholder="国庆" value={label} onChange={(e) => setLabel(e.target.value)} />
         <Button type="submit" variant="secondary" size="sm" disabled={!date} loading={busy}>加放假日期</Button>
       </form>
-      {error && <p className="mod-error ps-holiday-error" role="alert">{error}</p>}
+      {error && <div className="ps-holiday-error"><Alert tone="danger" title={error} /></div>}
     </ListGroup>
   );
 }
@@ -106,7 +106,7 @@ export function PositionEditPage({ positionId }: { positionId: number }) {
 
   if (loadError === "not-found") return <NotFound />;
   if (!position || !draft) {
-    return <div className="mod-page">{loadError ? <p className="mod-error" role="alert">{loadError}</p> : <Skeleton width="40%" height={28} />}</div>;
+    return <div className="mod-page">{loadError ? <Alert tone="danger" title={loadError} /> : <Skeleton width="40%" height={28} />}</div>;
   }
 
   const current = draft;
@@ -147,7 +147,7 @@ export function PositionEditPage({ positionId }: { positionId: number }) {
             <Button type="submit" loading={saving} disabled={!dirty || !nameOk}>保存</Button>
           </div>
         </header>
-        {saveError && <p className="mod-error" role="alert">{saveError}</p>}
+        {saveError && <Alert tone="danger" title={saveError} />}
 
         <ListGroup header="状态">
           <div className="ui-row">

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
-import { Alert, Button, Dialog, Icon } from "@ui";
+import { Alert, Button, Dialog, Icon, Input } from "@ui";
 import { mobileApi, type MobileConversation, type MobileDevice } from "../../../api/extras";
 import { navigate } from "../../../app/router";
 import { useAuth } from "../../../context/AuthContext";
@@ -178,11 +178,9 @@ export function MobileChatPage() {
           </div>
         </header>
         <div className="mx-range">
-          <label className="ui-sr-only" htmlFor="mx-start">开始日期</label>
-          <input id="mx-start" type="date" className="mx-date" value={range[0]} max={range[1]} onChange={(e) => setRange([e.target.value, range[1]])} />
+          <Input id="mx-start" type="date" aria-label="开始日期" value={range[0]} max={range[1]} onChange={(e) => setRange([e.target.value, range[1]])} />
           <span className="ex-muted">至</span>
-          <label className="ui-sr-only" htmlFor="mx-end">结束日期</label>
-          <input id="mx-end" type="date" className="mx-date" value={range[1]} min={range[0]} onChange={(e) => setRange([range[0], e.target.value])} />
+          <Input id="mx-end" type="date" aria-label="结束日期" value={range[1]} min={range[0]} onChange={(e) => setRange([range[0], e.target.value])} />
         </div>
         <div className="mx-chips" role="group" aria-label="按状态筛选">
           {STATUS_FILTERS.map((s) => (

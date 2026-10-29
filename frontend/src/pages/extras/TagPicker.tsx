@@ -1,5 +1,5 @@
 import { useState, type KeyboardEvent } from "react";
-import { Button, Tag } from "@ui";
+import { Button, Input, Tag } from "@ui";
 
 // Multi-select as removable tags plus an "add" dropdown. The component library has no multi-select.
 export function TagPicker({
@@ -76,15 +76,14 @@ export function TagInput({
         ))}
       </div>
       <div className="ex-taginput-row">
-        <label htmlFor={id} className="ui-sr-only">输入区县名称</label>
-        <input id={id} className="ui-input" placeholder="输入区县名称，回车添加" value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={onKey} />
+        <Input id={id} aria-label="输入区县名称" placeholder="输入区县名称，回车添加" value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={onKey} />
         <Button variant="secondary" size="sm" disabled={!draft.trim()} onClick={() => add(draft)}>添加</Button>
       </div>
       {unused.length > 0 && (
         <div className="ex-suggest">
           <span className="ex-muted">常用：</span>
           {unused.map((s) => (
-            <button key={s} type="button" className="ex-suggest-chip" onClick={() => add(s)}>＋ {s}</button>
+            <Button key={s} variant="tinted" size="sm" className="ex-suggest-chip" onClick={() => add(s)}>＋ {s}</Button>
           ))}
         </div>
       )}

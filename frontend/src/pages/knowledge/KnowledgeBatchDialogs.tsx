@@ -74,7 +74,7 @@ export function ImportDialog({ onClose, onImported }: { onClose: () => void; onI
     >
       <div className="mod-form">
         <FileDrop accept=".json,application/json" label="拖入 JSON 文件，或点击选择" hint='格式：[{"question": "...", "answer": "...", "keywords": [...]}]' onFile={onFile} />
-        {parseError && <p className="mod-error" role="alert">{parseError}</p>}
+        {parseError && <Alert tone="danger" title={parseError} />}
         {items && (
           <p className="kn-note" role="status">
             识别出 <strong className="ui-num">{items.length}</strong> 条知识
@@ -158,7 +158,7 @@ export function BatchUpdateDialog({ ids, onClose, onUpdated }: { ids: number[]; 
           error={fieldError}
           onChange={(e) => setSort(e.target.value)}
         />
-        {error && <p className="mod-error" role="alert">{error}</p>}
+        {error && <Alert tone="danger" title={error} />}
       </form>
     </Dialog>
   );

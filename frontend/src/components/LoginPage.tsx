@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 import { motion } from "framer-motion";
 import { useAuth } from "../context/AuthContext";
 import { ApiError } from "../api/client";
+import { Alert, Button, Input } from "@ui";
 
 export function LoginPage() {
   const { login } = useAuth();
@@ -35,36 +36,28 @@ export function LoginPage() {
         <h1>城市招聘配置管理</h1>
         <p className="login-subtitle">登录以继续</p>
 
-        <label className="field">
-          <span>账号</span>
-          <input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" required />
-        </label>
-
-        <label className="field">
-          <span>密码</span>
-          <input
+        <div className="login-fields">
+          <Input id="login-username" label="账号" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" required />
+          <Input
+            id="login-password"
+            label="密码"
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             autoComplete="current-password"
             required
           />
-        </label>
+        </div>
 
         {error && (
-          <motion.p className="login-error" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-            {error}
-          </motion.p>
+          <div className="login-error">
+            <Alert tone="danger" title={error} />
+          </div>
         )}
 
-        <motion.button
-          type="submit"
-          className="primary-button"
-          disabled={submitting}
-          whileTap={{ scale: 0.97 }}
-        >
+        <Button type="submit" className="login-submit" loading={submitting}>
           {submitting ? "登录中…" : "登录"}
-        </motion.button>
+        </Button>
       </motion.form>
     </div>
   );

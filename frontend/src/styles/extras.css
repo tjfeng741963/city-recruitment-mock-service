@@ -159,9 +159,14 @@
   align-items: center;
 }
 
-.ex-taginput-row .ui-input {
+.ex-taginput-row .ui-field {
   flex: 1;
   min-width: 0;
+}
+
+.ex-taginput-row .ui-field-message:empty,
+.mx-range .ui-field-message:empty {
+  display: none;
 }
 
 .ex-suggest {
@@ -172,14 +177,8 @@
 }
 
 .ex-suggest-chip {
-  padding: 2px var(--s-2);
-  border: none;
+  min-width: 0;
   border-radius: var(--r-pill);
-  background: var(--accent-soft);
-  color: var(--accent-ink);
-  font: inherit;
-  font-size: var(--t-footnote);
-  cursor: pointer;
 }
 
 /* ---------- 账户汇总 ---------- */
@@ -353,16 +352,13 @@
   background: var(--bg);
 }
 
-.mx-date {
+.mx-range .ui-field {
   flex: 1;
   min-width: 0;
+}
+
+.mx-range .ui-input {
   height: 36px;
-  padding: 0 var(--s-2);
-  border: 1px solid var(--control-border);
-  border-radius: var(--r-sm);
-  background: var(--panel-2);
-  color: var(--ink-1);
-  font: inherit;
   font-size: var(--t-footnote);
 }
 

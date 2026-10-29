@@ -71,7 +71,7 @@ function PickSheet({ city, max, onClose, onSaved }: { city: FeaturedCity; max: n
           ))}
         </div>
       )}
-      {failure && <p className="mod-error" role="alert">{failure}</p>}
+      {failure && <Alert tone="danger" title={failure} />}
     </Dialog>
   );
 }

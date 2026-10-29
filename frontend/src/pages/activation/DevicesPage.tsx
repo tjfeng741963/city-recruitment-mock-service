@@ -80,7 +80,7 @@ function LimitsDialog({ device, onClose, onSaved }: { device: ActivationDevice; 
           />
         ))}
         <Alert tone="accent" title="限流只卡自动推送">人工「立即发送」不受限制；Dify 对接在设备端上报，无需在这里配置。</Alert>
-        {error && <p className="mod-error" role="alert">{error}</p>}
+        {error && <Alert tone="danger" title={error} />}
       </form>
     </Dialog>
   );
