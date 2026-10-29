@@ -1,0 +1,384 @@
+/* 复聊 (activation) module. Tokens only, from tokens.css. */
+
+.ac-head-right {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  flex-wrap: wrap;
+}
+
+.ac-muted,
+.ac-sub {
+  margin: 0;
+  font-size: var(--t-footnote);
+  color: var(--ink-3);
+}
+
+.ac-strong {
+  font-weight: 600;
+  color: var(--ink-1);
+}
+
+.ac-warn {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.ac-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+}
+
+.ac-stack-sm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.ac-row-between {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s-3);
+  flex-wrap: wrap;
+}
+
+.ac-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+.ac-label {
+  margin: 0;
+  font-size: var(--t-subhead);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.ac-box {
+  margin: 0;
+  padding: var(--s-3) var(--s-4);
+  border-radius: var(--r-xs);
+  background: var(--panel-2);
+  font-size: var(--t-callout);
+  line-height: 1.6;
+  color: var(--ink-1);
+  white-space: pre-wrap;
+}
+
+.ac-link {
+  color: var(--accent-ink);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.ac-link:hover {
+  text-decoration: underline;
+}
+
+.ac-link:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+  border-radius: var(--r-xs);
+}
+
+/* ---------- 总览 ---------- */
+
+.ac-kpis {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: var(--s-3);
+}
+
+.ac-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: var(--s-4);
+  align-items: start;
+}
+
+.ac-feed {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.ac-feed-item {
+  display: flex;
+  gap: var(--s-3);
+  padding: var(--s-2) 0;
+  border-top: 1px solid var(--border);
+  font-size: var(--t-callout);
+  color: var(--ink-1);
+}
+
+.ac-feed-item:first-child {
+  border-top: none;
+}
+
+.ac-feed-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-pill);
+  background: var(--fill);
+  color: var(--ink-2);
+}
+
+.ac-feed-item.is-replied .ac-feed-icon {
+  background: var(--up-soft);
+  color: var(--up);
+}
+
+.ac-feed-item.is-failed .ac-feed-icon {
+  background: var(--err-soft);
+  color: var(--down);
+}
+
+.ac-feed-item.is-sent .ac-feed-icon {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+.ac-feed-item.is-frozen .ac-feed-icon {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.ac-feed-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* ---------- 列表页 ---------- */
+
+.ac-search {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 240px;
+}
+
+.ac-search .ui-search {
+  height: var(--control-h);
+}
+
+.ac-search-label {
+  color: var(--ink-2);
+  font-size: var(--t-footnote);
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.ac-switch-cell .ui-switch {
+  justify-content: flex-start;
+  gap: 0;
+}
+
+.ac-ellipsis {
+  display: -webkit-box;
+  max-width: 280px;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  font-size: var(--t-footnote);
+  color: var(--ink-2);
+}
+
+.ac-pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--s-4);
+}
+
+.ac-pager .ui-field {
+  width: 140px;
+}
+
+.ac-pager .ui-field-message {
+  display: none;
+}
+
+.ac-content {
+  max-width: 460px;
+  font-size: var(--t-callout);
+  line-height: 1.5;
+  color: var(--ink-1);
+  white-space: pre-wrap;
+}
+
+.ac-content.is-off {
+  color: var(--ink-3);
+}
+
+.ac-statline {
+  margin: 0;
+  font-size: var(--t-subhead);
+  color: var(--ink-2);
+}
+
+.ac-statline b {
+  color: var(--ink-1);
+}
+
+.ac-errors {
+  margin: var(--s-2) 0 0;
+  padding-left: var(--s-5);
+  font-size: var(--t-footnote);
+}
+
+/* ---------- 策略 ---------- */
+
+.ac-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+  gap: var(--s-4);
+}
+
+.ac-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+  padding: var(--s-4) var(--s-5);
+  border-radius: var(--r);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  box-shadow: var(--shadow);
+}
+
+.ac-card.is-off .ac-card-title {
+  color: var(--ink-3);
+}
+
+.ac-card-title {
+  margin: 0 0 var(--s-1);
+  font-size: var(--t-headline);
+  font-weight: 600;
+  color: var(--ink-1);
+}
+
+.ac-meta {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  margin: 0;
+  padding-top: var(--s-3);
+  border-top: 1px solid var(--border);
+}
+
+.ac-meta div {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  gap: var(--s-3);
+}
+
+.ac-meta dt {
+  font-size: var(--t-footnote);
+  color: var(--ink-3);
+}
+
+.ac-meta dd {
+  margin: 0;
+  font-size: var(--t-callout);
+  color: var(--ink-1);
+}
+
+.ac-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: var(--s-4);
+  align-items: start;
+}
+
+.ac-form-grid-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.ac-fieldset {
+  margin: 0;
+  padding: 0;
+  border: none;
+  min-width: 0;
+}
+
+.ac-fieldset legend {
+  margin-bottom: var(--s-2);
+}
+
+/* ---------- 客户详情 ---------- */
+
+.ac-chat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 480px;
+  overflow-y: auto;
+}
+
+.ac-chat-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  max-width: 78%;
+}
+
+.ac-chat-item.is-left {
+  align-self: flex-start;
+}
+
+.ac-chat-item.is-right {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+
+.ac-bubble {
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-sm);
+  background: var(--panel-2);
+  font-size: var(--t-callout);
+  line-height: 1.5;
+  color: var(--ink-1);
+  white-space: pre-wrap;
+}
+
+.ac-chat-item.is-right .ac-bubble {
+  background: var(--accent-soft);
+}
+
+@media (max-width: 1100px) {
+  .ac-kpis {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .ac-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 700px) {
+  .ac-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ac-cards {
+    grid-template-columns: 1fr;
+  }
+
+  .ac-form-grid,
+  .ac-form-grid-3 {
+    grid-template-columns: 1fr;
+  }
+}

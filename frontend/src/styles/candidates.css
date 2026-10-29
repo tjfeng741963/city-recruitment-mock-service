@@ -1,0 +1,274 @@
+/* 候选人模块：候选人 / 老朋友 / 状态看板 / AI 评估. Tokens only, from tokens.css. */
+
+.cd-head-left {
+  display: flex;
+  align-items: center;
+  gap: var(--s-4);
+  flex-wrap: wrap;
+}
+
+.cd-head-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.cd-lead {
+  margin: calc(var(--s-2) * -1) 0 0;
+  font-size: var(--t-subhead);
+  color: var(--ink-3);
+}
+
+.cd-muted {
+  font-size: var(--t-subhead);
+  color: var(--ink-3);
+}
+
+.cd-pad {
+  margin: 0;
+  padding: var(--s-4) 0;
+}
+
+.cd-strong {
+  font-weight: 600;
+  color: var(--ink-1);
+}
+
+.cd-row-ops {
+  display: inline-flex;
+  gap: var(--s-1);
+  white-space: nowrap;
+}
+
+.cd-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  flex-wrap: wrap;
+}
+
+.cd-pagesize .ui-field {
+  margin: 0;
+  min-width: 132px;
+}
+
+.cd-pagesize .ui-field-message:empty {
+  display: none;
+}
+
+.cd-search {
+  min-width: 240px;
+  padding-bottom: 2px;
+}
+
+/* Matches a .ui-field (label + 6px gap + control height) so the segmented control lines up with the inputs. */
+.cd-range {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  height: calc(var(--control-h) + 24px);
+  padding-bottom: 3px;
+}
+
+/* ---------- KPI 卡片 ---------- */
+
+.cd-stats {
+  display: grid;
+  gap: var(--s-4);
+}
+
+.cd-stats-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.cd-stats-5 {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+@media (max-width: 1100px) {
+  .cd-stats-5 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .cd-stats-3,
+  .cd-stats-5 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* ---------- 图表布局 ---------- */
+
+.cd-grid-2,
+.cd-grid-2-1 {
+  display: grid;
+  gap: var(--s-4);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.cd-grid-2-1 {
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+}
+
+@media (max-width: 900px) {
+  .cd-grid-2,
+  .cd-grid-2-1 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ---------- 排行列表 ---------- */
+
+.cd-rank {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cd-rank-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-2) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.cd-rank-row:last-child {
+  border-bottom: 0;
+}
+
+.cd-rank-no {
+  width: 22px;
+  color: var(--ink-3);
+  font-size: var(--t-footnote);
+}
+
+.cd-rank-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  color: var(--ink-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cd-rank-name small {
+  font-size: var(--t-footnote);
+  color: var(--ink-3);
+}
+
+.cd-rank-value {
+  font-weight: 600;
+  color: var(--ink-1);
+}
+
+.cd-rank-value.is-danger {
+  color: var(--down);
+}
+
+/* ---------- 对话记录 ---------- */
+
+.cd-chat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  max-height: 60vh;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.cd-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 80%;
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-sm);
+  background: var(--panel-2);
+}
+
+.cd-msg.is-customer {
+  align-self: flex-end;
+  background: var(--accent-soft);
+}
+
+.cd-msg-who {
+  font-size: var(--t-footnote);
+  color: var(--ink-3);
+}
+
+.cd-msg-text {
+  margin: 0;
+  white-space: pre-wrap;
+  color: var(--ink-1);
+  font-size: var(--t-subhead);
+}
+
+.cd-msg-orig {
+  margin: 0;
+  font-size: var(--t-footnote);
+  color: var(--ink-3);
+}
+
+/* ---------- 表单 / 建议 ---------- */
+
+.cd-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.cd-field-error {
+  margin: var(--s-2) 0 0;
+  font-size: var(--t-footnote);
+  color: var(--down);
+}
+
+.cd-suggest {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cd-suggest li {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-3);
+  color: var(--ink-1);
+  font-size: var(--t-subhead);
+}
+
+.cd-note {
+  margin: 0;
+  padding: var(--s-3) var(--s-4);
+  font-size: var(--t-footnote);
+  color: var(--ink-3);
+}
+
+.cd-person {
+  display: flex;
+  flex-direction: column;
+  white-space: nowrap;
+}
+
+.cd-person strong {
+  font-weight: 600;
+  color: var(--ink-1);
+}
+
+.cd-person small {
+  font-size: var(--t-footnote);
+  color: var(--ink-3);
+}
+
+.cd-range .ui-field-label {
+  margin: 0;
+}

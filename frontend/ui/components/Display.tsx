@@ -95,7 +95,7 @@ export function StatTile({
 }: {
   icon: IconName;
   label: string;
-  value: string;
+  value: ReactNode;
   unit?: string;
   delta?: string;
   deltaTone?: Tone;
