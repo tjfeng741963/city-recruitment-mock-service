@@ -1,6 +1,10 @@
 .git
 node_modules
 dist
+frontend/dist
+frontend/dist-showcase
+frontend/node_modules
+*.tsbuildinfo
 data
 过程文件
 *.sqlite
