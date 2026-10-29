@@ -10,3 +10,4 @@ data/*.sqlite-journal
 .env*
 bridge/node_modules/
 bridge/过程文件/
+*.tsbuildinfo
