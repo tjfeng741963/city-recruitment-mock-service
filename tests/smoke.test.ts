@@ -33,6 +33,35 @@ describe("local static shell (legacy bundle)", () => {
   });
 });
 
+describe("local static shell (default)", () => {
+  let app: FastifyInstance;
+  beforeAll(async () => {
+    process.env.REA_DATABASE_PATH = ":memory:";
+    delete process.env.REA_FRONTEND_DIR;
+    app = buildServer();
+    await app.ready();
+  });
+  afterAll(async () => {
+    await app.close();
+  });
+
+  it("serves the re-themed legacy bundle without configuration", async () => {
+    const response = await app.inject({ method: "GET", url: "/login" });
+    expect(response.body).toContain("/assets/index-BGyFQL9Q.js");
+    expect(response.body).toContain("/theme/theme.css");
+  });
+
+  it.each([
+    ["/theme/theme.css", "text/css"],
+    ["/theme/login-motion.js", "javascript"],
+    ["/theme/fonts/google-sans-flex-latin-wght-normal.woff2", "font/woff2"],
+  ])("serves theme asset %s", async (url, type) => {
+    const response = await app.inject({ method: "GET", url });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain(type);
+  });
+});
+
 describe("local static shell (new frontend)", () => {
   let app: FastifyInstance;
   let dir: string;
