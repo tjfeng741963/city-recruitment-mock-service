@@ -89,7 +89,7 @@ export function buildServer() {
     return reply.code(error.statusCode ?? 500).send({ detail: error.message });
   });
 
-  app.register(fastifyStatic, { root: path.resolve(process.cwd(), "public"), wildcard: false });
+  app.register(fastifyStatic, { root: config.frontendDir(), wildcard: false });
   registerAuthRoutes(app, auth);
   registerCoreRoutes(app, db);
   registerResourceRoutes(app, db);
