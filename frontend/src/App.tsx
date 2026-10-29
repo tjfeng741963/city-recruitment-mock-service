@@ -3,7 +3,6 @@ import { LoginPage } from "./components/LoginPage";
 import { Shell } from "./components/Shell";
 import { usePathname, useLinkInterception } from "./app/router";
 import { isLegacy, matchRoute, type Route } from "./app/routes";
-import { UiKitShowcase } from "./pages/UiKitShowcase";
 import { LegacyPage } from "./pages/LegacyPage";
 import { ReceptionPage } from "./pages/reception/ReceptionPage";
 import { DevicesPage } from "./pages/devices/DevicesPage";
@@ -33,7 +32,6 @@ function Gate() {
   const { user, loading } = useAuth();
   const path = usePathname();
   useLinkInterception();
-  if (window.location.hash === "#ui-kit") return <UiKitShowcase />;
   if (loading) return <div className="boot-screen">加载中…</div>;
   if (!user) return <LoginPage />;
   const route = matchRoute(path);

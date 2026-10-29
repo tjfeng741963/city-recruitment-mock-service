@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { devicesApi } from "../../api/admin";
 import { ApiError } from "../../api/client";
-import { Badge, Button, EmptyState, Input, ListGroup, ListRow, Skeleton } from "../../components/ui";
+import { Badge, Button, EmptyState, Input, ListGroup, ListRow, Skeleton } from "@ui";
 import { formatWait, minutesSince } from "../reception/triage";
 import type { DeviceCard } from "./DevicesPage";
 import { STATE_LABEL, STATE_TONE, failedCommands } from "./model";

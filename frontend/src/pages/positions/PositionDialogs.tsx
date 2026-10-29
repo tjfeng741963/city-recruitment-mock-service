@@ -1,7 +1,7 @@
 import { useState, type FormEvent, type ReactNode } from "react";
 import { positionsApi, type Position } from "../../api/admin";
 import { ApiError, type City } from "../../api/client";
-import { Button, Dialog, Input } from "../../components/ui";
+import { Button, Dialog, Input } from "@ui";
 import { UNGROUPED } from "./model";
 
 function FormDialog({

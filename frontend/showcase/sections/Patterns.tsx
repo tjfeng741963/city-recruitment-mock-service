@@ -26,7 +26,7 @@ import {
   type Column,
   type ToastItem,
   type Tone,
-} from "../../components/ui";
+} from "@ui";
 import { Spec, UxNotes } from "./Kit";
 
 const DEFAULT_TAGS = ["长白班", "包吃住", "18–45 岁", "可住宿"];

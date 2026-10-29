@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { devicesApi, type DeviceDetail } from "../../api/admin";
 import { ApiError } from "../../api/client";
-import { Button, Dialog, Input } from "../../components/ui";
+import { Button, Dialog, Input } from "@ui";
 
 const CODE_PATTERN = /^[A-Za-z0-9_-]{3,64}$/;
 

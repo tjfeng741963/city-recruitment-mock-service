@@ -1,4 +1,4 @@
-import type { IconName } from "../components/ui";
+import type { IconName } from "@ui";
 
 export type ModuleKey = "reception" | "candidates" | "activation" | "devices" | "positions" | "knowledge" | "settings";
 

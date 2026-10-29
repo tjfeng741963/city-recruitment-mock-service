@@ -3,7 +3,7 @@ import { agentApi, type Conversation } from "../../api/agent";
 import { devicesApi, type BridgeCommand, type DeviceDetail } from "../../api/admin";
 import { ApiError } from "../../api/client";
 import { navigate } from "../../app/router";
-import { Badge, Button, EmptyState, Skeleton } from "../../components/ui";
+import { Badge, Button, EmptyState, Skeleton } from "@ui";
 import { useAuth } from "../../context/AuthContext";
 import type { DeviceState } from "../reception/useReception";
 import { formatWait, minutesSince } from "../reception/triage";

@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { useAuth } from "../context/AuthContext";
 import { MODULES, type ModuleKey } from "../app/routes";
-import { Icon } from "./ui";
+import { Icon } from "@ui";
 
 const ROLE_LABEL: Record<string, string> = { admin: "管理员", customer: "运营", recruiter: "招聘员" };
 

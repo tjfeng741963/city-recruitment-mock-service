@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { positionsApi, type Position } from "../../api/admin";
 import { ApiError, type City } from "../../api/client";
 import { navigate } from "../../app/router";
-import { Badge, Button, EmptyState, SearchField, SegmentedControl, Skeleton, Switch } from "../../components/ui";
+import { Badge, Button, EmptyState, SearchField, SegmentedControl, Skeleton, Switch } from "@ui";
 import { useAuth } from "../../context/AuthContext";
 import { CreateCityDialog, CreatePositionDialog } from "./PositionDialogs";
 import { groupByStore, isCityActive, isOnHoliday, localDate } from "./model";

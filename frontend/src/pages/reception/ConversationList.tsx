@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Avatar, SearchField } from "../../components/ui";
+import { Avatar, SearchField } from "@ui";
 import { formatWait, sortGroup, type GroupKey, type TriagedConversation } from "./triage";
 
 const GROUPS: Array<{ key: GroupKey; label: string }> = [

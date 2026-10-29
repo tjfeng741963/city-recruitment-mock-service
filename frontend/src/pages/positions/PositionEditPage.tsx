@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { positionsApi, type Position } from "../../api/admin";
 import { ApiError } from "../../api/client";
-import { Button, EmptyState, Input, ListGroup, ListRow, Skeleton, Switch, Textarea } from "../../components/ui";
+import { Button, EmptyState, Input, ListGroup, ListRow, Skeleton, Switch, Textarea } from "@ui";
 import { EDITABLE_SECTIONS, localDate, positionPayload, upcomingHolidays } from "./model";
 import { useHolidays } from "./usePositions";
 

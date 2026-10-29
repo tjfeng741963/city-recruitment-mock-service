@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { positionsApi, settingsApi, type AdminUser, type Recruiter } from "../../api/admin";
 import { ApiError, type City } from "../../api/client";
-import { Badge, Button, Dialog, EmptyState, Input, Select, Skeleton, Tag } from "../../components/ui";
+import { Badge, Button, Dialog, EmptyState, Input, Select, Skeleton, Tag } from "@ui";
 
 const ROLE_LABEL: Record<AdminUser["role"], string> = { admin: "管理员", customer: "运营", recruiter: "招聘员" };
 

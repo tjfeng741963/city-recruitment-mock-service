@@ -1,5 +1,5 @@
 import { MODULES, type ModuleKey } from "../app/routes";
-import { EmptyState } from "../components/ui";
+import { EmptyState } from "@ui";
 
 const LEGACY_ORIGIN = import.meta.env.VITE_LEGACY_ORIGIN ?? "http://127.0.0.1:8080";
 

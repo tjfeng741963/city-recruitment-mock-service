@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { settingsApi, type Settings } from "../../api/admin";
 import { ApiError } from "../../api/client";
-import { Button, Input, Skeleton } from "../../components/ui";
+import { Button, Input, Skeleton } from "@ui";
 import { useAuth } from "../../context/AuthContext";
 import { AccountsTab, RecruitersTab } from "./SettingsLists";
 

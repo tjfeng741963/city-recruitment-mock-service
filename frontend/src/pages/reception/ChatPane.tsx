@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { agentApi, type AgentMessage, type Conversation } from "../../api/agent";
 import { ApiError } from "../../api/client";
-import { Badge, Button, Icon } from "../../components/ui";
+import { Badge, Button, Icon } from "@ui";
 import { parseDbTime } from "./triage";
 import { POLL_MS } from "./useReception";
 

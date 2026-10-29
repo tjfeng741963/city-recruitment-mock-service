@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { agentApi, type ActivationRecord, type CandidateEvent, type Conversation, type FunnelEvent } from "../../api/agent";
 import { ApiError } from "../../api/client";
-import { Avatar, Button } from "../../components/ui";
+import { Avatar, Button } from "@ui";
 import type { DeviceView } from "./useReception";
 import { parseDbTime } from "./triage";
 

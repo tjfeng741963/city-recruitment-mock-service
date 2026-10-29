@@ -11,7 +11,7 @@ import {
   Slider,
   Switch,
   Textarea,
-} from "../../components/ui";
+} from "@ui";
 import { Spec, State, States, UxNotes } from "./Kit";
 
 const MODULES = [

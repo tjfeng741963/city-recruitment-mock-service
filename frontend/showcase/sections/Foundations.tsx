@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button, Icon, ICON_NAMES } from "../../components/ui";
+import { Button, Icon, ICON_NAMES } from "@ui";
 import { Chapter, Spec } from "./Kit";
 
 const PRINCIPLES = [

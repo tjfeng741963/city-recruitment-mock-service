@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Avatar, Badge, Icon, SearchField, SegmentedControl, StatTile, type IconName, type Tone } from "../../components/ui";
+import { Avatar, Badge, Icon, SearchField, SegmentedControl, StatTile, type IconName, type Tone } from "@ui";
 import { Chapter, Spec, UxNotes } from "./Kit";
 
 const NAV_WORK: Array<{ label: string; icon: IconName; count?: number }> = [

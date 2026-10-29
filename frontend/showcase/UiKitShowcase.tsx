@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
-import { Icon, SegmentedControl } from "../components/ui";
-import { Chapter } from "./uikit/Kit";
-import { Foundations } from "./uikit/Foundations";
-import { ButtonSpec, InputSpec, SelectionSpec, ToggleSpec } from "./uikit/Controls";
-import { DisplaySpec, EmptySpec, FeedbackSpec, ListSpec, MetricSpec, NavSpec, TableSpec } from "./uikit/Patterns";
-import { Layouts } from "./uikit/Layouts";
+import { Icon, SegmentedControl } from "@ui";
+import { Chapter } from "./sections/Kit";
+import { Foundations } from "./sections/Foundations";
+import { ButtonSpec, InputSpec, SelectionSpec, ToggleSpec } from "./sections/Controls";
+import { DisplaySpec, EmptySpec, FeedbackSpec, ListSpec, MetricSpec, NavSpec, TableSpec } from "./sections/Patterns";
+import { Layouts } from "./sections/Layouts";
 
 type Theme = "light" | "dark";
 

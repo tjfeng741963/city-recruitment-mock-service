@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Button, EmptyState, Skeleton } from "../../components/ui";
+import { Button, EmptyState, Skeleton } from "@ui";
 import { CandidateCard } from "./CandidateCard";
 import { ChatPane } from "./ChatPane";
 import { ConversationList } from "./ConversationList";
