@@ -50,12 +50,14 @@ describe("local static shell (default)", () => {
     expect(response.body).toContain("/assets/index-BGyFQL9Q.js");
     expect(response.body).toContain("/theme/theme.css");
     expect(response.body).toContain("/theme/motion.css");
+    expect(response.body).toContain("/theme/glass.css");
     expect(response.body).toContain("/theme/interaction.js");
   });
 
   it.each([
     ["/theme/theme.css", "text/css"],
     ["/theme/motion.css", "text/css"],
+    ["/theme/glass.css", "text/css"],
     ["/theme/login-motion.js", "javascript"],
     ["/theme/interaction.js", "javascript"],
     ["/theme/fonts/google-sans-flex-latin-wght-normal.woff2", "font/woff2"],

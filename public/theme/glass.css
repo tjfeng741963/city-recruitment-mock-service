@@ -1,0 +1,393 @@
+/* Glass layout: floating rounded shell over a Google-style gradient wash.
+ * Loaded after theme.css + motion.css; same `:root body` specificity, so later rules win.
+ * backdrop-filter only on surfaces with no in-place (non-teleported) dialogs inside them:
+ * sidebar, header capsule, poppers, message box. Dialogs/drawers blur via ::before so
+ * they never become a containing block or backdrop root for nested overlays. */
+
+:root {
+  --bd-radius: 24px;
+  --bd-radius-sm: 14px;
+  --gl-gap: 14px;
+  --gl-r-shell: 30px;
+  --gl-r-card: 24px;
+  --gl-r-inner: 16px;
+  --gl-r-control: 14px;
+  --gl-fill: rgba(255, 255, 255, 0.64);
+  --gl-fill-strong: rgba(255, 255, 255, 0.78);
+  --gl-fill-control: rgba(255, 255, 255, 0.74);
+  --gl-edge: rgba(255, 255, 255, 0.72);
+  --gl-hairline: rgba(31, 41, 64, 0.08);
+  --gl-blur: blur(28px) saturate(1.8);
+  --gl-shine: inset 0 1px 0 rgba(255, 255, 255, 0.95), inset 0 -1px 0 rgba(255, 255, 255, 0.28);
+  --gl-shadow: var(--gl-shine), 0 1px 2px rgba(20, 40, 90, 0.04), 0 12px 32px -14px rgba(20, 40, 90, 0.16);
+  --gl-shadow-hover: var(--gl-shine), 0 2px 6px rgba(20, 40, 90, 0.06), 0 20px 44px -16px rgba(20, 40, 90, 0.24);
+  --gl-shadow-float: var(--gl-shine), 0 2px 8px rgba(20, 40, 90, 0.06), 0 40px 90px -28px rgba(20, 40, 90, 0.38);
+  --gl-row-hover: #edf2fb;
+  --gl-fixed-cell: #f7f9fd;
+}
+
+/* ---------- Background: Google-style gradient wash ---------- */
+:root body {
+  background: #f3f6fc;
+}
+:root body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse 70vmax 55vmax at -8% -12%, rgba(49, 134, 255, 0.34), transparent 62%),
+    radial-gradient(ellipse 55vmax 45vmax at 108% -6%, rgba(255, 214, 51, 0.22), transparent 60%),
+    radial-gradient(ellipse 60vmax 50vmax at 104% 108%, rgba(252, 95, 120, 0.16), transparent 62%),
+    radial-gradient(ellipse 62vmax 52vmax at -6% 106%, rgba(0, 185, 92, 0.18), transparent 62%),
+    radial-gradient(ellipse 45vmax 38vmax at 58% 46%, rgba(120, 150, 255, 0.16), transparent 70%),
+    linear-gradient(160deg, #eef3fd 0%, #f6f8fd 45%, #f5f3fb 100%);
+}
+/* ---------- Shell: floating glass sidebar + header capsule ---------- */
+:root body .app-layout {
+  box-sizing: border-box;
+  height: 100vh;
+  height: 100dvh;
+  padding: var(--gl-gap);
+  gap: var(--gl-gap);
+  background: transparent;
+}
+:root body .sidebar {
+  box-sizing: border-box;
+  width: 236px;
+  height: auto;
+  border: 1px solid var(--gl-edge);
+  border-radius: var(--gl-r-shell);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.62), rgba(255, 255, 255, 0.42));
+  backdrop-filter: var(--gl-blur);
+  -webkit-backdrop-filter: var(--gl-blur);
+  box-shadow: var(--gl-shadow);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(31, 41, 64, 0.16) transparent;
+}
+:root body .sidebar-logo {
+  padding: 20px 18px 16px;
+}
+:root body .sidebar-menu .el-menu-item,
+:root body .sidebar-menu .el-sub-menu__title {
+  border-radius: var(--gl-r-control) !important;
+}
+:root body .sidebar-menu .el-menu-item:hover,
+:root body .sidebar-menu .el-sub-menu__title:hover {
+  background: rgba(31, 41, 64, 0.05) !important;
+}
+:root body .sidebar-menu .el-menu-item.is-active,
+:root body .sidebar-menu .el-menu--inline .el-menu-item.is-active {
+  background: rgba(255, 255, 255, 0.94) !important;
+  color: var(--rk-accent) !important;
+  box-shadow: 0 1px 2px rgba(20, 40, 90, 0.06), 0 6px 16px -8px rgba(11, 87, 208, 0.4);
+}
+:root body .sidebar-menu .el-menu-item.is-active .el-icon {
+  color: var(--rk-accent) !important;
+}
+:root body .main-area {
+  height: auto;
+  min-height: 0;
+  background: transparent;
+}
+:root body .top-header {
+  height: 52px;
+  padding: 0 2px;
+  background: transparent;
+  border-bottom: 0;
+  backdrop-filter: none;
+}
+:root body .header-right {
+  gap: 8px;
+  padding: 5px 6px 5px 5px;
+  border: 1px solid var(--gl-edge);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.58);
+  backdrop-filter: var(--gl-blur);
+  -webkit-backdrop-filter: var(--gl-blur);
+  box-shadow: var(--gl-shadow);
+}
+:root body .header-right .user-name {
+  padding-right: 4px;
+}
+:root body .header-right .logout-btn {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+}
+:root body .header-right .logout-btn:hover {
+  background: var(--rk-err-soft);
+}
+:root body .main-scroll {
+  background: transparent;
+  padding: 14px 8px 24px 4px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(31, 41, 64, 0.18) transparent;
+}
+/* ---------- Cards: frosted fill + specular edge, big radius ---------- */
+:root body .stat-card,
+:root body .chart-card,
+:root body .chart-section,
+:root body .table-wrapper,
+:root body .table-section,
+:root body .table-card,
+:root body .el-card,
+:root body .chat-card,
+:root body .city-card,
+:root body .edit-card,
+:root body .empty-wrap,
+:root body .engine-card,
+:root body .feed-card,
+:root body .info-card,
+:root body .settings-card,
+:root body .strategy-card,
+:root body .summary-card,
+:root body .timeline-card,
+:root body .filter-bar,
+:root body .admin-overview-card,
+:root body .conv-container {
+  border: 1px solid var(--gl-edge);
+  border-radius: var(--gl-r-card);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.8), rgba(255, 255, 255, 0.62));
+  box-shadow: var(--gl-shadow);
+}
+:root body .stat-card:hover,
+:root body .chart-card:hover,
+:root body .admin-overview-card:hover {
+  box-shadow: var(--gl-shadow-hover);
+}
+:root body .table-wrapper,
+:root body .table-card,
+:root body .table-section {
+  overflow: hidden;
+}
+:root body .el-card__header {
+  border-bottom-color: var(--gl-hairline);
+}
+:root body .admin-overview-grid {
+  gap: 12px;
+}
+:root body .admin-overview-card {
+  border-radius: 20px;
+}
+
+/* Bare tables and page forms (no card wrapper in the legacy markup) get the same glass card. */
+:root body .main-scroll .el-table:not(:is(.table-wrapper, .table-card, .table-section, .el-card, .chart-card, .chart-section, .info-card, .edit-card, .settings-card, .summary-card, .el-dialog, .el-drawer, .el-table) *) {
+  border: 1px solid var(--gl-edge);
+  border-radius: var(--gl-r-card) !important;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.8), rgba(255, 255, 255, 0.62));
+  box-shadow: var(--gl-shadow);
+}
+:root body .main-scroll form.el-form:not(.el-form--inline):not(:is(.el-card, .settings-card, .edit-card, .info-card, .filter-bar, .el-dialog, .el-drawer, .admin-ops-modal, .el-table) *) {
+  padding: 24px 28px 8px;
+  border: 1px solid var(--gl-edge);
+  border-radius: var(--gl-r-card);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.8), rgba(255, 255, 255, 0.64));
+  box-shadow: var(--gl-shadow);
+}
+/* Dashboard chart rows wrap instead of overflowing on narrow screens. */
+:root body .main-scroll div:has(> .chart-card + .chart-card) {
+  flex-wrap: wrap;
+}
+:root body .main-scroll div:has(> .chart-card + .chart-card) > .chart-card {
+  min-width: 280px;
+}
+
+/* ---------- Conversation workspace: three rounded panes in one glass tray ---------- */
+:root body .conv-container {
+  height: calc(100dvh - 128px);
+  gap: 8px;
+  padding: 8px;
+}
+:root body .conv-container .left-panel,
+:root body .conv-container .mid-panel,
+:root body .conv-container .right-panel {
+  border: 0;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.7);
+  overflow: hidden;
+}
+:root body .conv-container .panel-title,
+:root body .conv-container .chat-header {
+  border-bottom-color: var(--gl-hairline);
+}
+:root body .conv-container .chat-messages {
+  background: rgba(240, 244, 251, 0.6);
+}
+:root body .conv-container .chat-input {
+  border-top-color: var(--gl-hairline);
+}
+:root body .device-item,
+:root body .customer-item {
+  margin: 2px 6px;
+  border-radius: 14px;
+  border-bottom: 0;
+}
+:root body .device-item:hover,
+:root body .customer-item:hover {
+  background: rgba(31, 41, 64, 0.05);
+}
+:root body .device-item.active,
+:root body .customer-item.active {
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(20, 40, 90, 0.06), 0 6px 16px -10px rgba(11, 87, 208, 0.45);
+}
+/* ---------- Tables: let the card glass show through; pinned columns stay opaque ---------- */
+:root body .el-table {
+  --el-table-bg-color: transparent;
+  --el-table-tr-bg-color: transparent;
+  --el-table-expanded-cell-bg-color: transparent;
+  --el-table-header-bg-color: rgba(240, 244, 251, 0.72);
+  --el-table-row-hover-bg-color: var(--gl-row-hover);
+  --el-table-border-color: var(--gl-hairline);
+  background: transparent;
+}
+:root body .el-table .el-table-fixed-column--left,
+:root body .el-table .el-table-fixed-column--right {
+  background-color: var(--gl-fixed-cell);
+}
+:root body .el-table th.el-table-fixed-column--left,
+:root body .el-table th.el-table-fixed-column--right {
+  background-color: #eef2fa !important;
+}
+:root body .el-table__body tr:hover > td.el-table-fixed-column--left,
+:root body .el-table__body tr:hover > td.el-table-fixed-column--right,
+:root body .el-table__body tr.hover-row > td.el-table-fixed-column--left,
+:root body .el-table__body tr.hover-row > td.el-table-fixed-column--right {
+  background-color: var(--gl-row-hover) !important;
+}
+:root body .el-table__inner-wrapper::before,
+:root body .el-table--border .el-table__inner-wrapper::after {
+  background-color: var(--gl-hairline);
+}
+
+/* ---------- Controls: bigger radius, translucent fill ---------- */
+:root body .el-input__wrapper,
+:root body .el-select__wrapper,
+:root body .el-textarea__inner,
+:root body .el-input-number .el-input__wrapper,
+:root body .el-date-editor.el-input__wrapper,
+:root body .el-range-editor.el-input__wrapper {
+  border-radius: var(--gl-r-control);
+  background-color: var(--gl-fill-control);
+}
+:root body .el-input-group__append,
+:root body .el-input-group__prepend {
+  border-radius: var(--gl-r-control);
+}
+:root body .el-alert {
+  border-radius: var(--gl-r-inner);
+}
+:root body .el-tabs--card > .el-tabs__header .el-tabs__nav {
+  border-radius: var(--gl-r-control) var(--gl-r-control) 0 0;
+}
+:root body .el-upload-dragger {
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.6);
+}
+/* ---------- Overlays ---------- */
+:root body .el-overlay {
+  background-color: rgba(18, 28, 52, 0.26);
+  backdrop-filter: blur(6px) saturate(1.2);
+  -webkit-backdrop-filter: blur(6px) saturate(1.2);
+}
+:root body .el-dialog,
+:root body .el-drawer,
+:root body .admin-ops-modal {
+  isolation: isolate;
+  border: 1px solid var(--gl-edge);
+  border-radius: 32px !important;
+  background: transparent;
+  box-shadow: var(--gl-shadow-float);
+}
+:root body .admin-ops-modal {
+  position: relative;
+}
+:root body .el-dialog::before,
+:root body .el-drawer::before,
+:root body .admin-ops-modal::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(250, 252, 255, 0.86));
+  backdrop-filter: var(--gl-blur);
+  -webkit-backdrop-filter: var(--gl-blur);
+  pointer-events: none;
+}
+:root body .el-drawer {
+  border-radius: 32px 0 0 32px !important;
+}
+:root body .el-drawer.ltr {
+  border-radius: 0 32px 32px 0 !important;
+}
+:root body .el-drawer.ttb {
+  border-radius: 0 0 32px 32px !important;
+}
+:root body .el-drawer.btt {
+  border-radius: 32px 32px 0 0 !important;
+}
+:root body .el-message-box {
+  border: 1px solid var(--gl-edge);
+  border-radius: 28px;
+  background: rgba(255, 255, 255, 0.86);
+  backdrop-filter: var(--gl-blur);
+  -webkit-backdrop-filter: var(--gl-blur);
+  box-shadow: var(--gl-shadow-float);
+}
+:root body .el-popper.is-light,
+:root body .el-select-dropdown,
+:root body .el-picker__popper.el-popper,
+:root body .el-dropdown__popper.el-popper {
+  border: 1px solid var(--gl-edge) !important;
+  border-radius: 20px !important;
+  background: rgba(255, 255, 255, 0.84) !important;
+  backdrop-filter: var(--gl-blur);
+  -webkit-backdrop-filter: var(--gl-blur);
+  box-shadow: var(--gl-shadow-hover) !important;
+}
+:root body .el-popper.is-light .el-popper__arrow::before {
+  background: rgba(255, 255, 255, 0.84) !important;
+  border-color: var(--gl-edge) !important;
+}
+:root body .el-select-dropdown__item {
+  border-radius: 12px;
+}
+:root body .el-picker-panel,
+:root body .el-date-range-picker,
+:root body .el-picker-panel__body-wrapper {
+  background: transparent;
+}
+:root body .el-message {
+  background: rgba(31, 31, 31, 0.86);
+  backdrop-filter: blur(18px) saturate(1.6);
+  -webkit-backdrop-filter: blur(18px) saturate(1.6);
+}
+/* ---------- Narrow screens + accessibility ---------- */
+@media (max-width: 1100px) {
+  :root {
+    --gl-gap: 10px;
+  }
+  :root body .sidebar {
+    width: 212px;
+    border-radius: 26px;
+  }
+}
+@media (prefers-reduced-transparency: reduce) {
+  :root body .sidebar,
+  :root body .header-right,
+  :root body .el-message-box,
+  :root body .el-popper.is-light,
+  :root body .el-select-dropdown,
+  :root body .el-picker__popper.el-popper,
+  :root body .el-dropdown__popper.el-popper,
+  :root body .el-dialog::before,
+  :root body .el-drawer::before,
+  :root body .admin-ops-modal::before {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: #fff !important;
+  }
+}
