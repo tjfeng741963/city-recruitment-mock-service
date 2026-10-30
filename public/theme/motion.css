@@ -1,0 +1,300 @@
+/* finesse · motion layer for the legacy Vue reskin.
+ * Hooks Element Plus transition classes and route mounts; never changes layout.
+ * Vue reads durations from the overlay root, so child animations stay <= root duration. */
+
+:root {
+  --rk-dur-1: 0.12s;
+  --rk-dur-2: 0.2s;
+  --rk-dur-3: 0.28s;
+  --rk-dur-4: 0.42s;
+  --rk-stagger: 45ms;
+  --rk-ease-out: cubic-bezier(0.2, 0, 0, 1);
+  --rk-ease-in: cubic-bezier(0.3, 0, 0.8, 0.15);
+}
+
+@keyframes rk-fade-up {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes rk-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes rk-slide-right {
+  from { opacity: 0; transform: translateX(-12px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes rk-pop-in {
+  from { opacity: 0; transform: translateY(6px) scale(0.97); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes rk-dialog-in {
+  from { opacity: 0; transform: translateY(12px) scale(0.96); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes rk-dialog-out {
+  from { opacity: 1; transform: none; }
+  to { opacity: 0; transform: scale(0.97); }
+}
+@keyframes rk-sheet-up {
+  from { transform: translateY(100%); }
+  to { transform: none; }
+}
+@keyframes rk-ripple {
+  from { transform: translate(-50%, -50%) scale(0); opacity: 0.32; }
+  to { transform: translate(-50%, -50%) scale(1); opacity: 0; }
+}
+
+/* ---------- Load order: shell once, then page blocks top-to-bottom ----------
+ * fill-mode backwards: nothing lingers after the run, so no stray containing
+ * blocks for fixed overlays rendered inside the page. */
+:root body .sidebar-logo {
+  animation: rk-fade-in var(--rk-dur-4) var(--rk-ease-out) backwards;
+}
+:root body .sidebar-menu > .el-menu-item,
+:root body .sidebar-menu > .el-sub-menu {
+  animation: rk-slide-right var(--rk-dur-4) var(--rk-ease-out) backwards;
+}
+:root body .sidebar-menu > :nth-child(1) { animation-delay: 40ms; }
+:root body .sidebar-menu > :nth-child(2) { animation-delay: 70ms; }
+:root body .sidebar-menu > :nth-child(3) { animation-delay: 100ms; }
+:root body .sidebar-menu > :nth-child(4) { animation-delay: 130ms; }
+:root body .sidebar-menu > :nth-child(5) { animation-delay: 160ms; }
+:root body .sidebar-menu > :nth-child(6) { animation-delay: 190ms; }
+:root body .sidebar-menu > :nth-child(n + 7) { animation-delay: 220ms; }
+:root body .top-header {
+  animation: rk-fade-in var(--rk-dur-4) var(--rk-ease-out) 60ms backwards;
+}
+
+:root body .main-scroll > * > :not(.stats-row):not(.admin-overview-grid):not(.el-overlay):not(.admin-ops-mask),
+:root body .main-scroll .stats-row > *,
+:root body .main-scroll .admin-overview-grid > * {
+  animation: rk-fade-up var(--rk-dur-4) var(--rk-ease-out) backwards;
+  animation-delay: calc(var(--rk-i, 0) * var(--rk-stagger));
+}
+:root body .main-scroll > * > :nth-child(2) { --rk-i: 1; }
+:root body .main-scroll > * > :nth-child(3) { --rk-i: 2; }
+:root body .main-scroll > * > :nth-child(4) { --rk-i: 3; }
+:root body .main-scroll > * > :nth-child(5) { --rk-i: 4; }
+:root body .main-scroll > * > :nth-child(n + 6) { --rk-i: 5; }
+:root body .main-scroll .stats-row > :nth-child(1) { --rk-i: 1; }
+:root body .main-scroll .stats-row > :nth-child(2) { --rk-i: 2; }
+:root body .main-scroll .stats-row > :nth-child(3) { --rk-i: 3; }
+:root body .main-scroll .stats-row > :nth-child(4) { --rk-i: 4; }
+:root body .main-scroll .stats-row > :nth-child(n + 5) { --rk-i: 5; }
+
+:root body .el-table__body tr {
+  animation: rk-fade-in var(--rk-dur-3) var(--rk-ease-out) backwards;
+}
+:root body .el-table__body tr:nth-child(2) { animation-delay: 20ms; }
+:root body .el-table__body tr:nth-child(3) { animation-delay: 40ms; }
+:root body .el-table__body tr:nth-child(4) { animation-delay: 60ms; }
+:root body .el-table__body tr:nth-child(5) { animation-delay: 80ms; }
+:root body .el-table__body tr:nth-child(6) { animation-delay: 100ms; }
+:root body .el-table__body tr:nth-child(7) { animation-delay: 120ms; }
+:root body .el-table__body tr:nth-child(n + 8) { animation-delay: 140ms; }
+
+/* ---------- Dialog: overlay fades, panel scales up from slightly below ---------- */
+:root body .dialog-fade-enter-active .el-overlay-dialog,
+:root body .dialog-fade-leave-active .el-overlay-dialog {
+  animation: none;
+}
+:root body .dialog-fade-enter-active .el-dialog {
+  animation: rk-dialog-in var(--rk-dur-3) var(--rk-ease) both;
+}
+:root body .dialog-fade-leave-active {
+  animation-duration: var(--rk-dur-2);
+}
+:root body .dialog-fade-leave-active .el-dialog {
+  animation: rk-dialog-out var(--rk-dur-2) var(--rk-ease-in) forwards;
+}
+
+/* ---------- Message box (confirm) ---------- */
+:root body .el-overlay.is-message-box.fade-in-linear-enter-active {
+  transition-duration: var(--rk-dur-3);
+}
+:root body .el-overlay.is-message-box.fade-in-linear-leave-active {
+  transition-duration: var(--rk-dur-2);
+}
+:root body .fade-in-linear-enter-active .el-overlay-message-box,
+:root body .fade-in-linear-leave-active .el-overlay-message-box {
+  animation: none;
+}
+:root body .fade-in-linear-enter-active .el-message-box {
+  animation: rk-dialog-in var(--rk-dur-3) var(--rk-ease) both;
+}
+:root body .fade-in-linear-leave-active .el-message-box {
+  animation: rk-dialog-out var(--rk-dur-2) var(--rk-ease-in) forwards;
+}
+
+/* ---------- Drawer: decelerate in ---------- */
+:root body .el-drawer {
+  transition: transform var(--el-transition-duration) var(--rk-ease);
+}
+
+/* ---------- Dropdowns / pickers: short drop instead of scaleY stretch ---------- */
+:root body .el-zoom-in-top-enter-active,
+:root body .el-zoom-in-top-leave-active {
+  transition: opacity var(--rk-dur-2) var(--rk-ease-out), transform var(--rk-dur-2) var(--rk-ease-out);
+  transform-origin: top center;
+}
+:root body .el-zoom-in-top-enter-from,
+:root body .el-zoom-in-top-leave-active {
+  opacity: 0;
+  transform: translateY(-6px) scale(0.98);
+}
+:root body .el-zoom-in-top-enter-active[data-popper-placement^="top"],
+:root body .el-zoom-in-top-leave-active[data-popper-placement^="top"] {
+  transform-origin: bottom center;
+}
+:root body .el-zoom-in-top-enter-from[data-popper-placement^="top"],
+:root body .el-zoom-in-top-leave-active[data-popper-placement^="top"] {
+  transform: translateY(6px) scale(0.98);
+}
+:root body .el-fade-in-linear-enter-active,
+:root body .el-fade-in-linear-leave-active {
+  transition: opacity var(--rk-dur-1) linear;
+}
+
+/* ---------- Toast: drop from top with a light settle ---------- */
+:root body .el-message {
+  transition: opacity var(--rk-dur-2) var(--rk-ease-out), transform var(--rk-dur-4) var(--rk-ease), top var(--rk-dur-4) var(--rk-ease);
+}
+:root body .el-message-fade-enter-from.is-center {
+  transform: translate(-50%, -18px) scale(0.94);
+}
+:root body .el-message-fade-leave-to.is-center {
+  transform: translate(-50%, -8px) scale(0.97);
+}
+
+/* ---------- Press feedback: ripple from pointer (interaction.js) + tactile scale ---------- */
+:root body .rk-ripple-host {
+  overflow: hidden;
+  isolation: isolate;
+}
+:root body .rk-ripple-host.rk-ripple-static {
+  position: relative;
+}
+:root body .rk-ripple {
+  position: absolute;
+  z-index: -1;
+  width: var(--rk-ripple-size);
+  height: var(--rk-ripple-size);
+  left: var(--rk-ripple-x);
+  top: var(--rk-ripple-y);
+  border-radius: 50%;
+  background: currentColor;
+  pointer-events: none;
+  animation: rk-ripple 0.5s var(--rk-ease-out) forwards;
+}
+:root body .el-button--primary:not(.is-plain):not(.is-text):not(.is-link) .rk-ripple,
+:root body .el-button--success:not(.is-plain) .rk-ripple,
+:root body .el-button--danger:not(.is-plain) .rk-ripple,
+:root body .login-btn .rk-ripple {
+  background: #fff;
+}
+
+:root body .el-sub-menu__title,
+:root body .el-menu-item {
+  transition: background-color var(--rk-dur-2) var(--rk-ease-standard), color var(--rk-dur-2) var(--rk-ease-standard), transform var(--rk-dur-1) var(--rk-ease-standard);
+}
+:root body .sidebar-menu .el-menu-item:active,
+:root body .sidebar-menu .el-sub-menu__title:active,
+:root body .el-pager li:active,
+:root body .customer-item:active,
+:root body .device-item:active {
+  transform: scale(0.98);
+}
+:root body .el-sub-menu .el-sub-menu__icon-arrow {
+  transition: transform var(--rk-dur-3) var(--rk-ease);
+}
+:root body .el-tabs__active-bar {
+  transition: width var(--rk-dur-3) var(--rk-ease), transform var(--rk-dur-3) var(--rk-ease);
+}
+:root body .el-switch__core,
+:root body .el-switch__action {
+  transition-timing-function: var(--rk-ease);
+}
+:root body .el-checkbox__inner::after {
+  transition: transform var(--rk-dur-2) var(--rk-ease) 40ms;
+}
+:root body .el-checkbox__input.is-checked .el-checkbox__inner,
+:root body .el-radio__input.is-checked .el-radio__inner {
+  animation: rk-check-pop var(--rk-dur-3) var(--rk-ease);
+}
+@keyframes rk-check-pop {
+  40% { transform: scale(0.86); }
+  to { transform: none; }
+}
+
+/* ---------- Hover lift on cards, row affordance ---------- */
+:root body .stat-card:hover,
+:root body .admin-overview-card:hover {
+  transform: translateY(-2px);
+}
+:root body .admin-overview-card {
+  transition: box-shadow var(--rk-dur-2) var(--rk-ease-standard), transform var(--rk-dur-2) var(--rk-ease-standard);
+}
+:root body .el-table__body tr > td.el-table__cell {
+  transition: background-color var(--rk-dur-1) linear;
+}
+
+/* ---------- Chat: new bubbles pop from their side; lists slide in ---------- */
+:root body .msg-row,
+:root body .mcd-row {
+  animation: rk-pop-in var(--rk-dur-3) var(--rk-ease) backwards;
+}
+:root body .msg-row.left,
+:root body .mcd-row.left {
+  transform-origin: left bottom;
+}
+:root body .msg-row.right,
+:root body .mcd-row.right {
+  transform-origin: right bottom;
+}
+:root body .customer-item,
+:root body .device-item,
+:root body .m-conv-item {
+  animation: rk-fade-in var(--rk-dur-3) var(--rk-ease-out) backwards;
+  transition: background-color var(--rk-dur-1) linear, transform var(--rk-dur-1) var(--rk-ease-standard);
+}
+
+/* ---------- Mobile: drawer and bottom sheet ---------- */
+:root body .m-drawer-mask,
+:root body .mf-sheet-mask {
+  animation: rk-fade-in var(--rk-dur-2) linear;
+}
+:root body .m-drawer {
+  animation-duration: var(--rk-dur-3);
+  animation-timing-function: var(--rk-ease);
+}
+:root body .mf-sheet {
+  animation: rk-sheet-up var(--rk-dur-4) var(--rk-ease);
+}
+:root body .m-conv-item:active {
+  transform: scale(0.99);
+}
+
+/* ---------- Legacy enhancement modal (admin-enhancements.js) ---------- */
+:root body .admin-ops-mask {
+  animation: rk-fade-in var(--rk-dur-2) linear;
+}
+:root body .admin-ops-modal {
+  animation: rk-dialog-in var(--rk-dur-3) var(--rk-ease);
+}
+
+/* ---------- Respect user motion preferences ---------- */
+@media (prefers-reduced-motion: reduce) {
+  :root body *,
+  :root body *::before,
+  :root body *::after {
+    animation-duration: 1ms !important;
+    animation-delay: 0s !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    transition-delay: 0s !important;
+  }
+  :root body .rk-ripple {
+    display: none;
+  }
+}

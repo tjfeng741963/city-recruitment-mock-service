@@ -49,11 +49,15 @@ describe("local static shell (default)", () => {
     const response = await app.inject({ method: "GET", url: "/login" });
     expect(response.body).toContain("/assets/index-BGyFQL9Q.js");
     expect(response.body).toContain("/theme/theme.css");
+    expect(response.body).toContain("/theme/motion.css");
+    expect(response.body).toContain("/theme/interaction.js");
   });
 
   it.each([
     ["/theme/theme.css", "text/css"],
+    ["/theme/motion.css", "text/css"],
     ["/theme/login-motion.js", "javascript"],
+    ["/theme/interaction.js", "javascript"],
     ["/theme/fonts/google-sans-flex-latin-wght-normal.woff2", "font/woff2"],
   ])("serves theme asset %s", async (url, type) => {
     const response = await app.inject({ method: "GET", url });
