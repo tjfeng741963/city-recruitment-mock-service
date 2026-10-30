@@ -1,4 +1,4 @@
-/* finesse · register=product · design-language=google (legacy Vue reskin, login: apple-mode=spatial)
+/* finesse · register=product · design-language=google (legacy Vue reskin, login: light city-dawn)
  * Re-themes the captured Vue + Element Plus bundle without touching its markup or behaviour.
  * `:root body` prefix outranks Vue scoped selectors (.x[data-v-*]) that are injected later. */
 
@@ -620,211 +620,367 @@
 :root body .el-badge__content--danger {
   background: var(--rk-down);
 }
-/* ---------- Login: dark stage, aurora, glass card with intelligence glow ---------- */
+/* ---------- Login: bright city dawn, drifting aurora, parallax skyline, white glass card ---------- */
 :root body .login-page {
   --mx: 0.5;
   --my: 0.5;
   min-height: 100dvh;
   height: auto;
-  padding: 24px 16px;
-  background:
-    radial-gradient(1200px 800px at 50% 120%, rgba(11, 87, 208, 0.35), transparent 60%),
-    #050608;
-  color: #f5f5f7;
+  padding: 24px clamp(16px, 8vw, 140px);
+  justify-content: flex-end;
+  background: linear-gradient(165deg, #e8f0fe 0%, #f5f8ff 38%, #fdf6ef 72%, #f3f6fc 100%);
+  color: var(--rk-ink-1);
   isolation: isolate;
+}
+:root body .login-bg {
+  overflow: hidden;
 }
 :root body .login-bg::after {
   content: "";
   position: absolute;
   inset: 0;
-  background-image: radial-gradient(rgba(255, 255, 255, 0.07) 1px, transparent 1px);
-  background-size: 22px 22px;
-  mask-image: radial-gradient(ellipse 70% 60% at 50% 50%, #000 20%, transparent 75%);
+  background-image: radial-gradient(rgba(11, 87, 208, 0.09) 1px, transparent 1px);
+  background-size: 26px 26px;
+  mask-image: linear-gradient(180deg, #000 0%, transparent 70%);
+  pointer-events: none;
 }
 :root body .login-page .bg-shape {
-  opacity: 0.6;
-  filter: blur(90px);
-  will-change: translate;
-  transform: translate(calc((var(--mx) - 0.5) * -60px), calc((var(--my) - 0.5) * -60px));
-  transition: transform 0.6s var(--rk-ease);
+  border-radius: 50%;
+  filter: blur(80px);
+  will-change: translate, transform;
+  transition: transform 0.9s var(--rk-ease);
+  transform: translate(calc((var(--mx) - 0.5) * -50px), calc((var(--my) - 0.5) * -40px));
 }
 :root body .login-page .shape-1 {
-  width: 560px;
-  height: 560px;
-  top: -180px;
-  right: -120px;
-  background: #3186ff;
-  animation: rk-drift-a 18s ease-in-out infinite alternate;
+  width: 62vmax; height: 62vmax; top: -30vmax; left: -18vmax; right: auto;
+  background: radial-gradient(circle, rgba(49, 134, 255, 0.55), rgba(49, 134, 255, 0) 68%);
+  opacity: 1;
+  animation: rk-drift-a 20s ease-in-out infinite alternate;
 }
 :root body .login-page .shape-2 {
-  width: 480px;
-  height: 480px;
-  bottom: -160px;
-  left: -120px;
-  background: #00b95c;
-  opacity: 0.42;
-  animation: rk-drift-b 22s ease-in-out infinite alternate;
+  width: 46vmax; height: 46vmax; bottom: auto; top: -16vmax; left: auto; right: -14vmax;
+  background: radial-gradient(circle, rgba(255, 200, 40, 0.42), rgba(255, 200, 40, 0) 68%);
+  opacity: 1;
+  animation: rk-drift-b 24s ease-in-out infinite alternate;
 }
 :root body .login-page .shape-3 {
-  width: 380px;
-  height: 380px;
-  top: 58%;
-  left: 62%;
-  background: conic-gradient(from 90deg, #fc413d, #ffe432, #fc413d);
-  opacity: 0.32;
-  transform: translate(calc(-50% + (var(--mx) - 0.5) * 90px), calc(-50% + (var(--my) - 0.5) * 90px));
-  animation: rk-drift-c 26s ease-in-out infinite alternate;
+  width: 40vmax; height: 40vmax; top: 34%; left: 38%;
+  background: radial-gradient(circle, rgba(252, 95, 120, 0.3), rgba(252, 95, 120, 0) 68%);
+  opacity: 1;
+  transform: translate(calc(-50% + (var(--mx) - 0.5) * 80px), calc(-50% + (var(--my) - 0.5) * 60px));
+  animation: rk-drift-c 28s ease-in-out infinite alternate;
 }
-@keyframes rk-drift-a { to { translate: -140px 120px; scale: 1.15; } }
-@keyframes rk-drift-b { to { translate: 160px -90px; scale: 0.9; } }
-@keyframes rk-drift-c { to { translate: -220px -160px; scale: 1.25; } }
+:root body .login-page .shape-4 {
+  width: 44vmax; height: 44vmax; bottom: -20vmax; left: -10vmax;
+  background: radial-gradient(circle, rgba(0, 185, 92, 0.26), rgba(0, 185, 92, 0) 68%);
+  animation: rk-drift-b 26s ease-in-out -8s infinite alternate-reverse;
+}
+@keyframes rk-drift-a { to { translate: 12vmax 8vmax; scale: 1.12; } }
+@keyframes rk-drift-b { to { translate: -10vmax 6vmax; scale: 0.92; } }
+@keyframes rk-drift-c { to { translate: -14vmax -8vmax; scale: 1.2; } }
+
+:root body .rk-bokeh i {
+  position: absolute;
+  left: var(--x);
+  bottom: -40px;
+  width: var(--s);
+  height: var(--s);
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, rgba(255, 255, 255, 0.95), rgba(168, 199, 250, 0.35) 60%, transparent 72%);
+  opacity: 0;
+  animation: rk-float var(--d) linear var(--delay) infinite;
+}
+:root body .rk-bokeh i:nth-child(1) { --x: 8%; --s: 14px; --d: 16s; --delay: -2s; }
+:root body .rk-bokeh i:nth-child(2) { --x: 22%; --s: 22px; --d: 21s; --delay: -9s; }
+:root body .rk-bokeh i:nth-child(3) { --x: 37%; --s: 10px; --d: 14s; --delay: -5s; }
+:root body .rk-bokeh i:nth-child(4) { --x: 51%; --s: 18px; --d: 19s; --delay: -13s; }
+:root body .rk-bokeh i:nth-child(5) { --x: 64%; --s: 12px; --d: 17s; --delay: -1s; }
+:root body .rk-bokeh i:nth-child(6) { --x: 78%; --s: 26px; --d: 24s; --delay: -16s; }
+:root body .rk-bokeh i:nth-child(7) { --x: 91%; --s: 9px; --d: 15s; --delay: -7s; }
+@keyframes rk-float {
+  0% { transform: translate3d(0, 0, 0); opacity: 0; }
+  12% { opacity: 0.9; }
+  80% { opacity: 0.6; }
+  100% { transform: translate3d(30px, -92vh, 0); opacity: 0; }
+}
+
+:root body .rk-skyline {
+  position: absolute;
+  left: -3%;
+  bottom: 0;
+  width: 106%;
+  height: min(34vh, 300px);
+  pointer-events: none;
+}
+:root body .rk-sky-far,
+:root body .rk-sky-near {
+  transition: transform 0.9s var(--rk-ease);
+}
+:root body .rk-sky-far { transform: translateX(calc((var(--mx) - 0.5) * -18px)); }
+:root body .rk-sky-near { transform: translateX(calc((var(--mx) - 0.5) * -40px)); }
+:root body .rk-sky-lights rect {
+  fill: #ffffff;
+  opacity: 0.55;
+}
+:root body .rk-sky-lights .rk-win-twinkle {
+  fill: #ffd25e;
+  animation: rk-twinkle 6s ease-in-out infinite;
+}
+@keyframes rk-twinkle {
+  0%, 100% { opacity: 0.25; }
+  45%, 60% { opacity: 1; }
+}
+:root body .rk-login-hero {
+  position: absolute;
+  left: clamp(24px, 8vw, 140px);
+  top: 50%;
+  width: min(560px, calc(100vw - 600px));
+  transform: translateY(calc(-58% + (var(--my) - 0.5) * -12px));
+  transition: transform 0.9s var(--rk-ease);
+}
+:root body .rk-login-hero > * {
+  animation: rk-rise 0.9s var(--rk-ease) backwards;
+}
+:root body .rk-login-hero > :nth-child(2) { animation-delay: 0.08s; }
+:root body .rk-login-hero > :nth-child(3) { animation-delay: 0.16s; }
+:root body .rk-login-hero > :nth-child(4) { animation-delay: 0.24s; }
+:root body .rk-hero-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 22px;
+  padding: 6px 14px 6px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.6);
+  box-shadow: 0 6px 20px -10px rgba(20, 40, 90, 0.3);
+  color: var(--rk-accent);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+:root body .rk-hero-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #00b95c;
+  box-shadow: 0 0 0 0 rgba(0, 185, 92, 0.5);
+  animation: rk-pulse 2.4s ease-out infinite;
+}
+@keyframes rk-pulse {
+  70% { box-shadow: 0 0 0 9px rgba(0, 185, 92, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(0, 185, 92, 0); }
+}
+:root body .rk-hero-title {
+  margin: 0 0 18px;
+  font-size: clamp(34px, 3.6vw, 54px);
+  line-height: 1.18;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: #0f1b33;
+}
+:root body .rk-hero-grad {
+  background: linear-gradient(100deg, #0b57d0, #3186ff 35%, #00b95c 65%, #0b57d0);
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: rk-text-flow 9s ease-in-out infinite alternate;
+}
+@keyframes rk-text-flow { to { background-position: 100% 0; } }
+:root body .rk-hero-desc {
+  max-width: 440px;
+  margin: 0 0 28px;
+  color: var(--rk-ink-2);
+  font-size: 16px;
+  line-height: 1.7;
+}
+:root body .rk-hero-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+:root body .rk-hero-tags li {
+  padding: 8px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.85);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.5);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  color: var(--rk-ink-2);
+  font-size: 13px;
+  font-weight: 500;
+}
 :root body .login-card {
   --cx: 50%;
   --cy: 0%;
   width: min(420px, 100%);
-  padding: 44px 36px 36px;
-  border-radius: 28px;
+  padding: 44px 38px 34px;
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  border-radius: 32px;
   background:
-    radial-gradient(420px 260px at var(--cx) var(--cy), rgba(255, 255, 255, 0.09), transparent 70%),
-    rgba(18, 19, 23, 0.72);
-  backdrop-filter: blur(28px) saturate(1.5);
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08) inset, 0 40px 100px -30px rgba(0, 0, 0, 0.8);
-  color: #f5f5f7;
-  animation: rk-rise 0.8s var(--rk-ease) both;
+    radial-gradient(380px 240px at var(--cx) var(--cy), rgba(255, 255, 255, 0.7), transparent 70%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.78), rgba(255, 255, 255, 0.6));
+  backdrop-filter: blur(30px) saturate(1.8);
+  -webkit-backdrop-filter: blur(30px) saturate(1.8);
+  box-shadow:
+    inset 0 1px 0 #fff,
+    0 2px 8px rgba(20, 40, 90, 0.06),
+    0 40px 90px -30px rgba(20, 40, 90, 0.35);
+  color: var(--rk-ink-1);
+  animation: rk-rise 0.8s var(--rk-ease) 0.1s backwards;
 }
-:root body .login-card::before,
-:root body .login-card::after {
-  content: "";
-  position: absolute;
-  pointer-events: none;
-  border-radius: inherit;
-  background: var(--rk-grad-brand);
-  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
-  animation: rk-spin 7s linear infinite;
-}
-:root body .login-card::before {
-  inset: 0;
-  padding: 1.5px;
-  opacity: 0.9;
-}
-:root body .login-card::after {
-  inset: -10px;
-  padding: 10px;
-  border-radius: 38px;
-  filter: blur(22px);
-  opacity: 0.35;
-}
-@keyframes rk-spin { to { --rk-angle: 360deg; } }
 @keyframes rk-rise {
   from { opacity: 0; transform: translateY(18px) scale(0.98); }
   to { opacity: 1; transform: none; }
 }
 :root body .login-card .login-header,
 :root body .login-card .el-form-item {
-  animation: rk-rise 0.7s var(--rk-ease) both;
+  animation: rk-rise 0.7s var(--rk-ease) backwards;
 }
-:root body .login-card .el-form-item:nth-child(1) { animation-delay: 0.12s; }
-:root body .login-card .el-form-item:nth-child(2) { animation-delay: 0.18s; }
-:root body .login-card .el-form-item:nth-child(3) { animation-delay: 0.24s; }
+:root body .login-card .login-header { animation-delay: 0.18s; }
+:root body .login-card .el-form-item:nth-child(1) { animation-delay: 0.26s; }
+:root body .login-card .el-form-item:nth-child(2) { animation-delay: 0.32s; }
+:root body .login-card .el-form-item:nth-child(3) { animation-delay: 0.38s; }
 :root body .login-header {
-  margin-bottom: 32px;
+  margin-bottom: 30px;
 }
 :root body .login-logo .logo-icon {
   position: relative;
-  width: 64px;
-  height: 64px;
+  width: 60px;
+  height: 60px;
   border-radius: 20px;
-  background: linear-gradient(160deg, #1a6be0, #0842a0);
-  font-size: 28px;
-  box-shadow: 0 10px 30px -8px rgba(49, 134, 255, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.18) inset;
-}
-:root body .login-title {
+  background: linear-gradient(160deg, #3186ff, #0b57d0 60%, #0842a0);
   font-size: 26px;
-  font-weight: 600;
+  box-shadow: 0 12px 28px -10px rgba(11, 87, 208, 0.65), inset 0 1px 0 rgba(255, 255, 255, 0.4);
+  animation: rk-bob 6s ease-in-out infinite;
+}
+@keyframes rk-bob { 50% { transform: translateY(-4px); } }
+:root body .login-title {
+  font-size: 24px;
+  font-weight: 700;
   letter-spacing: -0.01em;
-  color: #f5f5f7;
+  color: #0f1b33;
 }
 :root body .login-subtitle {
-  color: rgba(245, 245, 247, 0.62);
-  letter-spacing: 0.04em;
+  color: var(--rk-ink-3);
+  letter-spacing: 0.06em;
 }
 :root body .login-form .el-input__wrapper {
   height: 50px;
   border: 0;
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.06);
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12) inset;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 0 0 1px rgba(31, 41, 64, 0.1) inset;
+  transition: box-shadow 0.2s var(--rk-ease-standard), background-color 0.2s var(--rk-ease-standard), transform 0.2s var(--rk-ease);
 }
 :root body .login-form .el-input__wrapper:hover {
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.24) inset;
+  box-shadow: 0 0 0 1px rgba(31, 41, 64, 0.22) inset;
 }
 :root body .login-form .el-input__wrapper.is-focus {
-  background: rgba(255, 255, 255, 0.09);
-  box-shadow: 0 0 0 1.5px #a8c7fa inset, 0 0 0 5px rgba(168, 199, 250, 0.16);
+  background: #fff;
+  box-shadow: 0 0 0 2px var(--rk-accent) inset, 0 0 0 5px rgba(11, 87, 208, 0.12), 0 10px 24px -14px rgba(11, 87, 208, 0.5);
+  transform: translateY(-1px);
 }
 :root body .login-form .el-input__inner {
-  color: #f5f5f7;
+  color: var(--rk-ink-1);
   font-size: 15px;
-  -webkit-text-fill-color: #f5f5f7;
 }
 :root body .login-form .el-input__inner::placeholder {
-  color: rgba(245, 245, 247, 0.55);
-  -webkit-text-fill-color: rgba(245, 245, 247, 0.55);
+  color: #80868b;
 }
 :root body .login-form .el-input__inner:-webkit-autofill {
-  -webkit-box-shadow: 0 0 0 100px #1d1f24 inset;
-  caret-color: #f5f5f7;
+  -webkit-box-shadow: 0 0 0 100px #fff inset;
+  -webkit-text-fill-color: var(--rk-ink-1);
 }
 :root body .login-form .el-input__prefix,
 :root body .login-form .el-input__suffix,
 :root body .login-form .el-input__password {
-  color: rgba(245, 245, 247, 0.6);
+  color: #5f6368;
+  transition: color 0.2s var(--rk-ease-standard);
 }
-:root body .login-form .el-form-item__error {
-  color: #f2b8b5;
+:root body .login-form .el-input__wrapper.is-focus .el-input__prefix {
+  color: var(--rk-accent);
 }
 :root body .login-btn.el-button {
+  --bd-radius-sm: 999px;
+  position: relative;
   height: 50px;
   margin-top: 6px;
-  border-radius: 999px;
+  overflow: hidden;
+  border: 0 !important;
   font-size: 16px;
   letter-spacing: 0.08em;
-  background: linear-gradient(110deg, #0842a0, #0b57d0 40%, #3186ff 70%, #0b57d0);
-  background-size: 220% 100%;
-  box-shadow: 0 12px 32px -10px rgba(49, 134, 255, 0.75);
+  background: linear-gradient(110deg, #0842a0, #0b57d0 40%, #3186ff 70%, #0b57d0) 0 0 / 220% 100% !important;
+  box-shadow: 0 14px 30px -12px rgba(11, 87, 208, 0.7);
+  transition: background-position 0.6s var(--rk-ease), box-shadow 0.25s var(--rk-ease-standard), transform 0.2s var(--rk-ease);
+}
+:root body .login-btn.el-button::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 30%, rgba(255, 255, 255, 0.35) 50%, transparent 70%);
+  transform: translateX(-120%);
+  pointer-events: none;
 }
 :root body .login-btn.el-button:hover:not(.is-disabled) {
-  background-position: 100% 0;
-  box-shadow: 0 16px 40px -10px rgba(49, 134, 255, 0.9);
+  background-position: 100% 0 !important;
+  box-shadow: 0 18px 36px -12px rgba(11, 87, 208, 0.85);
+  transform: translateY(-1px);
+}
+:root body .login-btn.el-button:hover:not(.is-disabled)::after {
+  transform: translateX(120%);
+  transition: transform 0.8s var(--rk-ease);
+}
+:root body .login-btn.el-button:active:not(.is-disabled) {
+  transform: translateY(0) scale(0.98);
 }
 :root body .login-btn.el-button:focus-visible {
-  outline-color: #a8c7fa;
+  outline: 2px solid var(--rk-accent);
+  outline-offset: 3px;
 }
-
 @media (prefers-reduced-motion: reduce) {
   :root body .login-page .bg-shape,
+  :root body .rk-bokeh,
+  :root body .rk-login-hero > *,
   :root body .login-card,
-  :root body .login-card::before,
-  :root body .login-card::after,
   :root body .login-card .login-header,
-  :root body .login-card .el-form-item {
+  :root body .login-card .el-form-item,
+  :root body .login-logo .logo-icon,
+  :root body .rk-hero-grad,
+  :root body .rk-hero-dot,
+  :root body .rk-sky-lights rect {
     animation: none !important;
     transition: none !important;
+  }
+  :root body .rk-bokeh {
+    display: none;
   }
 }
 @media (prefers-reduced-transparency: reduce) {
   :root body .login-card {
     backdrop-filter: none;
-    background: #15161a;
+    -webkit-backdrop-filter: none;
+    background: #fff;
+  }
+}
+@media (max-width: 1080px) {
+  :root body .login-page {
+    justify-content: center;
+  }
+  :root body .rk-login-hero {
+    display: none;
   }
 }
 @media (max-width: 480px) {
   :root body .login-card {
     padding: 36px 22px 28px;
+    border-radius: 28px;
   }
-  :root body .login-card::after {
-    display: none;
+  :root body .rk-skyline {
+    height: 22vh;
   }
 }

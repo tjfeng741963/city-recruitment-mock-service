@@ -283,6 +283,30 @@
   animation: rk-dialog-in var(--rk-dur-3) var(--rk-ease);
 }
 
+/* ---------- Pointer spotlight on cards (interaction.js sets --rk-px/--rk-py) ---------- */
+:root body :is(.stat-card, .chart-card, .admin-overview-card, .city-card, .strategy-card, .engine-card, .summary-card):hover {
+  background:
+    radial-gradient(280px circle at var(--rk-px, 50%) var(--rk-py, 0%), rgba(255, 255, 255, 0.95), transparent 62%),
+    radial-gradient(420px circle at var(--rk-px, 50%) var(--rk-py, 0%), rgba(49, 134, 255, 0.08), transparent 70%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(255, 255, 255, 0.66));
+}
+
+/* ---------- Hover lift on buttons; press still wins ---------- */
+:root body .el-button:not(.is-text):not(.is-link):not(.is-circle):hover:not(.is-disabled) {
+  transform: translateY(-1px);
+}
+:root body .el-button:not(.is-text):not(.is-link):active:not(.is-disabled) {
+  transform: scale(0.97);
+}
+:root body .sidebar-menu .el-menu-item .el-icon,
+:root body .sidebar-menu .el-sub-menu__title .el-icon:not(.el-sub-menu__icon-arrow) {
+  transition: transform var(--rk-dur-2) var(--rk-ease);
+}
+:root body .sidebar-menu .el-menu-item:hover .el-icon,
+:root body .sidebar-menu .el-sub-menu__title:hover .el-icon:not(.el-sub-menu__icon-arrow) {
+  transform: translateX(2px) scale(1.06);
+}
+
 /* ---------- Respect user motion preferences ---------- */
 @media (prefers-reduced-motion: reduce) {
   :root body *,

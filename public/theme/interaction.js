@@ -38,3 +38,26 @@ document.addEventListener(
   },
   { passive: true, capture: true },
 );
+
+const SPOT_HOSTS = ".stat-card, .chart-card, .admin-overview-card, .city-card, .strategy-card, .engine-card, .summary-card";
+const FINE_POINTER = matchMedia("(hover: hover) and (pointer: fine)");
+let spotFrame = 0;
+let spotEvent = null;
+
+document.addEventListener(
+  "pointermove",
+  (event) => {
+    if (REDUCED.matches || !FINE_POINTER.matches) return;
+    spotEvent = event;
+    if (spotFrame) return;
+    spotFrame = requestAnimationFrame(() => {
+      spotFrame = 0;
+      const target = spotEvent.target instanceof Element ? spotEvent.target.closest(SPOT_HOSTS) : null;
+      if (!target) return;
+      const box = target.getBoundingClientRect();
+      target.style.setProperty("--rk-px", `${spotEvent.clientX - box.left}px`);
+      target.style.setProperty("--rk-py", `${spotEvent.clientY - box.top}px`);
+    });
+  },
+  { passive: true },
+);
