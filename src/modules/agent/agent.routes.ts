@@ -5,6 +5,7 @@ import { canAccessDevice, deviceConstraint, getUserScope } from "../../auth/user
 import { createHash, randomUUID } from "node:crypto";
 import { MessageEventService } from "../messaging/message-events.js";
 import { createMessageChannelProvider } from "../messaging/message-channel-provider.js";
+import { deviceDifyConfig, HttpDifyProvider } from "../dify/dify-provider.js";
 
 export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync) {
   const messageChannel = createMessageChannelProvider(undefined, db);
@@ -30,6 +31,22 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     if (!row || !canAccessDevice(getUserScope(db, request.auth!), String(data.device_code ?? ""))) return reply.code(404).send({ detail: "Device not found" });
     const result = db.prepare("DELETE FROM agent_devices WHERE id=?").run(id);
     return result.changes ? { success: true } : reply.code(404).send({ detail: "Device not found" });
+  });
+  // 本地新增，目标站契约里没有这条（7 轮 parity 快照均未抓到同类端点）——
+  // 纯运维工具：管理员在后台填完某设备自己的 dify_url/dify_key 后，一键验证能否连上，
+  // 不用等真实客户发消息才发现配置错了。调用既有的 DifyProvider.healthCheck()，不新建逻辑。
+  app.post<{ Params: { id: string } }>("/api/v1/agent/devices/:id/test-dify", async (request, reply) => {
+    const id = Number(request.params.id);
+    const row = db.prepare("SELECT data_json FROM agent_devices WHERE id=?").get(id) as { data_json: string } | undefined;
+    const data = row ? JSON.parse(row.data_json || "{}") as Record<string, unknown> : {};
+    if (!row || !canAccessDevice(getUserScope(db, request.auth!), String(data.device_code ?? ""))) return reply.code(404).send({ detail: "Device not found" });
+    const { baseUrl, apiKey } = deviceDifyConfig(data);
+    if (baseUrl.startsWith("mock://")) return reply.code(422).send({ detail: "Device has no dify_url configured" });
+    // 刻意不走 createDifyProvider()：那个工厂按 REA_DIFY_PROVIDER 选对话引擎
+    // (chatflow/mock 模式下 healthCheck 永远返回 healthy:true，不发真实请求)。
+    // 这里的"测试连接"要验证管理员填的地址本身能不能通，必须真打一次 HTTP 请求。
+    const result = await new HttpDifyProvider().healthCheck({ baseUrl, apiKey });
+    return { device_id: id, base_url: baseUrl, healthy: result.healthy, latency_ms: result.latency_ms, error: result.error };
   });
   app.get<{ Querystring: { device_code?: string } }>("/api/v1/agent/conversations", async (request, reply) => { const deviceCode = request.query.device_code ?? ""; if (!canAccessDevice(getUserScope(db, request.auth!), deviceCode)) return reply.code(403).send({ detail: "Device scope required" }); const rows = db.prepare("SELECT * FROM agent_conversations WHERE device_code=? ORDER BY updated_at DESC").all(deviceCode); return { items: rows, total_unread: (rows as Array<Record<string, unknown>>).reduce((sum, row) => sum + Number(row.unread ?? 0), 0) }; });
   app.get<{ Querystring: { device_code?: string; customer_id?: string; after_id?: string } }>("/api/v1/agent/messages", async (request, reply) => { const deviceCode = request.query.device_code ?? ""; if (!canAccessDevice(getUserScope(db, request.auth!), deviceCode)) return reply.code(403).send({ detail: "Device scope required" }); return { items: db.prepare("SELECT * FROM agent_messages WHERE device_code=? AND customer_id=? AND id>? ORDER BY id").all(deviceCode, Number(request.query.customer_id ?? 0), Number(request.query.after_id ?? 0)), takeover: false }; });

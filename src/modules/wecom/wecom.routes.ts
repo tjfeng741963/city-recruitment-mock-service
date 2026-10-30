@@ -4,7 +4,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { MessageEventService } from '../messaging/message-events.js';
 import { MessageAutomationService } from '../messaging/message-automation.js';
 import { createMessageChannelProvider } from '../messaging/message-channel-provider.js';
-import { HttpDifyProvider, MockDifyProvider } from '../dify/dify-provider.js';
+import { createDifyProvider } from '../dify/create-provider.js';
 import { readWeComConfig, wecomConfigurationStatus } from './wecom-config.js';
 import { WeComClient, WeComApiError } from './wecom-client.js';
 import { WeComStore } from './wecom-store.js';
@@ -40,40 +40,8 @@ export function registerWeComRoutes(app: FastifyInstance, db: DatabaseSync): voi
     } catch { return reply.code(403).send({ detail: 'Invalid WeCom callback signature' }); }
   });
 
-  app.post<{ Querystring: Query; Body: unknown }>('/api/v1/channels/wecom-kf/callback', async (request, reply) => {
-    const status = wecomConfigurationStatus();
-    if (!status.enabled || status.missing.length) return reply.code(503).send({ detail: 'WeCom callback is not configured' });
-    const config = readWeComConfig()!;
-    const raw = rawBody(request.body);
-    try {
-      const envelope = parseCallbackXml(raw);
-      const cipher = envelope.Encrypt;
-      if (!cipher) throw new Error('Missing Encrypt');
-      const plain = new WeComCrypto(config.token, config.aesKey, config.corpId).decrypt(
-        cipher, text(request.query.msg_signature), text(request.query.timestamp), text(request.query.nonce),
-      );
-      const event = parseCallbackXml(plain);
-      if (event.ToUserName && event.ToUserName !== config.corpId) throw new Error('Callback enterprise mismatch');
-      if (event.OpenKfId && event.OpenKfId !== config.openKfId) throw new Error('Callback customer service mismatch');
-      const store = new WeComStore(db, config);
-      store.ensureConnection();
-      store.notify(sha256(raw), text(event.Token));
-      return reply.type('text/plain').send('success');
-    } catch { return reply.code(403).send({ detail: 'Invalid WeCom callback signature or payload' }); }
-  });
-
-  app.get('/api/v1/channels/wecom-kf/status', async (request, reply) => {
-    if (request.auth?.role !== 'admin') return reply.code(403).send({ detail: 'Admin required' });
-    const status = wecomConfigurationStatus();
-    if (!status.enabled || status.missing.length) return { enabled: false, missing: status.missing };
-    const config = readWeComConfig()!;
-    const store = new WeComStore(db, config); store.ensureConnection();
-    const connection = store.connection();
-    const { sync_token, ...safeConnection } = connection;
-    void sync_token;
-    return { enabled: true, corp_id: config.corpId, open_kfid: config.openKfId, device_code: config.deviceCode, connection: safeConnection };
-  });
-
+  // syncRunning/runSync/triggerSync 提到回调路由之前声明，因为回调收到通知后要立即
+  // 触发同一个同步函数——不新建一条平行的拉取逻辑，避免两条路径各自维护游标状态。
   let syncRunning: Promise<{ pages: number; received: number; processed: number; cursor: string }> | null = null;
   const runSync = async (limitInput = 1000) => {
     const status = wecomConfigurationStatus();
@@ -101,16 +69,68 @@ export function registerWeComRoutes(app: FastifyInstance, db: DatabaseSync): voi
     const processed = await processInbox(db, config);
     return { pages, received, processed, cursor };
   };
+  // 回调触发用：不阻塞企微的 ack 响应（企微要求回调快速返回 success，否则会重试
+  // 回调本身），所以这里不 await。若已有同步在跑就不重复触发，交给那一次收尾。
+  // syncRunning 本身仍会在失败时 reject——不在这里吞掉，只在这个脱钩引用上单独
+  // 挂一个空 catch 消音"unhandled rejection"，这样谁 await 这同一个 promise
+  // （比如下面 /run 里"加入已有同步"的分支）仍能看到真实的失败结果。
+  const triggerSync = () => {
+    if (syncRunning) return;
+    const promise = runSync(1000);
+    syncRunning = promise;
+    promise.finally(() => { if (syncRunning === promise) syncRunning = null; });
+    promise.catch(() => {});
+  };
+
+  app.post<{ Querystring: Query; Body: unknown }>('/api/v1/channels/wecom-kf/callback', async (request, reply) => {
+    const status = wecomConfigurationStatus();
+    if (!status.enabled || status.missing.length) return reply.code(503).send({ detail: 'WeCom callback is not configured' });
+    const config = readWeComConfig()!;
+    const raw = rawBody(request.body);
+    try {
+      const envelope = parseCallbackXml(raw);
+      const cipher = envelope.Encrypt;
+      if (!cipher) throw new Error('Missing Encrypt');
+      const plain = new WeComCrypto(config.token, config.aesKey, config.corpId).decrypt(
+        cipher, text(request.query.msg_signature), text(request.query.timestamp), text(request.query.nonce),
+      );
+      const event = parseCallbackXml(plain);
+      if (event.ToUserName && event.ToUserName !== config.corpId) throw new Error('Callback enterprise mismatch');
+      if (event.OpenKfId && event.OpenKfId !== config.openKfId) throw new Error('Callback customer service mismatch');
+      const store = new WeComStore(db, config);
+      store.ensureConnection();
+      const isNew = store.notify(sha256(raw), text(event.Token));
+      // 回调本身不带消息正文（企微协议限制），只带"有新消息了"的通知；
+      // 真正拉取内容要靠 kf/sync_msg。这里收到通知后立即触发，不等 15 秒轮询。
+      if (isNew) triggerSync();
+      return reply.type('text/plain').send('success');
+    } catch { return reply.code(403).send({ detail: 'Invalid WeCom callback signature or payload' }); }
+  });
+
+  app.get('/api/v1/channels/wecom-kf/status', async (request, reply) => {
+    if (request.auth?.role !== 'admin') return reply.code(403).send({ detail: 'Admin required' });
+    const status = wecomConfigurationStatus();
+    if (!status.enabled || status.missing.length) return { enabled: false, missing: status.missing };
+    const config = readWeComConfig()!;
+    const store = new WeComStore(db, config); store.ensureConnection();
+    const connection = store.connection();
+    const { sync_token, ...safeConnection } = connection;
+    void sync_token;
+    return { enabled: true, corp_id: config.corpId, open_kfid: config.openKfId, device_code: config.deviceCode, connection: safeConnection };
+  });
 
   app.post<{ Body: { limit?: number } }>('/api/v1/channels/wecom-kf/run', async (request, reply) => {
     if (request.auth?.role !== 'admin') return reply.code(403).send({ detail: 'Admin required' });
     const status = wecomConfigurationStatus();
     if (!status.enabled || status.missing.length) return reply.code(503).send({ detail: 'WeCom is not configured', missing: status.missing });
-    if (syncRunning) return reply.code(409).send({ detail: 'WeCom sync is already running' });
-    syncRunning = runSync(request.body?.limit);
-    try { return await syncRunning; }
+    // 若回调已经抢先触发了同步（见上面的 triggerSync），不要另开一轮——
+    // 加入那一轮等它的结果，避免同一批消息被两条并发路径各处理一半。
+    const inFlight = syncRunning;
+    const promise = inFlight ?? runSync(request.body?.limit);
+    if (!inFlight) syncRunning = promise;
+    try { return await promise; }
     catch (error) { return reply.code(502).send({ detail: error instanceof Error ? error.message : 'WeCom sync failed' }); }
-    finally { syncRunning = null; }
+    finally { if (syncRunning === promise) syncRunning = null; }
   });
 
   if (process.env.REA_WECOM_WORKER_ENABLED === 'true') {
@@ -126,7 +146,10 @@ export function registerWeComRoutes(app: FastifyInstance, db: DatabaseSync): voi
 
 async function processInbox(db: DatabaseSync, config: ReturnType<typeof readWeComConfig> & object): Promise<number> {
   const events = new MessageEventService(db, { webhookSecret: process.env.REA_WEBHOOK_SECRET ?? 'local-webhook-secret' });
-  const dify = process.env.REA_DIFY_PROVIDER === 'http' ? new HttpDifyProvider() : new MockDifyProvider();
+  // 与 activation.jobs.ts / message-automation.ts 用同一套工厂，不再自己二选一。
+  // MessageAutomationService.handleInbound 内部已经用 deviceDifyConfig(deviceData) 读
+  // 该设备自己配置的 dify_url/dify_key，所以企微这条线换成这个工厂后就自动吃到设备级配置。
+  const dify = createDifyProvider();
   const channel = createMessageChannelProvider(undefined, db);
   const automation = new MessageAutomationService(db, events, dify, channel);
   const rows = db.prepare("SELECT msgid,customer_id,payload_json FROM wecom_inbox WHERE status='queued' AND next_attempt_at<=? ORDER BY created_at LIMIT 50").all(Date.now()) as Array<{ msgid: string; customer_id: number; payload_json: string }>;
