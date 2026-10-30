@@ -1,0 +1,92 @@
+name: test-and-deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.ref) || 'deploy-production' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.21.1
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      - name: Install backend deps
+        run: npm ci
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+
+      - name: Typecheck backend
+        run: npx tsc --noEmit
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Run tests
+        run: npx vitest run --testTimeout=20000
+
+  deploy:
+    needs: test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Pinned host key; update if the server is rebuilt.
+          echo "$SSH_HOST ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPy3qq+xavuOjfLcMRmtHf28ydRtIxOAnBnijIwpRQ3h" > ~/.ssh/known_hosts
+
+      - name: Deploy
+        env:
+          SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes "$SSH_USER@$SSH_HOST" \
+            sh -s -- "$GITHUB_SHA" <<'REMOTE'
+          set -eu
+          revision=$1
+          case "$revision" in ''|*[!0-9a-f]*) exit 2;; esac
+          cd /srv/apps/city-recruitment-mock-service/source
+          git fetch origin main
+          git checkout --detach "$revision"
+          stamp=$(date +%Y%m%d-%H%M%S)
+          cp -p .env.production ".env.production.pre-$revision-$stamp"
+          docker exec city-recruitment-app node --input-type=module -e 'import {DatabaseSync,backup} from "node:sqlite"; const db=new DatabaseSync("/data/app.sqlite",{readOnly:true}); await backup(db,process.argv[1]); db.close();' "/data/app.sqlite.pre-$revision-$stamp.bak"
+          docker compose -f docker-compose.production.yml build
+          docker compose -f docker-compose.production.yml up -d --no-build
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:4222/login; then
+              git log -1 --oneline
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "health check failed: /login did not respond within 60s" >&2
+          docker compose -f docker-compose.production.yml logs --tail 80 app >&2
+          exit 1
+          REMOTE
