@@ -121,6 +121,31 @@ describe('WeCom customer service end to end through official-shaped HTTP APIs', 
     expect(sent).toHaveLength(1);
   });
 
+  it('holds customer messages instead of sending Mock text when Dify is not switched to http', async () => {
+    delete process.env.REA_DIFY_PROVIDER;
+    pages.push({ errcode: 0, next_cursor: 'one', has_more: 0, msg_list: [customer()] });
+    await notify(); await run();
+    expect(difyCalls).toBe(0); expect(sent).toHaveLength(0);
+    expect(app.db.prepare('SELECT status,last_error FROM wecom_inbox').get()).toMatchObject({ status: 'queued', last_error: expect.stringContaining('REA_DIFY_PROVIDER') });
+    const status = (await app.inject({ url: '/api/v1/channels/wecom-kf/status', headers: admin })).json();
+    expect(status).toMatchObject({ dify_provider: 'mock', auto_reply_ready: false, auto_reply_blocked_reason: expect.stringContaining('Mock') });
+
+    // 运维补上配置后，压着的那条消息在下一次同步里正常回复，不用客户重发
+    process.env.REA_DIFY_PROVIDER = 'http';
+    app.db.prepare('UPDATE wecom_inbox SET next_attempt_at=0').run();
+    await run();
+    expect(difyCalls).toBe(1); expect(sent).toHaveLength(1);
+    expect((await app.inject({ url: '/api/v1/channels/wecom-kf/status', headers: admin })).json()).toMatchObject({ dify_provider: 'http', auto_reply_ready: true, auto_reply_blocked_reason: null });
+  });
+
+  it('holds customer messages when neither the device nor the server has a Dify address', async () => {
+    delete process.env.REA_DIFY_BASE_URL;
+    pages.push({ errcode: 0, next_cursor: 'one', has_more: 0, msg_list: [customer()] });
+    await notify(); await run();
+    expect(difyCalls).toBe(0); expect(sent).toHaveLength(0);
+    expect(app.db.prepare('SELECT status,last_error FROM wecom_inbox').get()).toMatchObject({ status: 'queued', last_error: expect.stringContaining('Dify 地址') });
+  });
+
   it('blocks the sixth reply in one customer message window', async () => {
     pages.push({ errcode: 0, next_cursor: 'one', has_more: 0, msg_list: [customer()] }); await notify(); await run();
     const contact = app.db.prepare('SELECT customer_id,last_customer_msgid FROM wecom_contacts').get() as { customer_id: number; last_customer_msgid: string };

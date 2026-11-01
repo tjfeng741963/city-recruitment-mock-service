@@ -4,7 +4,8 @@ import type { DatabaseSync } from 'node:sqlite';
 import { MessageEventService } from '../messaging/message-events.js';
 import { MessageAutomationService } from '../messaging/message-automation.js';
 import { createMessageChannelProvider } from '../messaging/message-channel-provider.js';
-import { createDifyProvider } from '../dify/create-provider.js';
+import { createDifyProvider, difyProviderMode } from '../dify/create-provider.js';
+import { deviceDifyConfig } from '../dify/dify-provider.js';
 import { readWeComConfig, wecomConfigurationStatus } from './wecom-config.js';
 import { WeComClient, WeComApiError } from './wecom-client.js';
 import { WeComStore } from './wecom-store.js';
@@ -116,7 +117,11 @@ export function registerWeComRoutes(app: FastifyInstance, db: DatabaseSync): voi
     const connection = store.connection();
     const { sync_token, ...safeConnection } = connection;
     void sync_token;
-    return { enabled: true, corp_id: config.corpId, open_kfid: config.openKfId, device_code: config.deviceCode, connection: safeConnection };
+    const blocked = replyBlockReason(db, config.deviceCode);
+    return {
+      enabled: true, corp_id: config.corpId, open_kfid: config.openKfId, device_code: config.deviceCode, connection: safeConnection,
+      dify_provider: difyProviderMode(), auto_reply_ready: blocked === null, auto_reply_blocked_reason: blocked,
+    };
   });
 
   app.post<{ Body: { limit?: number } }>('/api/v1/channels/wecom-kf/run', async (request, reply) => {
@@ -144,6 +149,21 @@ export function registerWeComRoutes(app: FastifyInstance, db: DatabaseSync): voi
   }
 }
 
+/** 返回不能自动回复的原因；能回复时返回 null。/status 和 processInbox 共用这一处判断。 */
+function replyBlockReason(db: DatabaseSync, deviceCode: string): string | null {
+  const mode = difyProviderMode();
+  if (mode === 'mock') return 'REA_DIFY_PROVIDER 未设为 http 或 chatflow，当前是 Mock，不会给企微客户发回复';
+  const device = db.prepare("SELECT data_json FROM agent_devices WHERE json_extract(data_json,'$.device_code')=? AND status='enabled' LIMIT 1")
+    .get(deviceCode) as { data_json: string } | undefined;
+  if (!device) return `没有启用状态、设备编码为 ${deviceCode} 的设备`;
+  if (mode === 'chatflow') return null;
+  let data: Record<string, unknown>;
+  try { data = JSON.parse(device.data_json || '{}') as Record<string, unknown>; }
+  catch { return `设备 ${deviceCode} 的配置不是合法 JSON`; }
+  if (deviceDifyConfig(data).baseUrl.startsWith('mock://')) return `设备 ${deviceCode} 没有配置 Dify 地址，服务器也没有设 REA_DIFY_BASE_URL`;
+  return null;
+}
+
 async function processInbox(db: DatabaseSync, config: ReturnType<typeof readWeComConfig> & object): Promise<number> {
   const events = new MessageEventService(db, { webhookSecret: process.env.REA_WEBHOOK_SECRET ?? 'local-webhook-secret' });
   // 与 activation.jobs.ts / message-automation.ts 用同一套工厂，不再自己二选一。
@@ -153,6 +173,16 @@ async function processInbox(db: DatabaseSync, config: ReturnType<typeof readWeCo
   const channel = createMessageChannelProvider(undefined, db);
   const automation = new MessageAutomationService(db, events, dify, channel);
   const rows = db.prepare("SELECT msgid,customer_id,payload_json FROM wecom_inbox WHERE status='queued' AND next_attempt_at<=? ORDER BY created_at LIMIT 50").all(Date.now()) as Array<{ msgid: string; customer_id: number; payload_json: string }>;
+  // 企微面对的是真实客户。Dify 没真正接上时宁可不回，也不能把 Mock 文本发出去。
+  // 消息留在 queued，配好后下一次同步会自动补回。
+  const blocked = rows.length ? replyBlockReason(db, config.deviceCode) : null;
+  if (blocked) {
+    for (const row of rows) {
+      db.prepare("UPDATE wecom_inbox SET last_error=?,next_attempt_at=? WHERE msgid=? AND open_kfid=? AND corp_id=? AND status='queued'")
+        .run(blocked, Date.now() + 60_000, row.msgid, config.openKfId, config.corpId);
+    }
+    return 0;
+  }
   let processed = 0;
   for (const row of rows) {
     const payload = JSON.parse(row.payload_json) as { text?: { content?: string } };

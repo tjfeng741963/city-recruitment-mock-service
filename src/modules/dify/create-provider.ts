@@ -9,6 +9,14 @@
 import { ChatflowDifyProvider } from "./chatflow-engine.js";
 import { HttpDifyProvider, MockDifyProvider, type DifyProvider } from "./dify-provider.js";
 
+export type DifyProviderMode = "chatflow" | "http" | "mock";
+
+/** 与 createDifyProvider 同一套取值规则，供需要知道“当前是不是 Mock”的调用方使用。 */
+export function difyProviderMode(): DifyProviderMode {
+  const value = process.env.REA_DIFY_PROVIDER;
+  return value === "chatflow" || value === "http" ? value : "mock";
+}
+
 export function createDifyProvider(): DifyProvider {
   switch (process.env.REA_DIFY_PROVIDER) {
     case "chatflow":
