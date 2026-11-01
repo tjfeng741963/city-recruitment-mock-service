@@ -51,6 +51,8 @@ describe("local static shell (default)", () => {
     expect(response.body).toContain("/theme/theme.css");
     expect(response.body).toContain("/theme/motion.css");
     expect(response.body).toContain("/theme/glass.css");
+    expect(response.body).toContain("/theme/sidebar.css");
+    expect(response.body).toContain("/theme/sidebar.js");
     expect(response.body).toContain("/theme/interaction.js");
   });
 
@@ -58,6 +60,8 @@ describe("local static shell (default)", () => {
     ["/theme/theme.css", "text/css"],
     ["/theme/motion.css", "text/css"],
     ["/theme/glass.css", "text/css"],
+    ["/theme/sidebar.css", "text/css"],
+    ["/theme/sidebar.js", "javascript"],
     ["/theme/login-motion.js", "javascript"],
     ["/theme/interaction.js", "javascript"],
     ["/theme/fonts/google-sans-flex-latin-wght-normal.woff2", "font/woff2"],
