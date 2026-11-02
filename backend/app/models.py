@@ -121,6 +121,9 @@ class Conversation(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     channel_account_id: Mapped[int] = mapped_column(ForeignKey("channel_accounts.id"))
     customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"))
+    # 通道侧的会话标识（企微：S:xxx_yyy 单聊 / R:xxx 群聊），用于本地 agent 回执
+    external_id: Mapped[str] = mapped_column(String(128), default="", index=True)
+    kind: Mapped[str] = mapped_column(String(16), default="single")  # single / group / system
     assigned_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     state: Mapped[str] = mapped_column(String(16), default="active")
     takeover: Mapped[bool] = mapped_column(Boolean, default=False)

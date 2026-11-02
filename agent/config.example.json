@@ -1,0 +1,9 @@
+{
+  "server": "http://127.0.0.1:8090",
+  "device_token": "在这里填服务端返回的 device_token",
+  "tool_path": "C:/path/to/wecomcracker.py",
+  "snapshot_dir": "",
+  "state_file": "",
+  "interval_seconds": 60,
+  "dry_run": false
+}

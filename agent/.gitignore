@@ -1,0 +1,16 @@
+# 本地运行时产物，不入库
+.snapshot/
+_decrypted/
+.state.json
+config.json
+
+# 运行数据
+reply_log.db
+*.db
+*.db-wal
+*.db-shm
+
+# Python
+.venv/
+__pycache__/
+*.pyc
