@@ -1,8 +1,10 @@
 name: test-and-deploy
 
 on:
+  # Any branch push runs the tests so feature branches get CI feedback.
+  # Deployment stays main-only through the `deploy` job condition below.
   push:
-    branches: [main]
+    branches: ['**']
   pull_request:
     branches: [main]
   workflow_dispatch:
