@@ -391,3 +391,116 @@
     background: #fff !important;
   }
 }
+
+/* ---------- Refine: fold the filter bar into the table card ----------
+ * The legacy markup renders `.filter-bar` and `.table-wrapper` as two sibling cards,
+ * so one table reads as two stacked plates with a 16px seam. When a filter bar sits
+ * directly above a table, they share one outline: top radius on the toolbar, bottom
+ * radius on the table, a hairline where they meet, and the shadow kept on the table. */
+:root body .main-scroll .filter-bar:has(+ .table-wrapper) {
+  margin-bottom: 0;
+  padding: 6px 18px;
+  border-bottom-color: transparent;
+  border-radius: var(--gl-r-card) var(--gl-r-card) 0 0;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.74));
+  box-shadow: none;
+}
+:root body .main-scroll .filter-bar:has(+ .table-wrapper) + .table-wrapper {
+  border-top: 1px solid var(--gl-hairline);
+  border-radius: 0 0 var(--gl-r-card) var(--gl-r-card);
+  box-shadow: var(--gl-shadow);
+  overflow: hidden;
+}
+/* Dropdowns/date pickers opened from the toolbar must not be clipped by the merged card. */
+:root body .main-scroll .filter-bar:has(+ .table-wrapper) .el-select,
+:root body .main-scroll .filter-bar:has(+ .table-wrapper) .el-date-editor {
+  position: relative;
+  z-index: 2;
+}
+
+/* ---------- Refine: one or two metrics read as a strip, not as empty cards ----------
+ * A lone 140x96 tile holding "8" leaves ~900px of the row blank. With <=2 metrics the
+ * row turns into compact pills; from 3 up the card layout carries real information. */
+:root body .stats-row:has(> .stat-card:only-child),
+:root body .stats-row:has(> .stat-card:nth-child(2):last-child) {
+  gap: 10px;
+  margin-bottom: 16px;
+}
+:root body .stats-row > .stat-card:only-child,
+:root body .stats-row:has(> .stat-card:nth-child(2):last-child) > .stat-card {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding: 7px 18px;
+  border-radius: 999px;
+  box-shadow: var(--gl-shine), 0 1px 2px rgba(20, 40, 90, 0.04);
+  text-align: left;
+}
+:root body .stats-row > .stat-card:only-child .stat-value,
+:root body .stats-row:has(> .stat-card:nth-child(2):last-child) > .stat-card .stat-value {
+  font-size: 21px;
+  font-weight: 700;
+}
+:root body .stats-row > .stat-card:only-child .stat-label,
+:root body .stats-row:has(> .stat-card:nth-child(2):last-child) > .stat-card .stat-label {
+  margin-top: 0;
+  font-size: 13px;
+}
+:root body .stats-row > .stat-card:only-child:hover,
+:root body .stats-row:has(> .stat-card:nth-child(2):last-child) > .stat-card:hover {
+  transform: none;
+}
+
+/* ---------- Refine: row actions become text buttons ----------
+ * Two filled 64x32 buttons per row x 8 rows = 16 saturated blocks competing with the
+ * data. Secondary actions drop to text; the filled accent stays on the page-level CTA. */
+:root body .el-table__body .el-table__cell .el-button:not(.is-circle) {
+  --el-button-bg-color: transparent;
+  --el-button-border-color: transparent;
+  --el-button-hover-bg-color: rgba(11, 87, 208, 0.08);
+  --el-button-hover-border-color: transparent;
+  --el-button-active-bg-color: rgba(11, 87, 208, 0.14);
+  --el-button-active-border-color: transparent;
+  --el-button-text-color: var(--rk-accent);
+  --el-button-hover-text-color: var(--rk-accent-deep);
+  --el-button-active-text-color: var(--rk-accent-deep);
+  height: 28px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0;
+  transform: none !important;
+}
+:root body .el-table__body .el-table__cell .el-button--primary {
+  color: var(--rk-accent);
+}
+:root body .el-table__body .el-table__cell .el-button:not(.is-circle):hover:not(.is-disabled) {
+  background: rgba(11, 87, 208, 0.08) !important;
+  background-image: none !important;
+  box-shadow: none !important;
+}
+:root body .el-table__body .el-table__cell .el-button--danger {
+  --el-button-text-color: var(--rk-down);
+  color: var(--rk-down);
+}
+:root body .el-table__body .el-table__cell .el-button--danger:hover:not(.is-disabled) {
+  background: var(--rk-err-soft);
+  color: #8c1d18;
+}
+/* Keep the destructive action visible but not shouting. */
+:root body .el-table__body .el-table__cell .el-button + .el-button {
+  margin-left: 2px;
+}
+
+/* ---------- Refine: settings column sits centred ---------- */
+:root body .main-scroll .settings-page {
+  max-width: 860px;
+  margin-inline: auto;
+}
