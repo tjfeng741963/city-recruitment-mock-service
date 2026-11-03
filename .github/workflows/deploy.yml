@@ -44,13 +44,18 @@ jobs:
         working-directory: frontend
         run: npm run build
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Install Python and dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y python3.11 python3.11-venv python3-pip
+          # ubuntu-latest 已切到 24.04 (noble)，apt 源里没有 python3.11，
+          # 只能用 setup-python 装。项目 package = false，装依赖不装自身。
           cd backend
-          python3.11 -m pip install --upgrade pip uv
-          python3.11 -m uv pip install --system -e .[dev]
+          python -m pip install --upgrade pip uv
+          uv pip install --system -r pyproject.toml pytest pytest-asyncio
 
       - name: Run Node tests
         run: npx vitest run --testTimeout=20000
