@@ -152,9 +152,11 @@ class KbEntry(Base):
             "wage_unit IS NULL OR wage_unit IN ('hour', 'day', 'month')",
             name="ck_kb_entry_wage_unit",
         ),
+        # 覆盖检索的三种入口：租户+状态（全表扫的兜底）、城市、年龄区间。
+        # 这三个索引对应 kb_search 的第 1 层条件，缺任何一个都会退化成全表扫描。
         Index("ix_kb_entry_tenant_status", "tenant_id", "status"),
-        Index("ix_kb_entry_city", "tenant_id", "city"),
-        Index("ix_kb_entry_age", "tenant_id", "age_min", "age_max"),
+        Index("ix_kb_entry_tenant_city", "tenant_id", "city"),
+        Index("ix_kb_entry_tenant_age", "tenant_id", "age_min", "age_max"),
     )
 
 
