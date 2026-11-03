@@ -1,0 +1,17 @@
+{
+  "measured_at": "2026-11-03",
+  "environment": "production (city-recruitment-postgres, 534 entries)",
+  "tokenizer": "bigram",
+  "threshold": 0.7,
+  "result": { "total": 50, "hits": 39, "recall": 0.78, "passes": true },
+  "recommendation": "前两层已达标，暂不建向量层",
+  "baseline_before_fix": { "recall": 0.36, "note": "整句当单词 LIKE，几乎全不命中" },
+  "known_misses": [
+    "有叉车证能安排吗（叉车类条目未被城市过滤保留）",
+    "保安还要不要人（保安分类条目 texts 较短）",
+    "东莞电子厂多少钱一个月（job 的 city 字段为空，仅 52/218 有值）",
+    "有没有长夜的活（'长夜'与库中'夜班'表述不一致）",
+    "夫妻两个能安排一起吗（无对应条目）"
+  ],
+  "conclusion": "78% > 70%。不建 pgvector。后续若问法多样度上升导致跌破 70%，再启用向量层；接口已按三层设计预留。"
+}
