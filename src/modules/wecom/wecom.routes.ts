@@ -105,7 +105,13 @@ export function registerWeComRoutes(app: FastifyInstance, db: DatabaseSync): voi
       // 真正拉取内容要靠 kf/sync_msg。这里收到通知后立即触发，不等 15 秒轮询。
       if (isNew) triggerSync();
       return reply.type('text/plain').send('success');
-    } catch { return reply.code(403).send({ detail: 'Invalid WeCom callback signature or payload' }); }
+    } catch (error) {
+      // 不要只回 403：验签、解密、入库任何一步失败都会走到这里，
+      // 不留日志的话排查只能靠猜（曾经因为一条 INSERT 少了列名，
+      // 表面症状一直是"验签失败"）。
+      request.log.warn({ err: error }, 'wecom callback rejected');
+      return reply.code(403).send({ detail: 'Invalid WeCom callback signature or payload' });
+    }
   });
 
   app.get('/api/v1/channels/wecom-kf/status', async (request, reply) => {
