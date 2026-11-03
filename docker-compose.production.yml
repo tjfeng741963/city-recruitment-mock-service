@@ -51,8 +51,8 @@ services:
     environment:
       APP_HOST: 0.0.0.0
       APP_PORT: 8090
-    ports:
-      - "127.0.0.1:8090:8090"
+    # 不映射宿主端口：API 只被同一 compose 网络内的服务调用。
+    # 映射会让重部署时撞上 "address already in use"，而外部并不需要直连它。
     networks:
       - default
       - postgres

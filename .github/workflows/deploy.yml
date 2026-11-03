@@ -108,14 +108,16 @@ jobs:
             fi
             sleep 2
           done
-          # Python API starts slower (create_all + seed); give it its own window
+          # Python API 不映射宿主端口，健康检查读容器自身的 health 状态。
+          # 起得比 Node 慢（建表 + 种子），给它独立的 90s 窗口。
           for i in $(seq 1 45); do
-            if curl -fsS -o /dev/null http://127.0.0.1:8090/healthz; then
+            status=$(docker inspect -f '{{.State.Health.Status}}' city-recruitment-api 2>/dev/null || echo missing)
+            if [ "$status" = "healthy" ]; then
               git log -1 --oneline
               exit 0
             fi
             if [ "$i" -eq 45 ]; then
-              echo "health check failed: /healthz did not respond within 90s" >&2
+              echo "health check failed: api not healthy within 90s (status=$status)" >&2
               docker compose -f docker-compose.production.yml logs --tail 80 api >&2
               exit 1
             fi
