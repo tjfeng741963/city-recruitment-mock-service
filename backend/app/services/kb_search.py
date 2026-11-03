@@ -19,7 +19,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, case, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models_kb import DEFAULT_TENANT_ID, KbEntry
@@ -153,7 +153,17 @@ async def search(
 
     # 只有 city / age 这类确定性条件才走第 1 层；纯文本查询直接进第 2 层
     if query.city or age is not None:
-        stmt = select(KbEntry).where(*sql_filters).limit(query.limit)
+        # 岗位优先于话术：客户问"广州 52 岁能去吗"，先要知道有哪个厂能接，
+        # 话术是辅助。不排序的话按主键截断，话术会先占满 limit（实测踩到过）。
+        stmt = (
+            select(KbEntry)
+            .where(*sql_filters)
+            .order_by(
+                case((KbEntry.kind == "job", 0), else_=1),
+                KbEntry.id,
+            )
+            .limit(query.limit)
+        )
         rows = (await session.execute(stmt)).scalars().all()
         for row in rows:
             if row.id not in seen_ids:

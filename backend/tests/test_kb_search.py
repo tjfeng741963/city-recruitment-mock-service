@@ -141,6 +141,20 @@ class TestActiveFiltering:
         assert "已停用岗位" not in {h.entry.title for h in result.hits}
 
 
+class TestJobPriority:
+    async def test_jobs_rank_before_scripts(self, seeded_kb: None) -> None:
+        """实测踩到过：广州的话术条目主键更小，会先占满 limit，岗位一条都出不来。
+
+        客户问"广州 52 岁能去吗"，先要告诉他哪个厂能接，话术是辅助。
+        """
+        async with SessionLocal() as session:
+            result = await search(
+                session, SearchQuery(city="广州", age=52, limit=1)
+            )
+        assert len(result.hits) == 1
+        assert result.hits[0].entry.kind == "job"
+
+
 class TestFulltextTier:
     async def test_match_by_factory_name(self, seeded_kb: None) -> None:
         async with SessionLocal() as session:
