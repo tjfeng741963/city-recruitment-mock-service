@@ -38,7 +38,8 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import SessionLocal, init_db
-from ..models_kb import DEFAULT_TENANT_ID, KbCategory, KbEntry, KbFragment
+from ..models_kb import DEFAULT_TENANT_ID, KbAsset, KbCategory, KbEntry, KbFragment
+from .kb_assets import AssetStore, LocalAssetStore, build_filename_index, extract_images
 from .kb_extract import extract_job_fields, has_relative_date
 
 
@@ -222,8 +223,12 @@ async def import_ebf(
     *,
     base_day: date | None = None,
     truncate: bool = False,
+    asset_store: AssetStore | None = None,
 ) -> ImportStats:
-    """执行导入。返回质量统计。"""
+    """执行导入。返回质量统计。
+
+    `asset_store` 为空时跳过图片抽取——测试里不需要 157 MB 的落盘。
+    """
     stats = ImportStats()
     con = _open_source(source)
     try:
@@ -245,7 +250,32 @@ async def import_ebf(
             await session.execute(
                 delete(KbCategory).where(KbCategory.tenant_id == DEFAULT_TENANT_ID)
             )
+            await session.execute(delete(KbAsset).where(KbAsset.tenant_id == DEFAULT_TENANT_ID))
             await session.commit()
+
+        # ── 图片：解码落盘，并在库里建占位行，拿到 asset_id ──
+        image_index: dict[str, object] = {}
+        asset_ids: dict[str, int] = {}
+        if asset_store is not None:
+            images, image_errors = extract_images(source, asset_store)
+            stats.errors.extend(image_errors)
+            image_index = build_filename_index(images)  # type: ignore[assignment]
+            next_asset_id = 1
+            for img in images:
+                if img.storage_key in asset_ids:
+                    continue
+                session.add(
+                    KbAsset(
+                        id=next_asset_id,
+                        tenant_id=DEFAULT_TENANT_ID,
+                        storage_key=img.storage_key,
+                        mime=img.mime,
+                        bytes=img.bytes,
+                    )
+                )
+                asset_ids[img.storage_key] = next_asset_id
+                next_asset_id += 1
+            await session.flush()
 
         sign_to_category: dict[str, int] = {}
 
@@ -350,14 +380,20 @@ async def import_ebf(
             await session.flush()
 
             for position, (frag_kind, content) in enumerate(fragments):
+                asset_id = None
+                if frag_kind == "image" and image_index:
+                    asset = image_index.get(content)
+                    if asset is not None:
+                        asset_id = asset_ids.get(asset.storage_key)
                 session.add(
                     KbFragment(
                         id=next_fragment_id,
                         entry_id=entry.id,
                         position=position,
                         kind=frag_kind,
-                        # 图片暂不下 base64，只占位：对象存储（COS）还没接
+                        # 图片不进正文：base64 不落库，靠 asset_id 指回存储
                         content=content if frag_kind == "text" else None,
+                        asset_id=asset_id,
                     )
                 )
                 next_fragment_id += 1
@@ -393,14 +429,24 @@ async def _main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--base-date", default=None, help="相对日期的基准日（YYYY-MM-DD），默认今天"
     )
+    parser.add_argument(
+        "--assets-dir",
+        default="./data/kb-assets",
+        help="图片落盘根目录；传空字符串则跳过图片抽取",
+    )
     args = parser.parse_args(argv)
 
     base_day = date.fromisoformat(args.base_date) if args.base_date else None
+    store = LocalAssetStore(Path(args.assets_dir)) if args.assets_dir else None
 
     await init_db()
     async with SessionLocal() as session:
         stats = await import_ebf(
-            session, args.source, base_day=base_day, truncate=args.truncate
+            session,
+            args.source,
+            base_day=base_day,
+            truncate=args.truncate,
+            asset_store=store,
         )
 
     payload = stats.as_dict()
