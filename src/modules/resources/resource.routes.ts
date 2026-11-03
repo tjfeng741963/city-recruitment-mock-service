@@ -9,6 +9,7 @@ type Resource = { table: string; name: string; fields: string[]; scope: "city" |
 const resources: Resource[] = [
   { table: "knowledge_items", name: "knowledge", fields: ["title", "content", "status"], scope: "recruiter" },
   { table: "unknown_questions", name: "unknown-questions", fields: ["question", "status"], scope: "recruiter" },
+  // kind / date 都是 NOT NULL 但前端不传，由 normalizeHolidayBody 兜底。
   { table: "holiday_schedules", name: "holiday-schedules", fields: ["city_id", "date", "kind"], scope: "city" },
   { table: "recruiters", name: "recruiters", fields: ["username", "city_id", "status"], scope: "recruiter" },
   { table: "agent_rules", name: "agent/rules", fields: ["rule_name", "status"], scope: "recruiter" },
@@ -82,6 +83,46 @@ const FIELD_ALIASES: Record<string, Record<string, string[]>> = {
   knowledge: { title: ["question"], content: ["answer"] },
   recruiters: { username: ["recruiter_id", "name"] },
 };
+
+/**
+ * 节假日配置：前端发的是业务字段，表里是 city_id + date。
+ * 不转换的话 date 是 NOT NULL 直接 500（实测点"新增"必崩）。
+ */
+function normalizeHolidayBody(
+  db: DatabaseSync,
+  body: Record<string, unknown>,
+): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...body };
+
+  // city_name -> city_id
+  if (next.city_id === undefined || next.city_id === null) {
+    const name = typeof next.city_name === "string" ? next.city_name.trim() : "";
+    if (name) {
+      const city = db.prepare("SELECT id FROM cities WHERE city_name=?").get(name) as
+        | { id: number }
+        | undefined;
+      if (city) next.city_id = city.id;
+    }
+  }
+
+  // start_date -> date（date 列 NOT NULL，缺失必定 500）
+  if (next.date === undefined || next.date === null || next.date === "") {
+    const start = typeof next.start_date === "string" ? next.start_date.trim() : "";
+    if (start) next.date = start.slice(0, 10);
+  }
+
+  // is_active 是前端展示字段，落到 status
+  if (next.status === undefined && typeof next.is_active === "boolean") {
+    next.status = next.is_active ? "enabled" : "disabled";
+  }
+
+  // kind 是 NOT NULL 但前端没有这个概念，按节假日名推断一个合理值
+  if (next.kind === undefined || next.kind === null || next.kind === "") {
+    const name = typeof next.holiday_name === "string" ? next.holiday_name : "";
+    next.kind = /补班|调休/.test(name) ? "workday" : "holiday";
+  }
+  return next;
+}
 
 function resolveField(resourceName: string, body: Record<string, unknown>, column: string): unknown {
   if (body[column] !== undefined && body[column] !== null) return body[column];
@@ -173,7 +214,13 @@ export async function registerResourceRoutes(app: FastifyInstance, db: DatabaseS
     });
     app.get<{ Params: { id: string } }>(`${base}/:id`, async (request, reply) => { const row = db.prepare(`SELECT * FROM ${resource.table} WHERE id=?`).get(Number(request.params.id)) as Record<string, unknown> | undefined; return row && canAccessResource(resource, row, getUserScope(db, request.auth!)) ? toOutput(row, resource, db) : reply.code(404).send({ detail: "记录不存在" }); });
     app.post<{ Body: Record<string, unknown> }>(base, async (request, reply) => {
-      const body = request.body ?? {};
+      let body = request.body ?? {};
+      if (resource.name === "holiday-schedules") {
+        body = normalizeHolidayBody(db, body);
+        if (!body.date) {
+          return reply.code(422).send({ detail: "start_date 不能为空" });
+        }
+      }
       const scope = getUserScope(db, request.auth!);
       const proposedRow = {
         ...body,
@@ -195,7 +242,10 @@ export async function registerResourceRoutes(app: FastifyInstance, db: DatabaseS
       return toOutput(db.prepare(`SELECT * FROM ${resource.table} WHERE id=?`).get(Number(result.lastInsertRowid)) as Record<string, unknown>, resource, db);
     });
     app.put<{ Params: { id: string }; Body: Record<string, unknown> }>(`${base}/:id`, async (request, reply) => {
-      const body = request.body ?? {};
+      let body = request.body ?? {};
+      if (resource.name === "holiday-schedules") {
+        body = normalizeHolidayBody(db, body);
+      }
       const id = Number(request.params.id);
       const current = db.prepare(`SELECT * FROM ${resource.table} WHERE id=?`).get(id) as Record<string, unknown> | undefined;
       const scope = getUserScope(db, request.auth!);

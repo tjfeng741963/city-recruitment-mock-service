@@ -47,8 +47,26 @@ export async function registerCoreRoutes(app: FastifyInstance, db: DatabaseSync)
   // The target rejects a non-admin delete with 403 before any lookup.
   app.delete<{ Params: { id: string } }>("/api/v1/cities/:id", async (request, reply) => {
     if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "无权删除该城市" });
-    const result = db.prepare("DELETE FROM cities WHERE id=?").run(Number(request.params.id));
-    return result.changes ? { success: true } : reply.code(404).send({ detail: "City not found" });
+    const id = Number(request.params.id);
+    const inUse = (db.prepare("SELECT COUNT(*) c FROM factories WHERE city_id=?").get(id) as { c: number }).c;
+    if (inUse > 0) {
+      return reply.code(409).send({
+        detail: `该城市下还有 ${inUse} 个工厂，请先删除或转移这些工厂`,
+        blocking: { factories: inUse },
+      });
+    }
+    // 外键还可能被岗位/招聘员等表拦住。直接抛会让用户看到 500，
+    // 换成可读的 409——"有关联数据"和"服务器错误"是完全不同的信息。
+    try {
+      const result = db.prepare("DELETE FROM cities WHERE id=?").run(id);
+      return result.changes ? { success: true } : reply.code(404).send({ detail: "City not found" });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("FOREIGN KEY")) {
+        return reply.code(409).send({ detail: "该城市仍被岗位或其他数据引用，无法删除" });
+      }
+      throw error;
+    }
   });
   app.patch<{ Params: { id: string }; Body: { recruitment_status?: string } }>("/api/v1/cities/:id/status", async (request, reply) => { const id = Number(request.params.id); if (denyCityWrite(scopeFor(request.auth!), id, reply)) return reply.sent ? reply : reply.code(404).send({ detail: "城市不存在" }); const result = db.prepare("UPDATE cities SET recruitment_status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(typeof request.body?.recruitment_status === "string" ? request.body.recruitment_status : "enabled", id); return result.changes ? serializeCity(db.prepare("SELECT * FROM cities WHERE id=?").get(id) as Record<string, unknown>) : reply.code(404).send({ detail: "城市不存在" }); });
   // City-factory relations live on factories.city_id. The target 404s with
@@ -78,7 +96,23 @@ export async function registerCoreRoutes(app: FastifyInstance, db: DatabaseSync)
   app.get<{ Params: { id: string } }>("/api/v1/factories/:id", async (request, reply) => { const row = db.prepare("SELECT * FROM factories WHERE id=?").get(Number(request.params.id)) as (Record<string, unknown> & { city_id: number }) | undefined; return row && canAccessCity(scopeFor(request.auth!), Number(row.city_id)) ? serializeFactory(row) : reply.code(404).send({ detail: "工厂不存在" }); });
   app.post<{ Body: Record<string, unknown> }>("/api/v1/factories", async (request, reply) => { const cityId = typeof request.body?.city_id === "number" ? request.body.city_id : null; if (cityId === null || denyCityWrite(scopeFor(request.auth!), cityId, reply)) return reply.sent ? reply : reply.code(422).send({ detail: "city_id is required" }); const row = db.prepare("INSERT INTO factories(factory_name,city_id,data_json) VALUES (?,?,?) RETURNING *").get(String(request.body?.factory_name ?? request.body?.name ?? "本地工厂"), cityId, JSON.stringify(request.body ?? {})) as Record<string, unknown>; return serializeFactory(row); });
   app.put<{ Params: { id: string }; Body: Record<string, unknown> }>("/api/v1/factories/:id", async (request, reply) => { const id = Number(request.params.id); const current = db.prepare("SELECT city_id FROM factories WHERE id=?").get(id) as { city_id: number } | undefined; if (!current || denyCityWrite(scopeFor(request.auth!), Number(current.city_id), reply)) return reply.sent ? reply : reply.code(404).send({ detail: "工厂不存在" }); const cityId = typeof request.body?.city_id === "number" ? request.body.city_id : Number(current.city_id); if (denyCityWrite(scopeFor(request.auth!), cityId, reply)) return reply; const name = request.body?.factory_name ?? request.body?.name; const result = db.prepare("UPDATE factories SET factory_name=COALESCE(?,factory_name),city_id=COALESCE(?,city_id),data_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(typeof name === "string" ? name : null, typeof request.body?.city_id === "number" ? request.body.city_id : null, JSON.stringify(request.body ?? {}), id); return result.changes ? serializeFactory(db.prepare("SELECT * FROM factories WHERE id=?").get(id) as Record<string, unknown>) : reply.code(404).send({ detail: "工厂不存在" }); });
-  app.delete<{ Params: { id: string } }>("/api/v1/factories/:id", async (request, reply) => { const id = Number(request.params.id); const row = db.prepare("SELECT city_id FROM factories WHERE id=?").get(id) as { city_id: number } | undefined; if (!row) return reply.code(404).send({ detail: "工厂不存在" }); if (denyCityWrite(scopeFor(request.auth!), Number(row.city_id), reply)) return reply; db.prepare("DELETE FROM factories WHERE id=?").run(id); return { success: true }; });
+  app.delete<{ Params: { id: string } }>("/api/v1/factories/:id", async (request, reply) => {
+    const id = Number(request.params.id);
+    const row = db.prepare("SELECT city_id FROM factories WHERE id=?").get(id) as { city_id: number } | undefined;
+    if (!row) return reply.code(404).send({ detail: "工厂不存在" });
+    if (denyCityWrite(scopeFor(request.auth!), Number(row.city_id), reply)) return reply;
+    // 岗位/招聘记录引用工厂时外键会拦，给可读的 409 而不是 500
+    try {
+      db.prepare("DELETE FROM factories WHERE id=?").run(id);
+      return { success: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("FOREIGN KEY")) {
+        return reply.code(409).send({ detail: "该工厂下还有岗位或关联数据，无法删除" });
+      }
+      throw error;
+    }
+  });
   app.get<{ Querystring: Record<string, unknown> }>("/api/v1/service-positions", async (request) => {
     const city = request.query.city_name;
     return list(db, "service_positions", request.query, serializeServicePosition, typeof city === "string" ? " WHERE city_id=(SELECT id FROM cities WHERE city_name=?)" : "", typeof city === "string" ? [city] : [], cityConstraint(scopeFor(request.auth!), "city_id"));
