@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     llm_model: str = "doubao-pro-32k"
     llm_timeout: float = 30.0
 
+    # 服务间调用令牌：Node 侧自动回复链路没有用户身份，
+    # 带 X-Service-Token 直连 /api/v1/kb/*。留空表示关闭这条路径。
+    kb_service_token: str = ""
+
     # 后台任务：生产默认都开。测试里 lifespan 不会跑（ASGITransport），不影响用例。
     outbox_worker: bool = True
     outbox_interval: float = 5.0

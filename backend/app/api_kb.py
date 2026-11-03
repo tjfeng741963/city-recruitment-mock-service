@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 
-from .deps import AdminUser, CurrentUser, SessionDep
+from .deps import AdminUser, CurrentUser, ServiceOrUser, SessionDep
 from .models_kb import DEFAULT_TENANT_ID, KbCategory, KbEntry, KbFragment
 from .services.kb_answer import answer as generate_answer
 from .services.kb_search import SearchQuery, extract_age_from_query, search
@@ -140,7 +140,7 @@ class AnswerResponse(BaseModel):
 # ─────────────────────────── 检索 ───────────────────────────
 @router.post("/search", response_model=SearchResponse)
 async def search_entries(
-    payload: SearchRequest, session: SessionDep, user: CurrentUser
+    payload: SearchRequest, session: SessionDep, user: ServiceOrUser
 ) -> SearchResponse:
     """三层漏斗检索。年龄从问法里自动识别，也可显式传入。"""
     del user  # 接口需要登录，但检索本身不按用户过滤
@@ -171,7 +171,7 @@ async def search_entries(
 # ─────────────────────────── 生成回复 ───────────────────────────
 @router.post("/answer", response_model=AnswerResponse)
 async def answer_question(
-    payload: AnswerRequest, session: SessionDep, user: CurrentUser
+    payload: AnswerRequest, session: SessionDep, user: ServiceOrUser
 ) -> AnswerResponse:
     """检索 + 生成 + 校验，给 Node 侧的自动回复链路用。
 

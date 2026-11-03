@@ -63,3 +63,27 @@ async def get_device_by_token(
 
 
 DeviceDep = Annotated[Device, Depends(get_device_by_token)]
+
+
+async def get_service_or_user(
+    session: SessionDep,
+    authorization: Annotated[str | None, Header()] = None,
+    x_service_token: Annotated[str | None, Header()] = None,
+) -> User | None:
+    """服务间调用或用户调用。
+
+    Node 侧的自动回复链路没有用户身份，用 X-Service-Token 直连。
+    只有配置了 APP_KB_SERVICE_TOKEN 且请求头匹配时才放行——
+    未配置时这条路径关闭，避免默认裸奔。
+    """
+    import hmac
+
+    from .settings import settings
+
+    if x_service_token and settings.kb_service_token:
+        if hmac.compare_digest(x_service_token, settings.kb_service_token):
+            return None
+    return await get_current_user(session, authorization)
+
+
+ServiceOrUser = Annotated[User | None, Depends(get_service_or_user)]

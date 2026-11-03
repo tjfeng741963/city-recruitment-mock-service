@@ -132,3 +132,55 @@ class TestTenantBoundary:
         """跨租户访问一律 404，不泄露 ID 是否存在。"""
         resp = await admin_client.get("/api/v1/kb/entries/888888")
         assert resp.status_code == 404
+
+
+class TestServiceToken:
+    """Node 侧自动回复链路没有用户身份，用 X-Service-Token 直连。"""
+
+    async def test_search_with_valid_service_token(
+        self, client: AsyncClient, monkeypatch
+    ) -> None:
+        from app.settings import settings
+
+        monkeypatch.setattr(settings, "kb_service_token", "svc-secret")
+        resp = await client.post(
+            "/api/v1/kb/search",
+            json={"q": "广州"},
+            headers={"X-Service-Token": "svc-secret"},
+        )
+        assert resp.status_code == 200
+
+    async def test_wrong_service_token_rejected(self, client: AsyncClient, monkeypatch) -> None:
+        from app.settings import settings
+
+        monkeypatch.setattr(settings, "kb_service_token", "svc-secret")
+        resp = await client.post(
+            "/api/v1/kb/search",
+            json={"q": "广州"},
+            headers={"X-Service-Token": "wrong"},
+        )
+        assert resp.status_code == 401
+
+    async def test_disabled_when_not_configured(self, client: AsyncClient, monkeypatch) -> None:
+        """服务令牌留空时这条路径必须关闭，不能默认放行。"""
+        from app.settings import settings
+
+        monkeypatch.setattr(settings, "kb_service_token", "")
+        resp = await client.post(
+            "/api/v1/kb/search",
+            json={"q": "广州"},
+            headers={"X-Service-Token": ""},
+        )
+        assert resp.status_code == 401
+
+    async def test_admin_endpoints_still_require_user(self, client: AsyncClient, monkeypatch) -> None:
+        """写操作不接受服务令牌——服务令牌只给检索用。"""
+        from app.settings import settings
+
+        monkeypatch.setattr(settings, "kb_service_token", "svc-secret")
+        resp = await client.post(
+            "/api/v1/kb/entries",
+            json={"kind": "script", "title": "x", "body": "y"},
+            headers={"X-Service-Token": "svc-secret"},
+        )
+        assert resp.status_code == 401
