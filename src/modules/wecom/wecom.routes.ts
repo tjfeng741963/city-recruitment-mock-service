@@ -110,7 +110,7 @@ export function registerWeComRoutes(app: FastifyInstance, db: DatabaseSync): voi
       // 不留日志的话排查只能靠猜（曾经因为一条 INSERT 少了列名，
       // 表面症状一直是"验签失败"）。
       request.log.warn({ err: error }, 'wecom callback rejected');
-      return reply.code(403).send({ detail: 'Invalid WeCom callback signature or payload' });
+      return reply.code(403).send({ detail: "Invalid WeCom callback signature or payload", cause: String((error as Error)?.message ?? error) });
     }
   });
 
