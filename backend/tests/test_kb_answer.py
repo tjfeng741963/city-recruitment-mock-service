@@ -52,7 +52,9 @@ async def one_job(client) -> None:  # noqa: ARG001
                 wage_min=22,
                 wage_max=25,
                 wage_unit="hour",
-                body="18-45岁 22-25元/小时",
+                has_meal=True,
+                has_dorm=True,
+                body="18-45岁 22-25元/小时 包吃住",
                 search_text="广州电子厂 18-45岁 22-25元/小时",
                 status="enabled",
                 valid_until=now + timedelta(days=30),
@@ -136,3 +138,46 @@ class TestPromptSeparation:
             result = await answer(session, "我52了还能去吗", provider, city="广州")
         assert result.source == "no_match"
         assert result.matched_entry_ids == ()
+
+
+class TestNoLLMMode:
+    """不配大模型是正式运行模式：检索照做，回复用模板，不发起任何外部调用。"""
+
+    async def test_provider_none_uses_template(self, one_job: None) -> None:
+        async with SessionLocal() as session:
+            result = await answer(session, "广州电子厂多少一小时", None, city="广州")
+        assert result.source == "template"
+        assert result.matched_entry_ids == (1,)
+        # 不是"降级失败"，而是正常路径
+        assert result.llm_fallback is False
+
+    async def test_template_mentions_real_facts(self, one_job: None) -> None:
+        async with SessionLocal() as session:
+            result = await answer(session, "广州电子厂多少一小时", None, city="广州")
+        assert "广州电子厂" in result.reply
+        assert "22-25" in result.reply
+        assert "18" in result.reply and "45" in result.reply
+        assert "包吃" in result.reply and "包住" in result.reply
+
+    async def test_template_speaks_like_a_person(self, one_job: None) -> None:
+        """不能把数据库字段名或【事实】这类内部标记贴给客户。"""
+        async with SessionLocal() as session:
+            result = await answer(session, "广州电子厂多少一小时", None, city="广州")
+        for forbidden in ("【", "】", "age_min", "wage", "事实", "原文"):
+            assert forbidden not in result.reply
+
+    async def test_over_age_gets_clear_answer(self, one_job: None) -> None:
+        """52 岁问 18-45 的厂：模板要直接说进不去，不能含糊。"""
+        async with SessionLocal() as session:
+            result = await answer(session, "我52了还能去吗", None, city="广州")
+        # 检索层就该排除这个岗位
+        assert result.source == "no_match"
+
+    async def test_template_numbers_all_from_database(self, one_job: None) -> None:
+        """模板回复里的数字必须都能在条目里找到——和 LLM 一样的红线。"""
+        from app.services.kb_reply import extract_numbers
+
+        async with SessionLocal() as session:
+            result = await answer(session, "广州电子厂多少一小时", None, city="广州")
+        allowed = {"18", "45", "22", "25"}
+        assert extract_numbers(result.reply) <= allowed

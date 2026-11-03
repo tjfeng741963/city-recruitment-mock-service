@@ -192,9 +192,16 @@ async def answer_question(
     )
 
 
-def _build_provider() -> OpenAICompatibleProvider:
-    """按环境变量组装 LLM。没配就指向一个必然失败的地址，
-    编排层会自动降级到模板——比抛异常好。"""
+def _build_provider() -> OpenAICompatibleProvider | None:
+    """按环境变量组装 LLM。**没配就返回 None**，编排层直接走模板。
+
+    不要返回一个"必然失败的地址"：那样每条客户消息都要白等一次超时，
+    高峰期会把回复队列堵住。没配就是没配，模板模式是正式运行模式。
+    """
+    if not settings.llm_api_key or settings.llm_api_key == "unset":
+        return None
+    if not settings.llm_base_url or settings.llm_base_url.startswith("http://127.0.0.1:1"):
+        return None
     return OpenAICompatibleProvider(
         base_url=settings.llm_base_url,
         api_key=settings.llm_api_key,
