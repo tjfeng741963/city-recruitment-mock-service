@@ -18,7 +18,10 @@ from sqlalchemy import delete, select
 
 from .deps import AdminUser, CurrentUser, SessionDep
 from .models_kb import DEFAULT_TENANT_ID, KbCategory, KbEntry, KbFragment
+from .services.kb_answer import answer as generate_answer
 from .services.kb_search import SearchQuery, extract_age_from_query, search
+from .services.llm_provider import OpenAICompatibleProvider
+from .settings import settings
 
 router = APIRouter(prefix="/api/v1/kb", tags=["knowledge"])
 
@@ -119,6 +122,21 @@ class SearchResponse(BaseModel):
     detected_age: int | None
 
 
+class AnswerRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=2000)
+    city: str | None = None
+
+
+class AnswerResponse(BaseModel):
+    reply: str
+    source: str
+    matched_entry_ids: list[int]
+    tiers_used: list[str]
+    validation_passed: bool
+    unauthorized_numbers: list[str]
+    llm_fallback: bool
+
+
 # ─────────────────────────── 检索 ───────────────────────────
 @router.post("/search", response_model=SearchResponse)
 async def search_entries(
@@ -147,6 +165,41 @@ async def search_entries(
         ],
         tiers_used=list(result.tiers_used),
         detected_age=age,
+    )
+
+
+# ─────────────────────────── 生成回复 ───────────────────────────
+@router.post("/answer", response_model=AnswerResponse)
+async def answer_question(
+    payload: AnswerRequest, session: SessionDep, user: CurrentUser
+) -> AnswerResponse:
+    """检索 + 生成 + 校验，给 Node 侧的自动回复链路用。
+
+    LLM 未配置时也会正常返回：降级模板照样能回客户，
+    只是 `llm_fallback` 为 true。
+    """
+    del user
+    provider = _build_provider()
+    result = await generate_answer(session, payload.text, provider, city=payload.city)
+    return AnswerResponse(
+        reply=result.reply,
+        source=result.source,
+        matched_entry_ids=list(result.matched_entry_ids),
+        tiers_used=list(result.tiers_used),
+        validation_passed=result.validation_passed,
+        unauthorized_numbers=list(result.unauthorized_numbers),
+        llm_fallback=result.llm_fallback,
+    )
+
+
+def _build_provider() -> OpenAICompatibleProvider:
+    """按环境变量组装 LLM。没配就指向一个必然失败的地址，
+    编排层会自动降级到模板——比抛异常好。"""
+    return OpenAICompatibleProvider(
+        base_url=settings.llm_base_url,
+        api_key=settings.llm_api_key,
+        model=settings.llm_model,
+        timeout=settings.llm_timeout,
     )
 
 

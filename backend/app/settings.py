@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     default_tenant_name: str = "默认租户"
     default_tenant_slug: str = "default"
 
+    # LLM：OpenAI 兼容中转站。换供应商只改这三个值，代码不动。
+    # 没配置时自动降级到模板回复，不会阻塞客户消息。
+    llm_base_url: str = "http://127.0.0.1:1/v1"
+    llm_api_key: str = "unset"
+    llm_model: str = "doubao-pro-32k"
+    llm_timeout: float = 30.0
+
     # 后台任务：生产默认都开。测试里 lifespan 不会跑（ASGITransport），不影响用例。
     outbox_worker: bool = True
     outbox_interval: float = 5.0
