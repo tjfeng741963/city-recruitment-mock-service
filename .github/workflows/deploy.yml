@@ -94,7 +94,13 @@ jobs:
           git checkout --detach "$revision"
           stamp=$(date +%Y%m%d-%H%M%S)
           cp -p .env.production ".env.production.pre-$revision-$stamp"
-          docker exec city-recruitment-app node --input-type=module -e 'import {DatabaseSync,backup} from "node:sqlite"; const db=new DatabaseSync("/data/app.sqlite",{readOnly:true}); await backup(db,process.argv[1]); db.close();' "/data/app.sqlite.pre-$revision-$stamp.bak"
+          # 备份用 VACUUM INTO 并校验表数：之前用 node:sqlite 的 backup() 产出过
+          # 只有文件头、0 页的空壳，而 PRAGMA integrity_check 对空库仍返回 ok，
+          # 部署脚本据此以为备份成功。现在用独立脚本，校验不过直接让部署失败。
+          bak="data/app.sqlite.pre-$revision-$stamp.bak"
+          docker run --rm -v "$PWD/data:/data" -v "$PWD/scripts:/scripts:ro" \
+            node:22.21.1-bookworm-slim \
+            node /scripts/backup-sqlite.mjs /data/app.sqlite "/data/app.sqlite.pre-$revision-$stamp.bak"
           docker compose -f docker-compose.production.yml build
           docker compose -f docker-compose.production.yml up -d --no-build
           for i in $(seq 1 30); do
