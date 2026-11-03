@@ -12,16 +12,72 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .kb_extract import _CITY_HINTS
 from .kb_reply import Facts, build_facts, build_messages, verify_reply
 from .kb_search import SearchQuery, extract_age_from_query, search
 from .llm_provider import ChatMessage, LLMProvider, LLMUnavailable
 
 NO_MATCH_REPLY = "我确认一下，稍后回你哈"
 TEMPLATE_FALLBACK = "我这边查一下，等下给你准信哈"
+CLARIFY_CITY_REPLY = "你在哪个城市呀？我按城市给你找合适的厂。"
+
+# 上面这几个是"没有确定信息"时的问句/兜底，不算答非所问
+
+
+def infer_city(text: str, history: Sequence[str] = ()) -> str | None:
+    """从当前消息或最近几句里找城市。
+
+    客户经常先说"我在广州"，下一句只问"工价多少"。第二句没有城市，
+    不追问就会随便挑一个城市的岗位——答非所问比不回答更糟。
+
+    规则：当前消息优先；没有就往前翻历史，**从最近往最早找**。
+    """
+    for candidate in (text, *reversed(tuple(history))):
+        if not candidate:
+            continue
+        for city in _CITY_HINTS:
+            if city in candidate:
+                return city
+    return None
+
+
+def _already_asked_city(history: Sequence[str]) -> bool:
+    """上一轮已经问过城市了就别再问——连续追问同一件事，客户会觉得是机器人。
+
+    历史上限只看最近两条，够用且不依赖消息角色标记。
+    """
+    recent = tuple(history)[-2:]
+    return any(CLARIFY_CITY_REPLY in turn for turn in recent if turn)
+
+
+# 纯条件类问法：答案高度依赖城市，没城市就答不准
+_CONDITION_WORDS = (
+    "工价", "多少", "工资", "几号发", "多少钱", "包吃", "包住", "宿舍",
+    "年龄", "岁", "加班", "面试", "体检", "班次", "白班", "夜班",
+)
+
+# 用户能自己说清楚要什么：具体厂名、地铁站、公司名
+_SPECIFIC_WORDS = ("厂", "公司", "地铁", "站", "哪个", "哪家")
+
+
+def wants_clarification(text: str, city: str | None) -> bool:
+    """是否需要先反问城市。
+
+    只有"问条件"且"没提具体对象"时才反问。两类不反问：
+    - 已经知道城市（当前句或历史里提到过）
+    - 用户问的是具体厂名/站点，直接查
+    "你好""在吗"这种也不是条件问法，不该反问。
+    """
+    if city or not text:
+        return False
+    if any(token in text for token in _SPECIFIC_WORDS):
+        return False
+    return any(token in text for token in _CONDITION_WORDS)
 
 
 @dataclass(frozen=True)
@@ -43,6 +99,7 @@ async def answer(
     provider: LLMProvider | None,
     *,
     city: str | None = None,
+    history: Sequence[str] = (),
     limit: int = 3,
 ) -> Answer:
     """生成一条回复。任何异常都不外抛，最差也给模板。
@@ -52,17 +109,37 @@ async def answer(
     不发起任何外部调用，也不会有超时等待。
     """
     age = extract_age_from_query(user_text)
+
+    # 城市：显式传入 > 当前消息里提到的 > 最近对话里提到的
+    resolved_city = city or infer_city(user_text, history)
+
+    # 纯条件类问法（问工价/包吃住/年龄）却没给城市：先反问，别乱挑一个城市回答
+    if wants_clarification(user_text, resolved_city) and not _already_asked_city(history):
+        return Answer(
+            reply=CLARIFY_CITY_REPLY,
+            source="clarify",
+            matched_entry_ids=(),
+            tiers_used=(),
+            validation_passed=True,
+            unauthorized_numbers=(),
+            llm_fallback=False,
+        )
+
     result = await search(
         session,
-        SearchQuery(city=city, age=age, text=user_text, limit=limit),
+        SearchQuery(city=resolved_city, age=age, text=user_text, limit=limit),
     )
 
     entry_ids = tuple(h.entry.id for h in result.hits)
     tiers = result.tiers_used
 
     if not result.hits:
+        reply = NO_MATCH_REPLY
+        if resolved_city is None and not wants_clarification(user_text, resolved_city):
+            # 用户问的是具体厂名但没查到，别让他一直猜
+            reply = "这个我这边暂时没查到，你方便说一下是哪个城市、什么厂吗？我帮你确认。"
         return Answer(
-            reply=NO_MATCH_REPLY,
+            reply=reply,
             source="no_match",
             matched_entry_ids=entry_ids,
             tiers_used=tiers,

@@ -125,6 +125,8 @@ class SearchResponse(BaseModel):
 class AnswerRequest(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
     city: str | None = None
+    # 最近几条对话，新的在后。用于识别"上一句说了城市、这一句只问工价"的情况。
+    history: list[str] = Field(default_factory=list, max_length=10)
 
 
 class AnswerResponse(BaseModel):
@@ -180,7 +182,9 @@ async def answer_question(
     """
     del user
     provider = _build_provider()
-    result = await generate_answer(session, payload.text, provider, city=payload.city)
+    result = await generate_answer(
+        session, payload.text, provider, city=payload.city, history=payload.history
+    )
     return AnswerResponse(
         reply=result.reply,
         source=result.source,

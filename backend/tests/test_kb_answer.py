@@ -181,3 +181,74 @@ class TestNoLLMMode:
             result = await answer(session, "广州电子厂多少一小时", None, city="广州")
         allowed = {"18", "45", "22", "25"}
         assert extract_numbers(result.reply) <= allowed
+
+
+class TestCityContext:
+    """客户常说"我在广州"，下一句只问"工价多少"。丢掉上下文就会乱答。"""
+
+    async def test_city_from_history(self, one_job: None) -> None:
+        async with SessionLocal() as session:
+            result = await answer(
+                session, "工价多少一个小时", None, history=["我在广州，想找个厂"]
+            )
+        assert result.source == "template"
+        assert result.matched_entry_ids == (1,)
+
+    async def test_current_message_beats_history(self, one_job: None) -> None:
+        async with SessionLocal() as session:
+            result = await answer(
+                session, "深圳有厂吗", None, history=["我在广州"]
+            )
+        assert result.source == "no_match"
+
+    async def test_nearest_history_wins(self, one_job: None) -> None:
+        async with SessionLocal() as session:
+            result = await answer(
+                session, "工价多少", None, history=["我在广州", "现在在深圳"]
+            )
+        # 最近一条说深圳，应该按深圳查
+        assert result.matched_entry_ids == ()
+
+    async def test_explicit_city_param_wins(self, one_job: None) -> None:
+        async with SessionLocal() as session:
+            result = await answer(
+                session, "工价多少", None, city="广州", history=["我在深圳"]
+            )
+        assert result.matched_entry_ids == (1,)
+
+
+class TestClarification:
+    """没城市又要问条件时，先反问，不要随便挑一个城市回答。"""
+
+    async def test_asks_city_when_condition_without_city(self, one_job: None) -> None:
+        from app.services.kb_answer import CLARIFY_CITY_REPLY
+
+        async with SessionLocal() as session:
+            result = await answer(session, "工价多少一个小时", None)
+        assert result.source == "clarify"
+        assert result.reply == CLARIFY_CITY_REPLY
+
+    async def test_no_repeat_question(self, one_job: None) -> None:
+        """上一轮刚问过城市，这一轮没答，也别再重复问。"""
+        from app.services.kb_answer import CLARIFY_CITY_REPLY
+
+        async with SessionLocal() as session:
+            result = await answer(
+                session, "工价多少", None, history=[CLARIFY_CITY_REPLY]
+            )
+        assert result.source != "clarify"
+
+    async def test_greeting_does_not_trigger_clarify(self, one_job: None) -> None:
+        async with SessionLocal() as session:
+            result = await answer(session, "你好", None)
+        assert result.source != "clarify"
+
+    async def test_specific_factory_does_not_trigger_clarify(self, one_job: None) -> None:
+        async with SessionLocal() as session:
+            result = await answer(session, "广州电子厂工价多少", None)
+        assert result.source != "clarify"
+
+    async def test_city_known_no_clarify(self, one_job: None) -> None:
+        async with SessionLocal() as session:
+            result = await answer(session, "工价多少一个小时", None, city="广州")
+        assert result.source == "template"
