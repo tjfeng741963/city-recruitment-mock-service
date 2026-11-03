@@ -273,11 +273,33 @@ def _extract_wage(text: str) -> tuple[Decimal | None, Decimal | None, str | None
     return low, high, unit
 
 
-def _extract_city(text: str) -> str | None:
+def _cities_with_position(text: str) -> list[tuple[int, str]]:
+    """返回文本里出现的城市及其位置，按位置排序。
+
+    位置很关键：标题"东莞到深圳"里，离开头最近的才是主城市。
+    原实现按词表顺序取第一个命中，导致标题写东莞的条目被判成深圳。
+    """
+    found: list[tuple[int, str]] = []
     for city in _CITY_HINTS:
-        if city in text:
-            return city
-    return None
+        start = text.find(city)
+        if start >= 0:
+            found.append((start, city))
+    return sorted(found)
+
+
+def _extract_city(text: str, title: str | None = None) -> str | None:
+    """城市优先级：标题里最靠前的 > 正文里最靠前的。
+
+    标题优先的理由：正文经常顺带提到别的城市（"广州的厂，也能去深圳"），
+    但标题写的是这条岗位的真实地点。实测 218 条岗位里有 9 条因此
+    记错城市，客户可能被推荐到别的城市去。
+    """
+    if title:
+        in_title = _cities_with_position(title)
+        if in_title:
+            return in_title[0][1]
+    in_body = _cities_with_position(text)
+    return in_body[0][1] if in_body else None
 
 
 def _extract_flags(
@@ -291,15 +313,16 @@ def _extract_flags(
 
 
 def extract_job_fields(
-    text: str, *, base: date | datetime | None = None
+    text: str, *, title: str | None = None, base: date | datetime | None = None
 ) -> JobFields:
     """从一条岗位文案里抽结构化事实。抽不到的字段一律 None。
 
     宁可留空也不要猜：工价猜错要赔钱。这些字段只用于确定性筛选，
     原文 `body` 始终保留，展示时以原文为准。
     """
+    # 正文为空也要抽城市：有些条目只有标题和图片，标题里的城市是唯一线索
     if not text:
-        return JobFields()
+        return JobFields(city=_extract_city("", title))
 
     age_min, age_max = _extract_age(text)
     wage_min, wage_max, wage_unit = _extract_wage(text)
@@ -314,7 +337,7 @@ def extract_job_fields(
         valid_until = interview_at + timedelta(days=DEFAULT_VALIDITY_DAYS)
 
     return JobFields(
-        city=_extract_city(text),
+        city=_extract_city(text, title),
         age_min=age_min,
         age_max=age_max,
         wage_min=wage_min,

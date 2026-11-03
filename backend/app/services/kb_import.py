@@ -326,7 +326,7 @@ async def import_ebf(
                 continue
 
             title = _normalize_title(row.label, body)
-            fields = extract_job_fields(body, base=base_day)
+            fields = extract_job_fields(body, title=title, base=base_day)
             kind = _classify_kind(row.label, body)
 
             if has_relative_date(body):

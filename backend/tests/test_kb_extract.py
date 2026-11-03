@@ -160,3 +160,30 @@ class TestRelativeDateDetection:
     @pytest.mark.parametrize("text", ["包吃住 18-45岁", "广州 22元/小时"])
     def test_plain_text_has_none(self, text: str) -> None:
         assert has_relative_date(text) is False
+
+
+class TestCityExtraction:
+    """城市字段错了会把客户推荐到别的城市，比不填更糟。"""
+
+    def test_title_wins_over_body(self) -> None:
+        """标题写东莞、正文提到深圳时，以标题为准。"""
+        f = extract_job_fields(
+            "东莞的厂，也可以安排深圳的岗位", title="东莞钳工CNC招工"
+        )
+        assert f.city == "东莞"
+
+    def test_nearest_city_in_title_wins(self) -> None:
+        f = extract_job_fields("", title="东莞惠州转莞深")
+        assert f.city == "东莞"
+
+    def test_body_used_when_title_has_none(self) -> None:
+        f = extract_job_fields("广州万美表带厂 18-45岁", title="表带厂招工")
+        assert f.city == "广州"
+
+    def test_no_city_anywhere(self) -> None:
+        f = extract_job_fields("18-45岁 22元/小时", title="电子厂招工")
+        assert f.city is None
+
+    def test_title_only(self) -> None:
+        f = extract_job_fields("", title="珠海安保招聘")
+        assert f.city == "珠海"
