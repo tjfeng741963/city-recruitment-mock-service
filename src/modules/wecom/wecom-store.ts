@@ -26,7 +26,9 @@ export class WeComStore {
   notify(hash: string, token: string): boolean {
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      const added = this.db.prepare('INSERT OR IGNORE INTO wecom_callback_events VALUES (?,?)').run(hash,Date.now()).changes;
+      // 必须写列名：凡是不带列名的 INSERT 都会在加字段后静默错位，
+      // 而这里的异常被上层 catch 吃掉，只表现为"验签失败"，极难排查。
+      const added = this.db.prepare('INSERT OR IGNORE INTO wecom_callback_events(payload_hash,created_at) VALUES (?,?)').run(hash,Date.now()).changes;
       if (added) this.db.prepare('UPDATE wecom_connections SET generation=generation+1,sync_token=?,token_expires_at=?,next_sync_at=0 WHERE corp_id=? AND open_kfid=?')
         .run(token,Date.now()+600000,this.config.corpId,this.config.openKfId);
       this.db.exec('COMMIT'); return Boolean(added);
