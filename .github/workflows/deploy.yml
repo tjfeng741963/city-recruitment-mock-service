@@ -44,8 +44,19 @@ jobs:
         working-directory: frontend
         run: npm run build
 
-      - name: Run tests
+      - name: Install Python and dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3.11 python3.11-venv python3-pip
+          cd backend
+          python3.11 -m pip install --upgrade pip uv
+          python3.11 -m uv pip install --system -e .[dev]
+
+      - name: Run Node tests
         run: npx vitest run --testTimeout=20000
+
+      - name: Run Python tests
+        run: pytest backend/tests/
 
   deploy:
     needs: test
@@ -83,12 +94,26 @@ jobs:
           docker compose -f docker-compose.production.yml up -d --no-build
           for i in $(seq 1 30); do
             if curl -fsS -o /dev/null http://127.0.0.1:4222/login; then
-              git log -1 --oneline
-              exit 0
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "health check failed: /login did not respond within 60s" >&2
+              docker compose -f docker-compose.production.yml logs --tail 80 app >&2
+              exit 1
             fi
             sleep 2
           done
-          echo "health check failed: /login did not respond within 60s" >&2
-          docker compose -f docker-compose.production.yml logs --tail 80 app >&2
-          exit 1
+          # Python API starts slower (create_all + seed); give it its own window
+          for i in $(seq 1 45); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8090/healthz; then
+              git log -1 --oneline
+              exit 0
+            fi
+            if [ "$i" -eq 45 ]; then
+              echo "health check failed: /healthz did not respond within 90s" >&2
+              docker compose -f docker-compose.production.yml logs --tail 80 api >&2
+              exit 1
+            fi
+            sleep 2
+          done
           REMOTE

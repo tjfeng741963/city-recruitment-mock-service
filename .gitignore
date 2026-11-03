@@ -12,3 +12,4 @@ bridge/node_modules/
 bridge/过程文件/
 *.tsbuildinfo
 dist-showcase/
+*.egg-info/

@@ -10,7 +10,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from . import models_kb  # noqa: F401  导入即注册 kb_* / tenant 表到 Base.metadata
 from .models import Base, User
+from .models_kb import Tenant
 from .security import hash_password
 from .settings import settings
 
@@ -36,6 +38,29 @@ async def get_session() -> AsyncIterator[AsyncSession]:
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await seed_default_tenant()
+
+
+async def seed_default_tenant() -> None:
+    """确保默认租户存在。
+
+    单租户阶段所有 kb_* 表的 tenant_id 都指向它；没有这条记录，
+    外键约束会让知识库写入直接失败。
+    """
+    async with SessionLocal() as session:
+        existing = (
+            await session.execute(select(Tenant).where(Tenant.id == models_kb.DEFAULT_TENANT_ID))
+        ).scalar_one_or_none()
+        if existing:
+            return
+        session.add(
+            Tenant(
+                id=models_kb.DEFAULT_TENANT_ID,
+                name=settings.default_tenant_name,
+                slug=settings.default_tenant_slug,
+            )
+        )
+        await session.commit()
 
 
 async def seed_admin() -> str | None:

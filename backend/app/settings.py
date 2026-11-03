@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     seed_admin_username: str = "local-admin"
     seed_admin_password: str = "local-demo-only"
 
+    # 默认租户：单租户阶段所有 kb_* 表的 tenant_id 都指向它。
+    # 接第二个客户后这里只是租户 1 的元数据，不影响其他租户。
+    default_tenant_name: str = "默认租户"
+    default_tenant_slug: str = "default"
+
     # 后台任务：生产默认都开。测试里 lifespan 不会跑（ASGITransport），不影响用例。
     outbox_worker: bool = True
     outbox_interval: float = 5.0

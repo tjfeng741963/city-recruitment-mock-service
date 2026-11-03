@@ -37,3 +37,49 @@ services:
       options:
         max-size: 10m
         max-file: "3"
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: city-recruitment-backend:latest
+    container_name: city-recruitment-api
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env.api
+    environment:
+      APP_HOST: 0.0.0.0
+      APP_PORT: 8090
+    ports:
+      - "127.0.0.1:8090:8090"
+    networks:
+      - default
+      - postgres
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz').read()
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  postgres:
+    external: true
+    name: postgres_default
