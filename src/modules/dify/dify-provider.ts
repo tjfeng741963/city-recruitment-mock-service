@@ -5,6 +5,8 @@ export interface DifyMessageInput {
   query: string;
   conversationId?: string;
   inputs?: Record<string, unknown>;
+  /** 最近几条对话（新的在后）。知识库 provider 用它补全城市等上下文。 */
+  history?: string[];
 }
 
 export interface DifyMessageResult {

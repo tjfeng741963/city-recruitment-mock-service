@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     # 服务间调用令牌：Node 侧自动回复链路没有用户身份，
     # 带 X-Service-Token 直连 /api/v1/kb/*。留空表示关闭这条路径。
     kb_service_token: str = ""
+    # 令牌文件：两个容器共享的卷。启动时若文件不存在就生成一个写入，
+    # Node 侧读同一个文件——省掉手工在两处填同一个密钥。
+    kb_service_token_file: str = "/run/kb/service-token"
 
     # 后台任务：生产默认都开。测试里 lifespan 不会跑（ASGITransport），不影响用例。
     outbox_worker: bool = True

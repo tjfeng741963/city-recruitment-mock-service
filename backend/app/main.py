@@ -26,6 +26,7 @@ async def lifespan(app: FastAPI):
     if generated:
         print(f"[seed] 已创建管理员 {settings.seed_admin_username}，初始密码：{generated}")
     print(f"[boot] env={settings.env} db={settings.database_url}")
+    _ensure_service_token()
 
     worker_task: asyncio.Task | None = None
     sync_task: asyncio.Task | None = None
@@ -53,6 +54,37 @@ async def lifespan(app: FastAPI):
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+
+
+def _ensure_service_token() -> None:
+    """服务间令牌：没有就生成一个写进共享卷，供 Node 侧读取。
+
+    为什么不手工在两处填同一个密钥：那需要在服务器上改两个 env 文件、
+    还要保证两边一致，容易出错。这里让 Python 生成，Node 读同一个文件。
+
+    已存在就沿用——重启不换令牌，免得 Node 拿到旧值。
+    目录不可写（例如本地开发）就静默跳过，此时服务间调用不可用，
+    但用户令牌路径照常工作。
+    """
+    import os
+    import secrets
+    from pathlib import Path
+
+    if settings.kb_service_token:
+        return  # 显式配置优先
+    path = Path(settings.kb_service_token_file)
+    try:
+        if path.exists() and path.read_text().strip():
+            settings.kb_service_token = path.read_text().strip()
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        token = secrets.token_hex(32)
+        path.write_text(token + "\n", encoding="utf-8")
+        os.chmod(path, 0o444)
+        settings.kb_service_token = token
+        print(f"[boot] 已生成服务令牌 -> {path}")
+    except OSError:
+        print(f"[boot] 服务令牌不可用（{path} 不可写），服务间调用关闭")
 
 
 app = FastAPI(

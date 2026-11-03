@@ -9,6 +9,7 @@
  * 接口与 DifyProvider 完全一致，所以 create-provider.ts 里换一行配置就能切。
  * 失败时返回 success:false，让上层走既有的 blocked/降级路径，不抛异常。
  */
+import { readFileSync } from "node:fs";
 import type {
   DifyHealthResult,
   DifyMessageInput,
@@ -36,20 +37,40 @@ export class KnowledgeBaseDifyProvider implements DifyProvider {
     );
   }
 
+  /**
+   * 服务令牌：优先环境变量；否则读两个容器共享的卷。
+   * Python 启动时生成并写入，这里只读——省掉手工在两处填同一个密钥。
+   */
+  private serviceToken(): string {
+    if (process.env.REA_KB_API_TOKEN) return process.env.REA_KB_API_TOKEN;
+    try {
+      return readFileSync(
+        process.env.REA_KB_SERVICE_TOKEN_FILE ?? "/run/kb/service-token",
+        "utf8",
+      ).trim();
+    } catch {
+      return "";
+    }
+  }
+
   async sendMessage(input: DifyMessageInput): Promise<DifyMessageResult> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    const token = this.serviceToken();
     try {
       const response = await fetch(`${this.baseUrl()}/api/v1/kb/answer`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          // Python 侧复用同一套 JWT；服务间调用用专门的服务令牌
-          ...(process.env.REA_KB_API_TOKEN
-            ? { authorization: `Bearer ${process.env.REA_KB_API_TOKEN}` }
-            : {}),
+          // Python 侧认 X-Service-Token（不是 Bearer），两边必须一致
+          ...(token ? { "x-service-token": token } : {}),
         },
-        body: JSON.stringify({ text: input.query, city: input.inputs?.city ?? null }),
+        body: JSON.stringify({
+          text: input.query,
+          city: input.inputs?.city ?? null,
+          // 最近几条对话（新的在后）：客户可能上一句说了城市、这一句只问工价
+          history: input.history ?? [],
+        }),
         signal: controller.signal,
       });
       if (!response.ok) {
