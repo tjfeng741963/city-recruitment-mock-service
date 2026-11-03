@@ -1,0 +1,397 @@
+[
+  {
+    "question": "我52了还能去吗",
+    "expected_keywords": [
+      "年龄",
+      "岁",
+      "超龄",
+      "放宽"
+    ],
+    "city": null
+  },
+  {
+    "question": "有没有包吃住的活",
+    "expected_keywords": [
+      "包吃",
+      "包住",
+      "宿舍"
+    ],
+    "city": null
+  },
+  {
+    "question": "广州有什么厂在招",
+    "expected_keywords": [
+      "广州",
+      "厂"
+    ],
+    "city": "广州"
+  },
+  {
+    "question": "工价多少一个小时",
+    "expected_keywords": [
+      "元/小时",
+      "工价",
+      "块"
+    ],
+    "city": null
+  },
+  {
+    "question": "明天有面试吗",
+    "expected_keywords": [
+      "面试",
+      "明天"
+    ],
+    "city": null
+  },
+  {
+    "question": "地铁安检还招人吗",
+    "expected_keywords": [
+      "地铁",
+      "安检"
+    ],
+    "city": null
+  },
+  {
+    "question": "女孩子能做什么岗位",
+    "expected_keywords": [
+      "女",
+      "岗位"
+    ],
+    "city": null
+  },
+  {
+    "question": "两班倒还是长白班",
+    "expected_keywords": [
+      "班",
+      "白班",
+      "夜班"
+    ],
+    "city": null
+  },
+  {
+    "question": "要不要体检",
+    "expected_keywords": [
+      "体检"
+    ],
+    "city": null
+  },
+  {
+    "question": "工资几号发",
+    "expected_keywords": [
+      "发工资",
+      "号发",
+      "月发"
+    ],
+    "city": null
+  },
+  {
+    "question": "有叉车证能安排吗",
+    "expected_keywords": [
+      "叉车"
+    ],
+    "city": null
+  },
+  {
+    "question": "保安还要不要人",
+    "expected_keywords": [
+      "保安"
+    ],
+    "city": null
+  },
+  {
+    "question": "深圳这边有岗位吗",
+    "expected_keywords": [
+      "深圳"
+    ],
+    "city": "深圳"
+  },
+  {
+    "question": "佛山有包住的厂吗",
+    "expected_keywords": [
+      "佛山",
+      "包住"
+    ],
+    "city": "佛山"
+  },
+  {
+    "question": "东莞电子厂多少钱一个月",
+    "expected_keywords": [
+      "东莞",
+      "电子厂"
+    ],
+    "city": "东莞"
+  },
+  {
+    "question": "年龄放宽到多少岁",
+    "expected_keywords": [
+      "岁",
+      "年龄"
+    ],
+    "city": null
+  },
+  {
+    "question": "吃饭自己掏钱吗",
+    "expected_keywords": [
+      "包吃",
+      "餐补",
+      "吃饭"
+    ],
+    "city": null
+  },
+  {
+    "question": "宿舍几个人一间",
+    "expected_keywords": [
+      "宿舍"
+    ],
+    "city": null
+  },
+  {
+    "question": "面试要带什么材料",
+    "expected_keywords": [
+      "身份证",
+      "面试",
+      "复印件"
+    ],
+    "city": null
+  },
+  {
+    "question": "当天能安排住宿吗",
+    "expected_keywords": [
+      "宿舍",
+      "住宿",
+      "安排"
+    ],
+    "city": null
+  },
+  {
+    "question": "加班多不多",
+    "expected_keywords": [
+      "加班"
+    ],
+    "city": null
+  },
+  {
+    "question": "有没有长夜的活",
+    "expected_keywords": [
+      "夜班",
+      "两班倒"
+    ],
+    "city": null
+  },
+  {
+    "question": "我腿脚不太方便能做吗",
+    "expected_keywords": [
+      "岗位",
+      "坐班",
+      "轻松"
+    ],
+    "city": null
+  },
+  {
+    "question": "夫妻两个能安排一起吗",
+    "expected_keywords": [
+      "夫妻",
+      "一起"
+    ],
+    "city": null
+  },
+  {
+    "question": "押金要不要交",
+    "expected_keywords": [
+      "押金",
+      "收费",
+      "免费"
+    ],
+    "city": null
+  },
+  {
+    "question": "介绍费怎么算",
+    "expected_keywords": [
+      "收费",
+      "介绍费",
+      "推荐"
+    ],
+    "city": null
+  },
+  {
+    "question": "上个月工资什么时候结",
+    "expected_keywords": [
+      "工资",
+      "结"
+    ],
+    "city": null
+  },
+  {
+    "question": "体检费谁出",
+    "expected_keywords": [
+      "体检"
+    ],
+    "city": null
+  },
+  {
+    "question": "有没有不用上夜班的",
+    "expected_keywords": [
+      "白班",
+      "夜班"
+    ],
+    "city": null
+  },
+  {
+    "question": "广西南宁那边有岗位吗",
+    "expected_keywords": [
+      "南宁"
+    ],
+    "city": "南宁"
+  },
+  {
+    "question": "成都厂里管吃吗",
+    "expected_keywords": [
+      "成都",
+      "包吃"
+    ],
+    "city": "成都"
+  },
+  {
+    "question": "武汉有什么好一点的厂",
+    "expected_keywords": [
+      "武汉"
+    ],
+    "city": "武汉"
+  },
+  {
+    "question": "长沙的岗位工资多少",
+    "expected_keywords": [
+      "长沙",
+      "工资",
+      "元"
+    ],
+    "city": "长沙"
+  },
+  {
+    "question": "郑州还在招人吗",
+    "expected_keywords": [
+      "郑州"
+    ],
+    "city": "郑州"
+  },
+  {
+    "question": "天津包吃住的有没有",
+    "expected_keywords": [
+      "天津",
+      "包吃"
+    ],
+    "city": "天津"
+  },
+  {
+    "question": "西安这边工价高吗",
+    "expected_keywords": [
+      "西安",
+      "工价",
+      "元"
+    ],
+    "city": "西安"
+  },
+  {
+    "question": "杭州电子厂招不招女的",
+    "expected_keywords": [
+      "杭州"
+    ],
+    "city": "杭州"
+  },
+  {
+    "question": "昆明有没有年龄放宽的",
+    "expected_keywords": [
+      "昆明"
+    ],
+    "city": "昆明"
+  },
+  {
+    "question": "重庆哪个厂工资高",
+    "expected_keywords": [
+      "重庆"
+    ],
+    "city": "重庆"
+  },
+  {
+    "question": "青岛还缺人吗",
+    "expected_keywords": [
+      "青岛"
+    ],
+    "city": "青岛"
+  },
+  {
+    "question": "沈阳那边冷不冷能不能干",
+    "expected_keywords": [
+      "沈阳"
+    ],
+    "city": "沈阳"
+  },
+  {
+    "question": "南通厂里一天上多少小时",
+    "expected_keywords": [
+      "南通"
+    ],
+    "city": "南通"
+  },
+  {
+    "question": "呼和浩特有岗位吗",
+    "expected_keywords": [
+      "呼和浩特"
+    ],
+    "city": "呼和浩特"
+  },
+  {
+    "question": "苏州电子厂招到几岁",
+    "expected_keywords": [
+      "苏州"
+    ],
+    "city": "苏州"
+  },
+  {
+    "question": "厦门有没有包吃的",
+    "expected_keywords": [
+      "厦门"
+    ],
+    "city": "厦门"
+  },
+  {
+    "question": "福州这边面试在哪里",
+    "expected_keywords": [
+      "福州"
+    ],
+    "city": "福州"
+  },
+  {
+    "question": "合肥的岗位工资几号发",
+    "expected_keywords": [
+      "合肥"
+    ],
+    "city": "合肥"
+  },
+  {
+    "question": "想找个轻松点的活",
+    "expected_keywords": [
+      "轻松",
+      "岗位",
+      "工作内容"
+    ],
+    "city": null
+  },
+  {
+    "question": "我45岁还能进厂吗",
+    "expected_keywords": [
+      "岁",
+      "年龄"
+    ],
+    "city": null
+  },
+  {
+    "question": "进厂要交钱吗",
+    "expected_keywords": [
+      "收费",
+      "押金",
+      "免费"
+    ],
+    "city": null
+  }
+]

@@ -102,16 +102,29 @@ def _active_conditions(now: datetime | None = None) -> list:
 def _keyword_tokens(text: str) -> list[str]:
     """把问法切成用于 LIKE 的关键词。
 
-    中文没有空格分词，这里取"连续 2 个及以上汉字"作为词，再补上数字串。
-    够用且不引入分词依赖；将来上 tsvector 时替换这一个函数即可。
+    中文没有空格，整句当一个词去 LIKE 不可能命中——实测召回率只有 36%。
+    这里退化成**二元组（bigram）**：连续汉字串切成相邻两字组合，
+    再补上数字串。
+
+    bigram 的代价是召回变宽（"包吃住"会切出"包吃""吃住"），
+    但第 2 层本来就只是候选召回，后面还有相关度排序与 limit 截断。
+    比"一个字都匹配不上"好得多。
+
+    将来上 PostgreSQL tsvector + 中文分词时，替换这一个函数即可。
     """
-    tokens = re.findall(r"[一-鿿]{2,}", text)
+    tokens: list[str] = []
+    for run in re.findall(r"[一-鿿]+", text):
+        if len(run) == 1:
+            tokens.append(run)
+        else:
+            tokens.extend(run[i : i + 2] for i in range(len(run) - 1))
     tokens += re.findall(r"[0-9]{2,}", text)
-    # 去重保序，并丢掉过长片段（整句当一个词匹配不到任何东西）
+
+    # 去重保序；bigram 数量天然不多，但整句很长时仍需截断
     seen: set[str] = set()
     result: list[str] = []
     for token in tokens:
-        if token in seen or len(token) > 8:
+        if token in seen:
             continue
         seen.add(token)
         result.append(token)

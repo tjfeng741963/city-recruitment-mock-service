@@ -1,5 +1,7 @@
 .venv/
+# 运行时数据目录；测试夹具是代码资产，必须提交
 data/
+!tests/data/
 __pycache__/
 *.pyc
 .pytest_cache/
