@@ -3,16 +3,26 @@
 用法：
     python -m app.services.kb_seed_import kb_seed.json [--tenant-id 1] [--dry-run]
 
-三条规则：
+四条规则：
 
-1. **幂等**。以 `(tenant_id, title, city, district)` 为去重键，已存在就跳过，
+1. **幂等**。以 `(tenant_id, title, city, district)` 为去重键，**库里已有**就跳过，
    不更新。单机版装上以后客户会自己改条目，第二次导入拿种子覆盖回去，
    等于把客户的修改擦掉——所以只增不改。
+   去重只跟**库**比，不跟本批已插入的条目比：源数据里同名条目本来就多
+   （「招聘信息」25 条、「筛选要求」9 条，是同一份 word 的不同版本/不同分组），
+   拿 `(title, city, district)` 在本批内互相去重会静默丢掉 130 条真实内容。
+   第二次导入照样全部跳过——它们的键这时已经都在库里了，幂等不受影响。
 2. **分类按 label 对齐**。导出的 `category` 是 label 不是 id，导入时按 label
    查，查不到才建（`KbCategory`）。两台机器的自增 id 本来就不可能一样。
 3. **`search_text` 用同一条公式重新生成**。见 `build_search_text`，它与
    `kb_import.py` 建条目时的写法逐字一致；种子文件里不存这个字段，
    因为它是派生值，存下来只会在一边改规则后变成两份对不上的数据。
+4. **岗位城市缺失时按文案补全**。见 `infer_city`。导出的 218 条岗位里只有
+   52 条带 city（生产库很长时间没做抽取），而这些条目正文/标题里大多写着
+   「番禺」「市桥」「钟村」。不补的话，客户问「广州有什么厂」时检索层的
+   `city == '广州'` 会把这些岗位整片排除——库里有货，但客户永远看不到。
+   话术（`kind='script'`）不参与补全：它们没有城市语义，补了只会在按城市
+   筛选时把闲聊话术塞进岗位结果里。
 """
 
 from __future__ import annotations
@@ -31,8 +41,71 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import SessionLocal, init_db
 from ..models_kb import DEFAULT_TENANT_ID, KbAsset, KbCategory, KbEntry, KbFragment
+from .kb_extract import _extract_city
 
 SEED_VERSION = 1
+
+# 区县/镇级地名 -> 上级市。`kb_extract._CITY_HINTS` 只认市名，但源数据里
+# 大量条目标题/正文只写「市桥」「钟村」「化龙」「番禺」——只认市名会白丢
+# 一整片广州岗位（实测 159 条 city 为空的岗位里，靠市名只能补回 7 条）。
+#
+# 只收「能唯一确定上级市」的地名。下面这些看着像、但碰撞太多的**不收**：
+#   「长安」——"路线队长安排"里就有这两个字（实测 10 处全是假命中）
+#   「光明」——"光明正大"；「南山」「大石」「新造」同理（"新造型"）
+# 补错城市比不补更糟：客户会被推荐到另一个城市去面试。
+_DISTRICT_CITY_HINTS: tuple[tuple[str, str], ...] = (
+    # 广州
+    ("番禺", "广州"), ("市桥", "广州"), ("钟村", "广州"), ("南村", "广州"),
+    ("员岗", "广州"), ("化龙", "广州"), ("越秀", "广州"), ("花都", "广州"),
+    ("白云", "广州"), ("天河", "广州"), ("海珠", "广州"), ("荔湾", "广州"),
+    ("黄埔", "广州"), ("增城", "广州"), ("从化", "广州"),
+    # 深圳
+    ("龙岗", "深圳"), ("宝安", "深圳"), ("龙华", "深圳"), ("观澜", "深圳"),
+    ("沙井", "深圳"), ("松岗", "深圳"), ("坪山", "深圳"),
+    # 东莞
+    ("虎门", "东莞"), ("厚街", "东莞"), ("塘厦", "东莞"), ("大朗", "东莞"),
+    ("松山湖", "东莞"),
+    # 佛山
+    ("顺德", "佛山"), ("南海", "佛山"), ("三水", "佛山"), ("高明", "佛山"),
+)
+
+
+def _district_city(text: str) -> str | None:
+    """文本里最靠前的区县名对应的市。找不到返回 None。
+
+    取最靠前的一个，和 `kb_extract._cities_with_position` 的口径一致：
+    「番禺的厂，也能去深圳」这句的主城市是番禺。
+    """
+    best: tuple[int, str] | None = None
+    for district, city in _DISTRICT_CITY_HINTS:
+        start = text.find(district)
+        if start >= 0 and (best is None or start < best[0]):
+            best = (start, city)
+    return best[1] if best else None
+
+
+def infer_city(title: str | None, body: str | None) -> str | None:
+    """从标题 + 正文推断岗位所在城市。推断不出来返回 None。
+
+    顺序是硬规则，不要调换：
+
+        标题里的市名 → 标题里的区县名 → 正文里的市名 → 正文里的区县名
+
+    标题优先的理由和 `kb_extract._extract_city` 一样：正文经常顺带提到别的
+    城市（"广州的厂，也能去深圳"），标题写的才是这条岗位的真实地点。
+    同一段文本里市名优先于区县名——市名是明确写法，区县名是间接线索。
+
+    **推断不出来就返回 None，不设默认值**。默认广州会让深圳、东莞的岗位
+    被客户按城市筛出来，属于把人骗过去白跑一趟。
+    """
+    title_text = title or ""
+    body_text = body or ""
+    return (
+        _extract_city("", title_text)
+        or _district_city(title_text)
+        or _extract_city(body_text)
+        or _district_city(body_text)
+    )
 
 
 def build_search_text(title: str, body: str, city: str | None) -> str:
@@ -91,6 +164,7 @@ class SeedImportStats:
     entries_total: int = 0
     entries_added: int = 0
     entries_skipped: int = 0
+    cities_inferred: int = 0
     categories_created: int = 0
     fragments_added: int = 0
     assets_added: int = 0
@@ -101,7 +175,8 @@ class SeedImportStats:
         suffix = "（dry-run，未写库）" if self.dry_run else ""
         return (
             f"种子 {self.entries_total} 条：新增 {self.entries_added} / "
-            f"跳过 {self.entries_skipped}；分类新建 {self.categories_created} 个；"
+            f"跳过 {self.entries_skipped}；城市补全 {self.cities_inferred} 条；"
+            f"分类新建 {self.categories_created} 个；"
             f"片段 {self.fragments_added} 个{suffix}"
         )
 
@@ -141,7 +216,8 @@ async def import_seed(
     entries = seed.get("entries") or []
     stats.entries_total = len(entries)
 
-    seen = await _existing_keys(session, tenant_id)
+    # 只装库里已有的键。本批插入的条目不写回来——同名不同内容的多条要全进。
+    db_keys = await _existing_keys(session, tenant_id)
     categories = await _category_index(session, tenant_id)
     # 同一个 storage_key 在多条目里复用时只建一条 KbAsset
     assets: dict[str, int] = {}
@@ -153,10 +229,22 @@ async def import_seed(
             stats.entries_skipped += 1
             continue
 
-        key = dedupe_key(title, item.get("city"), item.get("district"))
-        if key in seen:
+        # 城市必须在算去重键之前补出来：库里存的是补全后的 city，
+        # 拿种子里的 null 去比键，第二次导入会把同一批岗位再插一遍。
+        kind = item.get("kind") if item.get("kind") in ("job", "script") else "script"
+        body = item.get("body") or ""
+        city = _norm(item.get("city"))
+        city_inferred = False
+        if city is None and kind == "job":
+            city = infer_city(title, body)
+            city_inferred = city is not None
+
+        key = dedupe_key(title, city, item.get("district"))
+        if key in db_keys:
             stats.entries_skipped += 1
             continue
+        if city_inferred:
+            stats.cities_inferred += 1
 
         # ── 分类：按 label 查，没有就建 ──
         category_id: int | None = None
@@ -178,9 +266,6 @@ async def import_seed(
                     category_id = category.id
                     categories[category_label] = category_id
 
-        kind = item.get("kind") if item.get("kind") in ("job", "script") else "script"
-        body = item.get("body") or ""
-        city = _norm(item.get("city"))
         fragments = [
             text
             for text in (item.get("fragments") or [])
@@ -196,7 +281,6 @@ async def import_seed(
             stats.entries_added += 1
             stats.fragments_added += len(fragments)
             stats.assets_added += len(asset_payloads)
-            seen.add(key)
             continue
 
         entry = KbEntry(
@@ -261,7 +345,6 @@ async def import_seed(
             position += 1
             stats.fragments_added += 1
 
-        seen.add(key)
         stats.entries_added += 1
 
     if not dry_run:

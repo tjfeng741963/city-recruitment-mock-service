@@ -1,0 +1,18 @@
+{
+  "server": "http://127.0.0.1:8090",
+  "device_token": "",
+  "device_code": "pc-office-01",
+  "tool_path": "C:/path/to/wecomcracker.py",
+  "snapshot_dir": "",
+  "state_file": "",
+  "interval_seconds": 60,
+  "dry_run": false,
+  "brain": {
+    "mode": "kb",
+    "base_url": "http://127.0.0.1:8090",
+    "username": "local-admin",
+    "password": "",
+    "timeout": 20,
+    "history_limit": 6
+  }
+}
