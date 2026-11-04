@@ -30,6 +30,20 @@ if settings.database_url.startswith("sqlite"):
 engine = create_async_engine(settings.database_url, **_engine_kwargs)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
+# SQLite 默认 journal 模式下，一个长读事务会挡住写（outbox 写投递会卡住）。
+# 开 WAL 让读写不互斥，再给一个忙等超时，避免瞬时锁冲突直接抛 "database is locked"。
+if settings.database_url.startswith("sqlite"):
+    from sqlalchemy import event
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _sqlite_pragma(dbapi_conn, _record):  # noqa: ANN001
+        cursor = dbapi_conn.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+        finally:
+            cursor.close()
+
 
 async def get_session() -> AsyncIterator[AsyncSession]:
     async with SessionLocal() as session:
@@ -39,6 +53,14 @@ async def get_session() -> AsyncIterator[AsyncSession]:
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # create_all 只建新表，不会给已存在的表补列。
+        # leads 后加的 interview_precision / check_at / alerted_at 必须走这里，
+        # 否则老库升级后一查就 500。
+        from .models_lead import ensure_lead_columns
+
+        added = await ensure_lead_columns(conn)
+        if added:
+            print(f"[db] leads 补列：{', '.join(added)}")
     await seed_default_tenant()
 
 

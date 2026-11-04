@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>线索待办 · 今日看板</title>
+<style>
+  :root {
+    --line: #e3e5e8;
+    --muted: #6b7280;
+    --bg: #f6f7f9;
+    --warn: #b45309;
+    --warn-bg: #fff8eb;
+    --ok: #15803d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 20px 16px 48px;
+    background: var(--bg);
+    color: #1f2328;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Microsoft YaHei", "Hiragino Sans GB", sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  .wrap { max-width: 960px; margin: 0 auto; }
+  header {
+    display: flex; align-items: baseline; gap: 12px;
+    margin-bottom: 16px;
+  }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  h2 { font-size: 15px; margin: 0 0 8px; font-weight: 600; }
+  .status { color: var(--muted); font-size: 12px; }
+  .status.err { color: #b91c1c; }
+  .hint { font-weight: 400; color: var(--muted); font-size: 12px; margin-left: 6px; }
+  button {
+    font: inherit; padding: 5px 12px; border: 1px solid var(--line);
+    background: #fff; border-radius: 6px; cursor: pointer; color: #1f2328;
+  }
+  button:hover { border-color: #c3c7cd; background: #fafbfc; }
+  button:active { background: #f0f2f4; }
+  input {
+    font: inherit; padding: 5px 8px; border: 1px solid var(--line);
+    border-radius: 6px; background: #fff; color: #1f2328;
+  }
+
+  .counts { display: flex; gap: 12px; margin-bottom: 20px; }
+  .count {
+    flex: 1; background: #fff; border: 1px solid var(--line); border-radius: 8px;
+    padding: 14px 16px; display: flex; flex-direction: column;
+  }
+  .count b { font-size: 26px; line-height: 1.2; font-weight: 600; }
+  .count span { color: var(--muted); font-size: 12px; margin-top: 2px; }
+
+  section { margin-bottom: 22px; }
+  .list { background: #fff; border: 1px solid var(--line); border-radius: 8px; }
+  .row {
+    display: grid;
+    grid-template-columns: 1.1fr 1.2fr 1.6fr auto;
+    gap: 10px;
+    align-items: center;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--line);
+    flex-wrap: wrap;
+  }
+  .row:last-child { border-bottom: 0; }
+  .row .cell { min-width: 0; overflow-wrap: anywhere; }
+  .name { font-weight: 500; }
+  .when { color: #374151; }
+  .job, .muted { color: var(--muted); }
+  .actions { display: flex; gap: 6px; justify-content: flex-end; white-space: nowrap; }
+
+  /* 待核实行的「该问一句」卡片 */
+  .ask {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--warn-bg); border: 1px solid #f0d9ab;
+    border-radius: 6px; padding: 6px 8px;
+  }
+  .ask-text { color: var(--warn); font-size: 13px; }
+  .ask button { padding: 3px 10px; font-size: 12px; }
+
+  .reschedule {
+    grid-column: 1 / -1;
+    display: flex; align-items: center; gap: 8px;
+    padding-top: 8px; margin-top: 2px; border-top: 1px dashed var(--line);
+  }
+  .empty { padding: 14px; color: var(--muted); }
+
+  .login {
+    background: #fff; border: 1px solid var(--line); border-radius: 8px;
+    padding: 18px; max-width: 360px;
+  }
+  .login h2 { margin-bottom: 12px; }
+  .login label { display: block; margin-bottom: 10px; }
+  .login input { width: 100%; }
+  .login .msg { margin-top: 10px; font-size: 12px; color: var(--muted); min-height: 18px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>线索待办</h1>
+    <span id="status" class="status"></span>
+  </header>
+
+  <div id="login" class="login" hidden>
+    <h2>登录后查看待办</h2>
+    <label>用户名<input id="username" autocomplete="username"></label>
+    <label>密码<input id="password" type="password" autocomplete="current-password"></label>
+    <button id="loginBtn">登录</button>
+    <div id="loginMsg" class="msg"></div>
+  </div>
+
+  <main id="board" hidden>
+    <div class="counts">
+      <div class="count"><b id="cToday">-</b><span>今日约面</span></div>
+      <div class="count"><b id="cPending">-</b><span>待核实</span></div>
+      <div class="count"><b id="cFollowup">-</b><span>需跟进</span></div>
+    </div>
+
+    <section>
+      <h2>待核实<span class="hint">到点还没确认的，自己发一句问问</span></h2>
+      <div id="pendingList" class="list"></div>
+    </section>
+
+    <section>
+      <h2>今日约面<span class="hint">点一下就是结果，点错了再点另一个即可</span></h2>
+      <div id="todayList" class="list"></div>
+    </section>
+
+    <section>
+      <h2>需跟进<span class="hint">超过 24 小时没动静</span></h2>
+      <div id="followupList" class="list"></div>
+    </section>
+  </main>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var TOKEN_KEY = "lead_token";
+  var REFRESH_MS = 60000;
+  var ASK_TEXT = "今天还过来吗？需要我帮你改个时间吗";
+
+  var token = localStorage.getItem(TOKEN_KEY) || "";
+
+  function $(id) { return document.getElementById(id); }
+
+  function esc(v) {
+    return String(v === null || v === undefined ? "" : v).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  // 后端给的是带 +08:00 的本地时间串，直接切字符，不经过 Date 解析，
+  // 避免浏览器按自己的时区把日期挪一天。
+  function fmtWhen(item) {
+    var at = item.interview_at;
+    if (!at) return "时间未定";
+    var md = at.slice(5, 10);
+    if (item.interview_precision === "day") return md + " 钟点未定";
+    return md + " " + at.slice(11, 16);
+  }
+
+  function todayStr() {
+    var d = new Date();
+    var m = String(d.getMonth() + 1);
+    var day = String(d.getDate());
+    if (m.length < 2) m = "0" + m;
+    if (day.length < 2) day = "0" + day;
+    return d.getFullYear() + "-" + m + "-" + day;
+  }
+
+  function setStatus(text, isError) {
+    var el = $("status");
+    el.textContent = text;
+    el.className = "status" + (isError ? " err" : "");
+  }
+
+  function showLogin() {
+    $("login").hidden = false;
+    $("board").hidden = true;
+    $("status").textContent = "未登录";
+  }
+
+  function hideLogin() {
+    $("login").hidden = true;
+    $("board").hidden = false;
+  }
+
+  // ───────────── 接口 ─────────────
+  async function api(path, options) {
+    options = options || {};
+    options.headers = Object.assign({
+      "Content-Type": "application/json",
+      "Authorization": "Bearer " + token
+    }, options.headers || {});
+    var res = await fetch("/api/v1" + path, options);
+    if (res.status === 401) {
+      showLogin();
+      throw new Error("unauthorized");
+    }
+    if (!res.ok) {
+      var body = "";
+      try { body = await res.text(); } catch (e) { body = ""; }
+      throw new Error(body.slice(0, 200) || ("HTTP " + res.status));
+    }
+    return res.json();
+  }
+
+  async function login() {
+    var username = $("username").value.trim();
+    var password = $("password").value;
+    if (!username || !password) {
+      $("loginMsg").textContent = "用户名和密码都要填";
+      return;
+    }
+    $("loginMsg").textContent = "登录中…";
+    try {
+      var res = await fetch("/api/v1/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: username, password: password })
+      });
+      if (!res.ok) {
+        $("loginMsg").textContent = "登录失败，检查账号密码";
+        return;
+      }
+      var body = await res.json();
+      token = body.access_token;
+      localStorage.setItem(TOKEN_KEY, token);
+      $("password").value = "";
+      $("loginMsg").textContent = "";
+      await load();
+    } catch (e) {
+      $("loginMsg").textContent = "登录失败：" + (e.message || e);
+    }
+  }
+
+  // ───────────── 渲染 ─────────────
+  function baseCells(item) {
+    return '<div class="cell name">' + esc(item.nickname || "未命名客户") + "</div>" +
+           '<div class="cell when">' + esc(fmtWhen(item)) + "</div>" +
+           '<div class="cell job">' + esc(item.job_title || "岗位未填") + "</div>";
+  }
+
+  function renderPending(items) {
+    var box = $("pendingList");
+    box.innerHTML = "";
+    if (!items.length) {
+      box.innerHTML = '<div class="empty">没有待核实的</div>';
+      return;
+    }
+    items.forEach(function (item) {
+      var row = document.createElement("div");
+      row.className = "row";
+      row.innerHTML = baseCells(item) +
+        '<div class="cell ask">' +
+          '<span class="ask-text">' + esc(ASK_TEXT) + "</span>" +
+          '<button class="copy">复制</button>' +
+        "</div>";
+      row.querySelector(".copy").addEventListener("click", function (ev) {
+        copyText(ASK_TEXT, ev.currentTarget);
+      });
+      box.appendChild(row);
+    });
+  }
+
+  function renderToday(items) {
+    var box = $("todayList");
+    box.innerHTML = "";
+    if (!items.length) {
+      box.innerHTML = '<div class="empty">今天没有约面</div>';
+      return;
+    }
+    items.forEach(function (item) {
+      var row = document.createElement("div");
+      row.className = "row";
+      row.innerHTML = baseCells(item) +
+        '<div class="cell actions">' +
+          '<button data-act="arrived">到了</button>' +
+          '<button data-act="noshow">没来</button>' +
+          '<button data-act="move">改期</button>' +
+        "</div>";
+      row.querySelector('[data-act="arrived"]').addEventListener("click", function () {
+        submit(item.conversation_id, { stage: "interviewed" });
+      });
+      row.querySelector('[data-act="noshow"]').addEventListener("click", function () {
+        submit(item.conversation_id, { stage: "no_show" });
+      });
+      row.querySelector('[data-act="move"]').addEventListener("click", function () {
+        openDate(row, item);
+      });
+      box.appendChild(row);
+    });
+  }
+
+  function renderFollowup(items) {
+    var box = $("followupList");
+    box.innerHTML = "";
+    if (!items.length) {
+      box.innerHTML = '<div class="empty">没有需要跟进的</div>';
+      return;
+    }
+    items.forEach(function (item) {
+      var row = document.createElement("div");
+      row.className = "row";
+      row.innerHTML = baseCells(item) +
+        '<div class="cell muted">' + esc(item.stage_label || "") + "</div>";
+      box.appendChild(row);
+    });
+  }
+
+  // 行内展开日期框，选完即提交：不再有确认步骤
+  function openDate(row, item) {
+    if (row.querySelector(".reschedule")) return;
+    var wrap = document.createElement("div");
+    wrap.className = "reschedule";
+    var label = document.createElement("span");
+    label.textContent = "改到";
+    var input = document.createElement("input");
+    input.type = "date";
+    input.min = todayStr();
+    var tip = document.createElement("span");
+    tip.className = "muted";
+    tip.textContent = "选完即提交，钟点记「未定」";
+    wrap.appendChild(label);
+    wrap.appendChild(input);
+    wrap.appendChild(tip);
+
+    input.addEventListener("change", function () {
+      if (!input.value) return;
+      submit(item.conversation_id, {
+        stage: "booked",
+        interview_at: input.value + "T00:00:00+08:00",
+        interview_precision: "day"
+      });
+    });
+
+    row.appendChild(wrap);
+    input.focus();
+    if (typeof input.showPicker === "function") {
+      try { input.showPicker(); } catch (e) { /* 浏览器不允许就算了 */ }
+    }
+  }
+
+  // ───────────── 提交 ─────────────
+  async function submit(conversationId, body) {
+    var buttons = document.querySelectorAll("button");
+    buttons.forEach(function (b) { b.disabled = true; });
+    try {
+      await api("/leads/" + conversationId + "/manual", {
+        method: "POST",
+        body: JSON.stringify(body)
+      });
+      await load();
+    } catch (e) {
+      if (e.message === "unauthorized") return;
+      setStatus("提交失败：" + (e.message || e), true);
+    } finally {
+      buttons.forEach(function (b) { b.disabled = false; });
+    }
+  }
+
+  async function copyText(text, btn) {
+    var old = btn.textContent;
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        // 本机 http 打开时 clipboard 不可用，退回旧办法
+        var ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+      btn.textContent = "已复制";
+    } catch (e) {
+      btn.textContent = "复制失败";
+    }
+    setTimeout(function () { btn.textContent = old; }, 1500);
+  }
+
+  // ───────────── 取数 ─────────────
+  async function load() {
+    if (!token) { showLogin(); return; }
+    try {
+      var data = await api("/leads/board/data");
+      hideLogin();
+      $("cToday").textContent = data.counts.today;
+      $("cPending").textContent = data.counts.pending;
+      $("cFollowup").textContent = data.counts.followup;
+      renderPending(data.pending);
+      renderToday(data.today);
+      renderFollowup(data.followup);
+      var now = new Date();
+      setStatus("已刷新 " + now.toLocaleTimeString("zh-CN", { hour12: false }));
+    } catch (e) {
+      if (e.message === "unauthorized") return;
+      setStatus("读取失败：" + (e.message || e), true);
+    }
+  }
+
+  $("loginBtn").addEventListener("click", login);
+  $("password").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") login();
+  });
+
+  load();
+  setInterval(function () { load(); }, REFRESH_MS);
+})();
+</script>
+</body>
+</html>

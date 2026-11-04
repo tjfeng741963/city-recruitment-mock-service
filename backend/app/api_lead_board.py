@@ -1,0 +1,159 @@
+"""今日待办看板：页面 + 数据。
+
+- `GET /leads/board`      返回 HTML 空壳，**公开**。浏览器从地址栏直接打开要能拿到，
+  否则页面还没渲染就先被 401 挡住，没法让人贴 token。
+- `GET /leads/board/data` 名单数据，`AdminUser` 鉴权。页面里的 token 从 localStorage 读，
+  所以"页面公开、数据要登录"是成立的。
+
+分组只做三件事，全部按东八区判定（库里是 naive UTC）：
+
+- today    已约面且约的时间落在本地今天，按时间升序；`day` 精度天然排在最前
+- pending  到点了还没确认来没来（`pending_confirm=1`），按该核实的时刻升序
+- followup 已约面/有意向但 24 小时没动静，按最后更新时间倒序
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException, status
+from fastapi.responses import FileResponse
+from sqlalchemy import select
+
+from .deps import AdminUser, SessionDep
+from .models import Conversation, Customer
+from .models_lead import (
+    PRECISION_DAY,
+    STAGE_BOOKED,
+    STAGE_INTENT,
+    STAGE_LABEL,
+    Lead,
+)
+
+router = APIRouter(prefix="/api/v1/leads", tags=["leads-board"])
+
+LOCAL_TZ = timezone(timedelta(hours=8))
+
+# 页面路径锚定 __file__：进程 cwd 可能是仓库根，也可能是 backend，
+# 相对路径在另一种 cwd 下会 404。
+PAGE_PATH = Path(__file__).parent / "static" / "leads.html"
+
+# 超过这个时长没有状态更新就算"该催一下"
+FOLLOWUP_AFTER = timedelta(hours=24)
+
+
+# ─────────────────────────── 工具 ───────────────────────────
+def _now_naive() -> datetime:
+    """当前时刻的 naive UTC —— 与库里的存法保持一致。"""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _local_day_bounds(now: datetime) -> tuple[datetime, datetime]:
+    """本地（东八区）今天的 [起, 止)，都换成 naive UTC。"""
+    local = now.replace(tzinfo=timezone.utc).astimezone(LOCAL_TZ)
+    start_local = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_local = start_local + timedelta(days=1)
+    to_utc = lambda d: d.astimezone(timezone.utc).replace(tzinfo=None)  # noqa: E731
+    return to_utc(start_local), to_utc(end_local)
+
+
+def _iso_local(dt: datetime | None) -> str | None:
+    """统一带 +08:00 给前端，省得浏览器按自己时区猜。"""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(LOCAL_TZ).isoformat(timespec="seconds")
+
+
+def _base_stmt():
+    """线索 + 客户昵称。昵称在 customers 上，得跨会话表 join 两跳。"""
+    return (
+        select(Lead, Customer.nickname)
+        .join(Conversation, Conversation.id == Lead.conversation_id)
+        .join(Customer, Customer.id == Conversation.customer_id)
+    )
+
+
+def _row(lead: Lead, nickname: str | None) -> dict:
+    return {
+        "conversation_id": lead.conversation_id,
+        "nickname": nickname,
+        "stage": lead.stage,
+        "stage_label": STAGE_LABEL.get(lead.stage, lead.stage),
+        "interview_at": _iso_local(lead.interview_at),
+        # 精度缺失的历史数据按最保守的 day 解释
+        "interview_precision": lead.interview_precision or PRECISION_DAY,
+        "interview_place": lead.interview_place,
+        "job_title": lead.job_title,
+        "pending_confirm": bool(lead.pending_confirm),
+        "age": lead.age,
+        "city": lead.city,
+        "updated_at": _iso_local(lead.updated_at),
+    }
+
+
+# ─────────────────────────── 页面 ───────────────────────────
+@router.get("/board", response_class=FileResponse)
+async def board_page() -> FileResponse:
+    """看板页面本体（空壳，不含任何名单）。"""
+    if not PAGE_PATH.exists():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "看板页面文件缺失")
+    return FileResponse(PAGE_PATH, media_type="text/html")
+
+
+# ─────────────────────────── 数据 ───────────────────────────
+@router.get("/board/data")
+async def board_data(admin: AdminUser, session: SessionDep) -> dict:
+    now = _now_naive()
+    day_start, day_end = _local_day_bounds(now)
+
+    today_rows = (
+        await session.execute(
+            _base_stmt()
+            .where(
+                Lead.stage == STAGE_BOOKED,
+                Lead.interview_at.is_not(None),
+                Lead.interview_at >= day_start,
+                Lead.interview_at < day_end,
+            )
+            .order_by(Lead.interview_at.asc())
+        )
+    ).all()
+
+    # check_at 可能是 NULL（存量数据故意不回填），SQLite 里 NULL 排最前，
+    # 正好让"从没扫过的"排在前面等人处理。
+    pending_rows = (
+        await session.execute(
+            _base_stmt().where(Lead.pending_confirm.is_(True)).order_by(Lead.check_at.asc())
+        )
+    ).all()
+
+    stale_before = now - FOLLOWUP_AFTER
+    followup_rows = (
+        await session.execute(
+            _base_stmt()
+            .where(
+                Lead.stage.in_((STAGE_BOOKED, STAGE_INTENT)),
+                Lead.updated_at.is_not(None),
+                Lead.updated_at < stale_before,
+            )
+            .order_by(Lead.updated_at.desc())
+        )
+    ).all()
+
+    today = [_row(lead, nick) for lead, nick in today_rows]
+    pending = [_row(lead, nick) for lead, nick in pending_rows]
+    followup = [_row(lead, nick) for lead, nick in followup_rows]
+
+    return {
+        "counts": {
+            "today": len(today),
+            "pending": len(pending),
+            "followup": len(followup),
+        },
+        "today": today,
+        "pending": pending,
+        "followup": followup,
+    }

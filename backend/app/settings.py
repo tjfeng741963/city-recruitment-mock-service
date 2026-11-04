@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     sync_worker: bool = True
     sync_interval: float = 15.0
 
+    # 线索扫描：只把到点的 booked 标成「待核实」，不向客户发任何消息。
+    # 默认关 —— 上线不回填存量、按顾问灰度，避免一次批量误标。
+    lead_worker: bool = False
+    lead_interval: float = 300.0
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -14,6 +14,7 @@ from .api_v1_conversations import router as conversations_router
 from .api_agent import router as agent_router
 from .api_kb import router as api_kb_router
 from .api_lead import router as lead_router
+from .api_lead_board import router as lead_board_router
 from .api_webhook import router as webhook_router
 from .db import init_db, seed_admin
 from . import instance
@@ -40,6 +41,13 @@ async def lifespan(app: FastAPI):
         worker_task = asyncio.create_task(run_forever(settings.outbox_interval))
         print(f"[boot] 发件箱 worker 已启动，间隔 {settings.outbox_interval}s")
 
+    lead_task: asyncio.Task | None = None
+    if settings.lead_worker:
+        from .workers.lead_sweep import run_forever as lead_sweep_forever
+
+        lead_task = asyncio.create_task(lead_sweep_forever(settings.lead_interval))
+        print(f"[boot] 线索扫描 worker 已启动，间隔 {settings.lead_interval}s")
+
     if settings.sync_worker:
         from .channels.wecom_kf.config import get_wecom_settings
         from .workers.wecom_sync import run_forever as sync_forever
@@ -53,7 +61,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        for task in (worker_task, sync_task):
+        for task in (worker_task, sync_task, lead_task):
             if task:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -118,6 +126,7 @@ app.include_router(agent_router)
 app.include_router(api_kb_router)
 app.include_router(webhook_router)
 app.include_router(lead_router)
+app.include_router(lead_board_router)
 app.include_router(ws_router)
 
 

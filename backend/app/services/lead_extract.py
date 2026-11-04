@@ -23,6 +23,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..models import Conversation
 from ..models_lead import (
     ALL_STAGES,
+    LOCAL_TZ,
+    PRECISION_DAY,
+    PRECISION_MINUTE,
     STAGE_ASKING,
     STAGE_BOOKED,
     STAGE_INTENT,
@@ -31,8 +34,10 @@ from ..models_lead import (
     STAGE_ORDER,
     Lead,
     LeadEvent,
+    compute_check_at,
     utcnow,
 )
+from .lead_guard import extract_enabled
 from .llm_provider import ChatMessage, LLMProvider, LLMUnavailable
 
 # 低于这个置信度一律不落库，宁可漏记也不要错记
@@ -40,6 +45,11 @@ MIN_CONFIDENCE = 0.65
 
 # 约的时间不能早于"现在 - 6 小时"，否则不算约面（已经过去了）
 PAST_TOLERANCE = timedelta(hours=6)
+
+# 人工刚标过的线索在这段时间内不接受自动判定覆盖。
+# 人工在后台点了"到面/爽约"，紧接着 agent 又上报一轮，模型看到的是旧对话，
+# 很容易把状态拉回去——这个窗口就是给人工的判断留的缓冲。
+MANUAL_HOLD = timedelta(minutes=10)
 
 _LABELS = "\n".join(f"- {k}：{v}" for k, v in STAGE_LABEL.items())
 
@@ -73,9 +83,11 @@ new → asking → intent → booked → interviewed → hired
 - 我们说"你什么时候方便"，客户没回 → 保持原状态
 - 客户说"你们在招什么"，只是打听 → asking
 
-**时间的填法：**
-- 知道日期但不知道钟点 → 填当天 09:00，并在 reason 里写明"具体钟点未定"
-- 知道日期和钟点 → 照实填
+**时间的填法（精度必须如实标注）：**
+- 知道日期但不知道钟点 → `interview_precision` 填 `"day"`，`interview_at` **只给日期**，
+  不要编造"09:00"这类钟点；reason 里写明"具体钟点未定"
+- 知道日期和钟点 → `interview_precision` 填 `"minute"`，照实填
+- 精度决定后面什么时候提醒人去核实，填错会让提醒早到/晚到，**不要猜钟点**
 
 **从客户话里抽信息：**
 - 客户说"我32""今年40了"→ age
@@ -93,6 +105,7 @@ new → asking → intent → booked → interviewed → hired
 {{
   "stage": "booked",
   "interview_at": "2026-11-05T09:00:00+08:00",
+  "interview_precision": "minute",
   "interview_place": "番禺立信电子厂",
   "job_title": "广州番禺电子厂普工",
   "age": null,
@@ -105,6 +118,8 @@ new → asking → intent → booked → interviewed → hired
 字段规则：
 - stage 必须取上面 10 个之一
 - interview_at：ISO 8601，带时区；**判 booked 时必填，判其他状态填 null**
+- interview_precision：`"minute"` 或 `"day"`；**只知道日期时必须填 `"day"`**，
+  判其他状态填 null
 - interview_place / job_title / city / age：没提到就 null，**不要编**
 - intent：1-5 的整数，5 = 明确要来
 - confidence：0-1 的小数，表示你对 stage 判断的把握
@@ -184,7 +199,17 @@ def _parse_dt(value: Any) -> datetime | None:
 def _to_naive_utc(dt: datetime | None) -> datetime | None:
     if dt is None:
         return None
+    if dt.tzinfo is None:
+        # 已经按 naive UTC 处理的直接透传，避免被当成本地时间再转一次
+        return dt
     return dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _local_day_start_naive_utc(dt: datetime) -> datetime:
+    """取该时刻在东八区的那一天，归一到 00:00，返回 naive UTC（即前一天 16:00）。"""
+    local = dt.astimezone(LOCAL_TZ)
+    start = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    return start.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def normalize(
@@ -209,6 +234,11 @@ def normalize(
 
     interview_at = _parse_dt(data.get("interview_at"))
 
+    # 精度缺失/乱填一律按 "day"：宁可提醒得早一点，也不要假装知道几点
+    precision = str(data.get("interview_precision") or "").strip().lower()
+    if precision not in (PRECISION_MINUTE, PRECISION_DAY):
+        precision = PRECISION_DAY
+
     # 判 booked 却没有可解析的时间 -> 降级成 intent，绝不虚报约面
     note = ""
     if stage == STAGE_BOOKED:
@@ -216,6 +246,10 @@ def normalize(
             stage, note = STAGE_INTENT, "判了 booked 但时间不可解析，降级为 intent"
         elif interview_at < ref - PAST_TOLERANCE:
             stage, note = STAGE_INTENT, "时间已过去，不算约面，降级为 intent"
+        elif precision == PRECISION_DAY:
+            # 模型不听 prompt 是常态：day 精度下即便吐了 09:00 也不采信，
+            # 统一归一到本地当天 00:00（存 naive UTC 是前一天 16:00）。
+            interview_at = _local_day_start_naive_utc(interview_at)
 
     # 不允许自动倒退（改了时间仍算 booked，不算倒退）
     cur = current_stage or STAGE_NEW
@@ -251,6 +285,7 @@ def normalize(
         {
             "stage": stage,
             "interview_at": _to_naive_utc(interview_at) if stage == STAGE_BOOKED else None,
+            "interview_precision": precision if stage == STAGE_BOOKED else PRECISION_DAY,
             "interview_place": _text("interview_place", 128),
             "job_title": _text("job_title", 128),
             "age": age_val,
@@ -314,7 +349,16 @@ async def observe(
     message_id: str = "",
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """抽取并落库。同一条消息重复上报是幂等的。"""
+    """抽取并落库。同一条消息重复上报是幂等的。
+
+    三道闸门，任何一道拦下都返回 ``changed=False`` 并在 reason 里说明：
+    急停开关 → 同消息幂等 → 人工标记的 10 分钟保护期。
+    """
+    # 急停开关放最前面：关掉抽取时连库都不该多查一次
+    ok, why = extract_enabled()
+    if not ok:
+        return {"changed": False, "reason": why}
+
     lead = (
         await session.execute(select(Lead).where(Lead.conversation_id == conversation.id))
     ).scalar_one_or_none()
@@ -326,6 +370,16 @@ async def observe(
 
     if message_id and lead.last_message_id == message_id:
         return {"changed": False, "reason": "同一条消息已处理", "stage": lead.stage}
+
+    ref = now or utcnow()
+    ref_naive = _to_naive_utc(ref)
+    if lead.updated_by == "manual" and lead.updated_at is not None:
+        if ref_naive - _to_naive_utc(lead.updated_at) < MANUAL_HOLD:
+            return {
+                "changed": False,
+                "reason": "人工刚刚标记过，忽略自动判定",
+                "stage": lead.stage,
+            }
 
     result = await extract(provider, history, lead.stage, now=now)
     if not result.get("ok"):
@@ -339,10 +393,42 @@ async def observe(
     unchanged = new_stage == old_stage and rec["interview_at"] == old_at
     if unchanged:
         lead.last_message_id = message_id or lead.last_message_id
-        return {"changed": False, "reason": "状态未变化", "stage": lead.stage}
+        if rec["note"]:
+            # 「本该 booked 却被降级」时状态确实没变，但降级理由必须留痕，
+            # 否则事后只能看到一条永远停在 intent 的线索，查不出为什么。
+            session.add(
+                LeadEvent(
+                    conversation_id=conversation.id,
+                    event_type="stage_change",
+                    from_stage=old_stage,
+                    to_stage=new_stage,
+                    payload=json.dumps(
+                        {
+                            "reason": rec["reason"],
+                            "note": rec["note"],
+                            "confidence": rec["confidence"],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    source="llm",
+                    message_id=message_id,
+                )
+            )
+            await session.commit()
+        return {
+            "changed": False,
+            "reason": rec["note"] or "状态未变化",
+            "stage": lead.stage,
+        }
 
     lead.stage = new_stage
     lead.interview_at = rec["interview_at"]
+    lead.interview_precision = rec["interview_precision"]
+    # 时间一变，待核实的时刻就要重算；旧提醒作废，等这一轮重新到点
+    lead.check_at = compute_check_at(
+        rec["interview_at"], rec["interview_precision"], now=ref
+    )
+    lead.alerted_at = None
     lead.interview_place = rec["interview_place"] or lead.interview_place
     lead.job_title = rec["job_title"] or lead.job_title
     lead.age = rec["age"] if rec["age"] is not None else lead.age
@@ -355,6 +441,7 @@ async def observe(
 
     payload = {
         "interview_at": rec["interview_at"].isoformat() if rec["interview_at"] else None,
+        "interview_precision": rec["interview_precision"],
         "interview_place": rec["interview_place"],
         "job_title": rec["job_title"],
         "reason": rec["reason"],
@@ -379,6 +466,7 @@ async def observe(
         "from_stage": old_stage,
         "stage": new_stage,
         "interview_at": rec["interview_at"].isoformat() if rec["interview_at"] else None,
+        "interview_precision": rec["interview_precision"],
         "reason": rec["reason"],
         "confidence": rec["confidence"],
     }

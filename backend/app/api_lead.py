@@ -20,9 +20,12 @@ from .deps import AdminUser, ServiceOrUser, SessionDep
 from .models import ChannelAccount, Conversation, Customer
 from .models_lead import (
     ALL_STAGES,
+    PRECISION_DAY,
+    PRECISION_MINUTE,
     STAGE_LABEL,
     Lead,
     LeadEvent,
+    compute_check_at,
 )
 from .services.agent_ingest import _counterpart, ensure_channel_account
 from .services.lead_extract import observe as extract_observe
@@ -30,6 +33,10 @@ from .services.lead_extract import observe as extract_observe
 router = APIRouter(prefix="/api/v1/leads", tags=["leads"])
 
 LOCAL_TZ = timezone(timedelta(hours=8))
+
+# 人工标这些状态说明这次约面已经有结论了，待核实提醒必须一并收掉，
+# 否则列表上会一直挂着「待核实」的噪音。
+CLOSED_STAGES = {"interviewed", "hired", "no_show", "gave_up", "unsuitable"}
 
 
 # ─────────────────────────── 入参 / 出参 ───────────────────────────
@@ -54,6 +61,7 @@ class LeadOut(BaseModel):
     stage: str
     stage_label: str
     interview_at: datetime | None = None
+    interview_precision: str = PRECISION_DAY
     interview_place: str | None = None
     job_title: str | None = None
     age: int | None = None
@@ -68,6 +76,8 @@ class LeadOut(BaseModel):
 class ManualIn(BaseModel):
     stage: str
     interview_at: datetime | None = None
+    # 人工改时间时顺手校准精度；不传就沿用原值
+    interview_precision: str | None = None
     interview_place: str | None = None
     note: str | None = None
 
@@ -152,6 +162,7 @@ def _to_out(lead: Lead, conv: Conversation, nickname: str | None) -> LeadOut:
         stage=lead.stage,
         stage_label=STAGE_LABEL.get(lead.stage, lead.stage),
         interview_at=_to_local(lead.interview_at),
+        interview_precision=lead.interview_precision or PRECISION_DAY,
         interview_place=lead.interview_place,
         job_title=lead.job_title,
         age=lead.age,
@@ -337,10 +348,25 @@ async def manual_update(
             if payload.interview_at.tzinfo
             else payload.interview_at
         )
+    if payload.interview_precision is not None:
+        # 只认两种，填错按最保守的"只知道哪一天"处理
+        lead.interview_precision = (
+            PRECISION_MINUTE
+            if payload.interview_precision == PRECISION_MINUTE
+            else PRECISION_DAY
+        )
     if payload.interview_place:
         lead.interview_place = payload.interview_place
     lead.pending_confirm = False
     lead.updated_by = "manual"
+
+    if payload.stage == "booked":
+        # 时间/精度任一被人工改过，待核实时刻都要重算，旧提醒作废
+        lead.check_at = compute_check_at(lead.interview_at, lead.interview_precision)
+        lead.alerted_at = None
+    elif payload.stage in CLOSED_STAGES:
+        lead.check_at = None
+        lead.alerted_at = None
 
     session.add(
         LeadEvent(
@@ -353,6 +379,7 @@ async def manual_update(
                     "note": payload.note,
                     "by": admin.username,
                     "interview_at": lead.interview_at.isoformat() if lead.interview_at else None,
+                    "interview_precision": lead.interview_precision,
                 },
                 ensure_ascii=False,
             ),
