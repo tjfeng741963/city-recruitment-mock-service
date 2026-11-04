@@ -160,3 +160,48 @@ git push origin main
 3. **"必须点坐标才有焦点"没验证过**，可能是自己加的 Alt 补丁导致焦点丢失，叠补丁掩盖问题，无法归因。
 
 **任何"XX 无效"的结论，先确认自己的调用有没有返回错误。**
+
+---
+
+# 附：LLM 调用规则 —— 不开思考模式
+
+**硬规则：只用非思考模型，永远不要开 thinking / reasoning。**
+
+| 项 | 值 |
+|---|---|
+| 模型 | `deepseek-chat`（非思考，服务端解析为 `deepseek-flash`） |
+| 禁止 | `deepseek-reasoner`（思考模型） |
+| 禁止参数 | `reasoning_effort`、`thinking`、`enable_thinking` 等任何推理开关 |
+| 配置位置 | `backend/.env` 的 `APP_LLM_MODEL` |
+
+## 为什么
+
+1. **延迟**：客户在企微里等回复，思考模型的思维链动辄十几秒，键鼠发送还要串行排队，累积起来一条回复要半分钟以上
+2. **成本**：thinking token 按输出计费，客服场景的高频短问会被放大数倍
+3. **不需要**：回复的事实全部来自知识库（`kb_answer` 已经做了数字校验，防编造工价），模型只负责把结构化事实改写成自然话术，这个任务不需要推理链
+4. **稳定**：思考模型会把 `reasoning_content` 混在响应里，当前 `llm_provider.py` 只取 `choices[0].message.content`，换模型等于要动代码
+
+## 落地位置
+
+- `backend/app/services/llm_provider.py::LLMProvider.complete()` 的 payload 只有 `model` + `messages`，**不传任何 kwargs**
+- `kb_answer.py` 调用时不传额外参数，所以没有任何路径能打开思考模式
+
+## 如需改动
+
+改模型名属于**配置变更**，不是代码变更。只改 `.env` 的 `APP_LLM_MODEL`，不要动 `llm_provider.py`。改完重启后端即可。
+
+若要换成其他厂商的模型，必须确认它是**非思考**版本（如 `qwen-plus` 而非 `qwq`、`glm-4-flash` 而非 `glm-z1`）。
+
+## 实测记录（2026-11-04）
+
+`APP_LLM_MODEL=deepseek-chat` 直连 `api.deepseek.com/v1`：
+
+```
+HTTP 200
+返回 model: deepseek-flash          ← deepseek-chat 是非思考别名，路由到 flash
+message 字段: ['role', 'content']   ← 无 reasoning_content
+finish_reason: stop
+usage: 9 tokens（无 reasoning token）
+```
+
+判定标准：**响应 message 里出现 `reasoning_content`，或 usage 里有 reasoning token，就是开了思考模式，必须立刻改回。**
