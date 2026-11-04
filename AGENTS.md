@@ -4,7 +4,7 @@
 
 ## 项目是什么
 
-城市招聘配置系统的 1:1 还原服务：Fastify + TypeScript 后端（`src/`），SQLite 存储，托管旧版 Vue 前端（`public/`，含换皮主题 `public/theme/`）和新 React 前端（`frontend/`）。生产环境跑在腾讯云 `119.91.113.100`，Docker Compose 部署，端口 `4222`。
+城市招聘配置系统的 1:1 还原服务：Fastify + TypeScript 后端（`src/`），SQLite 存储，托管 Vue 前端（`public/`，含换皮主题 `public/theme/`）。前端**只用 `public/` 的 Vue 版本**（曾经的 React 管理台 `frontend/` 已删除）。生产环境跑在腾讯云 `119.91.113.100`，Docker Compose 部署，端口 `4222`。
 
 ## 发布方式：推到 main 即自动上线
 
@@ -18,10 +18,9 @@
 
 检查项（任一失败就不会部署）：
 
-1. `npm ci` + `frontend/` 下 `npm ci`
+1. `npm ci`
 2. `npx tsc --noEmit` 后端类型检查
-3. `frontend/` 下 `npm run build`
-4. `npx vitest run --testTimeout=20000` 全部测试
+3. `npx vitest run --testTimeout=20000` 全部测试
 
 部署步骤（在服务器上以 `deploy` 用户执行）：拉取并 checkout 该提交 → 备份 `.env.production` 和 SQLite 数据库（带提交号和时间戳）→ `docker compose build` + `up -d` → 60 秒内轮询 `http://127.0.0.1:4222/login`，失败则打印容器日志并让流水线标红。
 
@@ -34,7 +33,6 @@
 ```bash
 npm ci
 npx tsc --noEmit
-(cd frontend && npm ci && npm run build)
 npx vitest run --testTimeout=20000
 ```
 

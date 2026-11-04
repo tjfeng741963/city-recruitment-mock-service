@@ -1,8 +1,5 @@
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
 import { buildServer } from "../src/server.js";
 
 describe("local static shell (legacy bundle)", () => {
@@ -69,29 +66,5 @@ describe("local static shell (default)", () => {
     const response = await app.inject({ method: "GET", url });
     expect(response.statusCode).toBe(200);
     expect(response.headers["content-type"]).toContain(type);
-  });
-});
-
-describe("local static shell (new frontend)", () => {
-  let app: FastifyInstance;
-  let dir: string;
-  beforeAll(async () => {
-    dir = mkdtempSync(path.join(tmpdir(), "rea-frontend-"));
-    writeFileSync(path.join(dir, "index.html"), "<!doctype html><title>新前端</title>");
-    process.env.REA_DATABASE_PATH = ":memory:";
-    process.env.REA_FRONTEND_DIR = dir;
-    app = buildServer();
-    await app.ready();
-  });
-  afterAll(async () => {
-    delete process.env.REA_FRONTEND_DIR;
-    await app.close();
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  it.each(["/", "/conversations", "/activation/customer/12"])("serves the configured frontend for %s", async (route) => {
-    const response = await app.inject({ method: "GET", url: route });
-    expect(response.statusCode).toBe(200);
-    expect(response.body).toContain("新前端");
   });
 });

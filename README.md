@@ -28,7 +28,7 @@ backend/     FastAPI：认证、设备、会话、消息、知识库、线索、
 agent/       本地采集与发送（解密企微本地库 + 键鼠），核心动作序列来自 wecom_io_core（未改动）
 deploy/      两种形态的安装包
 docs/        设计与实施文档
-src/ frontend/ public/   原有 Node/React 业务系统（与本后端并行，不是一套）
+src/ public/    原有 Node 业务系统 + Vue 前端（与本后端并行，不是一套）
 ```
 
 ## 能力
