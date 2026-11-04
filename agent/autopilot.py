@@ -69,6 +69,7 @@ DEFAULTS = {
     "interval": 3.0,
     "cooldown": 8.0,
     "backfill_hours": 1.0,   # 首次初始化时，只把最近 N 小时的消息当作待补发
+    "brain": None,           # {"mode":"kb","base_url":...} 时走知识库，否则固定文本
 }
 
 _last_reply_at = 0.0
@@ -147,6 +148,26 @@ def pick_reply(conv_id: str, cfg: dict) -> tuple[str, str]:
     return cfg["reply_next"], "继续对话"
 
 
+_brain = None  # 由 main() 注入；None 表示用固定文本
+
+
+def build_history(store: Store, conv_id: str, limit: int = 6) -> list[str]:
+    """取该会话最近几条「对方说的」纯文本，作为知识库的上下文。"""
+    try:
+        rows = store.messages(conv_id, limit=limit * 3)
+    except Exception:  # noqa: BLE001
+        return []
+    me = store.self_id()
+    out: list[str] = []
+    for m in rows:
+        if str(m.get("sender_id")) == me:
+            continue
+        text = (m.get("text") or "").strip()
+        if text:
+            out.append(text[:200])
+    return out[-limit:]
+
+
 def drain(store: Store, cfg: dict, *, dry: bool = False) -> dict:
     """按消息时间正序处理 pending + failed。
 
@@ -192,6 +213,18 @@ def drain(store: Store, cfg: dict, *, dry: bool = False) -> dict:
             continue
 
         text, scene = pick_reply(cid, cfg)
+        if _brain is not None:
+            hint = (it["in_text"] or "").strip()
+            if hint:
+                res = _brain.reply(hint, build_history(store, cid))
+                if res["ok"]:
+                    text, scene = res["reply"], "知识库"
+                    log(f"    [brain] {res['detail']}")
+                else:
+                    log(f"    [brain] 未命中（{res['detail']}），回落固定文本 {text!r}")
+            else:
+                log(f"    [brain] 该消息没有文本（type={it['in_type']}），回落固定文本 {text!r}")
+
         wait = cfg["cooldown"] - (time.time() - _last_reply_at)
         if wait > 0:
             time.sleep(wait)
