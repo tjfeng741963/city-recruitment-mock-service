@@ -43,6 +43,7 @@ import reply_store as rlog  # noqa: E402
 # 自己加 Alt / 点标题栏的版本反而会把焦点带偏，实测必失败。
 compat.apply()
 compat.apply_click_input()
+compat.apply_pb_text()   # 长消息（>127 字节）的长度前缀不是合法 UTF-8，原解析会丢成空
 
 from wecom_io_core import send as core_send  # noqa: E402
 from wecom_io_core.store import Store  # noqa: E402

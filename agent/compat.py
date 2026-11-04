@@ -268,6 +268,80 @@ def apply_click_input() -> None:
     core_win.tap = tap
 
 
+# ── 长消息解析 ──────────────────────────────────────────────────────────────
+# core/store.py 的 `_pb_text` 对每个 length-delimited 字段直接 `decode("utf-8")`，
+# 一旦失败就 `continue` 整段丢弃。消息体超过 127 字节时，长度前缀会变成两字节
+# varint（如 `\x96\x01`），其中的 `\x96` 后跟 `\x01` 不是合法 UTF-8 序列，
+# 于是整条消息被丢成空字符串。
+#
+# 实测：`'233'`（11 字节）能解，`'广州番禺电子厂普工现在还在招…'`（158 字节）解出空。
+# 后果是 `build_history()` 取不到上下文，知识库只能看到短消息。
+#
+# 修法：decode 时 `errors="ignore"`，非法字节丢掉、中文保留。评分逻辑不变。
+
+import re as _re
+
+
+def _pb_text_lenient(data):
+    if isinstance(data, str):
+        return data
+    if not isinstance(data, (bytes, bytearray)) or not data:
+        return ""
+    buf = bytes(data)
+    i, n = 0, len(buf)
+    best, best_score = "", 0
+
+    def _varint(pos: int):
+        val, shift = 0, 0
+        while pos < n:
+            b = buf[pos]
+            pos += 1
+            val |= (b & 0x7F) << shift
+            if not b & 0x80:
+                break
+            shift += 7
+        return val, pos
+
+    while i < n:
+        key, i = _varint(i)
+        if key == 0 or i >= n:
+            break
+        wire = key & 7
+        if wire == 0:
+            _, i = _varint(i)
+        elif wire == 1:
+            i += 8
+        elif wire == 2:
+            ln, i = _varint(i)
+            chunk = buf[i:i + ln]
+            i += ln
+            # 关键差异：ignore 而不是整段丢弃
+            text = chunk.decode("utf-8", errors="ignore")
+            clean = "".join(c for c in text if ord(c) >= 32 or c in "\n\t")
+            score = sum(1 for c in clean if c.isalnum() or "\u4e00" <= c <= "\u9fff")
+            has_cjk = any("\u4e00" <= c <= "\u9fff" for c in clean)
+            if has_cjk and clean and clean[0].isascii() and clean[0].isalnum():
+                score -= 10
+            if score > best_score and clean.strip():
+                best, best_score = clean, score
+        elif wire == 5:
+            i += 4
+        else:
+            break
+    best = best.replace("\x00", "").strip()
+    m = _re.match(r"^[\x20-\x7e\n]{1,5}(?=[\u4e00-\u9fff])", best)
+    if m:
+        best = best[m.end():]
+    return best.strip()
+
+
+def apply_pb_text() -> None:
+    """替换 core.store._pb_text 为宽松解码版本。"""
+    from wecom_io_core import store as core_store
+
+    core_store._pb_text = _pb_text_lenient
+
+
 def warmup_keyboard(keys: int = 2) -> bool:
     """抢前台后先空按几下，消耗掉"激活窗口"的那一次按键。
 
