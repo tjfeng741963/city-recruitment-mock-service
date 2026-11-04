@@ -15,6 +15,7 @@ from .api_agent import router as agent_router
 from .api_kb import router as api_kb_router
 from .api_webhook import router as webhook_router
 from .db import init_db, seed_admin
+from . import instance
 from .settings import settings
 from .ws.hub import router as ws_router
 
@@ -25,6 +26,8 @@ async def lifespan(app: FastAPI):
     generated = await seed_admin()
     if generated:
         print(f"[seed] 已创建管理员 {settings.seed_admin_username}，初始密码：{generated}")
+    info = instance.load_or_create()
+    print(f"[boot] install_id={info['install_id']}")
     print(f"[boot] env={settings.env} db={settings.database_url}")
     _ensure_service_token()
 
@@ -126,3 +129,13 @@ async def healthz() -> dict:
         "version": app.version,
         "ws": hub.stats(),
     }
+
+
+@app.get("/api/v1/instance", tags=["ops"])
+async def instance_info() -> dict:
+    """实例身份（公开）。
+
+    首次启动向导要能读到，所以不要求登录。
+    只有 install_id 这类标识，不含任何配置或密钥。
+    """
+    return instance.public_view()
