@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 import traceback
@@ -299,6 +300,33 @@ def main() -> int:
     cfg.update(target=args.target, reply_first=args.reply_first, reply_next=args.reply_next,
                interval=args.interval, cooldown=args.cooldown,
                backfill_hours=args.backfill_hours, dry_run=args.dry)
+
+    # 从 config.json 读 brain 段（DEFAULTS 里没有，只能从这里进）
+    cfg_path = ROOT / "config.json"
+    if cfg_path.is_file():
+        try:
+            file_cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+            if isinstance(file_cfg.get("brain"), dict):
+                cfg["brain"] = file_cfg["brain"]
+        except (OSError, ValueError) as exc:
+            log(f"config.json 读取失败，按固定文本处理：{exc}")
+
+    global _brain
+    bcfg = cfg.get("brain") or {}
+    if bcfg.get("mode") == "kb" and bcfg.get("base_url"):
+        import brain as brain_mod
+
+        _brain = brain_mod.Brain(
+            bcfg["base_url"],
+            bcfg.get("username", ""),
+            bcfg.get("password", ""),
+            timeout=float(bcfg.get("timeout") or 20),
+            history_limit=int(bcfg.get("history_limit") or 6),
+            mode="kb",
+        )
+        log(f"回复来源：知识库 {bcfg['base_url']}（失败回落固定文本）")
+    else:
+        log(f"回复来源：固定文本（brain.mode={bcfg.get('mode')!r}）")
 
     rlog.init()
 
