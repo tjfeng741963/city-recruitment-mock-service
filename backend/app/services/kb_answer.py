@@ -292,7 +292,9 @@ def render_template(result: SearchResult, *, age: int | None = None) -> str:
 
     parts: list[str] = []
     name = (top.title or "这个岗位").strip()
-    place = f"{top.city}" if top.city else ""
+    # 标题里已经带了城市（如「广州番禺电子厂普工」）就不要再加前缀，
+    # 否则会拼出「广州广州番禺电子厂普工」。
+    place = f"{top.city}" if top.city and not name.startswith(top.city) else ""
     parts.append(f"{place}{name}现在还在招")
 
     # 年龄：先判断用户本身能不能进，再报岗位要求
