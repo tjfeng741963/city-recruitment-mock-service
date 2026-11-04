@@ -170,6 +170,63 @@ def build_history(store: Store, conv_id: str, limit: int = 6) -> list[str]:
     return out[-limit:]
 
 
+def build_dialogue(store: Store, conv_id: str, limit: int = 12) -> list[dict]:
+    """取最近几轮**双方**对话，给谈单状态抽取用。
+
+    和 build_history 的区别：那个只要客户说的话（喂给知识库做检索），
+    这个要成对的问与答——判断"有没有约上"，必须看我们答了什么。
+    """
+    try:
+        rows = store.messages(conv_id, limit=limit * 2)
+    except Exception:  # noqa: BLE001
+        return []
+    me = store.self_id()
+    out: list[dict] = []
+    for m in rows:
+        text = (m.get("text") or "").strip()
+        if not text:
+            continue
+        role = "agent" if str(m.get("sender_id")) == me else "customer"
+        ts = m.get("time") or 0
+        item: dict = {"role": role, "text": text[:500]}
+        if ts:
+            item["at"] = time.strftime("%m-%d %H:%M", time.localtime(ts))
+        out.append(item)
+    return out[-limit:]
+
+
+def _observe_lead(store: Store, conv_id: str, name: str, message_id: str, log) -> None:
+    """发完消息后让后端判定谈单状态。
+
+    三条硬约束：
+    1. 群聊不判（`R:` 开头），只做单聊；
+    2. 任何异常都吞掉，绝不影响发送结果；
+    3. 不做任何键鼠动作，只发一个 HTTP 请求。
+    """
+    if _brain is None or conv_id.startswith("R:"):
+        return
+    try:
+        dialogue = build_dialogue(store, conv_id)
+        if not dialogue:
+            return
+        res = _brain.observe_lead(
+            conv_id,
+            store.self_id(),
+            dialogue,
+            nickname=name or "",
+            last_message_id=str(message_id or ""),
+        )
+        if not res.get("ok"):
+            log(f"    [线索] 未判定：{res.get('detail')}")
+        elif res.get("changed"):
+            log(
+                f"    [线索] {res.get('from_stage')} → {res.get('stage')}"
+                f"（{res.get('reason')}）"
+            )
+    except Exception as exc:  # noqa: BLE001
+        log(f"    [线索] 异常（忽略）：{type(exc).__name__}: {exc}")
+
+
 def drain(store: Store, cfg: dict, *, dry: bool = False) -> dict:
     """按消息时间正序处理 pending + failed。
 
@@ -255,6 +312,10 @@ def drain(store: Store, cfg: dict, *, dry: bool = False) -> dict:
                 _last_reply_at = time.time()
                 stats["sent"] += 1
                 log(f"    已发送：{result['detail']}")
+
+                # 发完再判定谈单状态：绝不阻塞发送，也绝不影响发送结果
+                if _brain is not None:
+                    _observe_lead(store, cid, name, mid, log)
             else:
                 rlog.mark_failed(mid, result["detail"], scene, text)
                 stats["failed"] += 1

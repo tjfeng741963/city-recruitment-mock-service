@@ -136,5 +136,47 @@ class Brain:
                 "detail": f"{type(exc).__name__}: {exc}",
             }
 
+    def observe_lead(
+        self,
+        conversation_external_id: str,
+        channel_external_id: str,
+        dialogue: list[dict[str, Any]],
+        *,
+        nickname: str = "",
+        last_message_id: str = "",
+    ) -> dict[str, Any]:
+        """把最近几轮对话交给后端判定谈单状态（约面/到面/放弃）。
+
+        只读回执，不产生任何键鼠动作。失败一律返回 ok=False，调用方忽略即可——
+        抽取不能影响发消息，这是硬约束。
+        """
+        if self.mode == "fixed":
+            return {"ok": False, "detail": "mode=fixed"}
+        if not dialogue:
+            return {"ok": False, "detail": "没有对话内容"}
+
+        payload = {
+            "conversation_external_id": conversation_external_id,
+            "channel_external_id": channel_external_id,
+            "nickname": nickname or None,
+            "last_message_id": last_message_id or "",
+            "history": dialogue[-12:],
+        }
+        try:
+            r = self._client.post(
+                f"{self.base_url}/api/v1/leads/observe", json=payload, headers=self._headers()
+            )
+            if r.status_code == 401:
+                self._token = ""
+                r = self._client.post(
+                    f"{self.base_url}/api/v1/leads/observe", json=payload, headers=self._headers()
+                )
+            if r.status_code != 200:
+                return {"ok": False, "detail": f"HTTP {r.status_code}: {r.text[:120]}"}
+            data = r.json()
+            return {"ok": True, "changed": bool(data.get("changed")), **data}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+
     def close(self) -> None:
         self._client.close()

@@ -13,6 +13,7 @@ from .api_v1 import router as api_v1
 from .api_v1_conversations import router as conversations_router
 from .api_agent import router as agent_router
 from .api_kb import router as api_kb_router
+from .api_lead import router as lead_router
 from .api_webhook import router as webhook_router
 from .db import init_db, seed_admin
 from . import instance
@@ -116,6 +117,7 @@ app.include_router(conversations_router)
 app.include_router(agent_router)
 app.include_router(api_kb_router)
 app.include_router(webhook_router)
+app.include_router(lead_router)
 app.include_router(ws_router)
 
 
