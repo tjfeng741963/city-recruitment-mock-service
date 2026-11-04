@@ -146,8 +146,21 @@ def _alerts(device: dict | None) -> list[dict]:
         ]
 
     age = device["age_seconds"]
-    if device["status"] == "online" and age is not None and age <= OFFLINE_AFTER_SECONDS:
-        return []
+    online = device["status"] == "online" and age is not None and age <= OFFLINE_AFTER_SECONDS
+
+    if online:
+        # 心跳正常不代表能用：窗口隐藏/退出登录时 agent 会主动停手，
+        # 一条消息都发不出去。这种情况必须报出来，否则看板一片绿、实际全停。
+        blocked = WECOM_REASON.get(device["wecom_state"])
+        if not blocked:
+            return []
+        return [
+            {
+                "level": "danger",
+                "code": "agent_blocked",
+                "text": f"采集端在线，但发不出消息（{blocked}），自动回复已暂停",
+            }
+        ]
 
     if age is None:
         text = "采集端从未上报心跳，期间消息收不到"

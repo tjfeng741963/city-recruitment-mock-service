@@ -17,3 +17,6 @@ reply_log.db
 .venv/
 __pycache__/
 *.pyc
+
+# 切换服务器/重置游标时留下的本地备份（含 token，禁止入库）
+*.local-bak

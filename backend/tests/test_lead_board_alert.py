@@ -200,6 +200,31 @@ async def test_hidden_window_alert_mentions_risk(admin_client) -> None:
 
 
 @pytest.mark.asyncio
+async def test_online_but_hidden_still_alerts(admin_client) -> None:
+    """心跳正常但窗口隐藏：agent 会停手，一条都发不出去，看板不能显示正常。"""
+    await _make_device(status="online", wecom_state="hidden", heartbeat_ago=10)
+
+    data = (await admin_client.get(BOARD)).json()
+
+    alert = _alert(data)
+    assert alert["code"] == "agent_blocked"
+    assert "发不出消息" in alert["text"]
+    assert "风控" in alert["text"] or "隐藏" in alert["text"]
+
+
+@pytest.mark.asyncio
+async def test_online_but_login_required_still_alerts(admin_client) -> None:
+    """同上：在线但已退出登录，必须报出来。"""
+    await _make_device(status="online", wecom_state="login_required", heartbeat_ago=10)
+
+    data = (await admin_client.get(BOARD)).json()
+
+    alert = _alert(data)
+    assert alert["code"] == "agent_blocked"
+    assert "扫码" in alert["text"]
+
+
+@pytest.mark.asyncio
 async def test_device_keys_match_contract(admin_client) -> None:
     """字段名与契约一字不差：顶层 6 个键，device 块 5 个键。"""
     await _make_device(status="offline", wecom_state="login_required", heartbeat_ago=720)
