@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     lead_worker: bool = False
     lead_interval: float = 300.0
 
+    # 设备离线判定：只读心跳时间，不改任何业务数据，可以常开。
+    device_worker: bool = True
+    device_interval: float = 30.0
+    device_offline_after: float = 90.0
+
 
 @lru_cache
 def get_settings() -> Settings:

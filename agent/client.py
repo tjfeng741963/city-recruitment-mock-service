@@ -3,16 +3,34 @@
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 import urllib.request
 from typing import Any
+from urllib.parse import quote
+
+# 采集端版本号，心跳里原样上报（服务端只落库，不做版本判断）
+AGENT_VERSION = "1.0.0"
+
+# 心跳/上报都是"尽力而为"：本地发送不能被它们拖住，所以单独给短超时
+HEARTBEAT_TIMEOUT = 5.0
+INGEST_TIMEOUT = 10.0
 
 
 class AgentClient:
-    def __init__(self, base_url: str, device_token: str, timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        device_token: str,
+        timeout: float = 30.0,
+        device_code: str = "",
+    ) -> None:
+        # device_code 只影响心跳（POST /devices/{code}/heartbeat 的路径参数）。
+        # 放在最后且有默认值，main.py 的 AgentClient(server, token) 调用不受影响。
         self.base_url = base_url.rstrip("/")
         self.device_token = device_token
         self.timeout = timeout
+        self.device_code = (device_code or "").strip()
 
     def _request(self, method: str, path: str, body: dict | None = None, timeout: float | None = None) -> Any:
         url = f"{self.base_url}{path}"
@@ -27,8 +45,40 @@ class AgentClient:
             raw = resp.read().decode("utf-8", "replace")
         return json.loads(raw) if raw.strip() else {}
 
-    def ingest(self, payload: dict) -> dict:
-        return self._request("POST", "/api/v1/agent/ingest", payload)
+    def ingest(self, payload: dict, timeout: float | None = None) -> dict:
+        return self._request(
+            "POST", "/api/v1/agent/ingest", payload, timeout=timeout or INGEST_TIMEOUT
+        )
+
+    def heartbeat(
+        self,
+        agent_version: str = "",
+        wecom_state: str = "unknown",
+        queue_size: int = 0,
+        last_error: str = "",
+    ) -> dict:
+        """POST /api/v1/devices/{device_code}/heartbeat。
+
+        device_code 来源优先级：构造参数 > 环境变量 AGENT_DEVICE_CODE。
+        都没有就抛异常——由调用方（autopilot）捕获并只记日志，不影响发送。
+        """
+        code = self.device_code or os.environ.get("AGENT_DEVICE_CODE", "").strip()
+        if not code:
+            raise RuntimeError("缺少 device_code（构造时传 device_code 或设 AGENT_DEVICE_CODE）")
+        payload = {
+            "agent_version": agent_version or AGENT_VERSION,
+            "capabilities": {},
+            "wecom_state": wecom_state or "unknown",
+            "queue_size": int(queue_size),
+            # 契约要求截断 200 字，服务端还会再截一次
+            "last_error": (last_error or "")[:200],
+        }
+        return self._request(
+            "POST",
+            f"/api/v1/devices/{quote(code, safe='')}/heartbeat",
+            payload,
+            timeout=min(self.timeout, HEARTBEAT_TIMEOUT),
+        )
 
     def commands(self, wait: int = 0) -> list[dict]:
         return self._request("GET", f"/api/v1/agent/commands?wait={wait}", timeout=wait + 30)

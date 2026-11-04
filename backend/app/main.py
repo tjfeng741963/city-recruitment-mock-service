@@ -48,6 +48,13 @@ async def lifespan(app: FastAPI):
         lead_task = asyncio.create_task(lead_sweep_forever(settings.lead_interval))
         print(f"[boot] 线索扫描 worker 已启动，间隔 {settings.lead_interval}s")
 
+    device_task: asyncio.Task | None = None
+    if settings.device_worker:
+        from .workers.device_watch import run_forever as device_watch_forever
+
+        device_task = asyncio.create_task(device_watch_forever(settings.device_interval))
+        print(f"[boot] 设备离线判定已启动，间隔 {settings.device_interval}s")
+
     if settings.sync_worker:
         from .channels.wecom_kf.config import get_wecom_settings
         from .workers.wecom_sync import run_forever as sync_forever
@@ -61,7 +68,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        for task in (worker_task, sync_task, lead_task):
+        for task in (worker_task, sync_task, lead_task, device_task):
             if task:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):

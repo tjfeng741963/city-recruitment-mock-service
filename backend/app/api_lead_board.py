@@ -10,6 +10,11 @@
 - today    已约面且约的时间落在本地今天，按时间升序；`day` 精度天然排在最前
 - pending  到点了还没确认来没来（`pending_confirm=1`），按该核实的时刻升序
 - followup 已约面/有意向但 24 小时没动静，按最后更新时间倒序
+
+另按 `docs/_contract/设备心跳与看板契约.md` 第四、五节追加两块：
+
+- `device` 第一条设备的心跳快照（没有设备时整块为 null）
+- `alerts` 采集端离线告警，页面顶部红条直接用它的 `text`
 """
 
 from __future__ import annotations
@@ -22,7 +27,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import select
 
 from .deps import AdminUser, SessionDep
-from .models import Conversation, Customer
+from .models import Conversation, Customer, Device
 from .models_lead import (
     PRECISION_DAY,
     STAGE_BOOKED,
@@ -41,6 +46,16 @@ PAGE_PATH = Path(__file__).parent / "static" / "leads.html"
 
 # 超过这个时长没有状态更新就算"该催一下"
 FOLLOWUP_AFTER = timedelta(hours=24)
+
+# 心跳超过这个秒数就当采集端失联（与 workers/device_watch.py 的判定保持一致）
+OFFLINE_AFTER_SECONDS = 90
+
+# 企微探测结果 → 给人看的原因。设备没报（unknown）就不瞎猜，只报离线。
+WECOM_REASON = {
+    "login_required": "企业微信已退出登录，需扫码",
+    "hidden": "窗口被隐藏，可能已被风控",
+    "not_running": "企业微信未运行",
+}
 
 
 # ─────────────────────────── 工具 ───────────────────────────
@@ -92,6 +107,58 @@ def _row(lead: Lead, nickname: str | None) -> dict:
         "city": lead.city,
         "updated_at": _iso_local(lead.updated_at),
     }
+
+
+# ─────────────────────────── 设备 / 告警 ───────────────────────────
+def _age_seconds(heartbeat_at: datetime | None, now: datetime) -> int | None:
+    """距上次心跳多少秒（整数）。库里是 naive UTC，读出来可能带 tz，统一归一到 UTC。"""
+    if heartbeat_at is None:
+        return None
+    hb = heartbeat_at
+    if hb.tzinfo is not None:
+        hb = hb.astimezone(timezone.utc).replace(tzinfo=None)
+    return max(0, int((now - hb).total_seconds()))
+
+
+def _device_payload(device: Device | None, now: datetime) -> dict | None:
+    """契约第四节的 device 块：字段名固定这五个，别自作主张加东西。"""
+    if device is None:
+        return None
+    return {
+        "device_code": device.device_code,
+        "status": device.status,
+        "wecom_state": device.wecom_state,
+        "last_heartbeat_at": _iso_local(device.last_heartbeat_at),
+        "age_seconds": _age_seconds(device.last_heartbeat_at, now),
+    }
+
+
+def _alerts(device: dict | None) -> list[dict]:
+    """生成看板顶部红条。都在线就是空数组，页面据此把整条隐藏掉。"""
+    if device is None:
+        # 一台设备都没注册过：消息肯定收不到，按最严重处理
+        return [
+            {
+                "level": "danger",
+                "code": "agent_offline",
+                "text": "采集端从未上报心跳，期间消息收不到",
+            }
+        ]
+
+    age = device["age_seconds"]
+    if device["status"] == "online" and age is not None and age <= OFFLINE_AFTER_SECONDS:
+        return []
+
+    if age is None:
+        text = "采集端从未上报心跳，期间消息收不到"
+    else:
+        text = f"采集端离线 {age // 60} 分钟，期间消息收不到"
+
+    reason = WECOM_REASON.get(device["wecom_state"])
+    if reason:
+        text = f"{text}（{reason}）"
+
+    return [{"level": "danger", "code": "agent_offline", "text": text}]
 
 
 # ─────────────────────────── 页面 ───────────────────────────
@@ -147,6 +214,12 @@ async def board_data(admin: AdminUser, session: SessionDep) -> dict:
     pending = [_row(lead, nick) for lead, nick in pending_rows]
     followup = [_row(lead, nick) for lead, nick in followup_rows]
 
+    # 单机阶段只认第一条设备；多台以后再看要不要按通道归属
+    device_row = (
+        await session.execute(select(Device).order_by(Device.id.asc()).limit(1))
+    ).scalar_one_or_none()
+    device = _device_payload(device_row, now)
+
     return {
         "counts": {
             "today": len(today),
@@ -156,4 +229,6 @@ async def board_data(admin: AdminUser, session: SessionDep) -> dict:
         "today": today,
         "pending": pending,
         "followup": followup,
+        "device": device,
+        "alerts": _alerts(device),
     }

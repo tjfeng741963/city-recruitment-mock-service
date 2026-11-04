@@ -18,6 +18,8 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    inspect,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -53,10 +55,46 @@ class Device(Base):
     device_token: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     status: Mapped[str] = mapped_column(String(16), default="offline")  # online/offline/disabled
     agent_version: Mapped[str] = mapped_column(String(32), default="")
+    # 企业微信侧的探测结果，由设备自己上报；服务器不猜（离线判定只改 status）
+    wecom_state: Mapped[str] = mapped_column(String(16), default="unknown")
+    last_error: Mapped[str] = mapped_column(String(200), default="")
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     channels: Mapped[list[ChannelAccount]] = relationship(back_populates="device")
+
+
+async def ensure_device_columns(conn) -> list[str]:
+    """给已存在的 devices 表补上后加的 wecom_state / last_error 列，返回本次新建的列名。
+
+    与 ``models_lead.ensure_lead_columns`` 同一约定：入参是 ``init_db`` 里
+    ``engine.begin()`` 拿到的 async connection，内部用 ``conn.run_sync`` 做反射。
+    ``create_all`` 只建表不改表，老库升级后不加这一步，一查设备就 500。
+    """
+    def _existing_columns(sync_conn) -> set[str] | None:  # noqa: ANN001
+        insp = inspect(sync_conn)
+        if not insp.has_table("devices"):
+            return None
+        return {c["name"] for c in insp.get_columns("devices")}
+
+    existing = await conn.run_sync(_existing_columns)
+    if existing is None:
+        # 表还没建（全新库），create_all 会带上全部列
+        return []
+
+    # 默认值只用于回填存量行：老设备没报过状态，按 unknown 处理最保守
+    ddl = {
+        "wecom_state": "VARCHAR(16) DEFAULT 'unknown'",
+        "last_error": "VARCHAR(200) DEFAULT ''",
+    }
+
+    added: list[str] = []
+    for name in ("wecom_state", "last_error"):
+        if name in existing:
+            continue
+        await conn.execute(text(f"ALTER TABLE devices ADD COLUMN {name} {ddl[name]}"))
+        added.append(name)
+    return added
 
 
 class ChannelAccount(Base):

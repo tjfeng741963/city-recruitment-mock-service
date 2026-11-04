@@ -61,6 +61,13 @@ async def init_db() -> None:
         added = await ensure_lead_columns(conn)
         if added:
             print(f"[db] leads 补列：{', '.join(added)}")
+
+        # devices 后加的 wecom_state / last_error，同样只补不重建
+        from .models import ensure_device_columns
+
+        dev_added = await ensure_device_columns(conn)
+        if dev_added:
+            print(f"[db] devices 补列：{', '.join(dev_added)}")
     await seed_default_tenant()
 
 

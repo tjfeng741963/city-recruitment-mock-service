@@ -1,8 +1,9 @@
 """回复编排：检索 → 事实/话术分离 → LLM → 数字校验 → 降级。
 
-这是把前面几块串起来的唯一入口。四条路径：
+这是把前面几块串起来的唯一入口。五条路径：
 
-1. 检索无命中        → 直说"我确认一下"，不调 LLM（省成本也不让模型瞎编）
+0. 纯寒暄           → 不查库，随机挑一句带问题的招呼（客户只是打个招呼）
+1. 检索无命中        → 分清是"年龄不符""城市没岗位"还是真没有，别一律"我确认一下"，也不调 LLM
 2. LLM 返回且校验通过 → 用模型回复
 3. LLM 返回但校验失败 → 重生成一次；仍失败则降级为模板
 4. LLM 不可用        → 降级为模板，绝不沉默
@@ -12,11 +13,15 @@
 
 from __future__ import annotations
 
+import random
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..models_kb import DEFAULT_TENANT_ID, KbEntry
 from .kb_extract import _CITY_HINTS
 from .kb_reply import Facts, build_facts, build_messages, verify_reply
 from .kb_search import SearchQuery, extract_age_from_query, search
@@ -27,6 +32,15 @@ TEMPLATE_FALLBACK = "我这边查一下，等下给你准信哈"
 CLARIFY_CITY_REPLY = "你在哪个城市呀？我按城市给你找合适的厂。"
 
 # 上面这几个是"没有确定信息"时的问句/兜底，不算答非所问
+
+# 寒暄不能让客户对着同一句话看三遍——真人不会每次都一个字不差。
+# 每条都必须落到一个具体问题上（城市 / 工种 / 年龄），否则客户接不下去。
+GREETING_VARIANTS = (
+    "你好呀，我们这边广州、深圳、东莞都有厂在招，你之前做过什么工种？",
+    "哎你好，是想找普工还是别的岗位？我这边广州深圳都有在招的。",
+    "在的，你打算去哪个城市？我看看那边有什么合适的厂。",
+    "你好，最近厂里在补人，你多大年纪、想找哪个城市的？",
+)
 
 
 def infer_city(text: str, history: Sequence[str] = ()) -> str | None:
@@ -80,12 +94,103 @@ def wants_clarification(text: str, city: str | None) -> bool:
     return any(token in text for token in _CONDITION_WORDS)
 
 
+# 纯寒暄词。只认"整句就是在打招呼"，不做语义猜测
+_GREETING_TOKENS = (
+    "你好", "您好", "在吗", "在不在", "有人吗", "老板",
+    "hello", "hi", "早上好", "下午好", "晚上好",
+)
+
+# 实质内容词：出现任何一个就说明客户在问事，不是单纯打招呼。
+# "你好，广州有什么厂" 里有「厂」「广州」，必须走正常检索，不能当寒暄打发。
+_SUBSTANTIVE_WORDS = (
+    "厂", "公司", "岗", "工作", "招", "工价", "工资", "多少", "钱", "包吃", "包住",
+    "面试", "体检", "年龄", "岁", "多大", "城市", "哪儿", "哪里", "哪家", "哪个",
+    "上班", "加班", "班次", "白班", "夜班", "宿舍", "什么时候",
+)
+
+# 寒暄都很短。放宽到 8 个字，"老板你好呀在吗" 这种叠着说的也算
+_MAX_GREETING_LEN = 8
+
+_PUNCT_RE = re.compile(r"[\s，。、！？!?,.~～…:：;；\"'“”‘’()（）]+")
+
+
+def classify_greeting(text: str) -> bool:
+    """这句话是不是单纯的打招呼。
+
+    判定必须保守：**短** 且 **不含实质词** 且 **含寒暄词**，三个条件同时成立才算。
+    宁可把一句寒暄当正常问题去查（最多回一句兜底），也不能把
+    "你好，广州有什么厂" 当成寒暄打发掉——那是客户唯一一次说需求的机会。
+    """
+    if not text:
+        return False
+    stripped = text.strip()
+    normalized = _PUNCT_RE.sub("", stripped)
+    if not normalized or len(normalized) > _MAX_GREETING_LEN:
+        return False
+    if any(word in stripped for word in _CITY_HINTS):
+        return False
+    if any(word in stripped for word in _SUBSTANTIVE_WORDS):
+        return False
+    lowered = stripped.lower()
+    return any(_contains_greeting_token(lowered, token) for token in _GREETING_TOKENS)
+
+
+def _contains_greeting_token(lowered: str, token: str) -> bool:
+    """中文直接找子串；英文按单词边界，避免 "hi" 命中 "this"。"""
+    if token.isascii():
+        return re.search(rf"(?<![a-z]){token}(?![a-z])", lowered) is not None
+    return token in lowered
+
+
+async def _cities_with_stock(
+    session: AsyncSession, *, exclude: str | None = None, limit: int = 3
+) -> list[str]:
+    """库里真实有岗位的城市，按在招条目数降序。
+
+    绝不拿 _CITY_HINTS 顶替：那份表是"识别城市名用的词典"，
+    库里没有的城市推荐给客户，等于让人白跑一趟。
+    """
+    stmt = select(KbEntry.city, func.count(KbEntry.id)).where(
+        KbEntry.tenant_id == DEFAULT_TENANT_ID,
+        KbEntry.status == "enabled",
+        KbEntry.city.is_not(None),
+        KbEntry.city != "",
+    )
+    if exclude:
+        stmt = stmt.where(KbEntry.city != exclude)
+    stmt = (
+        stmt.group_by(KbEntry.city)
+        .order_by(func.count(KbEntry.id).desc(), KbEntry.city)
+        .limit(limit)
+    )
+    rows = (await session.execute(stmt)).all()
+    return [city for city, _count in rows if city]
+
+
+def _city_empty_reply(city: str, others: Sequence[str]) -> str:
+    names = "、".join(others)
+    tail = "这几个地方还在招" if len(others) > 1 else "还在招"
+    return f"{city}暂时没有合适的，{names}{tail}，你考虑哪个？"
+
+
+def _age_mismatch_reply(entry: KbEntry, age: int) -> str | None:
+    """用条目里真实的年龄区间解释"为什么去不了"。没有区间就返回 None，交给上层兜底。"""
+    if entry.age_min is None or entry.age_max is None:
+        return None
+    name = (entry.title or "这个厂").strip()
+    place = f"{entry.city}" if entry.city and not name.startswith(entry.city) else ""
+    return (
+        f"{place}{name}要{entry.age_min}到{entry.age_max}岁，"
+        f"{age}岁去不了。我帮你看看有没有年龄放宽一点的？"
+    )
+
+
 @dataclass(frozen=True)
 class Answer:
     """一次回复的完整结果，字段够用于事后回溯。"""
 
     reply: str
-    source: str  # llm / template / no_match
+    source: str  # llm / template / no_match / clarify / greeting / city_empty / age_mismatch
     matched_entry_ids: tuple[int, ...]
     tiers_used: tuple[str, ...]
     validation_passed: bool
@@ -108,6 +213,10 @@ async def answer(
     检索照常做，回复由 `render_template()` 从命中的真实条目拼成口语化话术，
     不发起任何外部调用，也不会有超时等待。
     """
+    # 寒暄不查库：客户只是打个招呼，检索命中 0 条再回"我确认一下"是最伤人的回答
+    if classify_greeting(user_text):
+        return _greeting_answer()
+
     age = extract_age_from_query(user_text)
 
     # 城市：显式传入 > 当前消息里提到的 > 最近对话里提到的
@@ -134,18 +243,16 @@ async def answer(
     tiers = result.tiers_used
 
     if not result.hits:
-        reply = NO_MATCH_REPLY
-        if resolved_city is None and not wants_clarification(user_text, resolved_city):
-            # 用户问的是具体厂名但没查到，别让他一直猜
-            reply = "这个我这边暂时没查到，你方便说一下是哪个城市、什么厂吗？我帮你确认。"
-        return Answer(
-            reply=reply,
-            source="no_match",
-            matched_entry_ids=entry_ids,
-            tiers_used=tiers,
-            validation_passed=True,
-            unauthorized_numbers=(),
-            llm_fallback=False,
+        return await _no_hit_answer(
+            session,
+            user_text=user_text,
+            resolved_city=resolved_city,
+            age=age,
+            city_given=city is not None,
+            history=history,
+            entry_ids=entry_ids,
+            tiers=tiers,
+            limit=limit,
         )
 
     facts = build_facts(result)
@@ -214,6 +321,95 @@ async def answer(
         validation_passed=False,
         unauthorized_numbers=tuple(sorted(bad2)),
         llm_fallback=True,
+    )
+
+
+def _greeting_answer() -> Answer:
+    return Answer(
+        reply=random.choice(GREETING_VARIANTS),
+        source="greeting",
+        matched_entry_ids=(),
+        tiers_used=(),
+        validation_passed=True,
+        unauthorized_numbers=(),
+        llm_fallback=False,
+    )
+
+
+async def _no_hit_answer(
+    session: AsyncSession,
+    *,
+    user_text: str,
+    resolved_city: str | None,
+    age: int | None,
+    city_given: bool,
+    history: Sequence[str],
+    entry_ids: tuple[int, ...],
+    tiers: tuple[str, ...],
+    limit: int,
+) -> Answer:
+    """检索 0 条时该怎么解释。
+
+    同一个 0 条有三种完全不同的原因，回同一句话就是答非所问：
+    - 年龄卡住了（去掉年龄能查到）
+    - 这个城市没有岗位（别的城市有）
+    - 真没有（或问的是某个具体厂，库里没录）
+
+    `city_given` 是调用方显式传入的城市筛选条件，不是客户原话；
+    这种时候保持原来"我确认一下"的口径，不推翻外部给定的筛选结果。
+    """
+    # ① 年龄不符：不带年龄再查一次，能查到就说明是年龄这道门卡住的
+    if age is not None and not city_given:
+        relaxed = await search(
+            session, SearchQuery(city=resolved_city, text=user_text, limit=limit)
+        )
+        for hit in relaxed.hits:
+            reply = _age_mismatch_reply(hit.entry, age)
+            if reply:
+                return Answer(
+                    reply=reply,
+                    source="age_mismatch",
+                    matched_entry_ids=tuple(hit.entry.id for hit in relaxed.hits),
+                    tiers_used=relaxed.tiers_used,
+                    validation_passed=True,
+                    unauthorized_numbers=(),
+                    llm_fallback=False,
+                )
+
+    # ② 这个城市没有岗位：把真实在招的城市报给他。
+    #    上文说的是**另一个**城市时（客户在对比两座城市，或刚换地方还没说清），
+    #    先保持中性说法，别急着把他往别处带。
+    history_city = infer_city("", history)
+    if (
+        resolved_city
+        and not city_given
+        and (history_city is None or history_city == resolved_city)
+    ):
+        others = await _cities_with_stock(session, exclude=resolved_city)
+        if others:
+            return Answer(
+                reply=_city_empty_reply(resolved_city, others),
+                source="city_empty",
+                matched_entry_ids=(),
+                tiers_used=(),
+                validation_passed=True,
+                unauthorized_numbers=(),
+                llm_fallback=False,
+            )
+
+    # ③ 原兜底，语义不变
+    reply = NO_MATCH_REPLY
+    if resolved_city is None and not wants_clarification(user_text, resolved_city):
+        # 用户问的是具体厂名但没查到，别让他一直猜
+        reply = "这个我这边暂时没查到，你方便说一下是哪个城市、什么厂吗？我帮你确认。"
+    return Answer(
+        reply=reply,
+        source="no_match",
+        matched_entry_ids=entry_ids,
+        tiers_used=tiers,
+        validation_passed=True,
+        unauthorized_numbers=(),
+        llm_fallback=False,
     )
 
 

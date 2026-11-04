@@ -165,3 +165,87 @@ skipped  不该发（系统会话 / 搜索不到会话名 / 同会话合并 / �
 本目录只做两件事：在它前后补环境适配（`compat.py`），以及决定「什么时候、给谁、回什么」（`autopilot.py`）。
 
 ⚠️ 读取解密本地库属于绕过客户端技术保护措施，聊天内容含第三方个人信息。**不要外传 `_decrypted/` 或 `reply_log.db`**。
+
+---
+
+## 上报与心跳
+
+`autopilot.py` 除了本地回复，还会**定时和服务器说话**。这两件事都是**纯 HTTP**，不产生任何键盘/鼠标事件，也不改发送动作序列。
+
+### 心跳（每 30 秒）
+
+`POST /api/v1/devices/{device_code}/heartbeat`，带 `X-Device-Token`，请求体遵循
+[`docs/_contract/设备心跳与看板契约.md`](../docs/_contract/设备心跳与看板契约.md)：
+
+```json
+{"agent_version": "1.0.0", "capabilities": {}, "wecom_state": "online", "queue_size": 0, "last_error": ""}
+```
+
+服务端据此把设备置为 `status=online`、刷新 `last_heartbeat_at`，看板就能判断「采集机还在不在」。
+超过 90 秒没心跳，服务端会自己标 `offline` 并发告警——所以心跳断了不用 agent 做任何补救。
+
+`wecom_state` 由本地 `detect_wecom_state()` 只读探测得出（`EnumWindows` / `GetClassNameW` / `IsWindowVisible` 一类只读 API，
+**不调用 `SetForegroundWindow` / `ShowWindow`**）：
+
+| 探测结果 | 判定 |
+|---|---|
+| 进程里没有 `WXWork.exe` | `not_running` |
+| 有窗口类名 `WeChatLogin` | `login_required` |
+| 有可见的 `WeWorkWindow` | `online` |
+| 只有不可见的 `WeWorkWindow` | `hidden` |
+| 其它 / 探测异常 | `unknown` |
+
+### 掉线就停手
+
+主循环**每轮开头**先自检：
+
+- `online` → 正常处理队列
+- 其它任何状态（`login_required` / `not_running` / `hidden` / `unknown`）→ **跳过全部发送**，日志写原因，队列原样保留，心跳照发
+- 状态恢复 `online` 后自动继续，不需要重启进程
+- `--dry` 本来就不发送，不受这条限制（可以照常看到"会回什么"）
+
+> 这是 11-02 被强制退出的直接原因：窗口隐藏了还在按 Ctrl+F。`drain()` 在函数第一行就 `return`，`core_send.send()` 一次都不会被调到。
+
+### 增量上报（每 30 秒，和心跳同一批）
+
+- 取本地解密库里**比游标新**的消息，一次最多 50 条，结构照 `main.py::collect_once`：
+  `account_uid` + `conversations` + `messages`
+- **群聊（`R:`）也上报**，`kind` 标成 `group`
+- 上报成功后把游标写进 `agent/.report_state.json`（每会话一个最大 `message_id`）
+- 首次运行没有游标时，只补最近 24 小时，避免把几天历史一次性灌进服务端
+- 失败不重试、不推进游标、只记日志，下一轮自然补
+
+心跳/上报跑在后台线程里，主线程照常发送；上一批没回来就跳过本轮，不会越堆越多。
+
+### `device_code` 从哪来
+
+心跳路径里的 `{device_code}` 不是从 token 反推的，必须本地配置。优先级：
+
+1. 命令行 `--device-code pc-office-01`
+2. 环境变量 `AGENT_DEVICE_CODE`
+3. `agent/config.json` 里的 `"device_code": "pc-office-01"`
+4. 上一次心跳成功后缓存在 `.report_state.json` 里的值
+
+都没有时**只跳过心跳，上报照常**（上报只认 `X-Device-Token`），日志会提示怎么配。
+`AgentClient.__init__` 只多了一个带默认值的 `device_code` 参数，`main.py` 的调用不受影响。
+
+### 怎么排查
+
+| 现象 | 看什么 |
+|---|---|
+| 看板显示采集机离线 | 日志里有没有 `[心跳] ... → ok=True`；没有就是进程没跑或 `device_code` 没配 |
+| `[心跳] 失败（忽略，下轮自然补）` | `server` 地址、后端是否在跑、token 是否被服务端删了；注意**失败不会重试**，恢复后下一轮自动补 |
+| `[自检] 企微状态 hidden` | 企微被最小化到托盘或已被风控隐藏；**不要手动多点窗口**，等它自己恢复成 `online` |
+| `[自检] 企微状态 login_required` | 需要人工扫码登录，扫码后下一轮自动恢复发送 |
+| 服务端会话时间不更新 | `[上报] 无新增消息` 说明游标已推进；对比 `.report_state.json` 的 `cursor` 与本地库最新 `message_id` |
+| 想重新全量上报 | 停进程，删掉 `agent/.report_state.json`（会按最近 24 小时重新挑），再启动 |
+
+手工确认（`TOK` 用 `POST /api/v1/auth/login` 换）：
+
+```sh
+curl -s --noproxy '*' http://127.0.0.1:8090/api/v1/devices -H "Authorization: Bearer $TOK"
+curl -s --noproxy '*' "http://127.0.0.1:8090/api/v1/conversations?limit=3" -H "Authorization: Bearer $TOK"
+```
+
+**只在 dry 模式下验证**：`uv run python autopilot.py --once --dry`（只登记不发送，仍会心跳/上报）。
+

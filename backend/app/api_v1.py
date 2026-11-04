@@ -27,6 +27,10 @@ from .security import create_access_token, verify_password
 
 router = APIRouter(prefix="/api/v1")
 
+# 企微状态枚举（见 docs/_contract/设备心跳与看板契约.md）。设备端升级不同步时
+# 可能报上来别的值，一律按 unknown 落库，不能因为一个枚举值让心跳 4xx/5xx。
+WECOM_STATES = {"online", "login_required", "not_running", "hidden", "unknown"}
+
 
 # ─────────────────────────── 认证 ───────────────────────────
 @router.post("/auth/login", response_model=TokenResponse, tags=["auth"])
@@ -88,8 +92,12 @@ async def heartbeat(
     if device.device_code != device_code:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "设备 Token 与路径不匹配")
     device.status = "online"
+    device.wecom_state = (
+        payload.wecom_state if payload.wecom_state in WECOM_STATES else "unknown"
+    )
     device.agent_version = payload.agent_version
     device.last_heartbeat_at = datetime.now(timezone.utc)
+    device.last_error = (payload.last_error or "")[:200]
     await session.commit()
     return HeartbeatOut(server_time=datetime.now(timezone.utc))
 

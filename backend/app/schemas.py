@@ -40,6 +40,8 @@ class DeviceOut(BaseModel):
     name: str
     status: str
     agent_version: str
+    wecom_state: str = "unknown"
+    last_error: str = ""
     last_heartbeat_at: datetime | None
 
 
@@ -50,6 +52,10 @@ class DeviceCreated(DeviceOut):
 class HeartbeatIn(BaseModel):
     agent_version: str = ""
     capabilities: dict = Field(default_factory=dict)
+    # 企业微信侧状态：online / login_required / not_running / hidden / unknown
+    wecom_state: str = "unknown"
+    queue_size: int = 0
+    last_error: str = ""
 
 
 class HeartbeatOut(BaseModel):
