@@ -214,7 +214,8 @@ export async function registerActivationRoutes(app: FastifyInstance, db: Databas
     const scope = deviceConstraint(deviceScope(request.auth!), "device_code");
     const records = db.prepare(`SELECT * FROM activation_records WHERE customer_id=?${scope.sql} ORDER BY id DESC`).all(customerId, ...scope.values);
     if (!records.length) return reply.code(404).send({ detail: "客户不存在或无权访问" });
-    return { customer_id: customerId, summary: "", records };
+    const latest = records[0] as { summary?: string };
+    return { customer_id: customerId, summary: String(latest.summary ?? ""), records };
   });
   // Regenerating a summary needs at least one activation record to summarise;
   // the target answers 404 "客户不存在或无权访问" otherwise.
@@ -224,5 +225,15 @@ export async function registerActivationRoutes(app: FastifyInstance, db: Databas
     const records = db.prepare(`SELECT * FROM activation_records WHERE customer_id=?${scope.sql} ORDER BY id DESC`).all(customerId, ...scope.values);
     if (!records.length) return reply.code(404).send({ detail: "客户不存在或无权访问" });
     return { success: true, customer_id: customerId, summary: "" };
+  });
+  // Summary edits land on the customer's latest activation record; GET reads it back.
+  app.put<{ Params: { id: string }; Body: { summary?: string } }>("/api/v1/activation/customers/:id/summary", async (request, reply) => {
+    const customerId = Number(request.params.id);
+    const scope = deviceConstraint(deviceScope(request.auth!), "device_code");
+    const latest = db.prepare(`SELECT id FROM activation_records WHERE customer_id=?${scope.sql} ORDER BY id DESC LIMIT 1`).get(customerId, ...scope.values) as { id: number } | undefined;
+    if (!latest) return reply.code(404).send({ detail: "客户不存在或无权访问" });
+    const summary = typeof request.body?.summary === "string" ? request.body.summary : "";
+    db.prepare("UPDATE activation_records SET summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(summary, latest.id);
+    return { success: true, customer_id: customerId, summary };
   });
 }

@@ -111,4 +111,20 @@ export async function registerRelationRoutes(app: FastifyInstance, db: DatabaseS
     const constraint = scope.isAdmin ? "" : scope.cityIds.length ? ` WHERE id IN (${scope.cityIds.map(() => "?").join(",")})` : " WHERE 1=0";
     return { items: db.prepare(`SELECT id,city_name FROM cities${constraint} ORDER BY city_name`).all(...(scope.isAdmin ? [] : scope.cityIds)) };
   });
+  // Batch-add service cities by name; unknown or inaccessible names are skipped.
+  app.post<{ Params: { id: string }; Body: { city_names?: string[]; is_enabled?: boolean } }>("/api/v1/recruiters/:id/service-cities/batch", async (request, reply) => {
+    const recruiterId = Number(request.params.id);
+    const names = Array.isArray(request.body?.city_names) ? request.body.city_names : [];
+    const scope = userScope(request);
+    if (!recruiterExists(recruiterId) || !canAccessRecruiter(scope, request.params.id)) return reply.code(404).send({ detail: "Recruiter not found" });
+    const enabled = request.body?.is_enabled === false ? 0 : 1;
+    let added = 0;
+    for (const name of names) {
+      const city = db.prepare("SELECT id FROM cities WHERE city_name=?").get(String(name)) as { id: number } | undefined;
+      if (!city || !canAccessCity(scope, city.id)) continue;
+      db.prepare("INSERT OR REPLACE INTO recruiter_cities(recruiter_id,city_id,is_enabled,is_service) VALUES (?,?,?,1)").run(recruiterId, city.id, enabled);
+      added += 1;
+    }
+    return { success: true, added };
+  });
 }

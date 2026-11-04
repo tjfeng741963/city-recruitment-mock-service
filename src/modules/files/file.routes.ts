@@ -65,7 +65,7 @@ export function registerFileRoutes(app: FastifyInstance, db: DatabaseSync) {
     }));
   });
 
-  for (const route of ["/api/v1/import-export/import", "/api/v1/import-export/factories/import", "/api/v1/import-export/service-positions/import", "/api/v1/service-positions/holidays-import", "/api/v1/activation/scripts/import", "/api/v1/knowledge/batch/import"]) {
+  for (const route of ["/api/v1/import-export/import", "/api/v1/import-export/factories/import", "/api/v1/import-export/service-positions/import", "/api/v1/service-positions/holidays-import", "/api/v1/service-positions/jingcai-import", "/api/v1/activation/scripts/import", "/api/v1/knowledge/batch/import"]) {
     app.post(route, async (request) => { const file = await request.file(); return { success: true, filename: file?.filename ?? null, total: 0, created: 0, updated: 0 }; });
   }
   for (const route of ["/api/v1/upload/image", "/api/v1/upload/video"]) {

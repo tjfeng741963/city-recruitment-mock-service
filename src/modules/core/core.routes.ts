@@ -92,6 +92,14 @@ export async function registerCoreRoutes(app: FastifyInstance, db: DatabaseSync)
     const result = db.prepare("UPDATE factories SET city_id=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND city_id=?").run(Number(request.params.factoryId), cityId);
     return result.changes ? { success: true } : reply.code(404).send({ detail: "City not found" });
   });
+  // Linking a factory to a city is the same store as PUT/DELETE above: factories.city_id.
+  app.post<{ Params: { id: string }; Body: { factory_id?: number } }>("/api/v1/cities/:id/factories", async (request, reply) => {
+    const cityId = Number(request.params.id);
+    if (!cityExists(cityId)) return reply.code(404).send({ detail: "City not found" });
+    if (denyCityWrite(scopeFor(request.auth!), cityId, reply)) return reply;
+    const result = db.prepare("UPDATE factories SET city_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(cityId, Number(request.body?.factory_id));
+    return result.changes ? { success: true } : reply.code(404).send({ detail: "工厂不存在" });
+  });
   app.get<{ Querystring: Record<string, unknown> }>("/api/v1/factories", async (request) => list(db, "factories", request.query, serializeFactory, "", [], cityConstraint(scopeFor(request.auth!), "city_id")));
   app.get<{ Params: { id: string } }>("/api/v1/factories/:id", async (request, reply) => { const row = db.prepare("SELECT * FROM factories WHERE id=?").get(Number(request.params.id)) as (Record<string, unknown> & { city_id: number }) | undefined; return row && canAccessCity(scopeFor(request.auth!), Number(row.city_id)) ? serializeFactory(row) : reply.code(404).send({ detail: "工厂不存在" }); });
   app.post<{ Body: Record<string, unknown> }>("/api/v1/factories", async (request, reply) => { const cityId = typeof request.body?.city_id === "number" ? request.body.city_id : null; if (cityId === null || denyCityWrite(scopeFor(request.auth!), cityId, reply)) return reply.sent ? reply : reply.code(422).send({ detail: "city_id is required" }); const row = db.prepare("INSERT INTO factories(factory_name,city_id,data_json) VALUES (?,?,?) RETURNING *").get(String(request.body?.factory_name ?? request.body?.name ?? "本地工厂"), cityId, JSON.stringify(request.body ?? {})) as Record<string, unknown>; return serializeFactory(row); });
