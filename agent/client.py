@@ -160,6 +160,38 @@ class BridgeClient:
             },
         )
 
+    def claim(self) -> dict | None:
+        """POST /claim：领一条待发指令（人工回复/接管）。
+
+        没有可领的指令、或设备不在线时服务端返回 {"command": null}。
+        返回结构：{id, device_code, customer_id, contact_id, nickname,
+        content, status, lease_token, ...}
+        """
+        code = quote(self.device_code, safe="")
+        res = self._request("POST", f"/api/v1/bridge/devices/{code}/claim", {})
+        return res.get("command") or None
+
+    def receipt(
+        self,
+        command_id: str,
+        lease_token: str,
+        status: str,
+        message_id: str = "",
+    ) -> dict:
+        """POST /receipts：回报指令执行结果（succeeded/failed/unknown）。"""
+        code = quote(self.device_code, safe="")
+        return self._request(
+            "POST",
+            f"/api/v1/bridge/devices/{code}/receipts",
+            {
+                "command_id": command_id,
+                "lease_token": lease_token,
+                "status": status,
+                # succeeded 时服务端强制要求非空 message_id
+                "message_id": message_id,
+            },
+        )
+
 
 def describe_error(exc: Exception) -> str:
     if isinstance(exc, urllib.error.HTTPError):

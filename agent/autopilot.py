@@ -22,6 +22,10 @@
     每 30 秒向服务端发一次设备心跳 + 增量上报本地新消息；
     同一周期顺带向 Node 桥接（4222）报一次设备心跳（双通道）；
     主循环每轮先自检企微状态，非 online 时**一条都不发**，只继续心跳。
+
+人工指令（4222 控制台主动发消息）：
+    每 10 秒向桥接 claim 一条人工指令，用同一套键鼠发送函数真实发出，
+    成功/失败都回执（receipts）；与自动回复串行 + 共享冷却，不会同时抢键鼠。
 """
 
 from __future__ import annotations
@@ -47,6 +51,7 @@ from wecom_io_core import win  # noqa: E402
 win.set_dpi_aware()
 
 import compat  # noqa: E402
+import login_watch  # noqa: E402
 import reply_store as rlog  # noqa: E402
 import client as agent_client  # noqa: E402
 
@@ -87,6 +92,12 @@ DEFAULTS = {
 }
 
 _last_reply_at = 0.0
+
+# ── 人工指令（4222 控制台主动发消息）────────────────────────────────────────
+# 主循环里与自动回复串行执行（同一个线程），共享 _last_reply_at 冷却，
+# 保证任意时刻只有一个键鼠发送者。轮询按时间戳判断，不额外起线程。
+CLAIM_INTERVAL = 10.0
+_last_claim_at = 0.0
 
 # ── 上报与心跳 ───────────────────────────────────────────────────────────────
 # 只做 HTTP，不产生任何键鼠事件。失败一律忽略，下一轮自然补。
@@ -807,6 +818,157 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
     return stats
 
 
+def _session_names(store: Store) -> set[str]:
+    """企微本地会话表里的全部会话名，用于人工发送前校验目标真实存在。"""
+    try:
+        sessions = store.sessions(limit=500)
+    except Exception:  # noqa: BLE001
+        return set()
+    return {(item.get("name") or "").strip() for item in sessions if (item.get("name") or "").strip()}
+
+
+def pump_commands(
+    store: Store,
+    cfg: dict,
+    *,
+    bridge=None,
+    wecom_state: str = "online",
+    dry: bool = False,
+) -> dict:
+    """领一条人工指令并用真实键鼠发出（4222 控制台的人工回复/接管）。
+
+    与自动回复的关系（红线）：
+    - 和 drain() 跑在同一个线程、同一轮里，天然互斥，不会同时抢键鼠；
+    - 复用 `_last_reply_at` 冷却，人工与自动之间也留够间隔；
+    - 只在企微 online 时领指令——离线领了只能失败，还会把指令锁 60 秒；
+    - 任何异常都只记日志并回执 failed，绝不影响主心跳/自动回复；
+    - 自动回复的判定逻辑（知识库、场景、合并）完全不改。
+
+    安全护栏（11-05 事故后补）：键鼠发送靠「搜索会话名 → 回车 → 粘贴」，
+    搜索不到目标时焦点会落回当前会话，消息会发给上一个聊天对象。
+    所以发送前必须确认目标名在企微会话列表里且不是系统会话；
+    发送后再回读解密库，落点不是该 contact_id 就回执 failed。
+    """
+    global _last_reply_at, _last_error, _last_claim_at
+    stats = {"claimed": 0, "sent": 0, "failed": 0}
+
+    if dry or cfg.get("dry_run") or bridge is None or not getattr(bridge, "enabled", False):
+        return stats
+    if wecom_state != "online":
+        return stats
+    now = time.time()
+    if now - _last_claim_at < CLAIM_INTERVAL:
+        return stats
+    _last_claim_at = now
+
+    try:
+        command = bridge.claim()
+    except Exception as exc:  # noqa: BLE001
+        log(f"[指令] 领取失败（忽略）：{agent_client.describe_error(exc)}")
+        return stats
+    if not command:
+        return stats
+
+    stats["claimed"] = 1
+    cmd_id = str(command.get("id") or "")
+    lease = str(command.get("lease_token") or "")
+    content = (command.get("content") or "").strip()
+    name = (command.get("nickname") or "").strip()
+    if not cmd_id or not lease:
+        return stats
+    log(f"[指令] 人工发送 #{cmd_id[:8]} → {name or '(无昵称)'}：{content[:30]!r}")
+
+    def receipt(status: str, message_id: str = "") -> None:
+        try:
+            bridge.receipt(cmd_id, lease, status, message_id)
+            log(f"    回执 {status} 已上报")
+        except Exception as exc:  # noqa: BLE001
+            log(f"    回执 {status} 失败（忽略）：{agent_client.describe_error(exc)}")
+
+    if not content or not name:
+        log("    跳过：指令缺少昵称或内容")
+        receipt("failed")
+        stats["failed"] += 1
+        return stats
+
+    # 盲发护栏：目标必须是企微里真实存在的非系统会话，否则键盘搜索落空时
+    # 消息会被上一个打开的真实客户收走（11-05 已发生一次）。
+    contact_id = str(command.get("contact_id") or "")
+    names = _session_names(store)
+    if is_system_conv(contact_id, name):
+        log(f"    拒绝发送：{name} 是系统/官方会话，人工发送不允许")
+        receipt("failed")
+        stats["failed"] += 1
+        return stats
+    if names and name not in names:
+        log(f"    拒绝发送：{name} 不在企微会话列表，避免搜索落空后发错人")
+        receipt("failed")
+        stats["failed"] += 1
+        return stats
+    if not names:
+        # 读不到会话列表就无法确认落点，宁可失败也不能盲发。
+        log("    拒绝发送：读不到企微会话列表，无法确认目标会话")
+        receipt("failed")
+        stats["failed"] += 1
+        return stats
+
+    # 与自动回复共用冷却：同一时间只允许一个发送者，且两条消息之间留间隔。
+    wait = cfg["cooldown"] - (time.time() - _last_reply_at)
+    if wait > 0:
+        time.sleep(wait)
+
+    if not compat.wait_clipboard_writable(timeout=15):
+        _last_error = "剪贴板被占用超过 15 秒"
+        log("    失败：剪贴板被占用（向日葵同步？）")
+        receipt("failed")
+        stats["failed"] += 1
+        return stats
+
+    try:
+        result = core_send.send(
+            store, name, content,
+            # 人工指令打开回读，并把落点锁死在该客户的 contact_id 上；
+            # 自动回复仍用 verify_db=False（core 里 rowid 兼容问题）。
+            expect_id=contact_id if contact_id.startswith(("S:", "R:")) else "",
+            verify_db=True,
+            log=lambda s: log(f"    {s}"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        _last_error = f"{type(exc).__name__}: {exc}"[:200]
+        log(f"    发送异常：{type(exc).__name__}: {exc}")
+        traceback.print_exc(limit=2)
+        receipt("failed")
+        stats["failed"] += 1
+        return stats
+
+    if result.get("ok"):
+        _last_reply_at = time.time()
+        _last_error = ""
+        stats["sent"] += 1
+        log(f"    已发送：{result.get('detail')}")
+        receipt("succeeded", f"keyboard-{cmd_id}")
+    else:
+        _last_error = str(result.get("detail"))[:200]
+        stats["failed"] += 1
+        log(f"    发送失败：{result.get('detail')}")
+        receipt("failed")
+    return stats
+
+
+def pump_safely(store: Store, cfg: dict, reporter: "Reporter | None", wecom_state: str) -> None:
+    """pump_commands 的安全外壳：任何异常都不许冒泡到主循环。"""
+    try:
+        pump_commands(
+            store,
+            cfg,
+            bridge=(reporter.bridge if reporter is not None else None),
+            wecom_state=wecom_state,
+            dry=bool(cfg.get("dry_run")),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log(f"[指令] 本轮异常（忽略）：{type(exc).__name__}: {exc}")
+
+
 def print_history(limit: int = 20) -> None:
     rows = rlog.recent(limit)
     if not rows:
@@ -955,10 +1117,12 @@ def main() -> int:
     if not args.watch:
         wecom_state = detect_wecom_state()
         log(f"[自检] 企微状态 {wecom_state}（{WECOM_STATE_TEXT.get(wecom_state, '未知')}）")
+        login_watch.alert_login_required(wecom_state, log=log)
         if reporter is not None:
             reporter.tick(wecom_state, pending_count(), force=True)
         scan(store, cfg)
         result = drain(store, cfg, dry=cfg["dry_run"], wecom_state=wecom_state)
+        pump_safely(store, cfg, reporter, wecom_state)
         if reporter is not None:
             reporter.wait(25)  # 等心跳/上报发完再退出，最多 25 秒
         log(f"本轮完成：{result}")
@@ -967,10 +1131,12 @@ def main() -> int:
 
     wecom_state = detect_wecom_state()
     log(f"[自检] 企微状态 {wecom_state}（{WECOM_STATE_TEXT.get(wecom_state, '未知')}）")
+    login_watch.alert_login_required(wecom_state, log=log)
     if reporter is not None:
         reporter.tick(wecom_state, pending_count(), force=True)
     scan(store, cfg)
     drain(store, cfg, dry=cfg["dry_run"], wecom_state=wecom_state)
+    pump_safely(store, cfg, reporter, wecom_state)
     last_sig = wal_signature(store.data_dir)
     log("开始监听（Ctrl+C 退出）")
     while True:
@@ -983,6 +1149,8 @@ def main() -> int:
                     f"（{WECOM_STATE_TEXT.get(state, '未知')}）"
                 )
                 wecom_state = state
+            # 掉登录时把企微窗口拉到前台并提示扫码（内部有 120s 冷却，非登录态不动作）
+            login_watch.alert_login_required(wecom_state, log=log)
             if reporter is not None:
                 reporter.tick(wecom_state, pending_count())
 
@@ -995,6 +1163,7 @@ def main() -> int:
             if n:
                 log(f"新登记 {n} 条")
             drain(store, cfg, dry=cfg["dry_run"], wecom_state=wecom_state)
+            pump_safely(store, cfg, reporter, wecom_state)
         except KeyboardInterrupt:
             log("已停止")
             return 0

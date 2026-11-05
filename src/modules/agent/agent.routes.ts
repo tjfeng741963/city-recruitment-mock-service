@@ -5,11 +5,55 @@ import { canAccessDevice, deviceConstraint, getUserScope } from "../../auth/user
 import { createHash, randomUUID } from "node:crypto";
 import { MessageEventService } from "../messaging/message-events.js";
 import { createMessageChannelProvider } from "../messaging/message-channel-provider.js";
+import { BridgeError, DeviceBridgeStore } from "../messaging/device-bridge.js";
+import { readWeComConfig } from "../wecom/wecom-config.js";
 import { deviceDifyConfig, HttpDifyProvider } from "../dify/dify-provider.js";
 
 export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync) {
   const messageChannel = createMessageChannelProvider(undefined, db);
   const messageEvents = new MessageEventService(db, { webhookSecret: process.env.REA_WEBHOOK_SECRET ?? "local-webhook-secret" });
+  const bridgeStore = new DeviceBridgeStore(db);
+  // 生产配置 REA_MESSAGE_CHANNEL_PROVIDER=bridge 时，人工回复不能再走
+  // DeviceBridgeChannelProvider 的「入队后同步等 30 秒回执」——键鼠客户端不是
+  // 常驻 claim 的，等待必然超时并回 502，消息看着像失败。改成入队即返回
+  // 202，由客户端 claim → 键鼠发送 → receipts 回执把状态推进到 sent。
+  // 配了微信客服（WeCom）时保持原通道，不能把客服消息塞进设备队列。
+  const queueBridge = (() => {
+    if ((process.env.REA_MESSAGE_CHANNEL_PROVIDER ?? "mock") !== "bridge") return null;
+    try { return readWeComConfig() ? null : bridgeStore; } catch { return null; }
+  })();
+  // 人工作为 Outbound 入队：写 message_events/message_deliveries/bridge_commands，
+  // 同时先把 agent_messages(status=queued) 与会话 last_msg 落库，界面立刻可见。
+  // 设备回执成功后再由 DeviceBridgeStore.receipt 推进为 sent。
+  const enqueueManualMessage = (deviceCode: string, customerId: number, content: string, suppliedKey: string) => {
+    const idempotencyKey = suppliedKey.trim() || randomUUID();
+    const eventId = `manual-reply:${createHash("sha256").update(`${deviceCode}\0${customerId}\0${idempotencyKey}`).digest("hex")}`;
+    const sourceEventId = `${eventId}:outbound`;
+    messageEvents.recordEvent({ eventId, eventType: "agent.manual_reply", direction: "outbound", deviceCode, customerId, payload: { device_code: deviceCode, customer_id: customerId, content } });
+
+    let delivery = db.prepare("SELECT id,status,content FROM message_deliveries WHERE event_id=? AND customer_id=? ORDER BY id LIMIT 1").get(eventId, customerId) as { id: number; status: string; content: string } | undefined;
+    if (delivery && delivery.content !== content) throw new BridgeError("Idempotency key was already used with different content", 409);
+    if (!delivery) {
+      const created = messageEvents.createDelivery({ eventId, deviceCode, customerId, content });
+      delivery = db.prepare("SELECT id,status,content FROM message_deliveries WHERE id=?").get(created.delivery_id) as { id: number; status: string; content: string };
+    }
+
+    let command = bridgeStore.enqueue({ deviceCode, customerId, content, idempotencyKey: eventId });
+    // 上一次设备回执 failed（没发出去）时，同一个幂等键应允许重新入队，
+    // 否则界面重试会永远停在失败状态。unknown 表示可能已经发出，不自动重发。
+    if (command.status === "failed") {
+      db.prepare("UPDATE bridge_commands SET status='queued',lease_token='',lease_until=0,message_id='',receipt_at=NULL WHERE id=?").run(command.id);
+      command = bridgeStore.command(command.id)!;
+    }
+
+    const now = new Date().toISOString();
+    db.prepare("INSERT OR IGNORE INTO agent_messages(device_code,customer_id,direction,content,status,created_at,source_event_id) VALUES (?,?,'outbound',?,?,?,?)")
+      .run(deviceCode, customerId, content, "queued", now, sourceEventId);
+    if (command.status === "queued") db.prepare("UPDATE agent_messages SET status='queued' WHERE source_event_id=?").run(sourceEventId);
+    const message = db.prepare("SELECT id,device_code,customer_id,direction,content,status,created_at FROM agent_messages WHERE source_event_id=? AND direction='outbound'").get(sourceEventId);
+    db.prepare("UPDATE agent_conversations SET last_msg=?,last_msg_at=?,updated_at=? WHERE device_code=? AND customer_id=?").run(content, now, now, deviceCode, customerId);
+    return { command, message: message as Record<string, unknown> };
+  };
   const canAccessDeviceForRequest = (request: import("fastify").FastifyRequest, deviceCode: string) =>
     !request.auth || canAccessDevice(getUserScope(db, request.auth), deviceCode);
   // Target envelope has no `total`; each item carries the Dify config fields:
@@ -49,7 +93,13 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     return { device_id: id, base_url: baseUrl, healthy: result.healthy, latency_ms: result.latency_ms, error: result.error };
   });
   app.get<{ Querystring: { device_code?: string } }>("/api/v1/agent/conversations", async (request, reply) => { const deviceCode = request.query.device_code ?? ""; if (!canAccessDevice(getUserScope(db, request.auth!), deviceCode)) return reply.code(403).send({ detail: "Device scope required" }); const rows = db.prepare("SELECT * FROM agent_conversations WHERE device_code=? ORDER BY updated_at DESC").all(deviceCode); return { items: rows, total_unread: (rows as Array<Record<string, unknown>>).reduce((sum, row) => sum + Number(row.unread ?? 0), 0) }; });
-  app.get<{ Querystring: { device_code?: string; customer_id?: string; after_id?: string } }>("/api/v1/agent/messages", async (request, reply) => { const deviceCode = request.query.device_code ?? ""; if (!canAccessDevice(getUserScope(db, request.auth!), deviceCode)) return reply.code(403).send({ detail: "Device scope required" }); return { items: db.prepare("SELECT * FROM agent_messages WHERE device_code=? AND customer_id=? AND id>? ORDER BY id").all(deviceCode, Number(request.query.customer_id ?? 0), Number(request.query.after_id ?? 0)), takeover: false }; });
+  app.get<{ Querystring: { device_code?: string; customer_id?: string; after_id?: string } }>("/api/v1/agent/messages", async (request, reply) => {
+    const deviceCode = request.query.device_code ?? "";
+    if (!canAccessDevice(getUserScope(db, request.auth!), deviceCode)) return reply.code(403).send({ detail: "Device scope required" });
+    const rows = db.prepare("SELECT * FROM agent_messages WHERE device_code=? AND customer_id=? AND id>? ORDER BY id").all(deviceCode, Number(request.query.customer_id ?? 0), Number(request.query.after_id ?? 0)) as Array<Record<string, unknown>>;
+    // 会话页按 role 决定气泡左右；agent_messages 只有 direction，这里补一层映射。
+    return { items: rows.map((row) => ({ ...row, role: row.direction === "inbound" ? "customer" : "agent" })), takeover: false };
+  });
   app.post<{ Body: { device_code?: string; customer_id?: number; takeover?: boolean } }>("/api/v1/agent/takeover", async (request, reply) => { const deviceCode = request.body?.device_code ?? ""; if (!canAccessDevice(getUserScope(db, request.auth!), deviceCode)) return reply.code(403).send({ detail: "Device scope required" }); const result = db.prepare("UPDATE agent_conversations SET takeover=? WHERE device_code=? AND customer_id=?").run(request.body?.takeover ? 1 : 0, deviceCode, request.body?.customer_id ?? 0); return result.changes ? { success: true } : reply.code(404).send({ detail: "Conversation not found" }); });
   app.post<{ Body: { device_code?: string; customer_id?: number; content?: string } }>("/api/v1/agent/manual-reply", async (request, reply) => {
     const deviceCode = request.body?.device_code ?? "";
@@ -57,9 +107,22 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     const customerId = request.body?.customer_id ?? 0;
     const content = request.body?.content ?? "";
     if (!db.prepare("SELECT id FROM agent_conversations WHERE device_code=? AND customer_id=?").get(deviceCode, customerId)) return reply.code(404).send({ detail: "Conversation not found" });
+    if (!content.trim()) return reply.code(422).send({ detail: "content is required" });
 
     const suppliedKey = request.headers["idempotency-key"];
     const idempotencyKey = typeof suppliedKey === "string" && suppliedKey.trim() ? suppliedKey.trim() : randomUUID();
+
+    // bridge 通道：入队即返回，状态由设备回执推进（会话页的发送按钮走这里）。
+    if (queueBridge) {
+      try {
+        const { command, message } = enqueueManualMessage(deviceCode, customerId, content, idempotencyKey);
+        return reply.code(command.status === "succeeded" ? 200 : 202).send({ ...message, command_id: command.id, command_status: command.status });
+      } catch (error) {
+        if (error instanceof BridgeError) return reply.code(error.statusCode).send({ detail: error.message });
+        throw error;
+      }
+    }
+
     const eventId = `manual-reply:${createHash("sha256").update(`${deviceCode}\0${customerId}\0${idempotencyKey}`).digest("hex")}`;
     messageEvents.recordEvent({ eventId, eventType: "agent.manual_reply", direction: "outbound", deviceCode, customerId, payload: { device_code: deviceCode, customer_id: customerId, content } });
 
@@ -93,6 +156,41 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
       .run(content, sentAt, sentAt, deviceCode, customerId);
     messageEvents.markDeliverySucceeded(delivery.id, sent.message_id);
     return db.prepare("SELECT id,device_code,customer_id,direction,content,status,created_at FROM agent_messages WHERE source_event_id=? AND direction='outbound'").get(sourceEventId);
+  });
+  // 控制台主动发消息（人工回复/接管）：人工指令只入队，不受设备 observe_only
+  // 影响——observe_only 仅抑制服务端自动生成的回复，人工发送必须照常下发。
+  // :id 是会话的 customer_id（会话由 device_code + customer_id 唯一确定）。
+  app.post<{ Params: { id: string }; Querystring: { device_code?: string }; Body: { device_code?: string; content?: string } }>("/api/v1/agent/conversations/:id/send", async (request, reply) => {
+    const body = request.body ?? {};
+    const content = typeof body.content === "string" ? body.content : "";
+    if (!content.trim()) return reply.code(422).send({ detail: "content is required" });
+    if (content.length > 20000) return reply.code(422).send({ detail: "content is too long" });
+    const customerId = Number(request.params.id);
+    if (!Number.isSafeInteger(customerId) || customerId <= 0) return reply.code(422).send({ detail: "Invalid conversation id" });
+
+    let deviceCode = String(body.device_code ?? request.query.device_code ?? "").trim();
+    if (!deviceCode) {
+      const rows = db.prepare("SELECT device_code FROM agent_conversations WHERE customer_id=?").all(customerId) as Array<{ device_code: string }>;
+      if (rows.length !== 1) return reply.code(422).send({ detail: "device_code is required" });
+      deviceCode = rows[0].device_code;
+    }
+    if (!canAccessDevice(getUserScope(db, request.auth!), deviceCode)) return reply.code(403).send({ detail: "Device scope required" });
+    if (!db.prepare("SELECT id FROM agent_conversations WHERE device_code=? AND customer_id=?").get(deviceCode, customerId)) return reply.code(404).send({ detail: "Conversation not found" });
+
+    const suppliedKey = request.headers["idempotency-key"];
+    try {
+      const { command, message } = enqueueManualMessage(deviceCode, customerId, content, typeof suppliedKey === "string" ? suppliedKey : "");
+      return reply.code(command.status === "succeeded" ? 200 : 202).send({
+        command_id: command.id,
+        status: command.status,
+        message_id: message.id,
+        device_code: deviceCode,
+        customer_id: customerId,
+      });
+    } catch (error) {
+      if (error instanceof BridgeError) return reply.code(error.statusCode).send({ detail: error.message });
+      throw error;
+    }
   });
   app.get<{ Querystring: { event_type?: string; page?: string; page_size?: string } }>("/api/v1/agent/candidates", async (request) => {
     const page = Math.max(1, Number(request.query.page) || 1), pageSize = Math.min(1000, Math.max(1, Number(request.query.page_size) || 50));

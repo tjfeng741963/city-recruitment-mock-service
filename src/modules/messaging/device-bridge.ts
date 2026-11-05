@@ -96,14 +96,22 @@ export class DeviceBridgeStore {
   command(id: string): BridgeCommand | null {
     return this.db.prepare("SELECT * FROM bridge_commands WHERE id=?").get(id) as unknown as BridgeCommand ?? null;
   }
-  claim(code: string): BridgeCommand | null {
+  claim(code: string): (BridgeCommand & { nickname: string }) | null {
     this.db.prepare("UPDATE bridge_commands SET status='unknown' WHERE device_code=? AND status='claimed' AND lease_until<=?").run(code, this.now());
     if (this.status(code)?.state !== "online") return null;
     const next = this.db.prepare("SELECT id FROM bridge_commands WHERE device_code=? AND status='queued' ORDER BY created_at,rowid LIMIT 1").get(code) as { id: string } | undefined;
     if (!next) return null;
     const claimed = this.db.prepare("UPDATE bridge_commands SET status='claimed',lease_token=?,lease_until=? WHERE id=? AND status='queued'")
       .run(randomBytes(24).toString("hex"), this.now() + 60_000, next.id);
-    return claimed.changes ? this.command(next.id) : null;
+    if (!claimed.changes) return null;
+    const command = this.command(next.id);
+    if (!command) return null;
+    // The device sends by typing the conversation name into the WeCom search
+    // box, so the claimed payload must carry the nickname — contact_id is an
+    // opaque internal id that is useless for keyboard automation.
+    const conversation = this.db.prepare("SELECT nickname FROM agent_conversations WHERE device_code=? AND customer_id=?")
+      .get(code, command.customer_id) as { nickname?: string } | undefined;
+    return { ...command, nickname: conversation?.nickname ?? "" };
   }
   receipt(code: string, id: string, lease: string, status: "succeeded" | "failed" | "unknown", messageId = "", simulated = false): void {
     const command = this.command(id);
@@ -113,12 +121,25 @@ export class DeviceBridgeStore {
       if (command.status !== status || command.message_id !== messageId) throw new BridgeError("Conflicting receipt");
     }
     this.db.prepare("UPDATE bridge_commands SET status=?,message_id=?,simulated=?,receipt_at=COALESCE(receipt_at,?) WHERE id=?").run(status, messageId, simulated ? 1 : 0, this.now(), id);
+    // A reply command's idempotency key is the outbound event id; the local
+    // message row is `<event id>:outbound`.
+    const sourceEvent = command.idempotency_key.endsWith(":reply")
+      ? command.idempotency_key.slice(0, -6) + ":outbound" : command.idempotency_key + ":outbound";
+    if (status === "failed") {
+      // Without this the queue entry and the local message would stay "queued"
+      // forever when the device reports a failed send.
+      const failedDelivery = this.db.prepare("SELECT id FROM message_deliveries WHERE event_id=?").get(command.idempotency_key) as { id: number } | undefined;
+      if (failedDelivery) {
+        this.db.prepare("UPDATE message_deliveries SET status='failed',last_error=?,next_retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?")
+          .run("Device reported delivery failure", failedDelivery.id);
+      }
+      this.db.prepare("UPDATE agent_messages SET status='failed' WHERE source_event_id=? AND direction='outbound'").run(sourceEvent);
+      return;
+    }
     if (status === "succeeded") {
       // Reconcile late receipts even after the original HTTP request timed out.
       const delivery = this.db.prepare("SELECT id FROM message_deliveries WHERE event_id=?").get(command.idempotency_key) as { id: number } | undefined;
       if (!delivery) return;
-      const sourceEvent = command.idempotency_key.endsWith(":reply")
-        ? command.idempotency_key.slice(0, -6) + ":outbound" : command.idempotency_key + ":outbound";
       this.db.prepare("UPDATE message_deliveries SET status='succeeded',provider_message_id=?,last_error=NULL,next_retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(messageId, delivery.id);
       this.db.prepare("INSERT OR IGNORE INTO agent_messages(device_code,customer_id,direction,content,status,source_event_id) VALUES (?,?,'outbound',?,?,?)")
         .run(code, command.customer_id, command.content, simulated ? "simulated" : "sent", sourceEvent);
