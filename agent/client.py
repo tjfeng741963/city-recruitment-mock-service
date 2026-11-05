@@ -15,6 +15,7 @@ AGENT_VERSION = "1.0.0"
 # 心跳/上报都是"尽力而为"：本地发送不能被它们拖住，所以单独给短超时
 HEARTBEAT_TIMEOUT = 5.0
 INGEST_TIMEOUT = 10.0
+BRIDGE_TIMEOUT = 5.0
 
 
 class AgentClient:
@@ -88,6 +89,58 @@ class AgentClient:
             "POST",
             f"/api/v1/agent/commands/{delivery_id}/ack",
             {"status": status, "external_msgid": external_msgid, "error": error},
+        )
+
+
+class BridgeClient:
+    """Node 桥接（4222）设备心跳客户端。
+
+    协议（服务器已部署验证，不要改语义）：
+        POST {bridge_server}/api/v1/bridge/devices/{device_code}/heartbeat
+        Authorization: Bearer {bridge_token}
+        {"state": "online"|"offline"|"scanning", "account_id": "..."}
+        → 200 {"device": {...}}
+
+    与 AgentClient 的区别：鉴权用 Bearer 头（桥接配对凭证），不走 X-Device-Token。
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        token: str,
+        device_code: str,
+        timeout: float = BRIDGE_TIMEOUT,
+    ) -> None:
+        self.base_url = (base_url or "").strip().rstrip("/")
+        self.token = (token or "").strip()
+        self.device_code = (device_code or "").strip()
+        self.timeout = timeout
+
+    @property
+    def enabled(self) -> bool:
+        """三项配置缺一不可；不完整时调用方应完全跳过桥接上报。"""
+        return bool(self.base_url and self.token and self.device_code)
+
+    def _request(self, method: str, path: str, body: dict | None = None) -> dict:
+        url = f"{self.base_url}{path}"
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method)
+        req.add_header("Authorization", f"Bearer {self.token}")
+        if data:
+            req.add_header("Content-Type", "application/json")
+        # 公网直连，绕过系统代理（与 AgentClient 同一套做法）
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(req, timeout=self.timeout) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+        return json.loads(raw) if raw.strip() else {}
+
+    def heartbeat(self, state: str, account_id: str = "") -> dict:
+        """state 必须已经是桥接语义（online/offline/scanning），映射在 autopilot 做。"""
+        code = quote(self.device_code, safe="")
+        return self._request(
+            "POST",
+            f"/api/v1/bridge/devices/{code}/heartbeat",
+            {"state": state or "offline", "account_id": (account_id or "")[:128]},
         )
 
 

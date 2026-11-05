@@ -20,6 +20,7 @@
 
 上报与心跳（纯 HTTP，零键鼠事件）：
     每 30 秒向服务端发一次设备心跳 + 增量上报本地新消息；
+    同一周期顺带向 Node 桥接（4222）报一次设备心跳（双通道）；
     主循环每轮先自检企微状态，非 online 时**一条都不发**，只继续心跳。
 """
 
@@ -98,6 +99,15 @@ REPORT_FIRST_WINDOW = 24 * 3600              # 首次没有游标时只补最近
 _last_error = ""
 # 上一次"因掉线暂停发送"的日志时间，避免每轮刷屏
 _last_block_log = 0.0
+
+# ── 桥接心跳（Node 桥 4222，与主心跳同一周期、同一线程触发）──────────────────
+# 桥只认 online/offline/scanning。映射要保守：只有确认 online 才报 online，
+# hidden / login_required / not_running / unknown 一律 offline（宁可显示掉线）。
+BRIDGE_STATE_MAP = {"online": "online"}
+
+
+def map_bridge_state(wecom_state: str) -> str:
+    return BRIDGE_STATE_MAP.get(wecom_state, "offline")
 
 # 自检状态的中文说明，只用于日志
 WECOM_STATE_TEXT = {
@@ -271,11 +281,14 @@ class Reporter:
         *,
         interval: float = REPORT_INTERVAL,
         device_code: str = "",
+        bridge: agent_client.BridgeClient | None = None,
     ) -> None:
         self.api = api
         self.store = store
         self.state_path = state_path
         self.interval = interval
+        # Node 桥接客户端（4222）；None 表示未配置，完全跳过桥接上报
+        self.bridge = bridge
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._last_at = 0.0
@@ -417,6 +430,11 @@ class Reporter:
             self._send_heartbeat(heartbeat)
         except Exception as exc:  # noqa: BLE001
             log(f"[心跳] 异常（忽略）：{agent_client.describe_error(exc)}")
+        # 双通道：与主心跳同一处触发，不另起线程；任何桥接异常都不影响主心跳
+        try:
+            self._send_bridge(heartbeat.get("wecom_state") or "unknown")
+        except Exception as exc:  # noqa: BLE001
+            log(f"[桥接] 异常（忽略）：{agent_client.describe_error(exc)}")
         try:
             self._send_ingest(batch)
         except Exception as exc:  # noqa: BLE001
@@ -436,6 +454,26 @@ class Reporter:
             self._save()
         except Exception as exc:  # noqa: BLE001
             log(f"[心跳] 失败（忽略，下轮自然补）：{agent_client.describe_error(exc)}")
+
+    def _send_bridge(self, wecom_state: str) -> None:
+        """向 Node 桥接（4222）报设备心跳。
+
+        健壮性红线：未配置 → 完全跳过；请求失败 → 打一行日志继续跑，
+        绝不影响主心跳和主循环。
+        """
+        bridge = self.bridge
+        if bridge is None or not bridge.enabled:
+            return  # 未配置桥接（启动时已打一行日志说明）
+        state = map_bridge_state(wecom_state)
+        try:
+            account_id = self.store.self_id() or ""
+        except Exception:  # noqa: BLE001
+            account_id = ""
+        try:
+            bridge.heartbeat(state, account_id=account_id)
+            log(f"[桥接] {self.device_code} → {state} ok=True")
+        except Exception as exc:  # noqa: BLE001
+            log(f"[桥接] 失败（忽略，不影响主心跳）：{agent_client.describe_error(exc)}")
 
     def _send_ingest(self, batch: dict) -> None:
         messages = batch.get("messages") or []
@@ -741,6 +779,21 @@ def print_history(limit: int = 20) -> None:
     print("\n统计:", rlog.stats())
 
 
+def _make_bridge(cfg: dict, device_code: str) -> agent_client.BridgeClient | None:
+    """按 config.json 建桥接客户端；没配 bridge_server/bridge_token 就返回 None。"""
+    bserver = (cfg.get("bridge_server") or "").strip()
+    btoken = (cfg.get("bridge_token") or "").strip()
+    if not bserver or not btoken:
+        log("[桥接] 未配置 bridge_server / bridge_token，跳过桥接上报")
+        return None
+    bridge = agent_client.BridgeClient(bserver, btoken, device_code)
+    if not bridge.enabled:
+        log("[桥接] device_code 缺失，跳过桥接上报")
+        return None
+    log(f"[桥接] 目标 {bserver} / device_code={bridge.device_code}")
+    return bridge
+
+
 def _make_reporter(cfg: dict, store: Store) -> Reporter | None:
     """按 config.json 建心跳/上报器；没配 server/device_token 就返回 None。
 
@@ -753,7 +806,8 @@ def _make_reporter(cfg: dict, store: Store) -> Reporter | None:
         return None
     code = resolve_device_code(cfg)
     api = agent_client.AgentClient(server, token, device_code=code)
-    rep = Reporter(api, store, device_code=code)
+    bridge = _make_bridge(cfg, code)
+    rep = Reporter(api, store, device_code=code, bridge=bridge)
     if rep.device_code:
         log(f"[心跳] 目标 {server} / device_code={rep.device_code}")
     else:
@@ -796,6 +850,9 @@ def main() -> int:
             cfg["server"] = (file_cfg.get("server") or "").strip()
             cfg["device_token"] = (file_cfg.get("device_token") or "").strip()
             cfg["device_code"] = (file_cfg.get("device_code") or "").strip()
+            # 桥接心跳（4222）配置；缺失时桥接上报整体跳过，不影响主心跳
+            cfg["bridge_server"] = (file_cfg.get("bridge_server") or "").strip()
+            cfg["bridge_token"] = (file_cfg.get("bridge_token") or "").strip()
         except (OSError, ValueError) as exc:
             log(f"config.json 读取失败，按固定文本处理：{exc}")
     if args.device_code:
