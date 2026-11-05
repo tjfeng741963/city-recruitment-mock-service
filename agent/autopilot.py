@@ -439,6 +439,10 @@ class Reporter:
             self._send_ingest(batch)
         except Exception as exc:  # noqa: BLE001
             log(f"[上报] 异常（忽略）：{agent_client.describe_error(exc)}")
+        try:
+            self._send_bridge_inbound(batch)
+        except Exception as exc:  # noqa: BLE001
+            log(f"[桥接] inbound 异常（忽略）：{agent_client.describe_error(exc)}")
 
     def _send_heartbeat(self, heartbeat: dict) -> None:
         if not self.device_code:
@@ -474,6 +478,44 @@ class Reporter:
             log(f"[桥接] {self.device_code} → {state} ok=True")
         except Exception as exc:  # noqa: BLE001
             log(f"[桥接] 失败（忽略，不影响主心跳）：{agent_client.describe_error(exc)}")
+
+    def _send_bridge_inbound(self, batch: dict) -> None:
+        """把入站消息（is_self=False）同步给 Node 桥接（4222），供 4222 会话页实时展示。
+
+        红线：只发 HTTP；失败只打一行日志，绝不影响主心跳/主上报；
+        桥内按 event_id 去重，重复上报幂等；只发入站，出站（键鼠发的）不上报。
+        """
+        bridge = self.bridge
+        if bridge is None or not bridge.enabled:
+            return
+        names = {
+            c.get("external_id"): (c.get("name") or "")
+            for c in (batch.get("conversations") or [])
+        }
+        sent = 0
+        for m in batch.get("messages") or []:
+            if m.get("direction") != "inbound":
+                continue
+            cid = (m.get("external_conversation_id") or "").strip()
+            msg_id = str(m.get("external_msgid") or "").strip()
+            text = (m.get("content") or "").strip()
+            if not cid or not msg_id or not text:
+                continue
+            name = names.get(cid, "")
+            if is_system_conv(cid, name):
+                continue  # 系统/官方会话不进 4222 会话页
+            try:
+                bridge.inbound(
+                    event_id=f"{cid}:{msg_id}",
+                    contact_id=cid,
+                    content=text,
+                    nickname=name,
+                )
+                sent += 1
+            except Exception as exc:  # noqa: BLE001
+                log(f"[桥接] inbound {cid}:{msg_id} 失败（忽略）：{agent_client.describe_error(exc)}")
+        if sent:
+            log(f"[桥接] inbound 上报 {sent} 条")
 
     def _send_ingest(self, batch: dict) -> None:
         messages = batch.get("messages") or []

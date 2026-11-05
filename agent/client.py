@@ -143,6 +143,23 @@ class BridgeClient:
             {"state": state or "offline", "account_id": (account_id or "")[:128]},
         )
 
+    def inbound(self, event_id: str, contact_id: str, content: str, nickname: str = "") -> dict:
+        """POST /api/v1/bridge/devices/{device_code}/inbound（入站消息上报）。
+
+        桥内按 event_id 去重，重复上报幂等；要求设备 online（心跳正常就满足）。
+        """
+        code = quote(self.device_code, safe="")
+        return self._request(
+            "POST",
+            f"/api/v1/bridge/devices/{code}/inbound",
+            {
+                "event_id": (event_id or "")[:200],
+                "contact_id": (contact_id or "")[:200],
+                "content": (content or "")[:20000],
+                "nickname": (nickname or "")[:200],
+            },
+        )
+
 
 def describe_error(exc: Exception) -> str:
     if isinstance(exc, urllib.error.HTTPError):

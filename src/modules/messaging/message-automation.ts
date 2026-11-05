@@ -28,7 +28,7 @@ interface DeliveryRow {
 export interface InboundMessageResult {
   status: "processed" | "duplicate";
   event_id: string;
-  reply_status: "simulated" | "sent" | "api_accepted" | "human_takeover" | "failed" | "pending";
+  reply_status: "simulated" | "sent" | "api_accepted" | "human_takeover" | "observe_only" | "failed" | "pending";
   error?: string;
 }
 
@@ -69,6 +69,14 @@ export class MessageAutomationService {
     let deviceData: Record<string, unknown>;
     try { deviceData = JSON.parse(device.data_json || "{}") as Record<string, unknown>; }
     catch { return this.failed(input.eventId, "Message device configuration is invalid"); }
+
+    // observe_only：观察模式设备只记录会话与消息，不生成任何回复。
+    // 客户端（键鼠 autopilot）自己用本地知识库回复，若这里再生成回复并入队
+    // bridge_commands，会出现两套引擎都回客户的生产事故，所以必须在
+    // recordEvent/createDelivery/Dify/渠道入队之前返回。
+    if (deviceData.observe_only === true) {
+      return { status: "processed", event_id: input.eventId, reply_status: "observe_only" };
+    }
 
     const replyEventId = `${input.eventId}:reply`;
     this.events.recordEvent({

@@ -20,3 +20,6 @@ __pycache__/
 
 # 切换服务器/重置游标时留下的本地备份（含 token，禁止入库）
 *.local-bak
+
+# 运行时游标备份（本地状态，不入库）
+.report_state.json.*
