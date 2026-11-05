@@ -43,6 +43,19 @@ export class DeviceBridgeStore {
     if (accountId && device.account_id && accountId !== device.account_id) throw new BridgeError("Device is bound to a different account");
     this.db.prepare("UPDATE bridge_devices SET state=?,heartbeat_at=?,account_id=CASE WHEN ?<>'' THEN ? ELSE account_id END WHERE device_code=?")
       .run(state, this.now(), accountId, accountId, code);
+    // The admin UI (GET /api/v1/agent/devices) reads online/last_online from
+    // agent_devices.data_json, not from bridge_devices — mirror each heartbeat
+    // there so the Vue device dot follows the bridge state.
+    this.syncAgentDevice(code, state === "online");
+  }
+
+  private syncAgentDevice(code: string, online: boolean): void {
+    const row = this.db.prepare("SELECT id,data_json FROM agent_devices WHERE json_extract(data_json,'$.device_code')=?").get(code) as { id: number; data_json: string } | undefined;
+    if (!row) return;
+    const data = JSON.parse(row.data_json || "{}") as Record<string, unknown>;
+    data.online = online;
+    if (online) data.last_online = new Date(this.now()).toISOString();
+    this.db.prepare("UPDATE agent_devices SET data_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(JSON.stringify(data), row.id);
   }
   contact(code: string, contactId: string, nickname: string): number {
     const existing = this.db.prepare("SELECT customer_id FROM bridge_contacts WHERE device_code=? AND contact_id=?").get(code, contactId) as { customer_id: number } | undefined;

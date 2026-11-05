@@ -87,6 +87,18 @@ describe("independent device bridge", () => {
     expect(store.command(id)).toMatchObject({ status: "succeeded", message_id: "late-wx-id" });
   });
 
+  it("mirrors heartbeat state into agent_devices so the admin UI shows the device online", async () => {
+    await call("heartbeat", { state: "online", account_id: "wx-owner" });
+    const devices = await app.inject({ method: "GET", url: "/api/v1/agent/devices", headers: admin });
+    const row = devices.json().items.find((item: { device_code: string }) => item.device_code === "local-device-001");
+    expect(row).toMatchObject({ online: true, status: true });
+    expect(row.last_online).not.toBe("");
+    await call("heartbeat", { state: "offline" });
+    const after = await app.inject({ method: "GET", url: "/api/v1/agent/devices", headers: admin });
+    const offlineRow = after.json().items.find((item: { device_code: string }) => item.device_code === "local-device-001");
+    expect(offlineRow).toMatchObject({ online: false });
+  });
+
   it("rejects unmapped contacts, invalid receipts, disabled devices and inbound event conflicts", async () => {
     await call("heartbeat", { state: "online", account_id: "wx-owner" });
     const store = new DeviceBridgeStore(app.db);
