@@ -2,6 +2,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { deviceDifyConfig, type DifyProvider } from "../dify/dify-provider.js";
 import type { MessageEventService } from "./message-events.js";
 import type { MessageChannelProvider } from "./message-channel-provider.js";
+import { NOOP_NOTIFIER, type StreamNotifier } from "./stream-events.js";
 
 interface IncomingMessage {
   eventId: string;
@@ -38,6 +39,7 @@ export class MessageAutomationService {
     private readonly events: MessageEventService,
     private readonly dify: DifyProvider,
     private readonly channel: MessageChannelProvider,
+    private readonly notifier: StreamNotifier = NOOP_NOTIFIER,
   ) {}
 
   async handleInbound(input: IncomingMessage): Promise<InboundMessageResult> {
@@ -53,6 +55,9 @@ export class MessageAutomationService {
           last_msg=excluded.last_msg,last_msg_at=excluded.last_msg_at,
           unread=agent_conversations.unread+1,updated_at=excluded.updated_at
       `).run(input.deviceCode, input.customerId, input.content, now, now);
+      // Push as soon as the row exists — before Dify answers — so the open
+      // conversation page shows the customer message without polling.
+      this.notifier.messageCreated(input.deviceCode, input.customerId, input.eventId);
     }
 
     const conversation = this.db.prepare(

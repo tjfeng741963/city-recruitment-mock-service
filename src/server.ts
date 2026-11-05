@@ -21,10 +21,12 @@ import { registerRelationRoutes } from "./modules/relations/relations.routes.js"
 import { registerPermissionRoutes } from "./modules/permissions/permission.routes.js";
 import { registerAdminRoutes } from "./modules/admin/admin.routes.js";
 import { registerDeviceBridgeRoutes } from "./modules/messaging/device-bridge.routes.js";
+import { registerStreamRoutes } from "./modules/agent/stream.routes.js";
+import { EventBus, createStreamNotifier } from "./modules/messaging/stream-events.js";
 import { registerWeComRoutes } from "./modules/wecom/wecom.routes.js";
 
 declare module "fastify" {
-  interface FastifyInstance { db: DatabaseSync }
+  interface FastifyInstance { db: DatabaseSync; events: EventBus }
   interface FastifyRequest { authToken: string }
 }
 
@@ -49,6 +51,9 @@ const PUBLIC_ROUTES = new Set([
   // conversation even when the value is fake, with or without a bearer token.
   "PUT /api/v1/agent/conversations/:id/restart",
   "PUT /api/v1/agent/conversations/:id/reset-disqualified",
+  // EventSource cannot set headers: the JWT is a query parameter and the route
+  // authenticates itself (401/403 instead of the header preHandler's 403).
+  "GET /api/v1/agent/stream",
 ]);
 
 interface RoutePattern { method: string; regex: RegExp }
@@ -70,7 +75,11 @@ export function buildServer() {
   // leases intact; retrying a recovered delivery reuses its durable command id.
   db.prepare("UPDATE message_deliveries SET status='failed',last_error='Application restarted before delivery was finalized' WHERE status='sending'").run();
   const auth = new AuthService(db, config.jwtSecret);
+  // One bus per app instance so tests that build several servers stay isolated.
+  const events = new EventBus();
+  const notifier = createStreamNotifier(db, events);
   app.decorate("db", db);
+  app.decorate("events", events);
   app.decorateRequest("authToken", "");
 
   // Collect every registered API route so the not-found handler can tell a
@@ -94,8 +103,9 @@ export function buildServer() {
   registerCoreRoutes(app, db);
   registerResourceRoutes(app, db);
   registerFileRoutes(app, db);
-  registerAgentRoutes(app, db);
-  registerDeviceBridgeRoutes(app, db);
+  registerAgentRoutes(app, db, notifier);
+  registerDeviceBridgeRoutes(app, db, notifier);
+  registerStreamRoutes(app, db, events, auth);
   registerWeComRoutes(app, db);
   registerActivationRoutes(app, db);
   registerRelationRoutes(app, db);
@@ -173,6 +183,11 @@ export function buildServer() {
     return reply.sendFile("index.html");
   });
 
+  // End open SSE responses before the HTTP server stops, otherwise shutdown
+  // waits for every EventSource tab to hang up on its own. This must be
+  // `preClose`: Fastify's own onClose hook calls server.close() (which waits
+  // for live sockets) before user onClose hooks registered here would run.
+  app.addHook("preClose", () => { events.closeAll(); });
   app.addHook("onClose", () => db.close());
   return app;
 }

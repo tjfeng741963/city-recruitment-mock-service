@@ -5,15 +5,16 @@ import { DeviceBridgeStore } from "./device-bridge.js";
 import { MessageAutomationService } from "./message-automation.js";
 import { MessageEventService } from "./message-events.js";
 import { createMessageChannelProvider } from "./message-channel-provider.js";
+import { NOOP_NOTIFIER, type StreamNotifier } from "./stream-events.js";
 import { createDifyProvider } from "../dify/create-provider.js";
 
 type DeviceRequest = { Params: { code: string }; Body: Record<string, unknown> };
 const field = (body: Record<string, unknown>, key: string, max = 1000) => typeof body[key] === "string" && String(body[key]).length <= max ? String(body[key]) : "";
 
-export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSync): void {
+export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSync, notifier: StreamNotifier = NOOP_NOTIFIER): void {
   const store = new DeviceBridgeStore(db);
   const events = new MessageEventService(db, { webhookSecret: process.env.REA_WEBHOOK_SECRET ?? "local-webhook-secret" });
-  const automation = new MessageAutomationService(db, events, createDifyProvider(), createMessageChannelProvider(undefined, db));
+  const automation = new MessageAutomationService(db, events, createDifyProvider(), createMessageChannelProvider(undefined, db), notifier);
 
   app.post<DeviceRequest>("/api/v1/bridge/devices/:code/pair", async (req, reply) => {
     if (req.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin required" });
@@ -33,14 +34,33 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
       if (action === "heartbeat") {
         const state = field(body, "state");
         if (!["online", "offline", "scanning"].includes(state)) return reply.code(422).send({ detail: "Invalid device state" });
+        // Only a *change* is worth a push: the client heartbeats every few
+        // seconds and re-emitting "online" would flood every open tab.
+        const before = store.status(code)?.state ?? "offline";
         store.heartbeat(code, state as "online" | "offline" | "scanning", field(body, "account_id"));
-        return { device: store.status(code) };
+        const after = store.status(code);
+        if (after && after.state !== before) notifier.deviceUpdated(code, after.state);
+        return { device: after };
       }
-      if (action === "claim") return { command: store.claim(code) };
+      if (action === "claim") {
+        const command = store.claim(code);
+        if (command) notifier.commandUpdated(code, command);
+        return { command };
+      }
       if (action === "receipts") {
         const status = field(body, "status");
         if (!["succeeded", "failed", "unknown"].includes(status)) return reply.code(422).send({ detail: "Invalid receipt status" });
         store.receipt(code, field(body, "command_id"), field(body, "lease_token"), status as "succeeded" | "failed" | "unknown", field(body, "message_id"), body.simulated === true);
+        const command = store.command(field(body, "command_id"));
+        if (command) {
+          notifier.commandUpdated(code, {
+            id: command.id,
+            customer_id: command.customer_id,
+            status: command.status,
+            error: command.status === "failed" ? "Device reported delivery failure"
+              : command.status === "unknown" ? "Device did not confirm the send" : null,
+          });
+        }
         return { ok: true };
       }
       if (store.status(code)?.state !== "online") return reply.code(409).send({ detail: "Device must be online" });

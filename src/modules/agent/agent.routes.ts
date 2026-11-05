@@ -6,10 +6,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { MessageEventService } from "../messaging/message-events.js";
 import { createMessageChannelProvider } from "../messaging/message-channel-provider.js";
 import { BridgeError, DeviceBridgeStore } from "../messaging/device-bridge.js";
+import { NOOP_NOTIFIER, type StreamNotifier } from "../messaging/stream-events.js";
 import { readWeComConfig } from "../wecom/wecom-config.js";
 import { deviceDifyConfig, HttpDifyProvider } from "../dify/dify-provider.js";
 
-export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync) {
+export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync, notifier: StreamNotifier = NOOP_NOTIFIER) {
   const messageChannel = createMessageChannelProvider(undefined, db);
   const messageEvents = new MessageEventService(db, { webhookSecret: process.env.REA_WEBHOOK_SECRET ?? "local-webhook-secret" });
   const bridgeStore = new DeviceBridgeStore(db);
@@ -47,11 +48,17 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     }
 
     const now = new Date().toISOString();
-    db.prepare("INSERT OR IGNORE INTO agent_messages(device_code,customer_id,direction,content,status,created_at,source_event_id) VALUES (?,?,'outbound',?,?,?,?)")
+    const inserted = db.prepare("INSERT OR IGNORE INTO agent_messages(device_code,customer_id,direction,content,status,created_at,source_event_id) VALUES (?,?,'outbound',?,?,?,?)")
       .run(deviceCode, customerId, content, "queued", now, sourceEventId);
     if (command.status === "queued") db.prepare("UPDATE agent_messages SET status='queued' WHERE source_event_id=?").run(sourceEventId);
     const message = db.prepare("SELECT id,device_code,customer_id,direction,content,status,created_at FROM agent_messages WHERE source_event_id=? AND direction='outbound'").get(sourceEventId);
     db.prepare("UPDATE agent_conversations SET last_msg=?,last_msg_at=?,updated_at=? WHERE device_code=? AND customer_id=?").run(content, now, now, deviceCode, customerId);
+    // Push the queued command so the sender's other tabs (and the injected
+    // client's UI) see "sending" immediately instead of on the next poll. A
+    // retried idempotency key re-uses the message row, so only a fresh insert
+    // produces message.created — no duplicated bubbles on replay.
+    notifier.commandUpdated(deviceCode, { id: command.id, customer_id: customerId, status: command.status, error: null });
+    if (Number(inserted.changes) === 1) notifier.messageCreated(deviceCode, customerId, sourceEventId);
     return { command, message: message as Record<string, unknown> };
   };
   const canAccessDeviceForRequest = (request: import("fastify").FastifyRequest, deviceCode: string) =>
