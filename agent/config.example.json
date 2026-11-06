@@ -2,6 +2,7 @@
   "server": "http://127.0.0.1:8090",
   "device_token": "在这里填服务端返回的 device_token",
   "device_code": "pc-office-01",
+  "data_dir": "",
   "tool_path": "C:/path/to/wecomcracker.py",
   "snapshot_dir": "",
   "state_file": "",

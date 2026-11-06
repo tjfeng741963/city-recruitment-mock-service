@@ -81,6 +81,7 @@ SYSTEM_NAMES = (
 
 DEFAULTS = {
     "target": "all",
+    "data_dir": "",
     "reply_first": "1",
     "reply_next": "233",
     "interval": 3.0,
@@ -1173,6 +1174,9 @@ def load_config(args: argparse.Namespace, config_path: Path | None = None) -> di
         cfg["dry_run"] = True
     if not isinstance(cfg["dry_run"], bool):
         raise ValueError("dry_run must be true or false")
+    if not isinstance(cfg["data_dir"], str):
+        raise ValueError("data_dir must be a string")
+    cfg["data_dir"] = cfg["data_dir"].strip()
     for key in ("target", "reply_first", "reply_next"):
         if not isinstance(cfg[key], str) or not cfg[key].strip():
             raise ValueError(f"{key} must be a nonempty string")
@@ -1192,9 +1196,25 @@ def load_config(args: argparse.Namespace, config_path: Path | None = None) -> di
     return cfg
 
 
+def configured_data_dir(cfg: dict) -> Path | None:
+    value = cfg["data_dir"]
+    if not value:
+        return None
+    directory = Path(value)
+    if not directory.is_absolute():
+        raise ValueError("data_dir must be an absolute path")
+    try:
+        if not directory.is_dir() or not all((directory / name).is_file() for name in ("message.db", "session.db")):
+            raise ValueError("data_dir must contain message.db and session.db")
+    except OSError as exc:
+        raise ValueError("data_dir could not be inspected") from exc
+    return directory
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="企业微信自动回复（队列 + 回复历史）")
     ap.add_argument("--target", default=argparse.SUPPRESS, help="all 或某个会话名")
+    ap.add_argument("--data-dir", default=argparse.SUPPRESS, help="企微 Data 目录绝对路径，覆盖 config.json")
     ap.add_argument("--reply-first", default=argparse.SUPPRESS)
     ap.add_argument("--reply-next", default=argparse.SUPPRESS)
     ap.add_argument("--interval", type=float, default=argparse.SUPPRESS)
@@ -1255,7 +1275,12 @@ def main() -> int:
         print_history()
         return 0
 
-    store = Store()
+    try:
+        data_dir = configured_data_dir(cfg)
+    except ValueError as exc:
+        log(f"Configuration error: {exc}")
+        return 2
+    store = Store(data_dir=data_dir) if data_dir is not None else Store()
     if not store.data_dir:
         print("没找到企业微信数据目录")
         return 1
