@@ -58,19 +58,14 @@ import login_watch  # noqa: E402
 import reply_store as rlog  # noqa: E402
 import client as agent_client  # noqa: E402
 
-# 只打两个补丁：剪贴板写入、进会话后点一下输入框。
+# 仅启用剪贴板兼容和长消息解析补丁；发送动作与时序沿用冻结核心。
 # 抢前台用 core/win.py 原版（ShowWindow + AttachThreadInput），
 # 自己加 Alt / 点标题栏的版本反而会把焦点带偏，实测必失败。
 compat.apply()
-compat.apply_click_input()
 compat.apply_pb_text()   # 长消息（>127 字节）的长度前缀不是合法 UTF-8，原解析会丢成空
 
 from wecom_io_core import send as core_send  # noqa: E402
 from wecom_io_core.store import Store  # noqa: E402
-
-# Ctrl+F 唤出搜索后，等搜索结果渲染完再回车。
-# 原包是 0.8s，本机实测经常抢跑（回车时结果还没出来），改为 2s。
-core_send.SEARCH_DELAY = 2.0
 
 # 企微自带的应用/系统会话，前缀命中就不回复
 SYSTEM_PREFIXES = (
