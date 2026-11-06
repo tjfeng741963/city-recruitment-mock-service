@@ -1,13 +1,14 @@
-"""客户端 inbound 上报：入站消息同步给 Node 桥接（4222）的测试。
+"""客户端双向消息上报：同步给 Node 桥接（4222）的测试。
 
 复用 test_bridge_heartbeat 的桩加载方式（agent/autopilot.py 依赖键鼠模块，
-backend 测试环境用桩替代后再加载）。被测的 _send_bridge_inbound /
+backend 测试环境用桩替代后再加载）。被测的 _send_bridge_messages /
 BridgeClient.inbound 只发 HTTP，不碰窗口和键鼠。
 """
 
 from __future__ import annotations
 
 import json
+from unittest.mock import MagicMock
 
 from tests.test_bridge_heartbeat import (  # noqa: F401
     FakeApi,
@@ -25,7 +26,7 @@ BATCH = {
     "messages": [
         {"external_conversation_id": "S:1688850001", "external_msgid": "101",
          "direction": "inbound", "content": "你们厂包吃住吗"},
-        # 出站（键鼠发的）绝不上报
+        # 出站（自动回复或直接在企微里发的）也同步
         {"external_conversation_id": "S:1688850001", "external_msgid": "102",
          "direction": "outbound", "content": "包的"},
         # 群聊也是真实会话，照常上报
@@ -45,11 +46,24 @@ class FakeBridge:
     """带 inbound 的假桥接客户端；exc 不为 None 时 inbound 抛异常。"""
 
     enabled = True
+    device_code = "test-device"
 
     def __init__(self, exc: Exception | None = None) -> None:
         self.heartbeats: list[tuple[str, str]] = []
         self.inbounds: list[dict] = []
+        self.outbounds: list[dict] = []
+        self.requests: list[tuple] = []
         self.exc = exc
+
+    def _request(self, method, path, body):
+        self.requests.append((method, path, body))
+        if path.endswith("/inbound"):
+            return self.inbound(**{k: v for k, v in body.items() if k != "sent_at"})
+        assert path.endswith("/outbound")
+        self.outbounds.append(body)
+        if self.exc is not None:
+            raise self.exc
+        return {"status": "processed"}
 
     def heartbeat(self, state: str, account_id: str = "") -> dict:
         self.heartbeats.append((state, account_id))
@@ -67,8 +81,8 @@ class FakeBridge:
         return {"status": "processed", "reply_status": "observe_only"}
 
 
-def test_inbound_reported_only_for_inbound_messages(tmp_path, capsys):
-    """入站消息逐条上报；出站/系统会话/空内容跳过；nickname 取会话名。"""
+def test_both_directions_reported_except_system_and_empty_messages(tmp_path, capsys):
+    """双向逐条上报；系统会话/空内容跳过；nickname 取会话名。"""
     autopilot = _load_autopilot()
     api = FakeApi()
     bridge = FakeBridge()
@@ -80,10 +94,11 @@ def test_inbound_reported_only_for_inbound_messages(tmp_path, capsys):
         ("S:1688850001:101", "S:1688850001", "你们厂包吃住吗", "张三"),
         ("R:1002:103", "R:1002", "群里有人问工资", "普工群"),
     ]
+    assert [m["event_id"] for m in bridge.outbounds] == ["S:1688850001:102"]
     # 主心跳照常
     assert len(api.calls) == 1
     out = capsys.readouterr().out
-    assert "[桥接] inbound 上报 2 条" in out
+    assert "[桥接] messages 上报 3 条" in out
 
 
 def test_bridge_inbound_failure_does_not_break_reporting(tmp_path, capsys):
@@ -95,8 +110,9 @@ def test_bridge_inbound_failure_does_not_break_reporting(tmp_path, capsys):
 
     rep._run({"wecom_state": "online", "queue_size": 0, "last_error": ""}, BATCH)
 
-    # 失败逐条被吞，上报条数=入站可上报条数（2），但都没有成功
-    assert len(bridge.inbounds) == 2
+    # Stop after one failure; all eligible records remain queued for retry.
+    assert len(bridge.inbounds) == 1
+    assert len(rep._bridge_pending) == 3
     assert len(api.calls) == 1  # 主心跳照常
     out = capsys.readouterr().out
     assert "失败（忽略）" in out
@@ -159,3 +175,141 @@ def test_bridge_inbound_request_shape(monkeypatch):
         "nickname": "张三",
     }
     assert res == {"status": "processed", "reply_status": "observe_only"}
+
+
+class IngestApi(FakeApi):
+    def ingest(self, batch):
+        return {"messages_created": len(batch["messages"])}
+
+
+HEARTBEAT = {"wecom_state": "online", "queue_size": 0, "last_error": ""}
+
+
+def test_bridge_failure_retries_after_primary_cursor_advances_and_process_restarts(tmp_path):
+    autopilot = _load_autopilot()
+    bridge = FakeBridge(exc=TimeoutError("offline"))
+    rep = make_reporter(autopilot, IngestApi(), bridge, tmp_path)
+    rep._run(HEARTBEAT, BATCH)
+    assert rep._cursor["S:1688850001"] == 105
+    saved = json.loads(rep.state_path.read_text(encoding="utf-8"))
+    assert len(saved["bridge_pending"]) == 3
+
+    recovered = FakeBridge()
+    restarted = make_reporter(autopilot, IngestApi(), recovered, tmp_path)
+    restarted._run(HEARTBEAT, {"messages": []})
+    assert [event["event_id"] for event in recovered.inbounds] == ["S:1688850001:101", "R:1002:103"]
+    assert [event["event_id"] for event in recovered.outbounds] == ["S:1688850001:102"]
+    assert restarted._bridge_pending == {}
+    assert json.loads(restarted.state_path.read_text(encoding="utf-8"))["bridge_pending"] == {}
+    restarted._run(HEARTBEAT, {"messages": []})
+    assert len(recovered.inbounds) == 2
+
+
+def test_partial_success_keeps_only_unacknowledged_records(tmp_path):
+    autopilot = _load_autopilot()
+    bridge = FakeBridge()
+    original = bridge.inbound
+
+    def send(**event):
+        if event["contact_id"].startswith("R:"):
+            raise TimeoutError("second record failed")
+        return original(**event)
+
+    bridge.inbound = send
+    rep = make_reporter(autopilot, IngestApi(), bridge, tmp_path)
+    rep._run(HEARTBEAT, BATCH)
+    assert len(rep._bridge_pending) == 1
+    assert next(iter(rep._bridge_pending.values()))["event"]["event_id"] == "R:1002:103"
+    bridge.inbound = original
+    rep._run(HEARTBEAT, {"messages": []})
+    assert [event["event_id"] for event in bridge.inbounds] == ["S:1688850001:101", "R:1002:103"]
+
+
+def test_bridge_queue_is_durable_before_primary_ingest(tmp_path):
+    autopilot = _load_autopilot()
+    rep = make_reporter(autopilot, IngestApi(), FakeBridge(), tmp_path)
+    original = rep.api.ingest
+
+    def ingest(batch):
+        saved = json.loads(rep.state_path.read_text(encoding="utf-8"))
+        assert len(saved["bridge_pending"]) == 3
+        return original(batch)
+
+    rep.api.ingest = ingest
+    rep._run(HEARTBEAT, BATCH)
+    assert not rep._bridge_pending
+
+
+def test_queue_write_failure_does_not_advance_primary_cursor(tmp_path, monkeypatch):
+    autopilot = _load_autopilot()
+    api = IngestApi()
+    api.ingest = MagicMock()
+    bridge = FakeBridge()
+    rep = make_reporter(autopilot, api, bridge, tmp_path)
+    monkeypatch.setattr(rep, "_save", lambda: False)
+    rep._run(HEARTBEAT, BATCH)
+    api.ingest.assert_not_called()
+    assert rep._cursor == {}
+    assert bridge.inbounds == []
+    assert len(api.calls) == 1
+
+
+def test_pending_records_are_not_sent_to_a_reconfigured_bridge(tmp_path):
+    autopilot = _load_autopilot()
+    bridge = FakeBridge(exc=TimeoutError("offline"))
+    bridge.base_url = "http://old.example"
+    rep = make_reporter(autopilot, IngestApi(), bridge, tmp_path)
+    rep._run(HEARTBEAT, BATCH)
+    other = FakeBridge()
+    other.base_url = "http://new.example"
+    restarted = make_reporter(autopilot, IngestApi(), other, tmp_path)
+    restarted._run(HEARTBEAT, {"messages": []})
+    assert other.inbounds == []
+    assert other.outbounds == []
+    assert len(restarted._bridge_pending) == 3
+
+
+def test_old_state_files_without_queue_remain_compatible(tmp_path):
+    autopilot = _load_autopilot()
+    (tmp_path / "state.json").write_text(json.dumps({"cursor": {"S:old": 100}}), encoding="utf-8")
+    rep = make_reporter(autopilot, IngestApi(), FakeBridge(), tmp_path)
+    assert rep._cursor == {"S:old": 100}
+    assert rep._bridge_pending == {}
+
+
+def test_old_pending_inbound_format_remains_compatible(tmp_path):
+    autopilot = _load_autopilot()
+    event = {"event_id": "old:1", "contact_id": "S:old", "content": "old", "nickname": "old"}
+    (tmp_path / "state.json").write_text(json.dumps({"bridge_pending": {
+        "old-key": {"destination": ["", "test-device"], "event": event},
+    }}), encoding="utf-8")
+    bridge = FakeBridge()
+    rep = make_reporter(autopilot, IngestApi(), bridge, tmp_path)
+    rep._run(HEARTBEAT, {"messages": []})
+    assert bridge.inbounds == [event]
+    assert rep._bridge_pending == {}
+
+
+def test_outbound_retry_keeps_timestamp_and_uses_escaped_device_path(tmp_path):
+    autopilot = _load_autopilot()
+    bridge = FakeBridge()
+    bridge.device_code = "device/with space"
+    event = {**BATCH["messages"][1], "sent_at": "2026-11-06T02:00:00+00:00"}
+    rep = make_reporter(autopilot, IngestApi(), bridge, tmp_path)
+    rep._run(HEARTBEAT, {"messages": [event]})
+    method, path, body = bridge.requests[0]
+    assert (method, path) == ("POST", "/api/v1/bridge/devices/device%2Fwith%20space/outbound")
+    assert body["sent_at"] == event["sent_at"]
+
+
+def test_outbound_failure_is_durable_and_retried_after_restart(tmp_path):
+    autopilot = _load_autopilot()
+    failed = FakeBridge(exc=TimeoutError("offline"))
+    rep = make_reporter(autopilot, IngestApi(), failed, tmp_path)
+    rep._run(HEARTBEAT, {"messages": [BATCH["messages"][1]]})
+    assert len(failed.outbounds) == 1
+    recovered = FakeBridge()
+    restarted = make_reporter(autopilot, IngestApi(), recovered, tmp_path)
+    restarted._run(HEARTBEAT, {"messages": []})
+    assert recovered.outbounds == failed.outbounds
+    assert restarted._bridge_pending == {}

@@ -9,6 +9,7 @@ interface IncomingMessage {
   deviceCode: string;
   customerId: number;
   content: string;
+  sentAt?: string;
 }
 
 interface ConversationRow {
@@ -46,15 +47,16 @@ export class MessageAutomationService {
     const now = new Date().toISOString();
     const inserted = this.db.prepare(
       "INSERT OR IGNORE INTO agent_messages(device_code,customer_id,direction,content,status,created_at,source_event_id) VALUES (?,?, 'inbound',?,'received',?,?)",
-    ).run(input.deviceCode, input.customerId, input.content, now, input.eventId);
+    ).run(input.deviceCode, input.customerId, input.content, input.sentAt ?? now, input.eventId);
     if (Number(inserted.changes) === 1) {
       this.db.prepare(`
         INSERT INTO agent_conversations(device_code,customer_id,last_msg,last_msg_at,unread,updated_at)
         VALUES (?,?,?,?,1,?)
         ON CONFLICT(device_code,customer_id) DO UPDATE SET
-          last_msg=excluded.last_msg,last_msg_at=excluded.last_msg_at,
+          last_msg=CASE WHEN agent_conversations.last_msg_at IS NULL OR julianday(agent_conversations.last_msg_at)<=julianday(excluded.last_msg_at) THEN excluded.last_msg ELSE agent_conversations.last_msg END,
+          last_msg_at=CASE WHEN agent_conversations.last_msg_at IS NULL OR julianday(agent_conversations.last_msg_at)<=julianday(excluded.last_msg_at) THEN excluded.last_msg_at ELSE agent_conversations.last_msg_at END,
           unread=agent_conversations.unread+1,updated_at=excluded.updated_at
-      `).run(input.deviceCode, input.customerId, input.content, now, now);
+      `).run(input.deviceCode, input.customerId, input.content, input.sentAt ?? now, now);
       // Push as soon as the row exists — before Dify answers — so the open
       // conversation page shows the customer message without polling.
       this.notifier.messageCreated(input.deviceCode, input.customerId, input.eventId);

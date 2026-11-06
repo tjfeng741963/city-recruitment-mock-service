@@ -7,37 +7,26 @@ test_bridge_heartbeat 的做法，用桩替代 wecom_io_core / compat，
 
 from __future__ import annotations
 
-import importlib.util
 import json
-import sys
 import types
-from pathlib import Path
 from unittest.mock import MagicMock
 
-AGENT_DIR = Path(__file__).resolve().parents[2] / "agent"
+import pytest
+
+from tests.agent_loader import load_autopilot as _load_autopilot
+from tests.agent_loader import load_reply_store
 
 
-def _load_autopilot():
-    if "autopilot" in sys.modules:
-        return sys.modules["autopilot"]
-    for name in (
-        "wecom_io_core",
-        "wecom_io_core.win",
-        "wecom_io_core.send",
-        "wecom_io_core.store",
-        "compat",
-    ):
-        if name not in sys.modules:
-            sys.modules[name] = MagicMock()
-    if "reply_store" not in sys.modules:
-        stub = types.ModuleType("reply_store")
-        stub.stats = lambda: {"pending": 0, "failed": 0}
-        sys.modules["reply_store"] = stub
-    spec = importlib.util.spec_from_file_location("autopilot", AGENT_DIR / "autopilot.py")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["autopilot"] = mod
-    spec.loader.exec_module(mod)
-    return mod
+@pytest.fixture(autouse=True)
+def _real_command_journal(tmp_path, monkeypatch):
+    original = _load_autopilot
+
+    def load():
+        module = original()
+        module.rlog = load_reply_store(tmp_path / "reply_log.db")
+        return module
+
+    monkeypatch.setattr(f"{__name__}._load_autopilot", load)
 
 
 def _reset(autopilot):
@@ -51,6 +40,8 @@ class FakeBridge:
     """桥接客户端桩：只记录 claim / receipt 调用。"""
 
     enabled = True
+    base_url = "http://bridge.example"
+    device_code = "pc-office-01"
 
     def __init__(self, command: dict | None = None, claim_exc: Exception | None = None):
         self.command = command
@@ -92,6 +83,29 @@ def _cfg(**over):
     cfg = {"cooldown": 0.0, "dry_run": False}
     cfg.update(over)
     return cfg
+
+
+@pytest.mark.parametrize("new_ids,confirmed,expected", [
+    ([102], True, "S:1688858186855249_7881299918302353:102"),
+    ([102, 103], True, "keyboard-cmd-0001"),
+    ([], True, "keyboard-cmd-0001"),
+    ([102], False, "keyboard-cmd-0001"),
+])
+def test_manual_receipt_correlates_only_one_new_confirmed_database_message(monkeypatch, new_ids, confirmed, expected):
+    autopilot = _load_autopilot()
+    store = _mock_store()
+    store.self_id.return_value = "owner"
+    old = {"id": 101, "sender_id": "owner", "text": COMMAND["content"]}
+    store.messages.side_effect = [[old], [old, *[
+        {"id": mid, "sender_id": "owner", "text": COMMAND["content"]} for mid in new_ids
+    ], {"id": 104, "sender_id": "customer", "text": COMMAND["content"]}]]
+    autopilot.core_send.send.return_value = {
+        "ok": True, "conversation_id": COMMAND["contact_id"] if confirmed else "", "detail": "ok",
+    }
+    bridge = FakeBridge(command=dict(COMMAND))
+    assert autopilot.pump_commands(store, _cfg(), bridge=bridge)["sent"] == 1
+    assert bridge.receipts[-1][-1] == expected
+    store.refresh.assert_not_called()
 
 
 # --------------------------------------------------------------------------- #
@@ -156,7 +170,7 @@ def test_send_exception_is_contained(monkeypatch):
     stats = autopilot.pump_commands(_mock_store(), _cfg(), bridge=bridge, wecom_state="online")
 
     assert stats == {"claimed": 1, "sent": 0, "failed": 1}
-    assert bridge.receipts[-1][2] == "failed"
+    assert bridge.receipts[-1][2] == "unknown"
 
 
 # --------------------------------------------------------------------------- #

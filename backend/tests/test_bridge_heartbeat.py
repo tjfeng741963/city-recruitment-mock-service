@@ -8,38 +8,10 @@ backend 测试环境没有这些依赖，这里用桩替代后再加载模块。
 
 from __future__ import annotations
 
-import importlib.util
 import json
-import sys
-import types
-from pathlib import Path
 from unittest.mock import MagicMock
 
-AGENT_DIR = Path(__file__).resolve().parents[2] / "agent"
-
-
-def _load_autopilot():
-    """把 agent/autopilot.py 加载进来；Windows/键鼠相关模块用桩替代。"""
-    if "autopilot" in sys.modules:
-        return sys.modules["autopilot"]
-    for name in (
-        "wecom_io_core",
-        "wecom_io_core.win",
-        "wecom_io_core.send",
-        "wecom_io_core.store",
-        "compat",
-    ):
-        if name not in sys.modules:
-            sys.modules[name] = MagicMock()
-    if "reply_store" not in sys.modules:
-        stub = types.ModuleType("reply_store")
-        stub.stats = lambda: {"pending": 0, "failed": 0}
-        sys.modules["reply_store"] = stub
-    spec = importlib.util.spec_from_file_location("autopilot", AGENT_DIR / "autopilot.py")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["autopilot"] = mod
-    spec.loader.exec_module(mod)
-    return mod
+from tests.agent_loader import load_autopilot as _load_autopilot
 
 
 class FakeApi:

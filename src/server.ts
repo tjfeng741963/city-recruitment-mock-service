@@ -35,7 +35,7 @@ declare module "fastify" {
  * Verified 2026-10-21 against http://47.107.245.246:8080 — these returned 200
  * with real payloads while every other contract returned 403.
  */
-const DEVICE_TOKEN_ROUTES = new Set(["heartbeat", "claim", "receipts", "inbound"].map(action => `POST /api/v1/bridge/devices/:code/${action}`));
+const DEVICE_TOKEN_ROUTES = new Set(["heartbeat", "claim", "receipts", "inbound", "outbound"].map(action => `POST /api/v1/bridge/devices/:code/${action}`));
 const PUBLIC_ROUTES = new Set([
   "POST /api/v1/auth/login",
   "GET /api/v1/agent/reminder-config",

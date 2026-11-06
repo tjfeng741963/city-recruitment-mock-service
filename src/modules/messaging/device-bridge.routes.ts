@@ -24,7 +24,7 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
     if (!canAccessDevice(getUserScope(db, req.auth!), req.params.code)) return reply.code(403).send({ detail: "Device scope required" });
     return { device: store.status(req.params.code), commands: db.prepare("SELECT id,status,message_id,simulated,created_at FROM bridge_commands WHERE device_code=? ORDER BY created_at DESC LIMIT 50").all(req.params.code) };
   });
-  for (const action of ["heartbeat", "claim", "receipts", "inbound"] as const) {
+  for (const action of ["heartbeat", "claim", "receipts", "inbound", "outbound"] as const) {
     app.post<DeviceRequest>(`/api/v1/bridge/devices/:code/${action}`, async (req, reply) => {
       const code = req.params.code;
       const token = (req.headers.authorization ?? "").replace(/^Bearer /, "");
@@ -66,10 +66,22 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
       if (store.status(code)?.state !== "online") return reply.code(409).send({ detail: "Device must be online" });
       const eventId = field(body, "event_id"), contactId = field(body, "contact_id"), content = field(body, "content", 20000);
       if (!eventId || !contactId || !content.trim()) return reply.code(422).send({ detail: "event_id, contact_id and content required" });
+      let sentAt: string | undefined;
+      if (body.sent_at != null && body.sent_at !== "") {
+        if (typeof body.sent_at !== "string" || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(body.sent_at) || !Number.isFinite(Date.parse(body.sent_at))) {
+          return reply.code(422).send({ detail: "sent_at must be an ISO timestamp with timezone" });
+        }
+        sentAt = new Date(body.sent_at).toISOString();
+      }
+      if (action === "outbound") {
+        const result = store.observeOutbound(code, eventId, contactId, content, field(body, "nickname"), sentAt);
+        if (result.created) notifier.messageCreated(code, result.customer_id, result.source_event_id);
+        return { status: result.created ? "processed" : "duplicate", ...result };
+      }
       const scopedId = store.inboundEvent(code, eventId, contactId, content);
       const customerId = store.contact(code, contactId, field(body, "nickname"));
       events.recordEvent({ eventId: scopedId, eventType: "message.created", direction: "inbound", deviceCode: code, customerId, payload: { content } });
-      const result = await automation.handleInbound({ eventId: scopedId, deviceCode: code, customerId, content });
+      const result = await automation.handleInbound({ eventId: scopedId, deviceCode: code, customerId, content, sentAt });
       return reply.code(result.reply_status === "failed" ? 502 : 200).send({ ...result, customer_id: customerId });
     });
   }
