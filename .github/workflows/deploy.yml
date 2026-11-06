@@ -58,6 +58,9 @@ jobs:
       - name: Run Python tests
         run: pytest backend/tests/
 
+      - name: Run isolated HTTP acceptance
+        run: python scripts/acceptance-smoke.py
+
   deploy:
     needs: test
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
