@@ -55,11 +55,14 @@ def test_result_committed_before_http_and_retries_after_restart_without_sending(
     def verify_durable(*args):
         saved = pending(agent, bridge)[0]
         assert saved["status"] == "succeeded"
-        assert saved["message_id"] == f"keyboard-{COMMAND['id']}"
+        assert saved["message_id"] == f"{COMMAND['contact_id']}:102"
         return original(*args)
 
     bridge.receipt = verify_durable
-    assert agent.pump_commands(_mock_store(), _cfg(), bridge=bridge)["sent"] == 1
+    store = _mock_store()
+    store.self_id.return_value = "owner"
+    store.messages.side_effect = [[], [{"id": 102, "sender_id": "owner", "text": COMMAND["content"]}]]
+    assert agent.pump_commands(store, _cfg(), bridge=bridge)["sent"] == 1
     agent.core_send.send.assert_called_once()
     replay = restart(agent)
     recovered = ReceiptBridge()
@@ -69,6 +72,31 @@ def test_result_committed_before_http_and_retries_after_restart_without_sending(
     assert recovered.receipts == bridge.receipts
     assert pending(replay, recovered) == []
     assert replay.rlog.recent_manual_receipts()[0]["receipt_state"] == "acked"
+
+
+def test_unverified_send_stays_unknown_after_receipt_recovery_and_new_lease(agent):
+    bridge = ReceiptBridge(dict(COMMAND), TimeoutError("response lost"))
+    store = _mock_store()
+    store.self_id.return_value = "owner"
+    store.messages.return_value = []
+    assert agent.pump_commands(store, _cfg(), bridge=bridge) == {"claimed": 1, "sent": 0, "failed": 1}
+    assert pending(agent, bridge)[0]["status"] == "unknown"
+    assert pending(agent, bridge)[0]["message_id"] == ""
+    replay = restart(agent)
+    recovered = ReceiptBridge({**COMMAND, "lease_token": "new-lease"})
+    replay.pump_commands(_mock_store(), _cfg(), bridge=recovered)
+    assert recovered.receipts == [(COMMAND["id"], COMMAND["lease_token"], "unknown", "")]
+    assert pending(replay, recovered) == []
+    replay.core_send.send.assert_not_called()
+
+
+def test_historical_keyboard_receipt_is_replayed_unchanged(agent):
+    bridge = ReceiptBridge()
+    seed(agent, bridge, message_id=f"keyboard-{COMMAND['id']}")
+    replay = restart(agent)
+    assert replay.flush_manual_receipts(bridge, force=True)
+    assert bridge.receipts == [(COMMAND["id"], COMMAND["lease_token"], "succeeded", f"keyboard-{COMMAND['id']}")]
+    replay.core_send.send.assert_not_called()
 
 
 def test_attempt_is_durable_before_sender_and_crash_recovers_as_unknown(agent):

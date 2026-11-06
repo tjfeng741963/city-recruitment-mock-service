@@ -85,13 +85,13 @@ def _cfg(**over):
     return cfg
 
 
-@pytest.mark.parametrize("new_ids,confirmed,expected", [
-    ([102], True, "S:1688858186855249_7881299918302353:102"),
-    ([102, 103], True, "keyboard-cmd-0001"),
-    ([], True, "keyboard-cmd-0001"),
-    ([102], False, "keyboard-cmd-0001"),
+@pytest.mark.parametrize("new_ids,confirmed,status,expected", [
+    ([102], True, "succeeded", "S:1688858186855249_7881299918302353:102"),
+    ([102, 103], True, "unknown", ""),
+    ([], True, "unknown", ""),
+    ([102], False, "succeeded", "S:1688858186855249_7881299918302353:102"),
 ])
-def test_manual_receipt_correlates_only_one_new_confirmed_database_message(monkeypatch, new_ids, confirmed, expected):
+def test_manual_receipt_correlates_only_one_new_confirmed_database_message(new_ids, confirmed, status, expected):
     autopilot = _load_autopilot()
     store = _mock_store()
     store.self_id.return_value = "owner"
@@ -103,8 +103,10 @@ def test_manual_receipt_correlates_only_one_new_confirmed_database_message(monke
         "ok": True, "conversation_id": COMMAND["contact_id"] if confirmed else "", "detail": "ok",
     }
     bridge = FakeBridge(command=dict(COMMAND))
-    assert autopilot.pump_commands(store, _cfg(), bridge=bridge)["sent"] == 1
-    assert bridge.receipts[-1][-1] == expected
+    assert autopilot.pump_commands(store, _cfg(), bridge=bridge) == {
+        "claimed": 1, "sent": int(status == "succeeded"), "failed": int(status == "unknown"),
+    }
+    assert bridge.receipts[-1][2:] == (status, expected)
     store.refresh.assert_not_called()
 
 
@@ -118,17 +120,20 @@ def test_claim_sends_with_keyboard_and_reports_success(monkeypatch, capsys):
 
     def fake_send(store, name, text, **kwargs):
         sent.append((name, text, kwargs.get("verify_db"), kwargs.get("expect_id")))
-        return {"ok": True, "conversation_id": "cid", "detail": "已发送"}
+        return {"ok": True, "conversation_id": COMMAND["contact_id"], "detail": "已发送"}
 
     monkeypatch.setattr(autopilot, "core_send", types.SimpleNamespace(send=fake_send))
     bridge = FakeBridge(command=dict(COMMAND))
+    store = _mock_store()
+    store.self_id.return_value = "owner"
+    store.messages.side_effect = [[], [{"id": 102, "sender_id": "owner", "text": COMMAND["content"]}]]
 
-    stats = autopilot.pump_commands(_mock_store(), _cfg(cooldown=0.0), bridge=bridge, wecom_state="online")
+    stats = autopilot.pump_commands(store, _cfg(cooldown=0.0), bridge=bridge, wecom_state="online")
 
     assert stats == {"claimed": 1, "sent": 1, "failed": 0}
-    # 用昵称（不是 contact_id）做搜索关键词，回读关闭与自动回复一致
+    # 用昵称做搜索关键词，人工回读开启并约束目标 contact_id。
     assert sent == [("青冥", "你好，这边是人工客服", True, "S:1688858186855249_7881299918302353")]
-    assert bridge.receipts == [("cmd-0001", "lease-abc", "succeeded", "keyboard-cmd-0001")]
+    assert bridge.receipts == [("cmd-0001", "lease-abc", "succeeded", f"{COMMAND['contact_id']}:102")]
     assert autopilot._last_reply_at > 0  # 发送后进入冷却，自动回复不会立刻抢键鼠
     out = capsys.readouterr().out
     assert "[指令] 人工发送" in out and "已发送" in out

@@ -1048,18 +1048,22 @@ def pump_commands(
 
     if result.get("ok"):
         _last_reply_at = time.time()
+        after = _outbound_snapshot(store, contact_id)
+        normalized = content.replace("\r\n", "\n").replace("\r", "\n").strip()
+        candidates = [mid for mid, text in (after or {}).items()
+                      if before is not None and mid not in before and text == normalized]
+        observed_cid = result.get("conversation_id") or ""
+        # Core may return ok after its legacy rowid readback fails; require stable ID evidence.
+        if (observed_cid and observed_cid != contact_id) or before is None or after is None or len(candidates) != 1:
+            _last_error = "人工发送未找到目标会话中唯一的新消息 ID，请核对实际落点，勿直接重发"
+            stats["failed"] += 1
+            log(f"    {_last_error}")
+            receipt("unknown")
+            return stats
         _last_error = ""
         stats["sent"] += 1
-        log(f"    已发送：{result.get('detail')}")
-        message_id = f"keyboard-{cmd_id}"
-        after = _outbound_snapshot(store, contact_id)
-        if result.get("conversation_id") == contact_id and before is not None and after is not None:
-            # Two equal new messages are ambiguous; never merge by text alone.
-            normalized = content.replace("\r\n", "\n").replace("\r", "\n").strip()
-            candidates = [mid for mid, text in after.items() if mid not in before and text == normalized]
-            if len(candidates) == 1:
-                message_id = f"{contact_id}:{candidates[0]}"
-        receipt("succeeded", message_id)
+        log("    已发送：目标会话中唯一的新消息 ID 已确认")
+        receipt("succeeded", f"{contact_id}:{candidates[0]}")
     else:
         _last_error = str(result.get("detail"))[:200]
         stats["failed"] += 1
