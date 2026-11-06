@@ -990,6 +990,25 @@ def pump_commands(
             return
         flush_manual_receipts(bridge, force=True)
 
+    def stop_if_lease_invalid() -> bool:
+        global _last_error
+        deadline = command.get("lease_until")
+        try:
+            valid = type(deadline) in (int, float) and math.isfinite(deadline) and deadline > time.time() * 1000
+        except OverflowError:
+            valid = False
+        if valid:
+            return False
+        _last_error = "人工指令租约已过期或无效，停止发送并保留 unknown，请人工核对"
+        log(f"    {_last_error}")
+        receipt("unknown")
+        stats["failed"] += 1
+        return True
+
+    # Socket timeouts do not bound a streaming response's total duration.
+    if stop_if_lease_invalid():
+        return stats
+
     if not content or not name:
         log("    跳过：指令缺少昵称或内容")
         receipt("failed")
@@ -1022,7 +1041,12 @@ def pump_commands(
     if wait > 0:
         time.sleep(wait)
 
-    if not compat.wait_clipboard_writable(timeout=15):
+    if stop_if_lease_invalid():
+        return stats
+    clipboard_ready = compat.wait_clipboard_writable(timeout=15)
+    if stop_if_lease_invalid():
+        return stats
+    if not clipboard_ready:
         _last_error = "剪贴板被占用超过 15 秒"
         log("    失败：剪贴板被占用（向日葵同步？）")
         receipt("failed")
@@ -1030,6 +1054,8 @@ def pump_commands(
         return stats
 
     before = _outbound_snapshot(store, contact_id)
+    if stop_if_lease_invalid():
+        return stats
     try:
         result = core_send.send(
             store, name, content,

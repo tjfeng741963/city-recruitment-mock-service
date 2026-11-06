@@ -69,6 +69,7 @@ COMMAND = {
     "content": "你好，这边是人工客服",
     "status": "claimed",
     "lease_token": "lease-abc",
+    "lease_until": 4102444800000,
 }
 
 
