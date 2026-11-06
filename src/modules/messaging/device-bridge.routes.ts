@@ -12,7 +12,7 @@ type DeviceRequest = { Params: { code: string }; Body: Record<string, unknown> }
 const field = (body: Record<string, unknown>, key: string, max = 1000) => typeof body[key] === "string" && String(body[key]).length <= max ? String(body[key]) : "";
 
 export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSync, notifier: StreamNotifier = NOOP_NOTIFIER): void {
-  const store = new DeviceBridgeStore(db);
+  const store = new DeviceBridgeStore(db, Date.now, notifier);
   const events = new MessageEventService(db, { webhookSecret: process.env.REA_WEBHOOK_SECRET ?? "local-webhook-secret" });
   const automation = new MessageAutomationService(db, events, createDifyProvider(), createMessageChannelProvider(undefined, db), notifier);
 
@@ -22,6 +22,7 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
   });
   app.get<{ Params: { code: string } }>("/api/v1/bridge/devices/:code", async (req, reply) => {
     if (!canAccessDevice(getUserScope(db, req.auth!), req.params.code)) return reply.code(403).send({ detail: "Device scope required" });
+    store.expireClaims(req.params.code);
     return { device: store.status(req.params.code), commands: db.prepare("SELECT id,status,message_id,simulated,created_at FROM bridge_commands WHERE device_code=? ORDER BY created_at DESC LIMIT 50").all(req.params.code) };
   });
   for (const action of ["heartbeat", "claim", "receipts", "inbound", "outbound"] as const) {

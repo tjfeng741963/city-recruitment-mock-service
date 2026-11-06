@@ -13,7 +13,7 @@ import { deviceDifyConfig, HttpDifyProvider } from "../dify/dify-provider.js";
 export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync, notifier: StreamNotifier = NOOP_NOTIFIER) {
   const messageChannel = createMessageChannelProvider(undefined, db);
   const messageEvents = new MessageEventService(db, { webhookSecret: process.env.REA_WEBHOOK_SECRET ?? "local-webhook-secret" });
-  const bridgeStore = new DeviceBridgeStore(db);
+  const bridgeStore = new DeviceBridgeStore(db, Date.now, notifier);
   // 生产配置 REA_MESSAGE_CHANNEL_PROVIDER=bridge 时，人工回复不能再走
   // DeviceBridgeChannelProvider 的「入队后同步等 30 秒回执」——键鼠客户端不是
   // 常驻 claim 的，等待必然超时并回 502，消息看着像失败。改成入队即返回
@@ -42,7 +42,8 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     let command = bridgeStore.enqueue({ deviceCode, customerId, content, idempotencyKey: eventId });
     // 上一次设备回执 failed（没发出去）时，同一个幂等键应允许重新入队，
     // 否则界面重试会永远停在失败状态。unknown 表示可能已经发出，不自动重发。
-    if (command.status === "failed") {
+    const retrying = command.status === "failed";
+    if (retrying) {
       db.prepare("UPDATE bridge_commands SET status='queued',lease_token='',lease_until=0,message_id='',receipt_at=NULL WHERE id=?").run(command.id);
       command = bridgeStore.command(command.id)!;
     }
@@ -52,7 +53,8 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
       .run(deviceCode, customerId, content, "queued", now, sourceEventId);
     if (command.status === "queued") db.prepare("UPDATE agent_messages SET status='queued' WHERE source_event_id=?").run(sourceEventId);
     const message = db.prepare("SELECT id,device_code,customer_id,direction,content,status,created_at FROM agent_messages WHERE source_event_id=? AND direction='outbound'").get(sourceEventId);
-    db.prepare("UPDATE agent_conversations SET last_msg=?,last_msg_at=?,updated_at=? WHERE device_code=? AND customer_id=?").run(content, now, now, deviceCode, customerId);
+    if (Number(inserted.changes) === 1 || retrying) db.prepare("UPDATE agent_conversations SET last_msg=?,last_msg_at=?,updated_at=? WHERE device_code=? AND customer_id=? AND (last_msg_at IS NULL OR julianday(last_msg_at)<=julianday(?))")
+      .run(content, now, now, deviceCode, customerId, now);
     // Push the queued command so the sender's other tabs (and the injected
     // client's UI) see "sending" immediately instead of on the next poll. A
     // retried idempotency key re-uses the message row, so only a fresh insert
@@ -99,10 +101,11 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     const result = await new HttpDifyProvider().healthCheck({ baseUrl, apiKey });
     return { device_id: id, base_url: baseUrl, healthy: result.healthy, latency_ms: result.latency_ms, error: result.error };
   });
-  app.get<{ Querystring: { device_code?: string } }>("/api/v1/agent/conversations", async (request, reply) => { const deviceCode = request.query.device_code ?? ""; if (!canAccessDevice(getUserScope(db, request.auth!), deviceCode)) return reply.code(403).send({ detail: "Device scope required" }); const rows = db.prepare("SELECT * FROM agent_conversations WHERE device_code=? ORDER BY updated_at DESC").all(deviceCode); return { items: rows, total_unread: (rows as Array<Record<string, unknown>>).reduce((sum, row) => sum + Number(row.unread ?? 0), 0) }; });
+  app.get<{ Querystring: { device_code?: string } }>("/api/v1/agent/conversations", async (request, reply) => { const deviceCode = request.query.device_code ?? ""; if (!canAccessDevice(getUserScope(db, request.auth!), deviceCode)) return reply.code(403).send({ detail: "Device scope required" }); bridgeStore.expireClaims(deviceCode); const rows = db.prepare("SELECT * FROM agent_conversations WHERE device_code=? ORDER BY updated_at DESC").all(deviceCode); return { items: rows, total_unread: (rows as Array<Record<string, unknown>>).reduce((sum, row) => sum + Number(row.unread ?? 0), 0) }; });
   app.get<{ Querystring: { device_code?: string; customer_id?: string; after_id?: string } }>("/api/v1/agent/messages", async (request, reply) => {
     const deviceCode = request.query.device_code ?? "";
     if (!canAccessDevice(getUserScope(db, request.auth!), deviceCode)) return reply.code(403).send({ detail: "Device scope required" });
+    bridgeStore.expireClaims(deviceCode);
     const rows = db.prepare("SELECT * FROM agent_messages WHERE device_code=? AND customer_id=? AND id>? ORDER BY id").all(deviceCode, Number(request.query.customer_id ?? 0), Number(request.query.after_id ?? 0)) as Array<Record<string, unknown>>;
     // 会话页按 role 决定气泡左右；agent_messages 只有 direction，这里补一层映射。
     return { items: rows.map((row) => ({ ...row, role: row.direction === "inbound" ? "customer" : "agent" })), takeover: false };
