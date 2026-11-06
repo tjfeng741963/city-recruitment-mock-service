@@ -167,6 +167,27 @@ describe("bridge recovery visible to operators", () => {
     expect(conversation()).toEqual(before);
   });
 
+  it.each([
+    { sentAt: "2026-01-01T00:01:00.000Z", latest: "new customer message", latestAt: "2026-01-01T00:02:00.000Z" },
+    { sentAt: "2026-01-01T00:03:00.000Z", latest: "manual reply", latestAt: "2026-01-01T00:03:00.000Z" },
+  ])("preserves the queued time until observation supplies $sentAt", async ({ sentAt, latest, latestAt }) => {
+    await send();
+    const command = (await post("claim")).json().command;
+    app.db.prepare("UPDATE agent_messages SET created_at='2026-01-01T00:00:00.000Z' WHERE device_code=?").run(code);
+    app.db.prepare("UPDATE agent_conversations SET last_msg_at='2026-01-01T00:00:00.000Z' WHERE device_code=?").run(code);
+    await post("inbound", { event_id: "newer", contact_id: contact, content: "new customer message", sent_at: "2026-01-01T00:02:00Z" });
+    const before = conversation();
+    expect(before).toMatchObject({ last_msg: "new customer message", last_msg_at: "2026-01-01T00:02:00.000Z", unread: 2 });
+    expect((await receipt(command)).statusCode).toBe(200);
+    expect(outbound()).toMatchObject({ status: "sent", created_at: "2026-01-01T00:00:00.000Z" });
+    expect(conversation()).toEqual(before);
+    expect((await post("outbound", { event_id: `${contact}:102`, contact_id: contact, content: "manual reply", sent_at: sentAt })).statusCode).toBe(200);
+    expect(outbound()).toMatchObject({ status: "sent", created_at: sentAt });
+    expect(conversation()).toMatchObject({ last_msg: latest, last_msg_at: latestAt, unread: 2 });
+    expect((await receipt(command)).statusCode).toBe(200);
+    expect(conversation()).toMatchObject({ last_msg: latest, last_msg_at: latestAt, unread: 2 });
+  });
+
   it.each([true, false])("uses the observed send time and preserves newer messages, receipt first=%s", async receiptFirst => {
     await send();
     const command = (await post("claim")).json().command;

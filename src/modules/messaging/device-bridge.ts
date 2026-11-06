@@ -228,7 +228,10 @@ export class DeviceBridgeStore {
       if (!delivery) return;
       this.db.prepare("UPDATE message_deliveries SET status='succeeded',provider_message_id=?,last_error=NULL,next_retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(messageId, delivery.id);
       const observedTime = observedSource ? this.db.prepare("SELECT created_at FROM agent_messages WHERE source_event_id=?").get(observedSource) as { created_at: string } | undefined : undefined;
-      const stamp = observedTime?.created_at ?? new Date(this.now()).toISOString();
+      const queuedTime = this.db.prepare("SELECT created_at FROM agent_messages WHERE source_event_id=?").get(sourceEvent) as { created_at: string } | undefined;
+      // A delayed HTTP receipt gives no send time. Keep the queued timestamp
+      // until observation supplies it, so the receipt cannot promote old text.
+      const stamp = observedTime?.created_at ?? queuedTime?.created_at ?? new Date(this.now()).toISOString();
       this.db.prepare("INSERT OR IGNORE INTO agent_messages(device_code,customer_id,direction,content,status,created_at,source_event_id) VALUES (?,?,'outbound',?,?,?,?)")
         .run(code, command.customer_id, command.content, simulated ? "simulated" : "sent", stamp, sourceEvent);
       this.db.prepare("UPDATE agent_messages SET status=?,created_at=? WHERE source_event_id=?").run(simulated ? "simulated" : "sent", stamp, sourceEvent);
