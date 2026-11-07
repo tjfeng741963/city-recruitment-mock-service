@@ -20,11 +20,18 @@ def smoke():
     return module
 
 
+def _fake_loader(tmp_path):
+    """subprocess 被替身之后，Services 仍会校验 loader 文件真实存在，这里补齐。"""
+    loader = tmp_path / "loader.mjs"
+    loader.write_text("export {};\n", encoding="utf-8")
+    return str(loader)
+
+
 def test_services_replace_inherited_backend_configuration(smoke, monkeypatch, tmp_path):
     for name in ("APP_DATABASE_URL", "REA_DATABASE_PATH", "WECOM_SECRET", "UVICORN_ENV_FILE", "NODE_OPTIONS", "app_extra_config"):
         monkeypatch.setenv(name, "inherited-production-sentinel")
     monkeypatch.setattr(smoke.shutil, "which", lambda _: sys.executable)
-    monkeypatch.setattr(smoke.subprocess, "check_output", lambda *args, **kwargs: str(tmp_path / "loader.mjs"))
+    monkeypatch.setattr(smoke.subprocess, "check_output", lambda *args, **kwargs: _fake_loader(tmp_path))
     services = smoke.Services(tmp_path)
     assert "inherited-production-sentinel" not in services.env.values()
     assert services.env["APP_OUTBOX_WORKER"] == "false"
@@ -35,7 +42,7 @@ def test_services_replace_inherited_backend_configuration(smoke, monkeypatch, tm
 
 def test_cleanup_terminates_owned_service_process(smoke, monkeypatch, tmp_path):
     monkeypatch.setattr(smoke.shutil, "which", lambda _: sys.executable)
-    monkeypatch.setattr(smoke.subprocess, "check_output", lambda *args, **kwargs: str(tmp_path / "loader.mjs"))
+    monkeypatch.setattr(smoke.subprocess, "check_output", lambda *args, **kwargs: _fake_loader(tmp_path))
     services = smoke.Services(tmp_path)
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

@@ -50,7 +50,15 @@ class Services:
         self.logs = []
         self.node = shutil.which("node")
         require(bool(self.node), "Node.js is required; install Node 22.19 or newer")
-        loader = subprocess.check_output([self.node, "-p", "require.resolve('tsx')"], cwd=ROOT, text=True).strip()
+        # Node always writes UTF-8; decoding with the Windows locale codec (cp936) mangles
+        # non-ASCII repository paths into a loader URI that cannot be resolved.
+        loader = subprocess.check_output(
+            [self.node, "-p", "require.resolve('tsx')"],
+            cwd=ROOT,
+            encoding="utf-8",
+            errors="strict",
+        ).strip()
+        require(Path(loader).is_file(), "tsx loader missing; run npm ci")
         self.loader = Path(loader).as_uri()
         self.password = secrets.token_urlsafe(24)
         self.env = {key: value for key, value in os.environ.items()
@@ -232,14 +240,19 @@ def main() -> int:
     try:
         require(sys.version_info >= (3, 11), "Python 3.11 or newer is required")
         require(importlib.util.find_spec("uvicorn") is not None, "Install backend/pyproject.toml dependencies in this Python environment")
-        with tempfile.TemporaryDirectory(prefix="city-acceptance-") as directory:
+        # Windows 上子进程刚被杀时日志句柄可能还没释放，清理失败不应把
+        # 已经跑完的验收判成失败（8/8 已通过，临时目录是垃圾）。
+        with tempfile.TemporaryDirectory(
+            prefix="city-acceptance-", ignore_cleanup_errors=True
+        ) as directory:
             services = Services(Path(directory))
             try:
                 exercise(services, checks)
             finally:
                 services.close()
         result["status"] = "passed"
-        result["temporary_data_removed"] = True
+        # 不再无条件写 True：清理被忽略时要如实反映目录还在。
+        result["temporary_data_removed"] = not Path(directory).exists()
     except Exception as error:
         result["status"] = "failed"
         # Exception payloads from HTTP bodies and child logs can contain credentials.

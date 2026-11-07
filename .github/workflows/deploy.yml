@@ -100,7 +100,20 @@ jobs:
             node:22.21.1-bookworm-slim \
             node /scripts/backup-sqlite.mjs /data/app.sqlite "/data/app.sqlite.pre-$revision-$stamp.bak"
           docker compose -f docker-compose.production.yml build
-          docker compose -f docker-compose.production.yml up -d --no-build
+          # 容器名固定（container_name），但历史上有人手工 docker run 起过同名容器、
+          # 没有 compose 标签：compose 发现名字被占又不认作自己的，直接报
+          # "container name is already in use" 让整个部署失败（11-07 即如此）。
+          # 只清理「同名但不属于本项目」的容器，本项目的交给 compose 重建。
+          for name in city-recruitment-app city-recruitment-api; do
+            if docker inspect "$name" >/dev/null 2>&1; then
+              owner=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$name" 2>/dev/null || true)
+              if [ -z "$owner" ] || [ "$owner" != "source" ]; then
+                echo "removing stale container $name (compose project: '${owner:-none}')" >&2
+                docker rm -f "$name" >/dev/null
+              fi
+            fi
+          done
+          docker compose -f docker-compose.production.yml up -d --no-build --remove-orphans
           for i in $(seq 1 30); do
             if curl -fsS -o /dev/null http://127.0.0.1:4222/login; then
               break

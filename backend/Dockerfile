@@ -21,7 +21,11 @@ RUN pip install --no-cache-dir uv && \
 
 COPY app ./app
 
+# /app/data 必须先在镜像里存在且属于 appuser：容器以只读根文件系统运行，
+# data 由命名卷覆盖。Docker 用镜像里的目录内容初始化新卷并保留属主；
+# 目录不存在时会被建成 root 属主，appuser 写 instance.json 就会 EACCES。
 RUN useradd -m -u 1000 appuser && \
+    mkdir -p /app/data && \
     chown -R appuser:appuser /app
 
 USER appuser
