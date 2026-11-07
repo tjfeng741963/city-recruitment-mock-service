@@ -13,7 +13,10 @@ def test_startup_only_enables_non_input_compatibility_patches():
 
     autopilot.compat.apply.assert_called_once_with()
     autopilot.compat.apply_pb_text.assert_called_once_with()
-    autopilot.compat.apply_click_input.assert_not_called()
+    # 2026-11-07 解冻：本版企业微信回车进会话后焦点不落在输入框，
+    # 必须点一下才能粘贴；见 agent/autopilot.py 启用处的说明。
+    autopilot.compat.apply_click_input.assert_called_once_with()
+    # 抢前台仍用 core 原版：compat 的 Alt/点标题栏版本会把焦点带偏。
     autopilot.compat.apply_foreground.assert_not_called()
     autopilot.core_send.send.assert_not_called()
 

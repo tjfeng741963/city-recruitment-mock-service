@@ -59,11 +59,16 @@ import reply_store as rlog  # noqa: E402
 import client as agent_client  # noqa: E402
 import register as agent_register  # noqa: E402
 
-# 仅启用剪贴板兼容和长消息解析补丁；发送动作与时序沿用冻结核心。
-# 抢前台用 core/win.py 原版（ShowWindow + AttachThreadInput），
-# 自己加 Alt / 点标题栏的版本反而会把焦点带偏，实测必失败。
+# 剪贴板兼容 + 长消息解析 + 进会话后点输入框。
+# 抢前台仍用 core/win.py 原版（ShowWindow + AttachThreadInput）；compat 里
+# 自己加 Alt / 点标题栏的版本会把焦点带偏，实测必失败，所以不启用。
 compat.apply()
 compat.apply_pb_text()   # 长消息（>127 字节）的长度前缀不是合法 UTF-8，原解析会丢成空
+# 2026-11-07 实测：本版企业微信回车进会话后焦点不会自动落在输入框，
+# 后续 Ctrl+A/Delete/Ctrl+V 全落在别处，verify_input_box 永远读到哨兵，
+# 发送在「输入框校验」处中止。这个补丁本来就是为这个现象写的，之前被
+# test_autopilot_sender_baseline 冻结；现在解冻（只解这一个，不动动作序列）。
+compat.apply_click_input()
 
 from wecom_io_core import send as core_send  # noqa: E402
 from wecom_io_core.store import Store  # noqa: E402
@@ -760,11 +765,24 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         return stats
 
     items = rlog.pending(include_failed=True)
+    # 每个会话选一条作为回复目标：优先「有文本」的最新一条。
+    # 企业微信在加好友、撤回、系统提示时会插入 type=1011 之类的空文本记录，
+    # 它们时间更晚；若只按时间取最新，真正要回的文本就被挤掉，知识库拿到
+    # 空字符串直接拒答（实测：Garbo_C 加好友，三条记录里只有第一条有文字）。
     newest: dict[str, dict] = {}
     for it in items:
         cid = it["conv_id"]
         cur = newest.get(cid)
-        if cur is None or int(it["msg_time"] or 0) >= int(cur["msg_time"] or 0):
+        if cur is None:
+            newest[cid] = it
+            continue
+        cur_has_text = bool((cur["in_text"] or "").strip())
+        it_has_text = bool((it["in_text"] or "").strip())
+        if it_has_text != cur_has_text:
+            if it_has_text:
+                newest[cid] = it
+            continue
+        if int(it["msg_time"] or 0) >= int(cur["msg_time"] or 0):
             newest[cid] = it
     for it in items:
         if newest[it["conv_id"]]["message_id"] != it["message_id"]:
