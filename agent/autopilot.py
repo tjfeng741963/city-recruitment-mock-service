@@ -1129,7 +1129,9 @@ def print_history(limit: int = 20) -> None:
     print(f"{'状态':<9}{'收到时间':<18}{'会话':<18}{'内容':<24}回复")
     for r in rows:
         t = time.strftime("%m-%d %H:%M:%S", time.localtime(r["msg_time"] or 0))
-        err = f"  ⚠ {r['error'][:40]}" if r["error"] and r["status"] != "sent" else ""
+        # 不用 ⚠ 这类符号：Windows 控制台默认 GBK，遇到不可编码字符会直接
+        # UnicodeEncodeError 中断整条命令（历史列表尤其容易踩到）。
+        err = f"  [!] {r['error'][:40]}" if r["error"] and r["status"] != "sent" else ""
         print(f"{r['status']:<9}{t:<18}{(r['conv_name'] or '')[:16]:<18}"
               f"{(r['in_text'] or '')[:20]!r:<24}{r['reply_text'] or '-'}{err}")
     print("\n统计:", rlog.stats())
