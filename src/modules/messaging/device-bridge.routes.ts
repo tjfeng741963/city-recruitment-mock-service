@@ -16,7 +16,9 @@ const field = (body: Record<string, unknown>, key: string, max = 1000) => typeof
 // 与 /pair 的区别是它不要求 admin JWT，因此密钥泄露=任何人都能往库里塞设备，
 // 所以密码学比较、长度固定、未配置时直接 503（宁可不可用，也不能默认放开）。
 const REGISTER_KEY_MIN_LENGTH = 16;
-const DEVICE_CODE_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+// 允许大写：后台「新增设备」弹窗的默认提示就是 AG-001，用户会照抄。
+// device_code 在库里按原样存、按原样匹配，所以这里也不能擅自转小写。
+const DEVICE_CODE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
 function matchesRegisterKey(supplied: string, expected: string): boolean {
   const a = Buffer.from(supplied, "utf8");
