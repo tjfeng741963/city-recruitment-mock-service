@@ -113,6 +113,12 @@ jobs:
               fi
             fi
           done
+          # kb-token 卷若由旧镜像建成 root 属主，Python 的 appuser 写不进令牌，
+          # Node 调知识库就 401，自动回复整条链断掉（11-07 部署后实测如此）。
+          # 镜像里 /run/kb 已属 appuser，这里只在卷确实是 root 时才改，幂等。
+          docker run --rm --user root --entrypoint sh \
+            -v source_kb-token:/run/kb city-recruitment-backend:latest \
+            -c '[ "$(stat -c %u /run/kb)" = "1000" ] || chown 1000:1000 /run/kb'
           docker compose -f docker-compose.production.yml up -d --no-build --remove-orphans
           for i in $(seq 1 30); do
             if curl -fsS -o /dev/null http://127.0.0.1:4222/login; then
