@@ -857,9 +857,13 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             continue
 
         try:
+            # 打开回读：verify_db=False 时只要按了回车就记 sent，发没发出去不知道
+            # （2026-11-07 实测：reply_log 记 sent，企微库里根本没有这条消息）。
+            # expect_id 锁死落点，防止回车落到别的会话上。
             result = core_send.send(
                 store, name, text,
-                verify_db=False,  # 回读在 core 里有 rowid 兼容问题，落库由下一轮扫描确认
+                expect_id=cid if str(cid).startswith(("S:", "R:")) else "",
+                verify_db=True,
                 log=lambda s: log(f"    {s}"),
             )
             if result["ok"]:
@@ -1298,6 +1302,30 @@ def configured_data_dir(cfg: dict) -> Path | None:
     return directory
 
 
+# 单实例锁：两个进程同时跑会同时抢前台、同时发消息，客户收到重复回复。
+# 2026-11-07 实测出现过。用命名互斥体，进程退出时由系统释放。
+MUTEX_NAME = "Global\\CityRecruitAutopilot"
+_mutex_handle = None
+
+
+def acquire_single_instance() -> bool:
+    """拿到进程锁返回 True；已有实例在跑返回 False。"""
+    global _mutex_handle
+    try:
+        kernel32 = ctypes.windll.kernel32
+        ERROR_ALREADY_EXISTS = 183
+        handle = kernel32.CreateMutexW(None, True, MUTEX_NAME)
+        if not handle:
+            return True  # 拿不到锁就别拦住用户，当作可以启动
+        if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+            kernel32.CloseHandle(handle)
+            return False
+        _mutex_handle = handle
+        return True
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="企业微信自动回复（队列 + 回复历史）")
     ap.add_argument("--target", default=argparse.SUPPRESS, help="all 或某个会话名")
@@ -1316,6 +1344,11 @@ def main() -> int:
     ap.add_argument("--flush-receipts", action="store_true", help="仅补传人工回执后退出，不操作企微")
     ap.add_argument("--device-code", default=argparse.SUPPRESS, help="设备编号，覆盖 config.json（心跳路径参数）")
     args = ap.parse_args()
+
+    # 常驻模式才需要单实例锁；--list / --reset / --once 这类一次性命令允许并行。
+    if args.watch and not acquire_single_instance():
+        log("已有客户端实例在运行，本进程退出（避免两个进程同时发消息）")
+        return 0
 
     try:
         cfg = load_config(args)
