@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hmac
 import secrets
 from datetime import datetime, timezone
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Header, HTTPException, status
 from sqlalchemy import select
 
 from .deps import AdminUser, CurrentUser, DeviceDep, SessionDep
@@ -26,6 +28,9 @@ from .schemas import (
 from .security import create_access_token, verify_password
 
 router = APIRouter(prefix="/api/v1")
+
+# 自注册密钥最短长度：太短的密钥用 5 分钟字典就能爆破，不如直接当没配。
+REGISTER_KEY_MIN_LENGTH = 16
 
 # 企微状态枚举（见 docs/_contract/设备心跳与看板契约.md）。设备端升级不同步时
 # 可能报上来别的值，一律按 unknown 落库，不能因为一个枚举值让心跳 4xx/5xx。
@@ -70,6 +75,55 @@ async def create_device(payload: DeviceCreate, admin: AdminUser, session: Sessio
         status="offline",
     )
     session.add(device)
+    await session.commit()
+    await session.refresh(device)
+    return device
+
+
+@router.post("/devices/register", response_model=DeviceCreated, status_code=201, tags=["devices"])
+async def register_device(
+    payload: DeviceCreate,
+    session: SessionDep,
+    x_register_key: Annotated[str | None, Header()] = None,
+) -> Device:
+    """设备自注册（方案 A）：客户端首次启动凭共享密钥换 device_token。
+
+    与 POST /devices 的区别是不要求管理员 JWT。密钥未配置时整个入口关闭
+    （503），因为这是唯一一条无需登录就能写库的路径，默认不能放开。
+
+    幂等：同一台机器重复注册不新建记录，只换发 token——机器重装系统后
+    device_code 会变，旧记录留着不影响；同一码重复注册则是覆盖 token，
+    让旧客户端的凭证立即失效。
+    """
+    from .settings import settings
+
+    expected = settings.register_key.strip()
+    if len(expected) < REGISTER_KEY_MIN_LENGTH:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "设备自注册未配置（APP_REGISTER_KEY）"
+        )
+    supplied = (x_register_key or "").strip()
+    if not supplied or not hmac.compare_digest(supplied, expected):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "自注册密钥无效")
+
+    device = (
+        await session.execute(select(Device).where(Device.device_code == payload.device_code))
+    ).scalar_one_or_none()
+    if device is not None:
+        if device.status == "disabled":
+            # 停用是管理员的决定，不能被客户端重复注册推翻。
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "设备已停用")
+        device.device_token = "dt_" + secrets.token_urlsafe(24)
+        if payload.name:
+            device.name = payload.name
+    else:
+        device = Device(
+            device_code=payload.device_code,
+            name=payload.name or payload.device_code,
+            device_token="dt_" + secrets.token_urlsafe(24),
+            status="offline",
+        )
+        session.add(device)
     await session.commit()
     await session.refresh(device)
     return device

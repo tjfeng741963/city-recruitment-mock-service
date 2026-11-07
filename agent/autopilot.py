@@ -57,6 +57,7 @@ import compat  # noqa: E402
 import login_watch  # noqa: E402
 import reply_store as rlog  # noqa: E402
 import client as agent_client  # noqa: E402
+import register as agent_register  # noqa: E402
 
 # 仅启用剪贴板兼容和长消息解析补丁；发送动作与时序沿用冻结核心。
 # 抢前台用 core/win.py 原版（ShowWindow + AttachThreadInput），
@@ -88,6 +89,8 @@ DEFAULTS = {
     "cooldown": 8.0,
     "backfill_hours": 1.0,   # 首次初始化时，只把最近 N 小时的消息当作待补发
     "brain": None,           # {"mode":"kb","base_url":...} 时走知识库，否则固定文本
+    "register_key": "",      # 空=关闭自注册；填了就在缺 token 时自动注册
+    "device_name": "",       # 注册时展示的名字，留空用 device_code
 }
 
 _last_reply_at = 0.0
@@ -1171,6 +1174,42 @@ def _make_reporter(cfg: dict, store: Store) -> Reporter | None:
     return rep
 
 
+def ensure_registration(cfg: dict, cfg_path: Path | None = None) -> dict:
+    """缺 token 时自动注册（方案 A），并把结果写回 config.json。
+
+    只在「配了 register_key 且 token 缺失」时才联网，已有 token 的机器启动
+    路径与以前完全一致——不让自注册影响到正在跑的客户端。
+    任何失败都只打日志不抛异常：注册是便利，不是可用性的前提。
+    """
+    key = (cfg.get("register_key") or "").strip()
+    if not key:
+        return cfg
+    server = (cfg.get("server") or "").strip()
+    bridge_server = (cfg.get("bridge_server") or "").strip()
+    has_token = bool((cfg.get("device_token") or "").strip())
+    has_bridge = bool((cfg.get("bridge_token") or "").strip())
+    if has_token and (has_bridge or not bridge_server):
+        return cfg
+    code = (cfg.get("device_code") or "").strip() or agent_register.derive_device_code()
+    name = (cfg.get("device_name") or "").strip()
+    try:
+        obtained = agent_register.register(server, key, code, name, bridge_server)
+    except (ValueError, OSError) as exc:
+        log(f"[注册] 失败：{exc}")
+        return cfg
+    if not obtained:
+        log("[注册] 服务端未返回 token（自注册可能未开启）")
+        return cfg
+    obtained.setdefault("device_code", code)
+    cfg.update(obtained)
+    try:
+        agent_register.write_back(cfg_path or (ROOT / "config.json"), obtained)
+        log(f"[注册] 完成 device_code={code}，已写回 config.json")
+    except OSError as exc:
+        log(f"[注册] 拿到 token 但写回失败：{exc}")
+    return cfg
+
+
 def load_config(args: argparse.Namespace, config_path: Path | None = None) -> dict:
     """Apply defaults, file settings, then explicitly supplied CLI options."""
     cfg = dict(DEFAULTS, dry_run=False)
@@ -1261,6 +1300,9 @@ def main() -> int:
     except ValueError as exc:
         log(f"Configuration error: {exc}")
         return 2
+
+    # 自注册只读配置、只发 HTTP，不影响下面的发送逻辑；失败了就按原样继续。
+    cfg = ensure_registration(cfg, ROOT / "config.json")
 
     rlog.init()
     if args.flush_receipts:

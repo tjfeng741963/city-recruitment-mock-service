@@ -43,6 +43,9 @@ const PUBLIC_ROUTES = new Set([
   "GET /api/v1/agent/report/account-summary",
   // External message bridges authenticate callbacks with the HMAC header.
   "POST /api/v1/webhooks/dify",
+  // 设备自注册：客户端首次启动没有 JWT，凭共享密钥换 token（方案 A）。
+  // 路由自己校验 X-Register-Key，未配置 REA_REGISTER_KEY 时返回 503。
+  "POST /api/v1/bridge/devices/:code/register",
   ...DEVICE_TOKEN_ROUTES,
   "GET /api/v1/channels/wecom-kf/callback",
   "POST /api/v1/channels/wecom-kf/callback",
