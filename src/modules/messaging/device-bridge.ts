@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import type { MessageChannelProvider, OutboundMessageInput, OutboundMessageResult } from "./message-channel-provider.js";
+import { NOOP_NOTIFIER, type StreamNotifier } from "./stream-events.js";
 
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 export class BridgeError extends Error {
@@ -11,9 +12,13 @@ export interface BridgeCommand {
   id: string; device_code: string; customer_id: number; contact_id: string; content: string;
   status: string; lease_token: string; message_id: string; simulated: number; idempotency_key: string;
 }
+const commandSource = (command: BridgeCommand) => command.idempotency_key.endsWith(":reply")
+  ? command.idempotency_key.slice(0, -6) + ":outbound" : command.idempotency_key + ":outbound";
+const normalizedText = (text: string) => text.replace(/\r\n?/g, "\n").trim();
 
 export class DeviceBridgeStore {
-  constructor(private readonly db: DatabaseSync, private readonly now: () => number = Date.now) {}
+  constructor(private readonly db: DatabaseSync, private readonly now: () => number = Date.now,
+    private readonly notifier: StreamNotifier = NOOP_NOTIFIER) {}
 
   enabled(code: string): boolean {
     return Boolean(this.db.prepare("SELECT id FROM agent_devices WHERE json_extract(data_json,'$.device_code')=? AND status='enabled'").get(code));
@@ -21,11 +26,55 @@ export class DeviceBridgeStore {
   pair(code: string): string {
     if (!this.enabled(code)) throw new BridgeError("Enabled device not found", 404);
     const token = randomBytes(32).toString("hex");
-    this.db.prepare(`INSERT INTO bridge_devices(device_code,token_hash) VALUES (?,?)
-      ON CONFLICT(device_code) DO UPDATE SET token_hash=excluded.token_hash,state='offline',heartbeat_at=0`).run(code, digest(token));
-    // Rotating credentials cannot silently replay commands that may have been sent.
-    this.db.prepare("UPDATE bridge_commands SET status=CASE WHEN status='claimed' THEN 'unknown' ELSE 'failed' END WHERE device_code=? AND status IN ('claimed','queued')").run(code);
+    const pending = this.db.prepare("SELECT * FROM bridge_commands WHERE device_code=? AND status IN ('claimed','queued')").all(code) as unknown as BridgeCommand[];
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare(`INSERT INTO bridge_devices(device_code,token_hash) VALUES (?,?)
+        ON CONFLICT(device_code) DO UPDATE SET token_hash=excluded.token_hash,state='offline',heartbeat_at=0`).run(code, digest(token));
+      // Rotating credentials cannot silently replay commands that may have been sent.
+      for (const command of pending) {
+        command.status = command.status === "claimed" ? "unknown" : "failed";
+        this.db.prepare("UPDATE bridge_commands SET status=? WHERE id=?").run(command.status, command.id);
+        this.applyUnconfirmed(command, command.status as "unknown" | "failed");
+      }
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    for (const command of pending) this.notifyUnconfirmed(command);
     return token;
+  }
+  expireClaims(code: string): void {
+    const expired = this.db.prepare("SELECT * FROM bridge_commands WHERE device_code=? AND status='claimed' AND lease_until<=?")
+      .all(code, this.now()) as unknown as BridgeCommand[];
+    if (!expired.length) return;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const command of expired) {
+        this.db.prepare("UPDATE bridge_commands SET status='unknown' WHERE id=?").run(command.id);
+        this.applyUnconfirmed(command, "unknown");
+        command.status = "unknown";
+      }
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    for (const command of expired) this.notifyUnconfirmed(command);
+  }
+  private notifyUnconfirmed(command: BridgeCommand): void {
+    this.notifier.commandUpdated(command.device_code, {
+      id: command.id, customer_id: command.customer_id, status: command.status,
+      error: command.status === "unknown" ? "Device outcome unknown; manual review required" : "Device reported delivery failure",
+    });
+  }
+  private applyUnconfirmed(command: BridgeCommand, status: "unknown" | "failed"): void {
+    this.db.prepare("UPDATE agent_messages SET status=? WHERE source_event_id=? AND direction='outbound'").run(status, commandSource(command));
+    this.db.prepare("UPDATE message_deliveries SET status=?,last_error=?,next_retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE event_id=?")
+      .run(status === "unknown" ? "sending" : "failed",
+        status === "unknown" ? "Device outcome unknown; manual review required" : "Device reported delivery failure", command.idempotency_key);
+  }
+  private refreshConversationPreview(code: string, customerId: number): void {
+    // A late observation can correct a receipt's provisional send time backwards.
+    const latest = this.db.prepare("SELECT content,created_at FROM agent_messages WHERE device_code=? AND customer_id=? ORDER BY julianday(created_at) DESC,id DESC LIMIT 1")
+      .get(code, customerId) as { content: string; created_at: string } | undefined;
+    if (latest) this.db.prepare("UPDATE agent_conversations SET last_msg=?,last_msg_at=?,updated_at=CURRENT_TIMESTAMP WHERE device_code=? AND customer_id=? AND (last_msg IS NOT ? OR last_msg_at IS NOT ?)")
+      .run(latest.content, latest.created_at, code, customerId, latest.content, latest.created_at);
   }
   authenticate(code: string, token: string): boolean {
     const row = this.db.prepare("SELECT token_hash FROM bridge_devices WHERE device_code=?").get(code) as { token_hash: string } | undefined;
@@ -79,6 +128,34 @@ export class DeviceBridgeStore {
     this.db.prepare("INSERT OR IGNORE INTO bridge_inbound(device_code,event_id,content_hash) VALUES (?,?,?)").run(code, eventId, hash);
     return `bridge-inbound:${digest(JSON.stringify([code, eventId]))}`;
   }
+  observeOutbound(code: string, eventId: string, contactId: string, content: string, nickname: string, sentAt?: string) {
+    const hash = digest(JSON.stringify([contactId, content, sentAt ?? null]));
+    const old = this.db.prepare("SELECT content_hash,source_event_id FROM bridge_outbound WHERE device_code=? AND event_id=?")
+      .get(code, eventId) as { content_hash: string; source_event_id: string } | undefined;
+    if (old && old.content_hash !== hash) throw new BridgeError("Outbound event id was reused with different content");
+    const customerId = this.contact(code, contactId, nickname);
+    if (old) return { customer_id: customerId, source_event_id: old.source_event_id, created: false };
+
+    const command = this.db.prepare("SELECT * FROM bridge_commands WHERE device_code=? AND message_id=? AND status='succeeded' AND simulated=0")
+      .get(code, eventId) as unknown as BridgeCommand | undefined;
+    if (command && (command.contact_id !== contactId || normalizedText(command.content) !== normalizedText(content))) throw new BridgeError("Observed message conflicts with command receipt");
+    const sourceEventId = command ? commandSource(command) : `bridge-outbound:${digest(JSON.stringify([code, eventId]))}`;
+    const stamp = sentAt ?? new Date(this.now()).toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("INSERT INTO bridge_outbound(device_code,event_id,contact_id,content_hash,source_event_id) VALUES (?,?,?,?,?)")
+        .run(code, eventId, contactId, hash, sourceEventId);
+      const inserted = this.db.prepare("INSERT OR IGNORE INTO agent_messages(device_code,customer_id,direction,content,status,created_at,source_event_id) VALUES (?,?,'outbound',?,'sent',?,?)")
+        .run(code, customerId, content, stamp, sourceEventId);
+      if (command && sentAt) {
+        this.db.prepare("UPDATE agent_messages SET created_at=? WHERE source_event_id=? AND direction='outbound'").run(stamp, sourceEventId);
+        this.refreshConversationPreview(code, customerId);
+      } else this.db.prepare("UPDATE agent_conversations SET last_msg=?,last_msg_at=?,updated_at=CURRENT_TIMESTAMP WHERE device_code=? AND customer_id=? AND (last_msg_at IS NULL OR julianday(last_msg_at)<=julianday(?))")
+        .run(content, stamp, code, customerId, stamp);
+      this.db.exec("COMMIT");
+      return { customer_id: customerId, source_event_id: sourceEventId, created: Number(inserted.changes) === 1 };
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
   enqueue(input: OutboundMessageInput): BridgeCommand {
     const old = this.db.prepare("SELECT * FROM bridge_commands WHERE device_code=? AND idempotency_key=?").get(input.deviceCode, input.idempotencyKey) as unknown as BridgeCommand | undefined;
     if (old) {
@@ -97,7 +174,7 @@ export class DeviceBridgeStore {
     return this.db.prepare("SELECT * FROM bridge_commands WHERE id=?").get(id) as unknown as BridgeCommand ?? null;
   }
   claim(code: string): (BridgeCommand & { nickname: string }) | null {
-    this.db.prepare("UPDATE bridge_commands SET status='unknown' WHERE device_code=? AND status='claimed' AND lease_until<=?").run(code, this.now());
+    this.expireClaims(code);
     if (this.status(code)?.state !== "online") return null;
     const next = this.db.prepare("SELECT id FROM bridge_commands WHERE device_code=? AND status='queued' ORDER BY created_at,rowid LIMIT 1").get(code) as { id: string } | undefined;
     if (!next) return null;
@@ -118,22 +195,31 @@ export class DeviceBridgeStore {
     if (!command || command.device_code !== code || !lease || command.lease_token !== lease) throw new BridgeError("Invalid command receipt", 403);
     if (status === "succeeded" && !messageId.trim()) throw new BridgeError("Successful receipt requires message_id", 422);
     if (["succeeded", "failed"].includes(command.status)) {
-      if (command.status !== status || command.message_id !== messageId) throw new BridgeError("Conflicting receipt");
+      if (command.status !== status || command.message_id !== messageId || Boolean(command.simulated) !== simulated) throw new BridgeError("Conflicting receipt");
+      return;
     }
+    // A real database message can arrive before its HTTP receipt. Reconcile by
+    // the exact device message id, never by text alone.
+    const observed = status === "succeeded" && !simulated ? this.db.prepare(`SELECT o.source_event_id,o.contact_id,m.content
+      FROM bridge_outbound o JOIN agent_messages m ON m.source_event_id=o.source_event_id
+      WHERE o.device_code=? AND o.event_id=?`).get(code, messageId) as { source_event_id: string; contact_id: string; content: string } | undefined : undefined;
+    if (observed && (observed.contact_id !== command.contact_id || normalizedText(observed.content) !== normalizedText(command.content))) throw new BridgeError("Receipt conflicts with observed message");
+    if (status === "succeeded" && !simulated && this.db.prepare("SELECT id FROM bridge_commands WHERE device_code=? AND message_id=? AND status='succeeded' AND id<>?").get(code, messageId, id)) throw new BridgeError("Message id already belongs to another command");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.applyReceipt(command, status, messageId, simulated, observed?.source_event_id);
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  private applyReceipt(command: BridgeCommand, status: "succeeded" | "failed" | "unknown", messageId: string, simulated: boolean, observedSource?: string): void {
+    const code = command.device_code, id = command.id;
     this.db.prepare("UPDATE bridge_commands SET status=?,message_id=?,simulated=?,receipt_at=COALESCE(receipt_at,?) WHERE id=?").run(status, messageId, simulated ? 1 : 0, this.now(), id);
     // A reply command's idempotency key is the outbound event id; the local
     // message row is `<event id>:outbound`.
-    const sourceEvent = command.idempotency_key.endsWith(":reply")
-      ? command.idempotency_key.slice(0, -6) + ":outbound" : command.idempotency_key + ":outbound";
-    if (status === "failed") {
-      // Without this the queue entry and the local message would stay "queued"
-      // forever when the device reports a failed send.
-      const failedDelivery = this.db.prepare("SELECT id FROM message_deliveries WHERE event_id=?").get(command.idempotency_key) as { id: number } | undefined;
-      if (failedDelivery) {
-        this.db.prepare("UPDATE message_deliveries SET status='failed',last_error=?,next_retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?")
-          .run("Device reported delivery failure", failedDelivery.id);
-      }
-      this.db.prepare("UPDATE agent_messages SET status='failed' WHERE source_event_id=? AND direction='outbound'").run(sourceEvent);
+    const sourceEvent = commandSource(command);
+    if (status !== "succeeded") {
+      this.applyUnconfirmed(command, status);
       return;
     }
     if (status === "succeeded") {
@@ -141,12 +227,28 @@ export class DeviceBridgeStore {
       const delivery = this.db.prepare("SELECT id FROM message_deliveries WHERE event_id=?").get(command.idempotency_key) as { id: number } | undefined;
       if (!delivery) return;
       this.db.prepare("UPDATE message_deliveries SET status='succeeded',provider_message_id=?,last_error=NULL,next_retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(messageId, delivery.id);
-      this.db.prepare("INSERT OR IGNORE INTO agent_messages(device_code,customer_id,direction,content,status,source_event_id) VALUES (?,?,'outbound',?,?,?)")
-        .run(code, command.customer_id, command.content, simulated ? "simulated" : "sent", sourceEvent);
-      this.db.prepare("UPDATE agent_messages SET status=? WHERE source_event_id=?").run(simulated ? "simulated" : "sent", sourceEvent);
-      const stamp = (this.db.prepare("SELECT receipt_at FROM bridge_commands WHERE id=?").get(id) as { receipt_at: number }).receipt_at;
-      this.db.prepare("UPDATE agent_conversations SET last_msg=?,last_msg_at=?,updated_at=CURRENT_TIMESTAMP WHERE device_code=? AND customer_id=? AND (last_msg_at IS NULL OR julianday(last_msg_at)<=julianday(?))")
-        .run(command.content, new Date(stamp).toISOString(), code, command.customer_id, new Date(stamp).toISOString());
+      const observedTime = observedSource ? this.db.prepare("SELECT created_at FROM agent_messages WHERE source_event_id=?").get(observedSource) as { created_at: string } | undefined : undefined;
+      const queuedTime = this.db.prepare("SELECT created_at FROM agent_messages WHERE source_event_id=?").get(sourceEvent) as { created_at: string } | undefined;
+      // A delayed HTTP receipt gives no send time. Keep the queued timestamp
+      // until observation supplies it, so the receipt cannot promote old text.
+      const stamp = observedTime?.created_at ?? queuedTime?.created_at ?? new Date(this.now()).toISOString();
+      this.db.prepare("INSERT OR IGNORE INTO agent_messages(device_code,customer_id,direction,content,status,created_at,source_event_id) VALUES (?,?,'outbound',?,?,?,?)")
+        .run(code, command.customer_id, command.content, simulated ? "simulated" : "sent", stamp, sourceEvent);
+      this.db.prepare("UPDATE agent_messages SET status=?,created_at=? WHERE source_event_id=?").run(simulated ? "simulated" : "sent", stamp, sourceEvent);
+      if (observedSource && observedSource !== sourceEvent) {
+        // Preserve the larger id: agent_messages uses INTEGER PRIMARY KEY
+        // without AUTOINCREMENT, and clients use after_id as their cursor.
+        const canonical = this.db.prepare("SELECT id FROM agent_messages WHERE source_event_id=?").get(sourceEvent) as { id: number };
+        const observed = this.db.prepare("SELECT id FROM agent_messages WHERE source_event_id=?").get(observedSource) as { id: number };
+        if (observed.id > canonical.id) {
+          this.db.prepare("DELETE FROM agent_messages WHERE id=?").run(canonical.id);
+          this.db.prepare("UPDATE agent_messages SET source_event_id=? WHERE id=?").run(sourceEvent, observed.id);
+        } else {
+          this.db.prepare("DELETE FROM agent_messages WHERE id=?").run(observed.id);
+        }
+        this.db.prepare("UPDATE bridge_outbound SET source_event_id=? WHERE device_code=? AND event_id=?").run(sourceEvent, code, messageId);
+      }
+      this.refreshConversationPreview(code, command.customer_id);
       const activation = /^activation-send:(\d+):(\d+)$/.exec(command.idempotency_key);
       if (activation) this.db.prepare("UPDATE activation_records SET status='sent',tier=?,script=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND tier=? AND status IN ('pending_send','pending_review')")
         .run(Number(activation[2]), command.content, Number(activation[1]), Number(activation[2])-1);

@@ -2,9 +2,9 @@
 
 三条设计原则：
 
-1. **失败绝不阻塞发送**。拿不到知识库回复就回落固定文本，
-   不能让客户等着——企微那边的键鼠动作已经开始了，卡住会留下半开状态。
-2. **超时短**。宁可回落，不让客户等 30 秒。
+1. **失败暂停该条回复**。知识库在任何键鼠动作之前调用；失败返回给
+   调用方保留为 held，待人工处理，不回落测试文本。
+2. **有超时**。请求失败后继续处理其他消息与心跳。
 3. **忽略系统代理**。本机 `HTTP_PROXY` 指向的代理连不上 `127.0.0.1`
    （今天已踩过：curl 访问 localhost 也被拦成 502），httpx 必须 `trust_env=False`。
 
@@ -83,7 +83,7 @@ class Brain:
 
     # ── 主入口 ────────────────────────────────────────────
     def reply(self, text: str, history: list[str] | None = None) -> dict[str, Any]:
-        """返回 {ok, reply, source, detail}。失败时 ok=False，由调用方回落。"""
+        """返回 {ok, reply, source, detail}。失败时 ok=False，由调用方暂停。"""
         if self.mode == "fixed":
             return {"ok": False, "reply": "", "source": "fixed", "detail": "mode=fixed"}
 

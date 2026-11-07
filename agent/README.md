@@ -48,7 +48,18 @@ uv run python autopilot.py --watch
 | `--list` | 打印回复历史 + 统计 |
 | `--reset` | 把待发/失败的条目全部作废 |
 | `--target 青冥` | 只监听某个会话 |
+| `--data-dir "D:/Documents/WXWork/测试账号/Data"` | 显式指定本机数据目录，覆盖配置文件 |
 | `--reply-first / --reply-next` | 改首次/后续回复内容 |
+
+### 重定向的数据目录
+
+在 `config.json` 设置 `data_dir` 为当前测试账号的 `Data` 目录绝对路径，或用 `--data-dir` 覆盖。目录必须存在并包含 `message.db`、`session.db`；配置错误时退出码为 2，不回退到其他账号。留空时沿用冻结 Store 的默认发现逻辑，在 `%USERPROFILE%/Documents/WXWork` 下选择消息库最新的账号。
+
+先使用 `python autopilot.py --once --dry --target "专用测试联系人"` 验证配置。dry-run 仍会登记记录和上报消息，`--target` 仅限制自动回复采集/处理，不限制 Reporter 上报或人工指令；整套测试账号与后端须隔离。维护命令 `--list`、`--retry-held`、`--flush-receipts` 不创建 Store，因此数据目录离线时仍可执行；配置字段类型仍须合法。`--retry-held` 只重新入队，恢复正常发送前需检查队列。
+
+本入口调用冻结 Store 已有的目录参数，不修改核心或发送动作。当前验收和发送边界以 [接手验收清单](../docs/验收清单-接手可靠性修复.md) 为准。
+
+人工指令必须携带服务端返回的有效 `lease_until`（数值毫秒时间戳）。新领取、冷却后及原发送函数调用前均核对期限；缺失、非法或已过期时保留 `unknown`，只补传回执，不自动重新入队。更新 agent 前须确认服务端 claim 返回该字段，并保持两端时钟正常。已持久化的成功回执仍可经 `--flush-receipts` 原样补传，不因租约过期改为 unknown。
 
 ---
 

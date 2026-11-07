@@ -10,15 +10,19 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.ref) || 'deploy-production' }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.ref) || github.ref == 'refs/heads/main' && 'deploy-production' || format('ci-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -53,6 +57,9 @@ jobs:
 
       - name: Run Python tests
         run: pytest backend/tests/
+
+      - name: Run isolated HTTP acceptance
+        run: python scripts/acceptance-smoke.py
 
   deploy:
     needs: test

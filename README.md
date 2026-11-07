@@ -1,5 +1,7 @@
 # 城市招聘 · 企业微信自动接待与线索管理
 
+最新开发交接（2026-11-07）：[可靠性修复、实机验收与下一步](docs/开发交接-可靠性修复与实机验收-20261107.md)。本轮代码在 `fix/handoff-reliability`、[草稿 PR #5](https://github.com/tjfeng741963/city-recruitment-mock-service/pull/5)，未合并/部署 main；接手前先读交接中的测试目录和发送边界。
+
 用本地企业微信 PC 客户端收消息 → 知识库问答（大模型改写）→ 键鼠回复 → 自动记录谈单进展。
 **同一套代码支持两种交付形态**：装在客户电脑上的「客户端」，和装在自己服务器上的「服务端」。
 
@@ -73,12 +75,13 @@ cd backend
 APP_DATABASE_URL="sqlite+aiosqlite:///./data/test_all.db" uv run pytest tests -q
 ```
 
-当前 **429 passed**。
+截至实现提交 `ee6c017`，Python **598 passed**（130 条既有警告），Node **269 passed**（43 文件），隔离 HTTP 八场景通过；PR/push 的 Ubuntu/Windows CI 全通过。详细验证范围及真实企微验收边界见最新开发交接。
 
 ## 文档索引
 
 | 主题 | 文档 |
 |---|---|
+| 最新开发交接（2026-11-07） | [可靠性修复与实机验收](docs/开发交接-可靠性修复与实机验收-20261107.md) |
 | 客户端部署 | `deploy/client/docs/部署说明.md` |
 | 服务端部署 | `deploy/server/docs/部署说明.md` |
 | 谈单状态机 | `docs/谈单状态机与面试记录设计.md` |
