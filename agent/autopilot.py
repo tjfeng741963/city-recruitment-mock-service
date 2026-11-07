@@ -69,6 +69,8 @@ compat.apply_pb_text()   # 长消息（>127 字节）的长度前缀不是合法
 # 发送在「输入框校验」处中止。这个补丁本来就是为这个现象写的，之前被
 # test_autopilot_sender_baseline 冻结；现在解冻（只解这一个，不动动作序列）。
 compat.apply_click_input()
+# 单一比例点会打偏（会话列表宽度、窗口布局变化）：校验失败时换候选点重试。
+compat.apply_input_focus_retry()
 
 from wecom_io_core import send as core_send  # noqa: E402
 from wecom_io_core.store import Store  # noqa: E402
