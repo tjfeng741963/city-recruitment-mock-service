@@ -79,3 +79,22 @@ class MockProvider:
     async def complete(self, messages: list[ChatMessage], **kwargs: object) -> str:
         del messages, kwargs
         return self.reply
+
+
+def build_provider() -> OpenAICompatibleProvider | None:
+    """按环境变量组装 LLM。没配就返回 None，调用方走确定性兜底。
+
+    不返回"必然失败的地址"：否则每条消息都要白等一次超时。
+    """
+    from ..settings import settings
+
+    if not settings.llm_api_key or settings.llm_api_key == "unset":
+        return None
+    if not settings.llm_base_url or settings.llm_base_url.startswith("http://127.0.0.1:1"):
+        return None
+    return OpenAICompatibleProvider(
+        base_url=settings.llm_base_url,
+        api_key=settings.llm_api_key,
+        model=settings.llm_model,
+        timeout=settings.llm_timeout,
+    )

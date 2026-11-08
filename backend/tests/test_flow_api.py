@@ -10,6 +10,12 @@ from httpx import AsyncClient
 pytestmark = pytest.mark.asyncio
 
 
+@pytest.fixture(autouse=True)
+def _no_llm(monkeypatch) -> None:  # noqa: ANN001
+    """接口测试不碰真模型：走确定性兜底，断言才稳定。"""
+    monkeypatch.setattr("app.api_flow.build_provider", lambda: None)
+
+
 async def _say(client: AsyncClient, key: str, text: str) -> dict:
     resp = await client.post(
         "/api/v1/flow/answer", json={"session_key": key, "text": text}

@@ -16,7 +16,8 @@ from pydantic import BaseModel, Field
 
 from .deps import ServiceOrUser, SessionDep
 from .services import flow_session as store
-from .services.flow_engine import step
+from .services.flow_llm import a_step
+from .services.llm_provider import build_provider
 
 router = APIRouter(prefix="/api/v1/flow", tags=["flow"])
 
@@ -52,7 +53,8 @@ async def flow_answer(
     before = dict(state.get("slots") or {})
     stage_before = str(state.get("stage") or "")
 
-    result = step(state, payload.text)
+    # 主路径交给模型；没配模型或调用失败时，a_step 内部退到确定性状态机
+    result = await a_step(state, payload.text, build_provider())
 
     records: list[tuple[str, dict[str, Any]]] = [
         (store.EVENT_INBOUND, {"text": payload.text})
