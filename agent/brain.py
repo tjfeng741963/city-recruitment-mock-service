@@ -81,15 +81,90 @@ class Brain:
             self._login()
         return {"Authorization": f"Bearer {self._token}"} if self._token else {}
 
+    # ── 流程模式（状态机在 backend）────────────────────────
+    def _reply_flow(self, text: str, session_key: str) -> dict[str, Any]:
+        """调 /api/v1/flow/answer。session_key 用企微会话 ID，状态存在服务端。"""
+        key = (session_key or "unknown")[:64]
+        payload = {"session_key": key, "text": text[:2000]}
+        try:
+            r = self._client.post(
+                f"{self.base_url}/api/v1/flow/answer", json=payload, headers=self._headers()
+            )
+            if r.status_code == 401:
+                self._token = ""
+                r = self._client.post(
+                    f"{self.base_url}/api/v1/flow/answer",
+                    json=payload,
+                    headers=self._headers(),
+                )
+            if r.status_code != 200:
+                return {
+                    "ok": False,
+                    "reply": "",
+                    "source": "http",
+                    "detail": f"HTTP {r.status_code}: {r.text[:120]}",
+                }
+            data = r.json()
+            stage = str(data.get("stage") or "")
+            reply = (data.get("reply") or "").strip()
+            if data.get("finished") and not reply:
+                return {
+                    "ok": True,
+                    "reply": "",
+                    "source": "flow",
+                    "skip": True,
+                    "detail": f"流程已结束（{stage}），不再自动回复",
+                }
+            if not reply:
+                return {
+                    "ok": False,
+                    "reply": "",
+                    "source": "empty",
+                    "detail": "流程返回空回复",
+                }
+            return {
+                "ok": True,
+                "reply": reply,
+                "source": "flow",
+                "scene": "流程",
+                "detail": f"阶段 {stage}",
+            }
+        except httpx.TimeoutException:
+            return {
+                "ok": False,
+                "reply": "",
+                "source": "timeout",
+                "detail": f"超过 {self.timeout}s",
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "ok": False,
+                "reply": "",
+                "source": "error",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }
+
     # ── 主入口 ────────────────────────────────────────────
-    def reply(self, text: str, history: list[str] | None = None) -> dict[str, Any]:
-        """返回 {ok, reply, source, detail}。失败时 ok=False，由调用方暂停。"""
+    def reply(
+        self,
+        text: str,
+        history: list[str] | None = None,
+        session_key: str = "",
+    ) -> dict[str, Any]:
+        """返回 {ok, reply, source, detail}。失败时 ok=False，由调用方暂停。
+
+        mode=flow 时多返回一个 skip=True：流程已经走完（约到面试），
+        这条消息不需要再回，调用方应记为跳过而不是发空消息。
+        """
         if self.mode == "fixed":
             return {"ok": False, "reply": "", "source": "fixed", "detail": "mode=fixed"}
 
         text = (text or "").strip()
         if not text:
             return {"ok": False, "reply": "", "source": "empty", "detail": "客户消息为空"}
+
+        if self.mode == "flow":
+            return self._reply_flow(text, session_key)
 
         payload = {
             "text": text[:2000],

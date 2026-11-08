@@ -814,18 +814,25 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             log(f"跳过 {cid}：会话没有可搜索的名字")
             continue
 
-        if _brain is not None or (cfg.get("brain") or {}).get("mode") == "kb":
+        if _brain is not None or (cfg.get("brain") or {}).get("mode") in ("kb", "flow"):
             hint = (it["in_text"] or "").strip()
             res = {"ok": False, "detail": "知识库未初始化"}
             try:
                 if not hint:
                     res = {"ok": False, "detail": f"消息没有文本（type={it['in_type']}）"}
                 elif _brain is not None:
-                    res = _brain.reply(hint, build_history(store, cid))
+                    res = _brain.reply(hint, build_history(store, cid), session_key=cid)
+                # 流程走完（已约到面试）后不再自动回复，这条消息记为跳过
+                if res.get("skip"):
+                    if not dry:
+                        rlog.mark_skipped(mid, res.get("detail") or "流程已结束")
+                    stats["skipped"] += 1
+                    log(f"    [flow] {res.get('detail') or '流程已结束，不再回复'}")
+                    continue
                 text = res.get("reply")
                 if not res.get("ok") or not isinstance(text, str) or not text.strip():
                     raise ValueError(res.get("detail") or "知识库返回空回复")
-                text, scene = text.strip(), "知识库"
+                text, scene = text.strip(), res.get("scene") or "知识库"
                 log(f"    [brain] {res.get('detail', '')}")
             except Exception as exc:  # noqa: BLE001
                 reason = f"知识库暂停，待人工处理：{type(exc).__name__}: {exc}"
@@ -1280,10 +1287,12 @@ def load_config(args: argparse.Namespace, config_path: Path | None = None) -> di
     if cfg["brain"] is not None and not isinstance(cfg["brain"], dict):
         raise ValueError("brain must contain an object")
     bcfg = cfg.get("brain") or {}
-    if bcfg and bcfg.get("mode") not in ("kb", "fixed"):
-        raise ValueError("brain.mode must be kb or fixed")
-    if bcfg.get("mode") == "kb" and (not isinstance(bcfg.get("base_url"), str) or not bcfg["base_url"].strip()):
-        raise ValueError("brain.base_url is required for kb mode")
+    if bcfg and bcfg.get("mode") not in ("kb", "flow", "fixed"):
+        raise ValueError("brain.mode must be kb, flow or fixed")
+    if bcfg.get("mode") in ("kb", "flow") and (
+        not isinstance(bcfg.get("base_url"), str) or not bcfg["base_url"].strip()
+    ):
+        raise ValueError("brain.base_url is required for kb/flow mode")
     return cfg
 
 
@@ -1375,7 +1384,7 @@ def main() -> int:
     global _brain
     _brain = None
     bcfg = cfg.get("brain") or {}
-    if bcfg.get("mode") == "kb" and bcfg.get("base_url"):
+    if bcfg.get("mode") in ("kb", "flow") and bcfg.get("base_url"):
         import brain as brain_mod
 
         _brain = brain_mod.Brain(
@@ -1384,9 +1393,10 @@ def main() -> int:
             bcfg.get("password", ""),
             timeout=float(bcfg.get("timeout") or 20),
             history_limit=int(bcfg.get("history_limit") or 6),
-            mode="kb",
+            mode=str(bcfg.get("mode")),
         )
-        log(f"回复来源：知识库 {bcfg['base_url']}（失败暂停，待人工处理）")
+        label = "知识库" if bcfg.get("mode") == "kb" else "流程编排"
+        log(f"回复来源：{label} {bcfg['base_url']}（失败暂停，待人工处理）")
     else:
         log(f"回复来源：固定文本（brain.mode={bcfg.get('mode')!r}）")
 
