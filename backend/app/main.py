@@ -15,6 +15,7 @@ from .api_agent import router as agent_router
 from .api_kb import router as api_kb_router
 from .api_lead import router as lead_router
 from .api_lead_board import router as lead_board_router
+from .api_flow import router as flow_router
 from .api_webhook import router as webhook_router
 from .db import init_db, seed_admin
 from . import instance
@@ -134,6 +135,7 @@ app.include_router(api_kb_router)
 app.include_router(webhook_router)
 app.include_router(lead_router)
 app.include_router(lead_board_router)
+app.include_router(flow_router)
 app.include_router(ws_router)
 
 
