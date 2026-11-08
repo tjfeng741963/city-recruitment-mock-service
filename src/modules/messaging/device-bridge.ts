@@ -108,7 +108,12 @@ export class DeviceBridgeStore {
   }
   contact(code: string, contactId: string, nickname: string): number {
     const existing = this.db.prepare("SELECT customer_id FROM bridge_contacts WHERE device_code=? AND contact_id=?").get(code, contactId) as { customer_id: number } | undefined;
-    if (existing) return existing.customer_id;
+    if (existing) {
+      // 老会话的 external_conversation_id 是空的，顺手补上：8090 推档案要靠它定位
+      this.db.prepare("UPDATE agent_conversations SET external_conversation_id=? WHERE device_code=? AND customer_id=? AND (external_conversation_id IS NULL OR external_conversation_id='')")
+        .run(contactId, code, existing.customer_id);
+      return existing.customer_id;
+    }
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const customerId = Number((this.db.prepare(`SELECT MAX(value)+1 AS id FROM (
@@ -116,7 +121,7 @@ export class DeviceBridgeStore {
         SELECT COALESCE(MAX(customer_id),0) FROM bridge_contacts UNION ALL SELECT 0)`)
         .get() as { id: number }).id);
       this.db.prepare("INSERT INTO bridge_contacts(device_code,contact_id,customer_id,nickname) VALUES (?,?,?,?)").run(code, contactId, customerId, nickname);
-      this.db.prepare("INSERT INTO agent_conversations(device_code,customer_id,nickname) VALUES (?,?,?)").run(code, customerId, nickname);
+      this.db.prepare("INSERT INTO agent_conversations(device_code,customer_id,nickname,external_conversation_id) VALUES (?,?,?,?)").run(code, customerId, nickname, contactId);
       this.db.exec("COMMIT");
       return customerId;
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }

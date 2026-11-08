@@ -25,6 +25,7 @@ from .flow_engine import (
     ACTION_BOOK,
     ACTION_HANDOFF,
     DEMO_JOBS,
+    PROFILE_KEYS,
     STAGE_ASK_CITY,
     STAGE_ASK_GENDER,
     STAGE_ASK_RECORD,
@@ -86,8 +87,15 @@ SYSTEM_PROMPT = """你是一家劳务中介的招聘顾问，叫「陈姐」，�
 # 输出格式（必须是 JSON，不要代码块，不要多余文字）
 {{"reply": "发给客户的话", "stage": "ask_city|ask_gender|ask_record|confirm|done",
   "slots": {{"city": "", "gender": "", "record": "", "age": null, "job_index": 0}},
+  "profile": {{"name": "", "phone": "", "district": "", "age": null, "notes": ""}},
   "action": null,
   "finished": false}}
+
+profile 是档案，客户说到才填，没说到就留空：
+- name 真实姓名、phone 手机号、district 区县（如「番禺」「长安」）、notes 补充（如「要长白班」）
+- phone 照客户原话抄，**不要改格式**（不要加空格、横线，也不要补 0）
+- age 没说到就填 null
+- 客户随口说的、跟他本人无关的（比如「我朋友在东莞」）不算他的档案
 
 action 只能是 null / "book_interview" / "handoff"：
 - 客户同意面试时间 → action="book_interview"，finished=true，reply 是欢迎语
@@ -187,6 +195,23 @@ def _clean_slots(raw: Any) -> dict[str, Any]:
     return slots
 
 
+def _clean_profile(raw: Any) -> dict[str, Any]:
+    """档案字段：只透传，不做格式校验（电话不许改格式）。空值跳过，免得覆盖已有值。"""
+    profile: dict[str, Any] = {}
+    if not isinstance(raw, dict):
+        return profile
+    for key in PROFILE_KEYS:
+        value = raw.get(key)
+        if key == "age":
+            if isinstance(value, int) and 16 <= value <= 70:
+                profile["age"] = value
+            continue
+        text = str(value or "").strip()
+        if text:
+            profile[key] = text
+    return profile
+
+
 def _max_stage(slots: dict[str, Any]) -> str:
     """缺什么就停在哪一步。模型不能跳过没拿到的槽位。"""
     if not slots.get("city"):
@@ -215,6 +240,8 @@ def apply_result(
     """把模型输出落成状态。副作用（时间、地点）由代码算，不信任模型。"""
     slots: dict[str, Any] = state.setdefault("slots", {})
     slots.update(_clean_slots(data.get("slots")))
+    # 档案沿用同一份槽位，只是来源不同（模型单独给的 profile 对象）
+    slots.update(_clean_profile(data.get("profile")))
 
     stage = str(data.get("stage") or state.get("stage") or STAGE_ASK_CITY)
     if stage not in ALLOWED_STAGES:

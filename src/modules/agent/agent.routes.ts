@@ -9,6 +9,7 @@ import { BridgeError, DeviceBridgeStore } from "../messaging/device-bridge.js";
 import { NOOP_NOTIFIER, type StreamNotifier } from "../messaging/stream-events.js";
 import { readWeComConfig } from "../wecom/wecom-config.js";
 import { deviceDifyConfig, HttpDifyProvider } from "../dify/dify-provider.js";
+import { listReminderTasks } from "./followup.js";
 
 export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync, notifier: StreamNotifier = NOOP_NOTIFIER) {
   const messageChannel = createMessageChannelProvider(undefined, db);
@@ -299,8 +300,12 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     db.prepare("UPDATE agent_conversations SET unread=0,updated_at=CURRENT_TIMESTAMP WHERE device_code=(SELECT device_code FROM agent_devices WHERE id=?)").run(deviceId);
     return { success: true };
   });
-  // Target envelope is exactly {items: []} — no total/page/page_size.
-  app.get("/api/v1/agent/reminder-tasks", async () => ({ items: [] }));
+  // 之前恒返回空数组（还没接跟进逻辑）。现在返回真实待跟进候选：
+  // status='invited' + interview_date 已到 + remind_count 未超 max_count，并带上设备范围过滤。
+  app.get("/api/v1/agent/reminder-tasks", async (request) => {
+    const scopeFilter = deviceConstraint(getUserScope(db, request.auth!), "device_code");
+    return { items: listReminderTasks(db, { filter: { sql: scopeFilter.sql, values: scopeFilter.values } }) };
+  });
   // Target shape: {ok: boolean, message: string} — a status envelope, not the
   // stored workflow blob itself.
   app.get<{ Params: { id: string } }>("/api/v1/agent/device/:id/workflow", async (request) => {

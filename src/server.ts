@@ -22,6 +22,8 @@ import { registerPermissionRoutes } from "./modules/permissions/permission.route
 import { registerAdminRoutes } from "./modules/admin/admin.routes.js";
 import { registerDeviceBridgeRoutes } from "./modules/messaging/device-bridge.routes.js";
 import { registerStreamRoutes } from "./modules/agent/stream.routes.js";
+import { registerProfileRoutes } from "./modules/agent/profile.routes.js";
+import { registerFollowupRoutes } from "./modules/agent/followup.js";
 import { EventBus, createStreamNotifier } from "./modules/messaging/stream-events.js";
 import { registerWeComRoutes } from "./modules/wecom/wecom.routes.js";
 
@@ -54,6 +56,10 @@ const PUBLIC_ROUTES = new Set([
   // conversation even when the value is fake, with or without a bearer token.
   "PUT /api/v1/agent/conversations/:id/restart",
   "PUT /api/v1/agent/conversations/:id/reset-disqualified",
+  // 候选人档案：8090 服务间调用没有用户 JWT，改为路由内校验 X-Profile-Token
+  // （与 REA_PROFILE_TOKEN 常数时间比较）；带合法 Bearer 时仍按用户 token 放行。
+  "POST /api/v1/agent/profile",
+  "GET /api/v1/agent/profile",
   // EventSource cannot set headers: the JWT is a query parameter and the route
   // authenticates itself (401/403 instead of the header preHandler's 403).
   "GET /api/v1/agent/stream",
@@ -109,6 +115,8 @@ export function buildServer() {
   registerAgentRoutes(app, db, notifier);
   registerDeviceBridgeRoutes(app, db, notifier);
   registerStreamRoutes(app, db, events, auth);
+  registerProfileRoutes(app, db);
+  registerFollowupRoutes(app, db);
   registerWeComRoutes(app, db);
   registerActivationRoutes(app, db);
   registerRelationRoutes(app, db);

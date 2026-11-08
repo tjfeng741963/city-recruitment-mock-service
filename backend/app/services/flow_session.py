@@ -19,13 +19,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models_flow import FlowEvent
-from .flow_engine import STAGE_ASK_CITY, new_state
+from .flow_engine import PROFILE_KEYS, STAGE_ASK_CITY, new_state
 
 EVENT_INBOUND = "inbound"
 EVENT_REPLY = "reply"
 EVENT_SLOT = "slot_set"
 EVENT_STAGE = "stage_change"
 EVENT_ACTION = "action"
+EVENT_PROFILE = "profile"
 EVENT_RESET = "reset"
 
 
@@ -53,6 +54,15 @@ def project(events: list[FlowEvent]) -> dict[str, Any]:
                 state.setdefault("slots", {})[key] = body.get("value")
         elif event.type == EVENT_STAGE:
             state["stage"] = str(body.get("to") or STAGE_ASK_CITY)
+        elif event.type == EVENT_PROFILE:
+            # 档案和槽位同源：回放时两边都写上，/state 的 slots 与 profile 不会打架
+            profile = state.setdefault("profile", {})
+            slots = state.setdefault("slots", {})
+            if isinstance(body, dict):
+                for key, value in body.items():
+                    if key in PROFILE_KEYS and value not in (None, ""):
+                        profile[key] = value
+                        slots[key] = value
         elif event.type == EVENT_ACTION:
             actions.append(body)
     state["history"] = history
@@ -101,6 +111,27 @@ def diff_slots(before: dict[str, Any], after: dict[str, Any]) -> list[tuple[str,
         if before.get(key) != value:
             changes.append((EVENT_SLOT, {"key": key, "value": value}))
     return changes
+
+
+def profile_of(slots: dict[str, Any]) -> dict[str, Any]:
+    """从槽位里摘出档案字段（档案和业务槽位同源，不另存一份）。"""
+    return {
+        key: (slots or {}).get(key)
+        for key in PROFILE_KEYS
+        if (slots or {}).get(key) not in (None, "")
+    }
+
+
+def diff_profile(
+    before: dict[str, Any], after_slots: dict[str, Any]
+) -> list[tuple[str, dict[str, Any]]]:
+    """只记本轮变了的档案键值；空值不记，免得把已有档案覆盖成空。"""
+    changes = {
+        key: value
+        for key, value in profile_of(after_slots).items()
+        if (before or {}).get(key) != value
+    }
+    return [(EVENT_PROFILE, changes)] if changes else []
 
 
 def build_context(state: dict[str, Any], limit: int = 8) -> dict[str, Any]:

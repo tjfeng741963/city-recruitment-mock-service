@@ -36,6 +36,9 @@ STAGE_DONE = "done"
 ACTION_BOOK = "book_interview"
 ACTION_HANDOFF = "handoff"
 
+# 档案字段：与业务槽位同放 state["slots"]，另由 profile 事件单独记一份便于回放/推送
+PROFILE_KEYS = ("name", "phone", "district", "age", "notes")
+
 # ── 演示数据：真实数据缺失，这里先编一套能跑通流程的 ──────────────────
 DEMO_JOBS: dict[str, list[dict[str, str]]] = {
     "广州": [
@@ -155,7 +158,12 @@ class FlowResult:
 
 
 def new_state() -> dict[str, Any]:
-    return {"stage": STAGE_ASK_CITY, "slots": {"city": "", "job_index": 0}, "turns": 0}
+    return {
+        "stage": STAGE_ASK_CITY,
+        "slots": {"city": "", "job_index": 0},
+        "turns": 0,
+        "profile": {},
+    }
 
 
 # ── 抽取 ──────────────────────────────────────────────

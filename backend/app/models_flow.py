@@ -10,6 +10,7 @@
     reply        我方发出的回复
     slot_set     槽位被更新（body: {key, value}）
     stage_change 阶段推进（body: {from, to}）
+    profile      档案字段变化（body: {key: value}，本轮只记变了的键）
     action       副作用（约面试 / 转人工）
 """
 
