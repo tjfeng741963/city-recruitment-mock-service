@@ -12,7 +12,13 @@ from datetime import datetime
 
 import pytest
 
-from app.services.flow_engine import ACTION_BOOK, STAGE_ASK_GENDER, TZ, new_state
+from app.services.flow_engine import (
+    ACTION_BOOK,
+    STAGE_ASK_GENDER,
+    STAGE_CONFIRM,
+    TZ,
+    new_state,
+)
 from app.services.flow_llm import a_step, build_messages
 
 NOW = datetime(2026, 11, 8, 14, 0, tzinfo=TZ)
@@ -97,6 +103,8 @@ async def test_booking_time_comes_from_code() -> None:
         )
     )
     state = _state_after_city()
+    state["stage"] = STAGE_CONFIRM
+    state["slots"].update({"gender": "男", "record": "无"})
     result = await a_step(state, "可以", provider, now=NOW)
 
     assert result.finished is True
@@ -123,3 +131,20 @@ def test_surface_only_carries_recent_context() -> None:
     assert "最新一句" in user
     assert "历史0" not in user
     assert "19 元/小时" in messages[0].content  # 岗位数据在系统提示里
+
+
+@pytest.mark.asyncio
+async def test_done_never_calls_model() -> None:
+    """约好之后客户再发消息：不调模型、不改状态、不回话。"""
+    from app.services.flow_engine import STAGE_DONE
+
+    provider = ScriptedProvider("不该被用到的回复")
+    state = new_state()
+    state["stage"] = STAGE_DONE
+    state["slots"] = {"city": "广州", "gender": "男", "record": "无", "booked": True}
+
+    result = await a_step(state, "我到了找谁", provider, now=NOW)
+    assert result.reply == ""
+    assert result.finished is True
+    assert result.stage == STAGE_DONE
+    assert provider.calls == []

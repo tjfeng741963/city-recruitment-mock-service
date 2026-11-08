@@ -70,8 +70,11 @@ SYSTEM_PROMPT = """你是一家劳务中介的招聘顾问，叫「陈姐」，�
 
 # 进度纪律
 - 顺序是 城市 → 性别 → 犯罪记录 → 约面试，缺一个都不能往下走
+- 只问这三样：城市、性别、有没有犯罪记录。**年龄、民族、学历这些不要问**
 - 一次只问一个问题，别连着抛三个
 - 客户答得含糊（比如你问「想去哪个厂」他回「没有」），不要当他在回答别的问题，把该问的重问一次
+- 客户没明确说去哪个厂，就默认第一个，**别反复问「你想去哪个」**
+- 约时间那句必须**以问句结尾**（「明天中午 1 点方便吗？」），客户答应了才说欢迎语
 - 三项都拿到了才约面试；约成之后不再回复
 
 # 岗位数据（只能从这里取）
@@ -222,10 +225,17 @@ def apply_result(
     action = action if action in (ACTION_BOOK, ACTION_HANDOFF) else None
     finished = bool(data.get("finished")) or stage == STAGE_DONE
 
+    # 约面试必须先问过「方便吗」。模型拿到记录就直接宣布约好，
+    # 客户下一句「可以」会撞在已结束的状态上收不到欢迎语。
+    if action == ACTION_BOOK and str(state.get("stage") or "") != STAGE_CONFIRM:
+        action = None
+        stage, finished = STAGE_CONFIRM, False
+
     # 护栏：槽位没齐，不许往后跳。模型想跳就按回该停的阶段，
-    # 并把缺的那个问题补在回复末尾，否则客户会卡在没有进展的循环里。
+    # 只有**被按回**的时候才补一句缺失的提问，否则会变成每句都复读。
     ceiling = _max_stage(slots)
-    if action is None and stage != ceiling:
+    clamped = action is None and stage != ceiling
+    if clamped:
         stage, finished = ceiling, False
 
     if action == ACTION_BOOK:
@@ -258,14 +268,14 @@ def apply_result(
             action=action,
         )
 
-    # 被按回阶段时，把缺的那句问题补上（回复里已经问到就不加）
+    # 只有被护栏按回阶段时，才补一句缺失的提问（回复里已经问到就不加）
     need = _QUESTION.get(stage)
-    if need and not finished:
+    if clamped and need and not finished:
         asked = {
             STAGE_ASK_CITY: ("城市",),
             STAGE_ASK_GENDER: ("男", "女"),
             STAGE_ASK_RECORD: ("记录",),
-            STAGE_CONFIRM: ("方便", "约"),
+            STAGE_CONFIRM: ("方便", "约", "明天", "点"),
         }.get(stage, ())
         if not any(word in reply for word in asked):
             reply = f"{reply}\n{need}" if reply else need
@@ -281,6 +291,15 @@ async def a_step(
     now: datetime | None = None,
 ) -> FlowResult:
     """一个 turn：模型读懂 + 回话；失败就退到确定性状态机。"""
+    # 已约好（done）就不再叫模型：省一次调用，也避免它把状态改回去
+    if str(state.get("stage")) == STAGE_DONE or (state.get("slots") or {}).get("booked"):
+        return FlowResult(
+            reply="",
+            stage=STAGE_DONE,
+            slots=state.get("slots") or {},
+            finished=True,
+        )
+
     if provider is None:
         return fallback_step(state, text, now=now)
 
