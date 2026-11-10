@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { Badge, Button, DataTable, FilterBar, Icon, Input, Pagination, Select, Tabs, useFeedback, type Column } from "@ui";
 import { candidatesApi, type Candidate, type CandidateEventType } from "../../api/candidates";
 import { ChatDialog, MarkDialog, STATUS_LABEL } from "./CandidateDialogs";
-import { LoadError, ModHead, PageSizeSelect, downloadCsv, useLoader, useMyDevices } from "./shared";
+import { LoadError, ModHead, PageSizeSelect, downloadCsv, errorText, useLoader, useMyDevices } from "./shared";
 
 const TABS: Array<{ value: CandidateEventType; label: string }> = [
   { value: "invited", label: "报名成功" },
@@ -12,7 +12,13 @@ const TABS: Array<{ value: CandidateEventType; label: string }> = [
 
 type Row = Omit<Candidate, "id"> & { id: string; raw: Candidate; device: string; region: string; ops: string };
 
-function buildColumns(tab: CandidateEventType, onChat: (c: Candidate) => void, onMark: (c: Candidate) => void): Column<Row>[] {
+function buildColumns(
+  tab: CandidateEventType,
+  onChat: (c: Candidate) => void,
+  onMark: (c: Candidate) => void,
+  onRemind: (c: Candidate) => void,
+  remindingId: string | null,
+): Column<Row>[] {
   const dash = (v: string) => v || "—";
   const cols: Array<Column<Row> | false> = [
     { key: "device", header: "招聘经理" },
@@ -28,9 +34,17 @@ function buildColumns(tab: CandidateEventType, onChat: (c: Candidate) => void, o
     },
     { key: "phone", header: "电话", render: (r) => <span className="ui-num">{dash(r.phone)}</span> },
     { key: "event_at", header: "事件时间", sortable: true, render: (r) => <span className="ui-num" title={r.event_at}>{r.event_at ? r.event_at.slice(5, 16) : "—"}</span> },
-    tab === "invited" && { key: "interview_date", header: "面试日期", sortable: true, render: (r) => <span className="ui-num">{dash(r.interview_date)}</span> },
+    tab === "invited" && {
+      key: "interview_date",
+      header: "面试时间",
+      sortable: true,
+      render: (r) => {
+        const text = [r.interview_date, r.interview_time].filter(Boolean).join(" ");
+        return <span className="ui-num">{dash(text)}</span>;
+      },
+    },
     tab === "invited" && { key: "factory_name", header: "面试工厂", render: (r) => dash(r.factory_name) },
-    tab === "invited" && { key: "region", header: "城市/区县", render: (r) => dash(r.region) },
+    tab === "invited" && { key: "region", header: "所在地", render: (r) => dash(r.region) },
     tab === "invited" && {
       key: "remind_count",
       header: "提醒",
@@ -45,6 +59,9 @@ function buildColumns(tab: CandidateEventType, onChat: (c: Candidate) => void, o
         <span className="cd-row-ops">
           <Button size="sm" variant="ghost" onClick={() => onChat(r.raw)}>对话记录</Button>
           <Button size="sm" variant="ghost" onClick={() => onMark(r.raw)}>标记</Button>
+          {r.status === "invited" && (
+            <Button size="sm" variant="tinted" loading={remindingId === r.id} onClick={() => onRemind(r.raw)}>提醒到场</Button>
+          )}
         </span>
       ),
     },
@@ -53,7 +70,7 @@ function buildColumns(tab: CandidateEventType, onChat: (c: Candidate) => void, o
 }
 
 export function CandidatesPage() {
-  const { toast } = useFeedback();
+  const { toast, confirm } = useFeedback();
   const { devices, names } = useMyDevices();
   const [tab, setTab] = useState<CandidateEventType>("invited");
   const [device, setDevice] = useState("");
@@ -63,6 +80,7 @@ export function CandidatesPage() {
   const [pageSize, setPageSize] = useState(50);
   const [chat, setChat] = useState<Candidate | null>(null);
   const [marking, setMarking] = useState<Candidate[] | null>(null);
+  const [remindingId, setRemindingId] = useState<string | null>(null);
 
   const interview = tab === "invited" ? interviewDate : "";
   const { data, error, loading, reload } = useLoader(
@@ -79,18 +97,41 @@ export function CandidatesPage() {
         id: String(c.id),
         raw: c,
         device: names.get(c.device_code) ?? (c.device_code || "—"),
-        region: [c.city, c.district].filter(Boolean).join("/"),
+        // 契约：province + city + "/" + district，缺省优雅降级。
+        region: [c.province, c.city, c.district].filter((v) => v && String(v).trim()).join("/"),
         ops: "",
       })),
     [items, names],
   );
-  const columns = useMemo(() => buildColumns(tab, setChat, (c) => setMarking([c])), [tab]);
+  const columns = useMemo(() => buildColumns(tab, setChat, (c) => setMarking([c]), remind, remindingId), [tab, remindingId]);
 
   function resetPage<T>(set: (v: T) => void) {
     return (v: T) => {
       set(v);
       setPage(1);
     };
+  }
+
+  /** 手动触发到场提醒：确认后调 followup/run，成功提示已加入跟进队列。 */
+  async function remind(c: Candidate) {
+    const label = c.name || c.nickname || `客户 ${c.customer_id}`;
+    const ok = await confirm({
+      title: "提醒到场？",
+      description: `将把「${label}」加入跟进队列，由系统按话术提醒其按时面试。`,
+      confirmLabel: "提醒到场",
+    });
+    if (!ok) return;
+    const id = String(c.id);
+    setRemindingId(id);
+    try {
+      await candidatesApi.runFollowup();
+      toast("已加入跟进队列", "success");
+      reload();
+    } catch (err) {
+      toast(errorText(err, "提醒失败，请稍后再试"), "danger");
+    } finally {
+      setRemindingId(null);
+    }
   }
 
   function exportCsv() {

@@ -214,7 +214,7 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     const where = conditions.length ? ` WHERE ${conditions.join(" AND ")}` : "";
     // Target item has no data_json/updated_at, and does carry wechat_id
     // (stored inside data_json locally since the column doesn't exist).
-    const COLUMNS = "id,device_code,customer_id,nickname,event_type,event_at,name,phone,interview_date,interview_time,factory_name,city,district,status,remind_count,disqualified_reason,created_at,data_json";
+    const COLUMNS = "id,device_code,customer_id,nickname,event_type,event_at,name,phone,interview_date,interview_time,factory_name,province,city,district,status,remind_count,disqualified_reason,created_at,data_json";
     const rows = db.prepare(`SELECT ${COLUMNS} FROM candidate_events${where} ORDER BY id DESC LIMIT ? OFFSET ?`).all(...params, pageSize, (page - 1) * pageSize) as Array<Record<string, unknown>>;
     const items = rows.map(serializeCandidate);
     const total = (db.prepare(`SELECT COUNT(*) count FROM candidate_events${where}`).get(...params) as { count: number }).count;

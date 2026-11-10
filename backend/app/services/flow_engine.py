@@ -1,17 +1,19 @@
-"""招聘对话状态机（演示版）。
+"""招聘对话状态机（v2）。
 
-核心思想：**问什么由代码决定，怎么说由话术模板决定。**
+核心思想没变：**问什么由代码决定，怎么说由话术模板决定。**
+变的是流程本身（对齐 docs/对齐-对话流程与知识库v2.md）：
 
-每轮输入 (state, 客户这句话) → 输出 (reply, 新 state)。state 可落库、可回放，
-出了问题能查出"当时他在哪一步、已经收集了哪些信息"。
+    ask_city       问「你投递的是哪个城市的简历」
+    send_info      按城市发工作信息（多段，一个 turn 内发完）
+    ask_interview  问「这两天能不能过来面试」
+    collect        要姓名 + 手机号（一次问两个）
+    done           期待你来面试，到了联系我；之后静默
+    kb             任意阶段的插问，答完仍回到原阶段
 
-流程（与产品定义一致）：
-    ask_city      问地点
-    offer_job     按城市发岗位 + 待遇（与问性别合并成一条消息）
-    ask_gender    问性别
-    ask_record    问有无犯罪记录
-    confirm       复述信息 + 约面试（默认次日 13:00）
-    done          欢迎去面试，之后不再自动回复
+三条不能破的规矩：
+1. 工作信息只从 DEMO_JOBS 取，话术里不许出现数据里没有的工价
+2. 面试时间由代码算（默认次日 09:00-11:00），不听客户以外的人瞎说
+3. 客户拒绝面试就到此为止，不再追问
 
 演示数据在 DEMO_JOBS 里，接真实数据时替换它即可，其余逻辑不动。
 """
@@ -27,17 +29,22 @@ from typing import Any
 TZ = timezone(timedelta(hours=8), "CST")
 
 STAGE_ASK_CITY = "ask_city"
-STAGE_OFFER_JOB = "offer_job"
-STAGE_ASK_GENDER = "ask_gender"
-STAGE_ASK_RECORD = "ask_record"
-STAGE_CONFIRM = "confirm"
+STAGE_SEND_INFO = "send_info"
+STAGE_ASK_INTERVIEW = "ask_interview"
+STAGE_COLLECT = "collect"
 STAGE_DONE = "done"
+# 插问的暂存阶段：答完就回原阶段，不落库成终态（见 _RESUME_OF）
+STAGE_KB = "kb"
 
 ACTION_BOOK = "book_interview"
+ACTION_GAVE_UP = "gave_up"
 ACTION_HANDOFF = "handoff"
 
+# 面试时间窗口：工厂账号可改成别的窗口，地铁账号固定早场
+INTERVIEW_WINDOW = "09:00-11:00"
+
 # 档案字段：与业务槽位同放 state["slots"]，另由 profile 事件单独记一份便于回放/推送
-PROFILE_KEYS = ("name", "phone", "district", "age", "notes")
+PROFILE_KEYS = ("name", "phone", "province", "district", "age", "notes")
 
 # ── 演示数据：真实数据缺失，这里先编一套能跑通流程的 ──────────────────
 DEMO_JOBS: dict[str, list[dict[str, str]]] = {
@@ -119,37 +126,60 @@ _CITY_ALIASES = {
     "东莞": "东莞", "东莞市": "东莞", "长安": "东莞", "虎门": "东莞",
 }
 
-_GENDER_MALE = ("男", "男生", "男工", "男孩", "爷们", "哥们")
-_GENDER_FEMALE = ("女", "女生", "女工", "女孩", "姐妹")
-
-_RECORD_NONE = ("没有", "无", "没", "干净", "清白", "没案底", "没有案底", "没记录")
-_RECORD_HAS = ("有案底", "有前科", "坐过牢", "判过", "拘留", "有记录", "有过", "有案")
-
-_AGREE = ("可以", "好", "行", "方便", "没问题", "能", "嗯", "ok", "OK", "Ok", "去", "准时")
-_DISAGREE = ("不行", "不方便", "没空", "改天", "再说", "来不了", "不能")
-
-_FAQ_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
-    (("地铁", "怎么去", "怎么走", "地址", "在哪", "位置"), "address"),
-    (("工资", "工价", "多少钱", "待遇", "几块", "小时"), "pay"),
-    (("吃", "住", "宿舍", "饭"), "welfare"),
-    (("几岁", "年龄", "多大"), "age"),
-    (("几点", "多久", "几号", "上班时间", "班次"), "hours"),
+_AGREE = (
+    "可以", "好的", "好呀", "好啊", "行", "没问题", "方便", "能来", "过去",
+    "嗯", "ok", "OK", "Ok", "准时", "去",
 )
+# 「不能」不算拒绝：「能不能过来」里有它。只认完整的否定说法。
+_DISAGREE = (
+    "不行", "不方便", "没空", "改天", "再说", "来不了", "不能来", "不去了",
+    "不过去", "不想去", "去不了", "再等等",
+)
+
+# 判断"这句话是不是在问事"，决定要不要走知识库
+_QUESTION_MARKS = (
+    "?", "？", "吗", "呢", "多少", "怎么", "怎样", "能不能", "可不可以",
+    "行不行", "有没有", "要不要", "是不是", "什么", "几点", "多久", "几号", "哪里", "在哪",
+)
+
+# 姓名抽取时要排掉的词：两个汉字的常用词太多，不排就会把「手机」当人名
+_NAME_STOPWORDS = {
+    "广州", "深圳", "东莞", "番禺", "天河", "白云", "龙华", "宝安", "龙岗", "长安", "虎门",
+    "手机", "电话", "号码", "联系", "方式", "微信", "你好", "在吗", "可以", "没有", "明天",
+    "今天", "后天", "男生", "女生", "普工", "面试", "工厂", "我们", "我是", "名字", "姓名",
+}
 
 
 @dataclass
 class FlowResult:
-    """一轮对话的处理结果。"""
+    """一轮对话的处理结果。
+
+    `reply` 永远是 `parts` 用换行拼起来的：老客户端只读 reply，
+    新客户端按 parts 逐条发（客户端一次只能发一条消息）。
+    """
 
     reply: str
     stage: str
     slots: dict[str, Any] = field(default_factory=dict)
     finished: bool = False
     action: str | None = None
+    parts: list[str] = field(default_factory=list)
+    attachments: list[Any] = field(default_factory=list)
+    # 知识库没答上来的原话，由调用方落 unknown_questions（本模块不做 I/O）
+    unknown_question: str = ""
+
+    def __post_init__(self) -> None:
+        self.parts = [part for part in (self.parts or []) if part]
+        if self.parts:
+            self.reply = "\n".join(self.parts)
+        elif self.reply:
+            self.parts = [self.reply]
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "reply": self.reply,
+            "parts": self.parts,
+            "attachments": self.attachments,
             "stage": self.stage,
             "slots": self.slots,
             "finished": self.finished,
@@ -174,24 +204,54 @@ def extract_city(text: str) -> str:
     return ""
 
 
-def extract_gender(text: str) -> str:
-    for word in _GENDER_MALE:
-        if word in text:
-            return "男"
-    for word in _GENDER_FEMALE:
-        if word in text:
-            return "女"
+def extract_province(text: str) -> str:
+    match = re.search(r"([\u4e00-\u9fa5]{2,3}省)", text)
+    return match.group(1) if match else ""
+
+
+def extract_district(text: str) -> str:
+    match = re.search(r"([\u4e00-\u9fa5]{2,3}(?:区|县|镇))", text)
+    if not match:
+        return ""
+    district = match.group(1)
+    # 「市白云区」这种把上一级尾巴带进来的，掐掉
+    while len(district) > 3 and district[0] in "省市县":
+        district = district[1:]
+    return district
+
+
+def extract_phone(text: str) -> str:
+    compact = re.sub(r"[\s\-—－.()（）]", "", text or "")
+    match = re.search(r"(?<!\d)(1[3-9]\d{9})(?!\d)", compact)
+    return match.group(1) if match else ""
+
+
+def _name_token(text: str) -> str:
+    for raw in re.split(r"[^\u4e00-\u9fa5]+", text or ""):
+        token = raw.strip()
+        for prefix in ("叫", "是"):
+            if token.startswith(prefix) and len(token) > 2:
+                token = token[len(prefix):]
+        for suffix in ("的手机", "的手机号", "电话"):
+            if token.endswith(suffix) and len(token) > len(suffix):
+                token = token[: -len(suffix)]
+        if 2 <= len(token) <= 4 and token not in _NAME_STOPWORDS:
+            return token
     return ""
 
 
-def extract_record(text: str) -> str:
-    for word in _RECORD_HAS:
-        if word in text:
-            return "有"
-    for word in _RECORD_NONE:
-        if word in text:
-            return "无"
-    return ""
+def extract_name(text: str, strict: bool = False) -> str:
+    """抽姓名。
+
+    strict=False 只认明确线索（「我叫张三」）——问城市那一轮把「广州」当人名的坑踩过。
+    strict=True 才敢把光秃秃的「张三」当名字，用在 collect 阶段。
+    """
+    for cue in ("我叫", "名字叫", "姓名叫", "姓名是", "我是"):
+        if cue in text:
+            name = _name_token(text.split(cue, 1)[1])
+            if name:
+                return name
+    return _name_token(text) if strict else ""
 
 
 def extract_age(text: str) -> int | None:
@@ -202,21 +262,28 @@ def extract_age(text: str) -> int | None:
 def is_agree(text: str) -> bool:
     if any(word in text for word in _DISAGREE):
         return False
-    return any(word in text for word in _AGREE)
+    # 「好几号到？」这种长句里的「好」不算答应，短句才算
+    return len(text) <= 12 and any(word in text for word in _AGREE)
 
 
 def is_disagree(text: str) -> bool:
     return any(word in text for word in _DISAGREE)
 
 
-def next_noon(now: datetime | None = None) -> datetime:
-    """默认面试时间：第二天 13:00（本地时区）。"""
+def looks_like_question(text: str) -> bool:
+    return any(mark in (text or "") for mark in _QUESTION_MARKS)
+
+
+def next_interview(now: datetime | None = None) -> datetime:
+    """默认面试时间：第二天 09:00（配合 INTERVIEW_WINDOW 用）。"""
     base = now or datetime.now(TZ)
     if base.tzinfo is None:
         base = base.replace(tzinfo=TZ)
-    return (base + timedelta(days=1)).replace(
-        hour=13, minute=0, second=0, microsecond=0
-    )
+    return (base + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+
+
+def day_label(when: datetime) -> str:
+    return f"明天（{when.month}月{when.day}日）"
 
 
 # ── 话术 ──────────────────────────────────────────────
@@ -232,96 +299,142 @@ def _job_of(slots: dict[str, Any]) -> dict[str, str]:
     return jobs[min(index, len(jobs) - 1)]
 
 
-def _city_ask(slots: dict[str, Any]) -> str:
+def _city_ask(slots: dict[str, Any] | None = None) -> str:
+    del slots
     cities = "、".join(DEMO_JOBS) or "本地"
-    return f"你好，我们这边{cities}都有厂在招。你人在哪个城市？"
+    return f"你投递的是哪个城市的简历？我们这边{cities}都有厂在招。"
 
 
-def _offer_text(slots: dict[str, Any]) -> str:
-    jobs = _jobs_of(slots)
-    if not jobs:
-        return _city_ask(slots)
+def _factory(job: dict[str, str]) -> str:
+    return job.get("title", "").split(" ")[0] if job.get("title") else ""
+
+
+def send_info_parts(slots: dict[str, Any], when: datetime | None = None) -> list[str]:
+    """工作信息多段文本：段1 岗位事实，段2 面试地点+时间窗口，段3 邀约问句。
+
+    这三段必须**由代码拼**，不能交给模型——工价一改就是事故。
+    """
     job = _job_of(slots)
-    lines = [f"{slots['city']}这边现在有 {len(jobs)} 个岗位在招，先发你一个："]
-    lines.append(
-        f"【{job['title']}】{job['place']}，{job['pay']}，{job['hours']}，"
-        f"年龄 {job['age']}，{job['welfare']}。"
-    )
-    if len(jobs) > 1:
-        others = "、".join(j["title"].split(" ")[0] for j in jobs[1:])
-        lines.append(f"另外还有{others}，想看去哪个跟我说。")
-    lines.append("你是男生还是女生？")
-    return "\n".join(lines)
-
-
-def _record_ask(slots: dict[str, Any]) -> str:
-    return "性别我记下了。厂里要查这个，你有没有犯罪记录？（如实说就行，不影响正常安排）"
-
-
-def _confirm_text(slots: dict[str, Any], when: datetime) -> str:
-    job = _job_of(slots)
-    stamp = when.strftime("%m月%d日 %H:%M").replace(" 13:00", " 中午1点")
-    return (
-        f"我确认一下：{slots.get('city', '')} · {job.get('title', '')} · "
-        f"{job.get('pay', '')} · {slots.get('gender', '')} · "
-        f"记录 {slots.get('record', '无')}。\n"
-        f"那就约明天（{stamp}）在{job.get('place', '')}面试，方便吗？"
-    )
-
-
-def _welcome_text(slots: dict[str, Any], when: datetime) -> str:
-    job = _job_of(slots)
-    stamp = when.strftime("%m月%d日 %H:%M").replace(" 13:00", " 中午1点")
-    return (
-        f"好嘞，约好了：明天（{stamp}）{job.get('place', '')}。\n"
-        f"到时候带上身份证，到了给我发个消息，我出来接你。祝你面试顺利！"
-    )
-
-
-def _faq_answer(text: str, job: dict[str, str]) -> str:
     if not job:
-        return ""
-    for keywords, key in _FAQ_RULES:
-        if any(word in text for word in keywords):
-            value = job.get(key, "")
-            if key == "address":
-                return f"地址是{job.get('place', '')}。"
-            if key == "pay":
-                return f"这个岗位{job.get('pay', '')}，{job.get('welfare', '')}。"
-            if key == "welfare":
-                return f"{job.get('welfare', '')}。"
-            if key == "age":
-                return f"年龄要求{job.get('age', '')}。"
-            if key == "hours":
-                return f"{job.get('hours', '')}。"
-            return str(value)
-    return ""
+        return [_city_ask(slots)]
+    day = day_label(when or next_interview())
+    part1 = "\n".join(
+        [
+            f"厂名：{_factory(job)}（{job.get('title', '').split(' ')[-1]}）",
+            f"工价：{job.get('pay', '')}",
+            f"班次：{job.get('hours', '')}",
+            f"年龄：{job.get('age', '')}",
+            f"吃住：{job.get('welfare', '')}",
+        ]
+    )
+    part2 = f"面试地点：{job.get('place', '')}\n面试时间：{day}{INTERVIEW_WINDOW}"
+    part3 = "这两天能不能过来面试？能来的话我把名额给你留着。"
+    return [part1, part2, part3]
+
+
+def _interview_ask() -> str:
+    return "这两天能不能过来面试？能来的话我把名额给你留着。"
+
+
+def _collect_ask(missing: str = "") -> str:
+    if missing == "name":
+        return "方便留个姓名吗？我这边登记一下。"
+    if missing == "phone":
+        return "手机号也发我一下，到面试那天好联系你。"
+    return "那我登记一下：麻烦把姓名和手机号一起发我。"
+
+
+def _gave_up_text() -> str:
+    return "好的，那就不打扰你了。后面想过来的话随时找我，名额一直有。"
+
+
+def _done_parts(slots: dict[str, Any], when: datetime | None = None) -> list[str]:
+    job = _job_of(slots)
+    day = day_label(when or next_interview())
+    who = " ".join(
+        part for part in (str(slots.get("name") or ""), str(slots.get("phone") or "")) if part
+    )
+    detail = f"{day}{INTERVIEW_WINDOW} 在{job.get('place', '')}面试"
+    head = f"好嘞，登记好了：{who}，{detail}。" if who else f"好嘞，{detail}。"
+    return [head, "期待你来面试，到了联系我。"]
+
+
+def _faq_retry(stage: str, slots: dict[str, Any]) -> str:
+    if stage == STAGE_COLLECT:
+        return _collect_prompt(slots) or _interview_ask()
+    return _interview_ask()
 
 
 # ── 主流程 ────────────────────────────────────────────
-def step(state: dict[str, Any], text: str, now: datetime | None = None) -> FlowResult:
-    """推进一轮对话。state 会被就地更新，返回值同时带上新 state。"""
+def _absorb(slots: dict[str, Any], text: str, strict_name: bool = False) -> None:
+    """顺手把客户自报的档案字段记下来（问城市那一轮也常一起报）。"""
+    phone = extract_phone(text)
+    if phone:
+        slots["phone"] = phone
+    name = extract_name(text, strict=strict_name)
+    if name:
+        slots["name"] = name
+    province = extract_province(text)
+    if province:
+        slots["province"] = province
+    district = extract_district(text)
+    if district:
+        slots["district"] = district
+    age = extract_age(text)
+    if age:
+        slots["age"] = age
+
+
+def _enter_info(slots: dict[str, Any], when: datetime) -> FlowResult:
+    slots["interview_offer_sent"] = True
+    return FlowResult(
+        reply="",
+        parts=send_info_parts(slots, when),
+        stage=STAGE_ASK_INTERVIEW,
+        slots=slots,
+    )
+
+
+def _book(slots: dict[str, Any], when: datetime) -> FlowResult:
+    slots["interview_at"] = when.isoformat()
+    slots["interview_window"] = INTERVIEW_WINDOW
+    slots["interview_place"] = _job_of(slots).get("place", "")
+    slots["interview_agreed"] = True
+    slots["booked"] = True
+    return FlowResult(
+        reply="",
+        parts=_done_parts(slots, when),
+        stage=STAGE_DONE,
+        slots=slots,
+        finished=True,
+        action=ACTION_BOOK,
+    )
+
+
+def step(
+    state: dict[str, Any],
+    text: str,
+    now: datetime | None = None,
+    kb_answer: str | None = None,
+) -> FlowResult:
+    """推进一轮对话。state 会被就地更新，返回值同时带上新 state。
+
+    `kb_answer` 是调用方（api_flow）先查知识库拿到的答案：本模块不碰数据库，
+    保证纯函数可单测。为 None 表示没命中。
+    """
     text = (text or "").strip()
     stage = str(state.get("stage") or STAGE_ASK_CITY)
     slots: dict[str, Any] = state.setdefault("slots", {})
     state["turns"] = int(state.get("turns") or 0) + 1
-    when = next_noon(now)
+    when = next_interview(now)
 
     if stage == STAGE_DONE:
         return FlowResult(reply="", stage=STAGE_DONE, slots=slots, finished=True)
 
-    # 中途插问：先把客户的问题答了，再把当前该问的追问一次
-    if stage != STAGE_ASK_CITY:
-        faq = _faq_answer(text, _job_of(slots))
-        if faq:
-            follow = {
-                STAGE_ASK_GENDER: "你是男生还是女生？",
-                STAGE_ASK_GENDER + "_pending": "你是男生还是女生？",
-                STAGE_ASK_RECORD: "对了，有没有犯罪记录？",
-                STAGE_CONFIRM: "明天中午 1 点方便吗？",
-            }.get(stage, "")
-            reply = f"{faq}{follow}" if follow else faq
-            return FlowResult(reply=reply, stage=stage, slots=slots)
+    # kb 只是插问的暂存标签，真进来就按"面试邀约"继续
+    if stage == STAGE_KB:
+        stage = STAGE_ASK_INTERVIEW
+        state["stage"] = stage
 
     if stage == STAGE_ASK_CITY:
         city = extract_city(text) or str(slots.get("city") or "")
@@ -329,84 +442,107 @@ def step(state: dict[str, Any], text: str, now: datetime | None = None) -> FlowR
             return FlowResult(reply=_city_ask(slots), stage=STAGE_ASK_CITY, slots=slots)
         slots["city"] = city
         slots.setdefault("job_index", 0)
-        state["stage"] = STAGE_ASK_GENDER
-        return FlowResult(
-            reply=_offer_text(slots), stage=STAGE_ASK_GENDER, slots=slots
-        )
+        _absorb(slots, text)
+        result = _enter_info(slots, when)
+        state["stage"] = result.stage
+        return result
 
-    if stage == STAGE_OFFER_JOB:
-        state["stage"] = STAGE_ASK_GENDER
-        return FlowResult(reply=_offer_text(slots), stage=STAGE_ASK_GENDER, slots=slots)
+    if stage == STAGE_SEND_INFO:
+        _absorb(slots, text)
+        result = _enter_info(slots, when)
+        state["stage"] = result.stage
+        return result
 
-    if stage == STAGE_ASK_GENDER:
-        gender = extract_gender(text)
-        if not gender:
-            return FlowResult(
-                reply="我这边好安排岗位，你先说下是男生还是女生？",
-                stage=STAGE_ASK_GENDER,
-                slots=slots,
-            )
-        slots["gender"] = gender
-        age = extract_age(text)
-        if age:
-            slots["age"] = age
-        state["stage"] = STAGE_ASK_RECORD
-        return FlowResult(reply=_record_ask(slots), stage=STAGE_ASK_RECORD, slots=slots)
-
-    if stage == STAGE_ASK_RECORD:
-        record = extract_record(text)
-        if not record:
-            return FlowResult(
-                reply="这个要如实说哈，有没有犯罪记录？有或没有都回我一句。",
-                stage=STAGE_ASK_RECORD,
-                slots=slots,
-            )
-        slots["record"] = record
-        age = extract_age(text)
-        if age:
-            slots["age"] = age
-        if record == "有":
-            slots.pop("interview_at", None)
+    if stage == STAGE_ASK_INTERVIEW:
+        _absorb(slots, text)
+        # 拒绝优先：客户说「这两天不行」里也含「行」，顺序反了就会误约
+        if is_disagree(text):
+            slots["recruit_status"] = "disqualified"
             state["stage"] = STAGE_DONE
             return FlowResult(
-                reply=(
-                    "这个情况我记下了。有记录的话厂里审核会卡，我先如实报上去，"
-                    "能不能过要看厂里，有结果我第一时间告诉你。"
-                ),
+                reply=_gave_up_text(),
                 stage=STAGE_DONE,
                 slots=slots,
                 finished=True,
-                action=ACTION_HANDOFF,
+                action=ACTION_GAVE_UP,
             )
-        slots["interview_at"] = when.isoformat()
-        slots["interview_place"] = _job_of(slots).get("place", "")
-        state["stage"] = STAGE_CONFIRM
-        return FlowResult(reply=_confirm_text(slots, when), stage=STAGE_CONFIRM, slots=slots)
+        if is_agree(text) and not looks_like_question(text):
+            return _agree_interview(state, slots, when)
+        # 插问（体检 / 住宿 / 地点）：先答，答完还停在邀约
+        if kb_answer or looks_like_question(text):
+            return _answer_side_question(state, stage, slots, text, kb_answer)
+        if is_agree(text):
+            return _agree_interview(state, slots, when)
+        return FlowResult(reply=_interview_ask(), stage=stage, slots=slots)
 
-    if stage == STAGE_CONFIRM:
-        if is_disagree(text):
-            # 客户想去别的时间：留在 confirm，等他自己给时间点（演示版先问一句）
-            return FlowResult(
-                reply="那你哪天方便？大概几点？说了我帮你跟厂里报。",
-                stage=STAGE_CONFIRM,
-                slots=slots,
-            )
-        if not is_agree(text):
-            return FlowResult(
-                reply="明天中午 1 点这个时间行不行？回我一句就行。",
-                stage=STAGE_CONFIRM,
-                slots=slots,
-            )
-        state["stage"] = STAGE_DONE
-        slots["booked"] = True
-        return FlowResult(
-            reply=_welcome_text(slots, when),
-            stage=STAGE_DONE,
-            slots=slots,
-            finished=True,
-            action=ACTION_BOOK,
-        )
+    if stage == STAGE_COLLECT:
+        _absorb(slots, text, strict_name=True)
+        prompt = _collect_prompt(slots)
+        if not prompt:
+            result = _book(slots, when)
+            state["stage"] = result.stage
+            return result
+        if not (slots.get("name") or slots.get("phone")):
+            # 一个字段都没给：可能是在问事，先答再要一次
+            answered = _answer_side_question(state, stage, slots, text, kb_answer)
+            if answered.parts:
+                return answered
+        return FlowResult(reply=prompt, stage=STAGE_COLLECT, slots=slots)
 
     # 未知阶段：兜底回到问城市
     state["stage"] = STAGE_ASK_CITY
     return FlowResult(reply=_city_ask(slots), stage=STAGE_ASK_CITY, slots=slots)
+
+
+def _collect_prompt(slots: dict[str, Any]) -> str:
+    """collect 的第一次问必须一次要两个；只缺一个时才单独追。"""
+    has_name = bool(str(slots.get("name") or ""))
+    has_phone = bool(str(slots.get("phone") or ""))
+    if has_name and has_phone:
+        return ""
+    if has_name:
+        return _collect_ask("phone")
+    if has_phone:
+        return _collect_ask("name")
+    return _collect_ask()
+
+
+def _agree_interview(state: dict[str, Any], slots: dict[str, Any], when: datetime) -> FlowResult:
+    """客户答应来：姓名手机都在就直接约成，缺一个就进 collect 只要缺的那个。"""
+    slots["interview_agreed"] = True
+    state["stage"] = STAGE_COLLECT
+    prompt = _collect_prompt(slots)
+    if prompt:
+        return FlowResult(reply=prompt, stage=STAGE_COLLECT, slots=slots)
+    result = _book(slots, when)
+    state["stage"] = result.stage
+    return result
+
+
+def _answer_side_question(
+    state: dict[str, Any],
+    stage: str,
+    slots: dict[str, Any],
+    text: str,
+    kb_answer: str | None,
+) -> FlowResult:
+    """插问分支：命中知识库就答，没命中就兜底并交回原话给上层记账。"""
+    if kb_answer:
+        return FlowResult(
+            reply="",
+            parts=[kb_answer, _faq_retry(stage, slots)],
+            stage=stage,
+            slots=slots,
+        )
+    if looks_like_question(text):
+        return FlowResult(
+            reply="",
+            parts=["这个我确认一下，稍后回你", _faq_retry(stage, slots)],
+            stage=stage,
+            slots=slots,
+            unknown_question=text,
+        )
+    # 含糊的一句（「嗯」「哦」）：只把该问的重问一次，不记未知问题
+    followup = _faq_retry(stage, slots)
+    state["stage"] = stage
+    return FlowResult(reply=followup, stage=stage, slots=slots)

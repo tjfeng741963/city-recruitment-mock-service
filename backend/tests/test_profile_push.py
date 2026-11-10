@@ -38,7 +38,7 @@ def test_profile_merged_into_slots_and_replayed() -> None:
         state,
         {
             "reply": "好嘞，广州这边有厂在招，你是男生还是女生？",
-            "stage": "ask_gender",
+            "stage": "ask_interview",
             "slots": {"city": "广州"},
             "profile": PROFILE,
             "action": None,
@@ -85,7 +85,7 @@ def test_profile_does_not_overwrite_with_empty() -> None:
         state,
         {
             "reply": "嗯，那咱就约明天中午 1 点，方便吗？",
-            "stage": "confirm",
+            "stage": "collect",
             "slots": {"city": "广州", "gender": "男", "record": "无"},
             "profile": {"name": "", "phone": "", "age": None},
             "action": None,
@@ -182,9 +182,36 @@ def test_interview_at_converts_to_date_and_time() -> None:
 
 def test_stage_mapping() -> None:
     assert build_profile({"city": "广州"}, "ask_city", None)["stage"] == "asking"
-    assert build_profile({"city": "广州"}, "confirm", None)["stage"] == "offered"
+    assert build_profile({"city": "广州"}, "send_info", None)["stage"] == "offered"
+    assert build_profile({"city": "广州"}, "ask_interview", None)["stage"] == "offered"
+    assert build_profile({"city": "广州"}, "collect", None)["stage"] == "offered"
+    assert build_profile({"city": "广州"}, "done", "gave_up")["stage"] == "gave_up"
     assert build_profile({"city": "广州"}, "done", "handoff")["stage"] == "gave_up"
     assert build_profile({}, "", None)["stage"] == "asking"
+
+
+def test_province_flows_into_profile_and_payload() -> None:
+    """省字段（017）：slots 里有了就要带出去，前端拼「广东省广州市/白云区」。"""
+    slots = {
+        "city": "广州",
+        "province": "广东省",
+        "district": "白云区",
+        "interview_at": "2026-11-09T09:00:00+08:00",
+        "interview_window": "09:00-11:00",
+    }
+    profile = build_profile(slots, "done", "book_interview")
+
+    assert profile["province"] == "广东省"
+    assert profile["city"] == "广州"
+    assert profile["district"] == "白云区"
+    # 窗口比整点更准，前端展示要用这个
+    assert profile["interview_time"] == "09:00-11:00"
+    assert profile["interview_date"] == "2026-11-09"
+    assert profile["stage"] == "booked"
+
+
+def test_only_province_is_still_worth_pushing() -> None:
+    assert profile_push.has_content(build_profile({"province": "广东省"})) is True
 
 
 class ScriptedProvider:
@@ -208,7 +235,7 @@ async def test_flow_answer_survives_push_failure(
         lambda: ScriptedProvider(
             {
                 "reply": "好嘞，广州这边有厂在招，你是男生还是女生？",
-                "stage": "ask_gender",
+                "stage": "ask_interview",
                 "slots": {"city": "广州"},
                 "profile": PROFILE,
                 "action": None,
@@ -247,7 +274,7 @@ async def test_flow_answer_pushes_extracted_profile(
         lambda: ScriptedProvider(
             {
                 "reply": "好嘞，广州这边有厂在招，你是男生还是女生？",
-                "stage": "ask_gender",
+                "stage": "ask_interview",
                 "slots": {"city": "广州"},
                 "profile": PROFILE,
                 "action": None,

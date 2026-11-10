@@ -18,13 +18,16 @@ import httpx
 
 from .flow_engine import (
     ACTION_BOOK,
+    ACTION_GAVE_UP,
     ACTION_HANDOFF,
     DEMO_JOBS,
+    INTERVIEW_WINDOW,
     STAGE_ASK_CITY,
-    STAGE_ASK_GENDER,
-    STAGE_ASK_RECORD,
-    STAGE_CONFIRM,
+    STAGE_ASK_INTERVIEW,
+    STAGE_COLLECT,
     STAGE_DONE,
+    STAGE_KB,
+    STAGE_SEND_INFO,
 )
 
 DEFAULT_URL = "http://127.0.0.1:4222/api/v1/agent/profile"
@@ -34,9 +37,11 @@ TIMEOUT = 3.0
 # 8090 的流程阶段 → 4222 的档案例 stage
 _STAGE_MAP = {
     STAGE_ASK_CITY: "asking",
-    STAGE_ASK_GENDER: "asking",
-    STAGE_ASK_RECORD: "asking",
-    STAGE_CONFIRM: "offered",
+    STAGE_KB: "asking",
+    # 信息已经发出去，客户在考虑要不要来
+    STAGE_SEND_INFO: "offered",
+    STAGE_ASK_INTERVIEW: "offered",
+    STAGE_COLLECT: "offered",
     STAGE_DONE: "booked",
 }
 
@@ -67,7 +72,7 @@ def _date_time(interview_at: Any) -> tuple[str, str]:
 def _stage(slots: dict[str, Any], stage: str, action: str | None) -> str:
     if action == ACTION_BOOK:
         return "booked"
-    if action == ACTION_HANDOFF:
+    if action in (ACTION_GAVE_UP, ACTION_HANDOFF):
         return "gave_up"
     return _STAGE_MAP.get(str(stage or ""), "asking")
 
@@ -84,20 +89,23 @@ def build_profile(
     job = _job_of(slots)
     title = job.get("title", "")
     interview_date, interview_time = _date_time(slots.get("interview_at"))
+    # 默认窗口是「09:00-11:00」，比 interview_at 的整点更准，优先用它
+    window = str(slots.get("interview_window") or "").strip() or interview_time
 
     fields = {
         "name": str(slots.get("name") or ""),
         "phone": str(slots.get("phone") or ""),
+        "province": str(slots.get("province") or ""),
         "city": str(slots.get("city") or ""),
         "district": str(slots.get("district") or ""),
         "gender": str(slots.get("gender") or ""),
-        "age": slots.get("age") if isinstance(slots.get("age"), int) else None,
         "record": str(slots.get("record") or ""),
+        "age": slots.get("age") if isinstance(slots.get("age"), int) else None,
         # 岗位名带工种（「利口福食品厂 普工」），工厂名取前半截
         "job_title": title,
         "factory_name": title.split(" ")[0] if title else "",
         "interview_date": interview_date,
-        "interview_time": interview_time,
+        "interview_time": window,
         "notes": str(slots.get("notes") or ""),
     }
     profile: dict[str, Any] = {
@@ -113,8 +121,7 @@ def has_content(profile: dict[str, Any]) -> bool:
         profile.get(key)
         for key in (
             "city",
-            "gender",
-            "record",
+            "province",
             "interview_date",
             "name",
             "phone",

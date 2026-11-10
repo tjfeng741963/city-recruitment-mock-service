@@ -119,6 +119,16 @@ export function UnknownQuestionsPage() {
     }
   }
 
+  async function resolve(row: Row) {
+    try {
+      await unknownQuestionsApi.resolve(row.num);
+      toast("已标记已处理", "success");
+      reload();
+    } catch (err) {
+      toast(errorText(err, "标记失败"), "danger");
+    }
+  }
+
   const columns: Column<Row>[] = [
     {
       key: "question",
@@ -138,8 +148,8 @@ export function UnknownQuestionsPage() {
         );
       },
     },
-    { key: "count", header: "次数", align: "right", width: "72px", sortable: true, render: (r) => r.count ?? "—" },
-    { key: "city_name", header: "城市", width: "96px", render: (r) => r.city_name || <span className="kn-muted">—</span> },
+    { key: "occurrence_count", header: "次数", align: "right", width: "72px", sortable: true, render: (r) => r.occurrence_count ?? r.count ?? "—" },
+    { key: "device_code", header: "设备", width: "130px", render: (r) => r.device_code || <span className="kn-muted">—</span> },
     {
       key: "status",
       header: "状态",
@@ -149,14 +159,15 @@ export function UnknownQuestionsPage() {
         return <Badge tone={s.tone} dot>{s.label}</Badge>;
       },
     },
-    { key: "last_seen_at", header: "最近出现", width: "170px", render: (r) => <span className="kn-muted ui-num">{r.last_seen_at || "—"}</span> },
+    { key: "created_at", header: "出现时间", width: "170px", render: (r) => <span className="kn-muted ui-num">{r.created_at || r.last_seen_at || "—"}</span> },
     {
       key: "actions",
       header: "操作",
-      width: "160px",
+      width: "200px",
       render: (r) => (
         <span className="kn-row-actions">
-          {r.status === "pending" && <Button size="sm" variant="tinted" onClick={() => setConverting(r)}>转知识库</Button>}
+          {r.status === "pending" && <Button size="sm" variant="tinted" onClick={() => resolve(r)}>标记已处理</Button>}
+          {r.status === "pending" && <Button size="sm" variant="ghost" onClick={() => setConverting(r)}>转知识库</Button>}
           <Button size="sm" variant="ghost" onClick={() => remove(r)}>删除</Button>
         </span>
       ),

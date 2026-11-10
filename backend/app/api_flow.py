@@ -1,4 +1,4 @@
-"""招聘对话流程接口（演示版）。
+"""招聘对话流程接口（v2）。
 
     POST /api/v1/flow/answer    推进一轮对话
     GET  /api/v1/flow/state     查看某会话投影出的状态
@@ -7,6 +7,9 @@
 客户端只需要多传一个 session_key（用 4222 的 conversation_id 即可）。
 每轮顺带抽出候选人档案（profile）：随事件落到 flow_events 可回放，
 档案有变化时再推给 4222 的 /api/v1/agent/profile（推不推得动都不影响回复）。
+
+响应里的 `parts` 是这一轮要说的话拆成的多条消息（客户端一次只能发一条），
+`reply` 仍然是 parts 用换行拼起来的一段，老客户端不用改。
 """
 
 from __future__ import annotations
@@ -19,11 +22,15 @@ from pydantic import BaseModel, Field
 
 from .deps import ServiceOrUser, SessionDep
 from .services import flow_session as store
-from .services import profile_push
+from .services import kb_placeholder, profile_push, unknown_questions
+from .services.flow_engine import STAGE_ASK_INTERVIEW, STAGE_COLLECT
 from .services.flow_llm import a_step
 from .services.llm_provider import build_provider
 
 router = APIRouter(prefix="/api/v1/flow", tags=["flow"])
+
+# 只有这两步客户会插问（问体检 / 住宿 / 地点），别的阶段不查库，省一次查询
+_KB_STAGES = {STAGE_ASK_INTERVIEW, STAGE_COLLECT}
 
 
 class FlowAnswerIn(BaseModel):
@@ -35,6 +42,8 @@ class FlowAnswerIn(BaseModel):
 
 class FlowAnswerOut(BaseModel):
     reply: str
+    parts: list[str] = Field(default_factory=list)
+    attachments: list[Any] = Field(default_factory=list)
     stage: str
     finished: bool
     action: str | None
@@ -62,8 +71,16 @@ async def flow_answer(
     before_profile = dict(state.get("profile") or {})
     stage_before = str(state.get("stage") or "")
 
+    # 知识库只做占位命中（标题关键词包含匹配），没命中交给流程走兜底话术
+    kb_answer: str | None = None
+    if stage_before in _KB_STAGES:
+        try:
+            kb_answer = await kb_placeholder.lookup(session, payload.text)
+        except Exception:  # noqa: BLE001  查库失败等同于没命中，不能挡住回复
+            kb_answer = None
+
     # 主路径交给模型；没配模型或调用失败时，a_step 内部退到确定性状态机
-    result = await a_step(state, payload.text, build_provider())
+    result = await a_step(state, payload.text, build_provider(), kb_answer=kb_answer)
 
     records: list[tuple[str, dict[str, Any]]] = [
         (store.EVENT_INBOUND, {"text": payload.text})
@@ -76,7 +93,8 @@ async def flow_answer(
     profile_records = store.diff_profile(before_profile, result.slots)
     records.extend(profile_records)
     if result.reply:
-        records.append((store.EVENT_REPLY, {"text": result.reply}))
+        # parts 一并落库：回放时能看出「那轮其实发了两条」
+        records.append((store.EVENT_REPLY, {"text": result.reply, "parts": result.parts}))
     if result.action:
         records.append(
             (store.EVENT_ACTION, {"name": result.action, "stage": result.stage})
@@ -85,19 +103,33 @@ async def flow_answer(
 
     profile = store.profile_of(result.slots)
 
+    device_code = payload.device_code or os.getenv(
+        "FLOW_PROFILE_DEVICE", profile_push.DEFAULT_DEVICE
+    )
+
     # 事件先落库，推送再尽力而为：推失败不回滚、不影响回复
     out_profile = profile_push.build_profile(result.slots, result.stage, result.action)
     if (profile_records or result.action) and profile_push.has_content(out_profile):
-        device_code = payload.device_code or os.getenv(
-            "FLOW_PROFILE_DEVICE", profile_push.DEFAULT_DEVICE
-        )
         try:
             await profile_push.push(device_code, payload.session_key, out_profile)
         except Exception:  # noqa: BLE001  推送是附加动作，不许影响客户收到话
             pass
 
+    # 知识库没答上来的原话：记一条给运营补话术（同样不许影响回复）
+    if result.unknown_question:
+        try:
+            await unknown_questions.record(
+                result.unknown_question,
+                device_code=device_code,
+                session_key=payload.session_key,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
     return FlowAnswerOut(
         reply=result.reply,
+        parts=result.parts,
+        attachments=result.attachments,
         stage=result.stage,
         finished=result.finished,
         action=result.action,

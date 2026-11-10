@@ -23,6 +23,7 @@ import { registerAdminRoutes } from "./modules/admin/admin.routes.js";
 import { registerDeviceBridgeRoutes } from "./modules/messaging/device-bridge.routes.js";
 import { registerStreamRoutes } from "./modules/agent/stream.routes.js";
 import { registerProfileRoutes } from "./modules/agent/profile.routes.js";
+import { registerUnknownQuestionRoutes } from "./modules/agent/unknown-questions.routes.js";
 import { registerFollowupRoutes } from "./modules/agent/followup.js";
 import { EventBus, createStreamNotifier } from "./modules/messaging/stream-events.js";
 import { registerWeComRoutes } from "./modules/wecom/wecom.routes.js";
@@ -60,6 +61,8 @@ const PUBLIC_ROUTES = new Set([
   // （与 REA_PROFILE_TOKEN 常数时间比较）；带合法 Bearer 时仍按用户 token 放行。
   "POST /api/v1/agent/profile",
   "GET /api/v1/agent/profile",
+  // 8090 的知识库未命中记账：同样用 X-Profile-Token 鉴权（路由内校验）
+  "POST /api/v1/agent/unknown-questions",
   // EventSource cannot set headers: the JWT is a query parameter and the route
   // authenticates itself (401/403 instead of the header preHandler's 403).
   "GET /api/v1/agent/stream",
@@ -116,6 +119,7 @@ export function buildServer() {
   registerDeviceBridgeRoutes(app, db, notifier);
   registerStreamRoutes(app, db, events, auth);
   registerProfileRoutes(app, db);
+  registerUnknownQuestionRoutes(app, db);
   registerFollowupRoutes(app, db);
   registerWeComRoutes(app, db);
   registerActivationRoutes(app, db);

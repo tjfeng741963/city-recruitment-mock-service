@@ -18,7 +18,7 @@ import { canAccessDevice, getUserScope } from "../../auth/user-scopes.js";
  */
 
 /** 档案里可以直接同步到 agent_conversations 列的键。 */
-const COLUMN_FIELDS = ["name", "phone", "factory_name", "interview_date", "interview_time", "city", "district"] as const;
+const COLUMN_FIELDS = ["name", "phone", "factory_name", "interview_date", "interview_time", "province", "city", "district"] as const;
 type ColumnField = (typeof COLUMN_FIELDS)[number];
 
 interface ConversationRow {
@@ -28,6 +28,7 @@ interface ConversationRow {
   nickname: string;
   state: string;
   recruit_status: string;
+  province: string;
   city: string;
   district: string;
   name: string;
@@ -104,18 +105,19 @@ function upsertCandidateEvent(db: DatabaseSync, row: ConversationRow, eventType:
     fields.interview_date ?? "",
     fields.interview_time ?? "",
     fields.factory_name ?? "",
+    fields.province ?? "",
     fields.city ?? "",
     fields.district ?? "",
     status,
   ];
   if (existing) {
-    db.prepare(`UPDATE candidate_events SET nickname=?,name=?,phone=?,interview_date=?,interview_time=?,factory_name=?,city=?,district=?,status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+    db.prepare(`UPDATE candidate_events SET nickname=?,name=?,phone=?,interview_date=?,interview_time=?,factory_name=?,province=?,city=?,district=?,status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
       .run(...values, existing.id);
     return existing.id;
   }
-  const inserted = db.prepare(`INSERT INTO candidate_events(device_code,customer_id,nickname,event_type,event_at,name,phone,interview_date,interview_time,factory_name,city,district,status,data_json)
-    VALUES (?,?,?,?,CURRENT_TIMESTAMP,?,?,?,?,?,?,?,?,?)`)
-    .run(row.device_code, String(row.customer_id), values[0], eventType, values[1], values[2], values[3], values[4], values[5], values[6], values[7], status, JSON.stringify({ source: "profile", customer_id: row.customer_id }));
+  const inserted = db.prepare(`INSERT INTO candidate_events(device_code,customer_id,nickname,event_type,event_at,name,phone,interview_date,interview_time,factory_name,province,city,district,status,data_json)
+    VALUES (?,?,?,?,CURRENT_TIMESTAMP,?,?,?,?,?,?,?,?,?,?)`)
+    .run(row.device_code, String(row.customer_id), values[0], eventType, values[1], values[2], values[3], values[4], values[5], values[6], values[7], values[8], status, JSON.stringify({ source: "profile", customer_id: row.customer_id }));
   return Number(inserted.lastInsertRowid);
 }
 
@@ -148,6 +150,7 @@ export async function registerProfileRoutes(app: FastifyInstance, db: DatabaseSy
       factory_name: conversation.factory_name ?? "",
       interview_date: conversation.interview_date ?? "",
       interview_time: conversation.interview_time ?? "",
+      province: conversation.province ?? "",
       city: conversation.city ?? "",
       district: conversation.district ?? "",
     };
@@ -173,8 +176,8 @@ export async function registerProfileRoutes(app: FastifyInstance, db: DatabaseSy
       state = "pending_invite";
     }
 
-    db.prepare(`UPDATE agent_conversations SET name=?,phone=?,remark=?,factory_name=?,interview_date=?,interview_time=?,profile_json=?,city=?,district=?,recruit_status=?,state=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-      .run(merged.name, merged.phone, remark, merged.factory_name, merged.interview_date, merged.interview_time, JSON.stringify(profileJson), merged.city, merged.district, recruitStatus, state, conversation.id);
+    db.prepare(`UPDATE agent_conversations SET name=?,phone=?,remark=?,factory_name=?,interview_date=?,interview_time=?,profile_json=?,province=?,city=?,district=?,recruit_status=?,state=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+      .run(merged.name, merged.phone, remark, merged.factory_name, merged.interview_date, merged.interview_time, JSON.stringify(profileJson), merged.province, merged.city, merged.district, recruitStatus, state, conversation.id);
 
     const row: ConversationRow = { ...conversation, ...merged, remark, recruit_status: recruitStatus, state };
     const eventFields = {
@@ -184,6 +187,7 @@ export async function registerProfileRoutes(app: FastifyInstance, db: DatabaseSy
       interview_date: merged.interview_date,
       interview_time: merged.interview_time,
       factory_name: merged.factory_name,
+      province: merged.province,
       city: merged.city,
       district: merged.district,
     };
@@ -217,6 +221,7 @@ export async function registerProfileRoutes(app: FastifyInstance, db: DatabaseSy
       factory_name: row.factory_name ?? "",
       interview_date: row.interview_date ?? "",
       interview_time: row.interview_time ?? "",
+      province: row.province ?? "",
       city: row.city ?? "",
       district: row.district ?? "",
       recruit_status: row.recruit_status,

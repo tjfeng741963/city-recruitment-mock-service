@@ -55,7 +55,15 @@ function toOutput(row: Record<string, unknown>, resource?: Resource, db?: Databa
     };
   }
   if (resource?.name === "unknown-questions") {
+    // 知识库页要的字段：次数、城市、最近出现、被合并的相似问法
+    const seen = Number(row.occurrence_count ?? 0) || 0;
+    const legacy = Number(data.count ?? 0) || 0;
     result.status = row.status;
+    result.count = legacy || seen;
+    result.occurrence_count = result.count;
+    result.city_name = String(data.city_name ?? "");
+    result.last_seen_at = row.updated_at;
+    result.merged_questions = Array.isArray(data.merged_questions) ? data.merged_questions : [];
     delete result.converted_knowledge_id;
     delete result.converted_at;
   }
@@ -134,7 +142,14 @@ function resolveField(resourceName: string, body: Record<string, unknown>, colum
 
 function list(db: DatabaseSync, resource: Resource, query: Record<string, unknown>, scope: UserScope) {
   const { page, pageSize, offset } = parsePagination(query);
-  const rows = (db.prepare(`SELECT * FROM ${resource.table} ORDER BY id DESC`).all() as Array<Record<string, unknown>>).filter((row) => canAccessResource(resource, row, scope));
+  let rows = (db.prepare(`SELECT * FROM ${resource.table} ORDER BY id DESC`).all() as Array<Record<string, unknown>>).filter((row) => canAccessResource(resource, row, scope));
+  // 知识库页会带 status + search；其它 resource 沿用原样，不新增行为。
+  if (resource.name === "unknown-questions") {
+    const status = typeof query.status === "string" ? query.status.trim() : "";
+    const search = typeof query.search === "string" ? query.search.trim() : "";
+    if (status) rows = rows.filter((row) => String(row.status) === status);
+    if (search) rows = rows.filter((row) => String(row.question ?? "").includes(search));
+  }
   // Target list envelope is exactly {items, total} for these resources.
   return { items: rows.slice(offset, offset + pageSize).map((row) => toOutput(row, resource, db)), total: rows.length };
 }

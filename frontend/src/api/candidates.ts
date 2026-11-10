@@ -14,6 +14,8 @@ export interface Candidate {
   interview_date: string;
   interview_time: string;
   factory_name: string;
+  /** 新契约字段，后端迁移完成前可能缺失。 */
+  province?: string;
   city: string;
   district: string;
   status: string;
@@ -168,6 +170,10 @@ export const candidatesApi = {
       method: "POST",
       body: JSON.stringify({ status }),
     });
+  },
+  /** 手动触发到场提醒跟进（admin）。 */
+  runFollowup() {
+    return request<{ success?: boolean; queued?: number }>(`${AGENT}/followup/run`, { method: "POST" });
   },
   myDevices() {
     return request<{ items: MyDevice[] }>(`${AGENT}/devices${qs({ my: true })}`);

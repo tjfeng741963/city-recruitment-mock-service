@@ -38,13 +38,18 @@ export type UnknownStatus = "pending" | "resolved" | "ignored";
 
 export interface UnknownQuestion {
   id: number;
+  device_code?: string;
+  customer_id?: string;
   question: string;
-  status: UnknownStatus | string;
+  /** 新契约字段名；旧后端用 count。 */
+  occurrence_count?: number;
+  /** 兼容旧字段，新后端 absence 时回退。 */
   count?: number;
+  status: UnknownStatus | string;
   city_name?: string | null;
   merged_questions?: string[];
-  last_seen_at?: string | null;
   created_at?: string;
+  last_seen_at?: string | null;
   updated_at?: string;
 }
 
@@ -115,11 +120,53 @@ export const unknownQuestionsApi = {
     const q = query({ page: params.page, page_size: params.pageSize, status: params.status || undefined, search: params.search || undefined });
     return request<ListResult<UnknownQuestion>>(`/api/v1/unknown-questions?${q}`);
   },
+  /** 标记已处理。 */
+  resolve(id: number) {
+    return request<{ success?: boolean }>(`/api/v1/unknown-questions/${id}/resolve`, { method: "POST" });
+  },
   convert(id: number, input: ConvertInput) {
     return request<KnowledgeItem>(`/api/v1/unknown-questions/${id}/convert`, json("POST", input));
   },
   remove(id: number) {
     return request<{ success: boolean }>(`/api/v1/unknown-questions/${id}`, { method: "DELETE" });
+  },
+};
+
+/** /api/v1/kb/entries 话术库（kind=script），8090 提供。 */
+export interface KbEntry {
+  id: number;
+  title?: string;
+  question: string;
+  answer: string;
+  kind: string;
+  keywords?: string[];
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface KbEntryInput {
+  title?: string;
+  question: string;
+  answer: string;
+  kind: string;
+  keywords?: string[];
+}
+
+export const kbEntriesApi = {
+  async list(params: { kind?: string; search?: string; page?: number; pageSize?: number } = {}) {
+    const q = query({ kind: params.kind, search: params.search, page: params.page, page_size: params.pageSize });
+    // 8090 可能返回裸数组或 {items,total}，统一归一化。
+    const res = await request<ListResult<KbEntry> | KbEntry[]>(`/api/v1/kb/entries${q ? `?${q}` : ""}`);
+    return Array.isArray(res) ? { items: res, total: res.length } : res;
+  },
+  create(input: KbEntryInput) {
+    return request<KbEntry>("/api/v1/kb/entries", json("POST", input));
+  },
+  update(id: number, input: KbEntryInput) {
+    return request<KbEntry>(`/api/v1/kb/entries/${id}`, json("PUT", input));
+  },
+  remove(id: number) {
+    return request<{ success?: boolean }>(`/api/v1/kb/entries/${id}`, { method: "DELETE" });
   },
 };
 

@@ -2,6 +2,7 @@ import type { ModuleKey } from "../../app/routes";
 import "../../styles/knowledge.css";
 import { AgentRulesPage } from "./AgentRulesPage";
 import { KnowledgeItemsPage } from "./KnowledgeItemsPage";
+import { ScriptsLibraryPage } from "./ScriptsLibraryPage";
 import { UnknownQuestionsPage } from "./UnknownQuestionsPage";
 
 function editTarget(path: string): "new" | number | undefined {
@@ -12,6 +13,7 @@ function editTarget(path: string): "new" | number | undefined {
 
 export function KnowledgeModule({ path }: { module: ModuleKey; path: string }) {
   const clean = path.replace(/\/+$/, "") || "/";
+  if (clean.startsWith("/scripts")) return <ScriptsLibraryPage />;
   if (clean.startsWith("/unknown-questions")) return <UnknownQuestionsPage />;
   if (clean.startsWith("/agent-rules")) return <AgentRulesPage />;
   return <KnowledgeItemsPage edit={editTarget(clean)} />;

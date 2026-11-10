@@ -82,7 +82,7 @@ describe("candidate profile api", () => {
       payload: {
         device_code: "local-device-001",
         customer_id: "700001",
-        profile: { name: "李四", phone: "13900000000", job_title: "利口福食品厂 普工", factory_name: "利口福食品厂", city: "广州", district: "番禺", interview_date: "2026-12-01", interview_time: "13:00", stage: "booked" },
+        profile: { name: "李四", phone: "13900000000", job_title: "利口福食品厂 普工", factory_name: "利口福食品厂", province: "广东省", city: "广州", district: "番禺", interview_date: "2026-12-01", interview_time: "09:00-11:00", stage: "booked" },
       },
     });
     expect(response.statusCode).toBe(200);
@@ -92,13 +92,17 @@ describe("candidate profile api", () => {
     const conversations = await app.inject({ method: "GET", url: "/api/v1/agent/conversations?device_code=local-device-001", headers: headers() });
     expect(conversations.statusCode).toBe(200);
     expect(conversations.json().items).toEqual(expect.arrayContaining([
-      expect.objectContaining({ customer_id: 700001, name: "李四", phone: "13900000000", factory_name: "利口福食品厂", interview_date: "2026-12-01", interview_time: "13:00", recruit_status: "invited", state: "pending_invite" }),
+      expect.objectContaining({ customer_id: 700001, name: "李四", phone: "13900000000", factory_name: "利口福食品厂", province: "广东省", interview_date: "2026-12-01", interview_time: "09:00-11:00", recruit_status: "invited", state: "pending_invite" }),
     ]));
 
     const candidates = await app.inject({ method: "GET", url: "/api/v1/agent/candidates?event_type=invited", headers: headers() });
     const invited = candidates.json().items.filter((item: Record<string, unknown>) => String(item.customer_id) === "700001" && item.event_type === "invited");
     expect(invited).toHaveLength(1);
-    expect(invited[0]).toMatchObject({ name: "李四", phone: "13900000000", interview_date: "2026-12-01", interview_time: "13:00", factory_name: "利口福食品厂", city: "广州", district: "番禺", status: "invited" });
+    expect(invited[0]).toMatchObject({ name: "李四", phone: "13900000000", interview_date: "2026-12-01", interview_time: "09:00-11:00", factory_name: "利口福食品厂", province: "广东省", city: "广州", district: "番禺", status: "invited" });
+
+    // 017：省字段要能读回来，前端拼「广东省广州市/番禺」
+    const provinceRead = await profileOf("device_code=local-device-001&customer_id=700001");
+    expect(provinceRead.json()).toMatchObject({ province: "广东省", city: "广州", district: "番禺" });
 
     // 再推一次同样的档案：事件只更新，不新增。
     await app.inject({ method: "POST", url: "/api/v1/agent/profile", headers: headers(), payload: { device_code: "local-device-001", customer_id: "700001", profile: { interview_date: "2026-12-01" } } });

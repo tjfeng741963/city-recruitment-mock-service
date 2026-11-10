@@ -32,7 +32,7 @@ const LEGACY_PREFIXES: Array<[ModuleKey, string[]]> = [
   ["reception", ["/m"]],
   ["candidates", ["/candidates", "/old-friends", "/status-dashboard", "/agent-evaluations"]],
   ["activation", ["/activation"]],
-  ["knowledge", ["/knowledge", "/unknown-questions", "/agent-rules"]],
+  ["knowledge", ["/knowledge", "/scripts", "/unknown-questions", "/agent-rules"]],
   ["positions", ["/holiday-schedules", "/city-links"]],
   ["settings", ["/account-summary"]],
 ];

@@ -1,16 +1,17 @@
-"""LLM 驱动的招聘对话（harness 风格）。
+"""LLM 驱动的招聘对话（harness 风格，v2 流程）。
 
 与 flow_engine 的分工：
 - flow_engine 是**确定性兜底**：模型挂了也保证客户收到一句像样的话
-- 本模块是**主路径**：模型自己读懂客户、自己决定问什么、自己说人话
+- 本模块是**主路径**：模型自己读懂客户、自己说人话
+- 但工作信息（厂名/工价/班次/年龄/吃住）永远由代码从 DEMO_JOBS 拼，
+  模型碰不到——它只要说了数据里没有的工价，整句就作废退回兜底
 
 对应 DeepSeek Harness 的几个关键取舍：
 1. 会话日志只追加（在 flow_session 里），本模块只读投影 + 追加，不覆盖
 2. turn / step：一次客户消息 = 一个 turn；模型调用失败在同一个 step 内重试，
    不重复消费客户输入、不重复发消息
 3. surface 投影：给模型的是"最近几轮 + 当前已知信息"，不是全部历史
-4. 副作用与文字分离：模型只提议 action，真正落库/算时间由代码做，
-   避免它嘴上说"约好了"其实什么都没写
+4. 副作用与文字分离：模型只提议 action，真正落库/算时间由代码做
 """
 
 from __future__ import annotations
@@ -23,83 +24,95 @@ from typing import Any
 
 from .flow_engine import (
     ACTION_BOOK,
+    ACTION_GAVE_UP,
     ACTION_HANDOFF,
     DEMO_JOBS,
+    INTERVIEW_WINDOW,
     PROFILE_KEYS,
     STAGE_ASK_CITY,
-    STAGE_ASK_GENDER,
-    STAGE_ASK_RECORD,
-    STAGE_CONFIRM,
+    STAGE_ASK_INTERVIEW,
+    STAGE_COLLECT,
     STAGE_DONE,
+    STAGE_KB,
+    STAGE_SEND_INFO,
     FlowResult,
-    next_noon,
+    looks_like_question,
+    next_interview,
+    send_info_parts,
     step as fallback_step,
 )
 from .llm_provider import ChatMessage, LLMProvider
 
 ALLOWED_STAGES = {
     STAGE_ASK_CITY,
-    STAGE_ASK_GENDER,
-    STAGE_ASK_RECORD,
-    STAGE_CONFIRM,
+    STAGE_SEND_INFO,
+    STAGE_ASK_INTERVIEW,
+    STAGE_COLLECT,
+    STAGE_KB,
     STAGE_DONE,
+}
+
+# 阶段推进顺序：clamp 时按这个比较「模型想跳多远」
+_STAGE_ORDER = {
+    STAGE_ASK_CITY: 0,
+    STAGE_SEND_INFO: 1,
+    STAGE_ASK_INTERVIEW: 2,
+    STAGE_COLLECT: 3,
+    STAGE_DONE: 4,
 }
 
 SYSTEM_PROMPT = """你是一家劳务中介的招聘顾问，叫「陈姐」，在广东做工厂招工十几年。
 
 # 你的目标
 把每一个来咨询的人，聊到「约好面试」为止。顺序是：
-1. 问他在哪个城市（广州 / 深圳 / 东莞）
-2. 按他的城市，介绍岗位和待遇（钱、吃住、班次、年龄要求）
-3. 问性别
-4. 问有没有犯罪记录（要说明这是厂里要查，不影响正常安排）
-5. 信息齐了，约面试：**默认第二天中午 1 点**，地点就是岗位地址
-6. 约好之后，欢迎他去面试，然后**不再回复**
+1. 问客户投递的是哪个城市（广州 / 深圳 / 东莞）
+2. 按城市发工作信息（厂名、工价、班次、年龄、吃住，系统会自己发，你不用重复）
+3. 问「这两天能不能过来面试」
+4. 客户答应 → 一次要**姓名 + 手机号**两个
+5. 信息齐了 → 收尾，然后不再回复
 
 # 说话方式（很重要）
 - 像微信上聊天的真人：短句、口语、可以用「哈」「嗯」「好嘞」
-- 一次只说一件事，别把三个问题堆一起
+- 一次只说一件事，别把几个问题堆一起
 - 客户问什么就先答什么，答完再自然接回你该问的
 - 不要复读上一句，不要每句都「您好」「请问」
-- 客户问「还有别的岗位吗」就把其他岗位报给他；说想换，就换
 
 # 硬性规则
 - **不许编数字**。工价、年龄、吃住只能照下面岗位数据说，一个字都不能改
-- 不知道就说「我问一下厂里，回头告诉你」，不要猜
-- 客户说有犯罪记录：别约面试，说如实报上去、能不能过看厂里
-- 客户已经约好之后又发消息：不再回复
+- 不知道就说「我确认一下，稍后回你」，不要猜体检报销、住宿条件这类细节
+- 客户拒绝面试：客气一句就结束（action="gave_up"），别再追
+- 已经约好之后又发消息：不再回复
 
 # 进度纪律
-- 顺序是 城市 → 性别 → 犯罪记录 → 约面试，缺一个都不能往下走
-- 只问这三样：城市、性别、有没有犯罪记录。**年龄、民族、学历这些不要问**
-- 一次只问一个问题，别连着抛三个
-- 客户答得含糊（比如你问「想去哪个厂」他回「没有」），不要当他在回答别的问题，把该问的重问一次
-- 客户没明确说去哪个厂，就默认第一个，**别反复问「你想去哪个」**
-- 约时间那句必须**以问句结尾**（「明天中午 1 点方便吗？」），客户答应了才说欢迎语
-- 三项都拿到了才约面试；约成之后不再回复
+- 顺序是 城市 → 发信息 → 问面试 → 收姓名手机号，缺一个都不能往下走
+- 只问这三样：城市、姓名、手机号
+- collect 阶段必须**一次问两个**（姓名和手机号一起要），不要分成两轮
+- 客户答得含糊（比如问城市他回「没有」），把该问的重问一次，不要当他在回答别的问题
 
 # 岗位数据（只能从这里取）
 {jobs}
+
+# 面试时间
+默认次日 {window}，地点就是岗位地址。客户明确说别的时间，以客户为准。
 
 # 现在时间
 {now}
 
 # 输出格式（必须是 JSON，不要代码块，不要多余文字）
-{{"reply": "发给客户的话", "stage": "ask_city|ask_gender|ask_record|confirm|done",
-  "slots": {{"city": "", "gender": "", "record": "", "age": null, "job_index": 0}},
-  "profile": {{"name": "", "phone": "", "district": "", "age": null, "notes": ""}},
+{{"reply": "发给客户的话", "stage": "ask_city|send_info|ask_interview|collect|done",
+  "slots": {{"city": "", "job_index": 0}},
+  "profile": {{"name": "", "phone": "", "province": "", "city": "", "district": "", "age": null, "notes": ""}},
   "action": null,
   "finished": false}}
 
 profile 是档案，客户说到才填，没说到就留空：
-- name 真实姓名、phone 手机号、district 区县（如「番禺」「长安」）、notes 补充（如「要长白班」）
+- name 真实姓名、phone 手机号、province 省（如「广东省」）、district 区县（如「白云区」）
 - phone 照客户原话抄，**不要改格式**（不要加空格、横线，也不要补 0）
-- age 没说到就填 null
 - 客户随口说的、跟他本人无关的（比如「我朋友在东莞」）不算他的档案
 
-action 只能是 null / "book_interview" / "handoff"：
-- 客户同意面试时间 → action="book_interview"，finished=true，reply 是欢迎语
-- 客户说有犯罪记录 → action="handoff"，finished=true
+action 只能是 null / "book_interview" / "gave_up"：
+- 姓名和手机号都拿到了 → action="book_interview"，finished=true，reply 是欢迎语
+- 客户说这两天来不了 / 不去了 → action="gave_up"，finished=true
 - 其他情况一律 null
 """
 
@@ -120,7 +133,11 @@ def build_messages(
 ) -> list[ChatMessage]:
     """surface 投影：只给最近几轮对话 + 已收集信息，不给全量历史。"""
     when = now or datetime.now().astimezone()
-    system = SYSTEM_PROMPT.format(jobs=_jobs_brief(), now=when.strftime("%Y-%m-%d %H:%M"))
+    system = SYSTEM_PROMPT.format(
+        jobs=_jobs_brief(),
+        window=INTERVIEW_WINDOW,
+        now=when.strftime("%Y-%m-%d %H:%M"),
+    )
     slots = {k: v for k, v in (state.get("slots") or {}).items() if v}
     recent = (state.get("history") or [])[-8:]
 
@@ -180,15 +197,6 @@ def _clean_slots(raw: Any) -> dict[str, Any]:
     city = str(raw.get("city") or "").strip()
     if city in DEMO_JOBS:
         slots["city"] = city
-    gender = str(raw.get("gender") or "").strip()
-    if gender in ("男", "女"):
-        slots["gender"] = gender
-    record = str(raw.get("record") or "").strip()
-    if record in ("有", "无"):
-        slots["record"] = record
-    age = raw.get("age")
-    if isinstance(age, int) and 16 <= age <= 70:
-        slots["age"] = age
     index = raw.get("job_index")
     if isinstance(index, int) and index >= 0:
         slots["job_index"] = index
@@ -216,19 +224,32 @@ def _max_stage(slots: dict[str, Any]) -> str:
     """缺什么就停在哪一步。模型不能跳过没拿到的槽位。"""
     if not slots.get("city"):
         return STAGE_ASK_CITY
-    if not slots.get("gender"):
-        return STAGE_ASK_GENDER
-    if not slots.get("record"):
-        return STAGE_ASK_RECORD
-    return STAGE_CONFIRM
+    if not slots.get("interview_offer_sent"):
+        return STAGE_SEND_INFO
+    if not slots.get("interview_agreed"):
+        return STAGE_ASK_INTERVIEW
+    if not (slots.get("name") and slots.get("phone")):
+        return STAGE_COLLECT
+    return STAGE_DONE
 
 
 _QUESTION = {
-    STAGE_ASK_CITY: "你在哪个城市呀？广州、深圳还是东莞？",
-    STAGE_ASK_GENDER: "对了，你是男生还是女生？",
-    STAGE_ASK_RECORD: "还有个事，厂里要查，你有没有犯罪记录？",
-    STAGE_CONFIRM: "那咱就约明天中午 1 点，方便吗？",
+    STAGE_ASK_CITY: "你投递的是哪个城市的简历呀？",
+    STAGE_ASK_INTERVIEW: "这两天能不能过来面试？",
+    STAGE_COLLECT: "麻烦把姓名和手机号一起发我。",
 }
+
+_ASKED_HINTS = {
+    STAGE_ASK_CITY: ("城市", "哪个市", "哪里"),
+    STAGE_ASK_INTERVIEW: ("面试", "这两天", "过来"),
+    STAGE_COLLECT: ("姓名", "手机", "电话"),
+}
+
+
+def _split_parts(reply: str) -> list[str]:
+    """模型返回的空行分段 → parts。老客户端只看 reply，新客户端逐条发。"""
+    parts = [chunk.strip() for chunk in re.split(r"\n{2,}", reply or "") if chunk.strip()]
+    return parts or ([reply.strip()] if reply.strip() else [])
 
 
 def apply_result(
@@ -237,78 +258,111 @@ def apply_result(
     text: str = "",
     now: datetime | None = None,
 ) -> FlowResult:
-    """把模型输出落成状态。副作用（时间、地点）由代码算，不信任模型。"""
+    """把模型输出落成状态。副作用（时间、地点、多段文本）由代码算，不信任模型。"""
     slots: dict[str, Any] = state.setdefault("slots", {})
     slots.update(_clean_slots(data.get("slots")))
     # 档案沿用同一份槽位，只是来源不同（模型单独给的 profile 对象）
     slots.update(_clean_profile(data.get("profile")))
+    when = next_interview(now)
 
     stage = str(data.get("stage") or state.get("stage") or STAGE_ASK_CITY)
     if stage not in ALLOWED_STAGES:
         stage = str(state.get("stage") or STAGE_ASK_CITY)
 
-    reply = str(data.get("reply") or "").strip()
+    # kb 只是插问标签，不落成终态
+    if stage == STAGE_KB:
+        stage = str(state.get("stage") or STAGE_ASK_INTERVIEW)
+
+    # 一拿到城市，工作信息就由代码发（多段），模型的措辞在这轮不采用：
+    # 工价/班次一个字都不能错，让模型复述等于把事故概率交给运气。
+    if slots.get("city") and not slots.get("interview_offer_sent"):
+        slots["interview_offer_sent"] = True
+        state["stage"] = STAGE_ASK_INTERVIEW
+        return FlowResult(
+            reply="",
+            parts=send_info_parts(slots, when),
+            stage=STAGE_ASK_INTERVIEW,
+            slots=slots,
+        )
+
     action = data.get("action")
-    action = action if action in (ACTION_BOOK, ACTION_HANDOFF) else None
+    action = action if action in (ACTION_BOOK, ACTION_GAVE_UP, ACTION_HANDOFF) else None
     finished = bool(data.get("finished")) or stage == STAGE_DONE
 
-    # 约面试必须先问过「方便吗」。模型拿到记录就直接宣布约好，
-    # 客户下一句「可以」会撞在已结束的状态上收不到欢迎语。
-    if action == ACTION_BOOK and str(state.get("stage") or "") != STAGE_CONFIRM:
-        action = None
-        stage, finished = STAGE_CONFIRM, False
+    # 档案兜底：模型嘴上说约好了但没给姓名手机，按 collect 处理
+    if stage in (STAGE_COLLECT, STAGE_DONE) and not slots.get("booked"):
+        slots["interview_agreed"] = True
 
-    # 护栏：槽位没齐，不许往后跳。模型想跳就按回该停的阶段，
-    # 只有**被按回**的时候才补一句缺失的提问，否则会变成每句都复读。
+    # 护栏：槽位没齐，不许往后跳
+    requested = stage
     ceiling = _max_stage(slots)
-    clamped = action is None and stage != ceiling
+    clamped = _STAGE_ORDER.get(stage, 0) > _STAGE_ORDER[ceiling]
     if clamped:
         stage, finished = ceiling, False
 
-    if action == ACTION_BOOK:
-        if _max_stage(slots) != STAGE_CONFIRM:
+    if action == ACTION_GAVE_UP:
+        slots["recruit_status"] = "disqualified"
+        stage, finished = STAGE_DONE, True
+    elif action == ACTION_HANDOFF:
+        # 交人工：结束自动流程，但不写面试时间，别让客户以为约上了
+        stage, finished = STAGE_DONE, True
+    elif action == ACTION_BOOK:
+        if not (slots.get("name") and slots.get("phone")):
             action = None
-            stage = _max_stage(slots)
-            finished = False
+            stage, finished = STAGE_COLLECT, False
         else:
-            when = next_noon(now)
             slots["interview_at"] = when.isoformat()
+            slots["interview_window"] = INTERVIEW_WINDOW
             slots["interview_place"] = _job_of(slots).get("place", "")
+            slots["interview_agreed"] = True
             slots["booked"] = True
             stage, finished = STAGE_DONE, True
-    elif action == ACTION_HANDOFF:
-        slots.pop("interview_at", None)
-        stage, finished = STAGE_DONE, True
+
+    # 约面试必须走到 collect 且姓名手机齐了，否则这单不算成
+    if action == ACTION_BOOK and not slots.get("booked"):
+        action = None
+        stage, finished = STAGE_COLLECT, False
 
     if stage == STAGE_DONE and not finished:
         finished = True
 
+    reply = str(data.get("reply") or "").strip()
+    parts = _split_parts(reply)
+
     # 兜底：模型编了工价 / 给了空话，退回确定性话术（在副本上跑，别污染真状态）
-    if not reply or not _money_guard(reply, slots):
-        safe = fallback_step(copy.deepcopy(state), text, now=now)
-        state["stage"] = stage
+    if not parts or not _money_guard(reply, slots):
+        probe = copy.deepcopy(state)
+        probe["stage"] = stage
+        probe["slots"] = dict(slots)
+        safe = fallback_step(probe, text, now=now)
+        slots.update(safe.slots)
+        state["stage"] = safe.stage
         return FlowResult(
-            reply=safe.reply or reply,
-            stage=stage,
+            reply="",
+            parts=safe.parts,
+            stage=safe.stage,
             slots=slots,
-            finished=finished,
-            action=action,
+            finished=safe.finished,
+            action=safe.action or action,
+            unknown_question=safe.unknown_question,
         )
 
     # 只有被护栏按回阶段时，才补一句缺失的提问（回复里已经问到就不加）
     need = _QUESTION.get(stage)
-    if clamped and need and not finished:
-        asked = {
-            STAGE_ASK_CITY: ("城市",),
-            STAGE_ASK_GENDER: ("男", "女"),
-            STAGE_ASK_RECORD: ("记录",),
-            STAGE_CONFIRM: ("方便", "约", "明天", "点"),
-        }.get(stage, ())
+    if need and clamped and requested != stage and not finished:
+        asked = _ASKED_HINTS.get(stage, ())
         if not any(word in reply for word in asked):
-            reply = f"{reply}\n{need}" if reply else need
+            parts.append(need)
 
     state["stage"] = stage
-    return FlowResult(reply=reply, stage=stage, slots=slots, finished=finished, action=action)
+    return FlowResult(
+        reply="",
+        parts=parts,
+        stage=stage,
+        slots=slots,
+        finished=finished,
+        action=action,
+    )
 
 
 async def a_step(
@@ -316,10 +370,13 @@ async def a_step(
     text: str,
     provider: LLMProvider | None,
     now: datetime | None = None,
+    kb_answer: str | None = None,
 ) -> FlowResult:
     """一个 turn：模型读懂 + 回话；失败就退到确定性状态机。"""
+    stage = str(state.get("stage") or STAGE_ASK_CITY)
+
     # 已约好（done）就不再叫模型：省一次调用，也避免它把状态改回去
-    if str(state.get("stage")) == STAGE_DONE or (state.get("slots") or {}).get("booked"):
+    if stage == STAGE_DONE or (state.get("slots") or {}).get("booked"):
         return FlowResult(
             reply="",
             stage=STAGE_DONE,
@@ -327,8 +384,15 @@ async def a_step(
             finished=True,
         )
 
+    # 插问交给确定性分支：命中就回知识库原话，没命中就兜底 + 记未知问题。
+    # 这类问题让模型自由发挥，最容易编出「体检费厂里全报」这种要赔钱的话。
+    if stage in (STAGE_ASK_INTERVIEW, STAGE_COLLECT) and (
+        kb_answer or looks_like_question(text)
+    ):
+        return fallback_step(state, text, now=now, kb_answer=kb_answer)
+
     if provider is None:
-        return fallback_step(state, text, now=now)
+        return fallback_step(state, text, now=now, kb_answer=kb_answer)
 
     try:
         raw = await provider.complete(
@@ -336,7 +400,7 @@ async def a_step(
         )
         data = _parse_json(raw)
     except Exception:  # noqa: BLE001  模型超时/返回乱码，不能让客户收不到话
-        return fallback_step(state, text, now=now)
+        return fallback_step(state, text, now=now, kb_answer=kb_answer)
 
     return apply_result(state, data, text, now=now)
 
