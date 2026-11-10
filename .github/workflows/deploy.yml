@@ -18,6 +18,10 @@ permissions:
 
 jobs:
   test:
+    env:
+      # Python's Windows runner defaults to a legacy code page; the test suite
+      # intentionally exercises Chinese replies and must emit them as UTF-8.
+      PYTHONUTF8: "1"
     strategy:
       fail-fast: false
       matrix:
