@@ -175,7 +175,7 @@ def _parse_json(raw: str) -> dict[str, Any]:
     return data
 
 
-_WANTS_MORE = re.compile(r"别的|其他|其它|换一|换家|还有没有|多几个")
+_WANTS_MORE = re.compile(r"别的|其他|其它|换一|换家|还有|多几个|几个厂|哪些厂")
 
 
 def _list_other_jobs(state: dict[str, Any], now: datetime | None = None) -> FlowResult:
