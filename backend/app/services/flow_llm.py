@@ -36,8 +36,10 @@ from .flow_engine import (
     STAGE_KB,
     STAGE_SEND_INFO,
     FlowResult,
+    jobs_for_city,
     looks_like_question,
     next_interview,
+    remote_job_cities,
     send_info_parts,
     step as fallback_step,
 )
@@ -118,12 +120,14 @@ action 只能是 null / "book_interview" / "gave_up"：
 
 
 def _jobs_brief() -> str:
+    cities = sorted(set(DEMO_JOBS) | set(remote_job_cities()))
     lines: list[str] = []
-    for city, jobs in DEMO_JOBS.items():
-        for index, job in enumerate(jobs):
+    for city in cities:
+        for index, job in enumerate(jobs_for_city(city)):
             lines.append(
-                f"- [{city}#{index}] {job['title']}｜{job['place']}｜{job['pay']}"
-                f"｜{job['hours']}｜{job['age']}｜{job['welfare']}"
+                f"- [{city}#{index}] {job.get('job_title', '')}｜{job.get('place', '')}"
+                f"｜{job.get('wage_text', '')}｜{job.get('hours_text', '')}"
+                f"｜{job.get('age_text', '')}｜{job.get('welfare_text', '')}"
             )
     return "\n".join(lines)
 
@@ -172,7 +176,7 @@ def _parse_json(raw: str) -> dict[str, Any]:
 
 
 def _job_of(slots: dict[str, Any]) -> dict[str, str]:
-    jobs = DEMO_JOBS.get(str(slots.get("city") or ""), [])
+    jobs = jobs_for_city(str(slots.get("city") or ""))
     if not jobs:
         return {}
     index = int(slots.get("job_index") or 0)
@@ -182,7 +186,8 @@ def _job_of(slots: dict[str, Any]) -> dict[str, str]:
 def _money_guard(reply: str, slots: dict[str, Any]) -> bool:
     """回复里出现的「N 元」必须能在岗位数据里找到，防止模型编工价。"""
     allowed = " ".join(
-        f"{job['pay']} {job['welfare']}" for job in DEMO_JOBS.get(str(slots.get("city") or ""), [])
+        f"{job.get('wage_text', '')} {job.get('welfare_text', '')}"
+        for job in jobs_for_city(str(slots.get("city") or ""))
     )
     for number in re.findall(r"\d+(?:\.\d+)?\s*元", reply):
         if number.replace(" ", "") not in allowed.replace(" ", ""):

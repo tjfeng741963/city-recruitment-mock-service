@@ -58,6 +58,29 @@
   color: var(--ink-3);
 }
 
+/* 设备话术：占位符高亮 + 筛选行 */
+.kn-ph {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--fill-2, rgba(0, 0, 0, 0.06));
+  color: var(--accent, inherit);
+  font-size: var(--t-footnote);
+  font-family: inherit;
+}
+
+.kn-toolbar-filters {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--s-2);
+  flex: 1;
+  min-width: 280px;
+  flex-wrap: wrap;
+}
+
+.kn-toolbar-filters .ui-field {
+  width: 220px;
+}
+
 .kn-row-actions {
   display: inline-flex;
   gap: var(--s-1);

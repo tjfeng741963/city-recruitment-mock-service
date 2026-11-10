@@ -143,6 +143,21 @@ class BridgeClient:
             {"state": state or "offline", "account_id": (account_id or "")[:128]},
         )
 
+    def fetch_config(self, device_code: str = "") -> dict | None:
+        """GET /api/v1/bridge/devices/{code}/config：远端运行参数 + 设备话术。
+
+        鉴权与其他桥接接口一致（Bearer bridge_token），超时沿用 BRIDGE_TIMEOUT(5s)。
+        任何失败（网络/HTTP/空响应）都返回 None，由调用方用本地缓存兜底，绝不抛出。
+        """
+        code = quote((device_code or self.device_code).strip(), safe="")
+        if not code:
+            return None
+        try:
+            res = self._request("GET", f"/api/v1/bridge/devices/{code}/config")
+        except Exception:  # noqa: BLE001
+            return None
+        return res if isinstance(res, dict) and res else None
+
     def inbound(self, event_id: str, contact_id: str, content: str, nickname: str = "") -> dict:
         """POST /api/v1/bridge/devices/{device_code}/inbound（入站消息上报）。
 

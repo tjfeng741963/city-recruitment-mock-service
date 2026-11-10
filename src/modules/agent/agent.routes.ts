@@ -331,4 +331,45 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     const start = new Date(today.getTime() - 29 * 86_400_000).toISOString().slice(0, 10);
     return serializeMetrics({ start_date: start, end_date: end, items: [] });
   });
+
+  // 设备话术（契约 docs/对齐-配置分发与按设备话术.md §2）：管理端维护，
+  // 经 GET /bridge/devices/:code/config 下发给客户端。POST 按
+  // (device_code, stage, city) upsert——库上有 UNIQUE 约束兜底。
+  const deviceScriptsRoutes = "/api/v1/agent/device-scripts";
+  const scriptField = (body: Record<string, unknown>, key: string, max: number) =>
+    typeof body[key] === "string" && String(body[key]).length <= max ? String(body[key]) : "";
+  app.get<{ Querystring: Record<string, string> }>(deviceScriptsRoutes, async (request) => {
+    const filters: string[] = [];
+    const args: string[] = [];
+    for (const key of ["device_code", "stage", "city"] as const) {
+      const value = (request.query?.[key] ?? "").trim();
+      if (value) { filters.push(`${key}=?`); args.push(value); }
+    }
+    const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+    return { items: db.prepare(`SELECT * FROM device_scripts ${where} ORDER BY id DESC`).all(...args) };
+  });
+  app.post<{ Body: Record<string, unknown> }>(deviceScriptsRoutes, async (request, reply) => {
+    const body = request.body ?? {};
+    const deviceCode = scriptField(body, "device_code", 64);
+    if (!deviceCode) return reply.code(422).send({ detail: "device_code required" });
+    const stage = scriptField(body, "stage", 64) || "send_info";
+    if (!["ask_city", "send_info", "ask_interview", "collect", "done"].includes(stage)) {
+      return reply.code(422).send({ detail: "Invalid stage" });
+    }
+    const city = scriptField(body, "city", 64);
+    const title = scriptField(body, "title", 200);
+    const content = scriptField(body, "content", 20000);
+    const status = body.status === "disabled" ? "disabled" : "enabled";
+    const now = new Date().toISOString();
+    db.prepare(`INSERT INTO device_scripts(device_code,city,stage,title,content,status,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?)
+      ON CONFLICT(device_code,stage,city) DO UPDATE SET
+        title=excluded.title, content=excluded.content, status=excluded.status, updated_at=excluded.updated_at`)
+      .run(deviceCode, city, stage, title, content, status, now, now);
+    return db.prepare("SELECT * FROM device_scripts WHERE device_code=? AND stage=? AND city=?").get(deviceCode, stage, city);
+  });
+  app.delete<{ Params: { id: string } }>(`${deviceScriptsRoutes}/:id`, async (request, reply) => {
+    const result = db.prepare("DELETE FROM device_scripts WHERE id=?").run(Number(request.params.id));
+    return result.changes ? { ok: true } : reply.code(404).send({ detail: "Not Found" });
+  });
 }

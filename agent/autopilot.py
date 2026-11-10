@@ -58,6 +58,7 @@ import login_watch  # noqa: E402
 import reply_store as rlog  # noqa: E402
 import client as agent_client  # noqa: E402
 import register as agent_register  # noqa: E402
+import remote_config as remote_cfg  # noqa: E402
 
 # 剪贴板兼容 + 长消息解析 + 进会话后点输入框。
 # 抢前台仍用 core/win.py 原版（ShowWindow + AttachThreadInput）；compat 里
@@ -304,6 +305,8 @@ class Reporter:
         interval: float = REPORT_INTERVAL,
         device_code: str = "",
         bridge: agent_client.BridgeClient | None = None,
+        cfg: dict | None = None,
+        remote_config: "remote_cfg.RemoteConfig | None" = None,
     ) -> None:
         self.api = api
         self.store = store
@@ -311,6 +314,9 @@ class Reporter:
         self.interval = interval
         # Node 桥接客户端（4222）；None 表示未配置，完全跳过桥接上报
         self.bridge = bridge
+        # 远端配置热更：cfg 是主循环共享的同一份字典，改 interval/cooldown 即时生效
+        self.cfg = cfg
+        self.remote_config = remote_config
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._last_at = 0.0
@@ -461,6 +467,12 @@ class Reporter:
             self._send_bridge(heartbeat.get("wecom_state") or "unknown")
         except Exception as exc:  # noqa: BLE001
             log(f"[桥接] 异常（忽略）：{agent_client.describe_error(exc)}")
+        # 远端配置：每个心跳周期比对一次 version，变了重拉并热更运行参数
+        try:
+            if self.remote_config is not None:
+                self.remote_config.sync(self.cfg)
+        except Exception as exc:  # noqa: BLE001
+            log(f"[远端配置] 异常（忽略）：{agent_client.describe_error(exc)}")
         # Persist bridge work before the primary ingest can advance the shared cursor.
         try:
             if not self._queue_bridge_messages(batch):
@@ -849,6 +861,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 continue
         else:
             text, scene = pick_reply(cid, cfg)
+            parts = [text]
 
         wait = cfg["cooldown"] - (time.time() - _last_reply_at)
         if wait > 0:
@@ -1208,7 +1221,7 @@ def _make_reporter(cfg: dict, store: Store) -> Reporter | None:
     code = resolve_device_code(cfg)
     api = agent_client.AgentClient(server, token, device_code=code)
     bridge = _make_bridge(cfg, code)
-    rep = Reporter(api, store, device_code=code, bridge=bridge)
+    rep = Reporter(api, store, device_code=code, bridge=bridge, cfg=cfg)
     if rep.device_code:
         log(f"[心跳] 目标 {server} / device_code={rep.device_code}")
     else:
@@ -1453,6 +1466,16 @@ def main() -> int:
         log(f"有 {leftover} 条待补发（含上次失败/未发的），本轮会处理")
 
     reporter = _make_reporter(cfg, store)
+
+    # 远端配置（Node 4222 下发）：启动拉一次，成功则合并运行参数并缓存
+    # config.remote.json；拉不到时 RemoteConfig 内部用缓存兜底，只记一行日志。
+    # cfg 是全局共享字典，interval/cooldown 在主循环下一轮即时生效。
+    remote_client = reporter.bridge if reporter is not None else _make_bridge(cfg, resolve_device_code(cfg))
+    if remote_client is not None:
+        remote = remote_cfg.RemoteConfig(remote_client, log_fn=log)
+        remote.sync(cfg)
+        if reporter is not None:
+            reporter.remote_config = remote
 
     if not args.watch:
         wecom_state = detect_wecom_state()

@@ -65,6 +65,41 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
     if (req.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin required" });
     return { device_code: req.params.code, device_token: store.pair(req.params.code) };
   });
+  // 配置下发（契约 docs/对齐-配置分发与按设备话术.md §1）：运行参数来自
+  // agent_devices.data_json，话术来自 device_scripts；version = 两者 updated_at
+  // 取较新者，客户端只认字符串不等。缺省参数与「无数据给空 version」见验收。
+  const stampOf = (value: string | null | undefined): number => {
+    if (!value) return 0;
+    // agent_devices.updated_at 是 SQLite CURRENT_TIMESTAMP（UTC 无时区标记），
+    // device_scripts.updated_at 是 JS ISO；统一补 Z 再比，避免本地时区偏差。
+    const normalized = value.includes("T") ? value : `${value.replace(" ", "T")}Z`;
+    const parsed = Date.parse(normalized);
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+  const positive = (value: unknown, fallback: number) =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : fallback;
+  app.get<{ Params: { code: string } }>("/api/v1/bridge/devices/:code/config", async (req, reply) => {
+    const code = req.params.code;
+    const token = (req.headers.authorization ?? "").replace(/^Bearer /, "");
+    if (!store.authenticate(code, token)) return reply.code(401).send({ detail: "Invalid device token" });
+    if (!store.enabled(code)) return reply.code(403).send({ detail: "Device disabled" });
+    const device = db.prepare("SELECT data_json,updated_at FROM agent_devices WHERE json_extract(data_json,'$.device_code')=?")
+      .get(code) as { data_json: string; updated_at: string | null } | undefined;
+    if (!device) return reply.code(404).send({ detail: "Device not found" });
+    let params: Record<string, unknown> = {};
+    try { params = JSON.parse(device.data_json || "{}") as Record<string, unknown>; } catch { params = {}; }
+    const scripts = db.prepare("SELECT stage,city,title,content FROM device_scripts WHERE device_code=? AND status='enabled' ORDER BY id")
+      .all(code) as Array<{ stage: string; city: string; title: string; content: string }>;
+    const scriptUpdated = (db.prepare("SELECT MAX(updated_at) AS at FROM device_scripts WHERE device_code=?").get(code) as { at: string | null }).at;
+    const newer = stampOf(scriptUpdated) > stampOf(device.updated_at) ? (scriptUpdated ?? "") : (device.updated_at ?? "");
+    return {
+      version: newer,
+      interval_seconds: positive(params.interval_seconds, 20),
+      cooldown: positive(params.cooldown, 8),
+      merge_delay_seconds: positive(params.merge_delay_seconds, 0),
+      scripts,
+    };
+  });
   app.get<{ Params: { code: string } }>("/api/v1/bridge/devices/:code", async (req, reply) => {
     if (!canAccessDevice(getUserScope(db, req.auth!), req.params.code)) return reply.code(403).send({ detail: "Device scope required" });
     store.expireClaims(req.params.code);

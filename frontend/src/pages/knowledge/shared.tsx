@@ -2,11 +2,12 @@ import { useEffect, useState, type KeyboardEvent } from "react";
 import { ApiError } from "../../api/client";
 import { Button, FieldShell, Pagination, Select, Tag, describedByFor } from "@ui";
 
-export type KnowledgeTab = "items" | "scripts" | "unknown" | "rules";
+export type KnowledgeTab = "items" | "scripts" | "device-scripts" | "unknown" | "rules";
 
 const TABS: Array<[KnowledgeTab, string, string]> = [
   ["items", "知识条目", "/knowledge"],
   ["scripts", "话术库", "/scripts"],
+  ["device-scripts", "设备话术", "/device-scripts"],
   ["unknown", "未知问题", "/unknown-questions"],
   ["rules", "回复规则", "/agent-rules"],
 ];

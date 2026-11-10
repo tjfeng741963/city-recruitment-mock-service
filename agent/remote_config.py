@@ -1,0 +1,141 @@
+"""远端配置（Node 4222 下发）：拉取、合并、缓存、version 热更。
+
+契约：docs/对齐-配置分发与按设备话术.md §1/§4。
+- 只依赖标准库（根 tests/ 的 pytest 环境没有 pywin32，所以不从 autopilot 拆回来）；
+- 远端有就用远端，本地 config.json 兜底；
+- 失败静默：拉不到就用缓存/本地，只在状态变化时打一行日志，不刷屏。
+"""
+
+from __future__ import annotations
+
+import json
+import math
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+REMOTE_CONFIG_CACHE = ROOT / "config.remote.json"
+
+# 远端键 → 本地 cfg 键（interval/cooldown 即时生效：主循环每轮读 cfg 字典）
+REMOTE_PARAM_KEYS = {
+    "interval_seconds": "interval",
+    "cooldown": "cooldown",
+    "merge_delay_seconds": "merge_delay",
+}
+
+# 全量话术存内存；发送侧（brain/flow）按 device+stage+city 匹配
+_device_scripts: list[dict] = []
+
+
+def device_scripts() -> list[dict]:
+    """当前生效的设备话术（拉不到远端时为 config.remote.json 兜底值，可能为空）。"""
+    return list(_device_scripts)
+
+
+def _valid_seconds(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if math.isfinite(value) and value >= 0 else None
+
+
+def apply_remote_params(cfg: dict, remote: dict) -> list[str]:
+    """远端有的键覆盖本地，返回发生变化的本地键名。
+
+    只动运行参数；interval 不接受 0（与 load_config 的校验一致，0 会死循环）。
+    """
+    changed: list[str] = []
+    for remote_key, local_key in REMOTE_PARAM_KEYS.items():
+        value = _valid_seconds(remote.get(remote_key))
+        if value is None or (local_key == "interval" and value <= 0):
+            continue
+        if cfg.get(local_key) != value:
+            cfg[local_key] = value
+            changed.append(local_key)
+    return changed
+
+
+def load_remote_cache(path: Path | None = None) -> dict:
+    cache_path = path if path is not None else REMOTE_CONFIG_CACHE
+    try:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_remote_cache(data: dict, path: Path | None = None) -> None:
+    cache_path = path if path is not None else REMOTE_CONFIG_CACHE
+    tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(cache_path)
+
+
+class RemoteConfig:
+    """持有远端配置（version + 运行参数 + scripts），心跳时比对 version 热更。
+
+    client 只要求有 fetch_config() -> dict | None（BridgeClient 满足；
+    测试里注入假对象）。缓存 config.remote.json 含 version + scripts（外加
+    运行参数），重启后即使 version 没变也会把缓存参数并回 cfg。
+    """
+
+    def __init__(self, client, cache_path: Path | None = None, log_fn=None) -> None:
+        self.client = client
+        self.cache_path = Path(cache_path) if cache_path is not None else REMOTE_CONFIG_CACHE
+        self.log_fn = log_fn or (lambda msg: None)
+        self.version = ""
+        self.scripts: list[dict] = []
+        self.params: dict = {}
+        cached = load_remote_cache(self.cache_path)
+        if cached:
+            self.version = str(cached.get("version") or "")
+            self.scripts = [s for s in (cached.get("scripts") or []) if isinstance(s, dict)]
+            self.params = {
+                key: value
+                for key, value in cached.items()
+                if key in REMOTE_PARAM_KEYS and _valid_seconds(value) is not None
+            }
+            global _device_scripts
+            _device_scripts = list(self.scripts)
+        self._last_ok = True  # 有缓存可兜底就不算失败态，避免启动即报错
+
+    def _fetch(self) -> dict | None:
+        try:
+            remote = self.client.fetch_config()
+        except Exception:  # noqa: BLE001
+            remote = None
+        return remote if isinstance(remote, dict) and remote else None
+
+    def sync(self, cfg: dict | None = None) -> bool:
+        """心跳周期调用：比对 version，变了才热更参数/话术并写缓存。
+
+        成功 True；拉不到返回 False（cfg 与缓存都不动，用兜底值）。
+        """
+        remote = self._fetch()
+        if remote is None:
+            if self._last_ok:
+                self._last_ok = False
+                self.log_fn("[远端配置] 拉取失败（忽略，用本地/缓存兜底）")
+            return False
+        self._last_ok = True
+        version = str(remote.get("version") or "")
+        if version != self.version:
+            scripts = remote.get("scripts")
+            self.scripts = [s for s in scripts if isinstance(s, dict)] if isinstance(scripts, list) else []
+            self.params = {
+                key: float(value)
+                for key, value in remote.items()
+                if key in REMOTE_PARAM_KEYS and _valid_seconds(value) is not None
+            }
+            self.version = version
+            global _device_scripts
+            _device_scripts = list(self.scripts)
+            try:
+                save_remote_cache({"version": version, **self.params, "scripts": self.scripts}, self.cache_path)
+            except OSError as exc:
+                self.log_fn(f"[远端配置] 缓存写盘失败（忽略）：{exc}")
+            changed = apply_remote_params(cfg, remote) if cfg is not None else []
+            detail = f"，热更 {', '.join(changed)}" if changed else ""
+            self.log_fn(f"[远端配置] version={version or '(空)'} scripts={len(self.scripts)} 条{detail}")
+        elif cfg is not None and self.params:
+            # 重启后 version 未变：config.json 可能还是旧值，把缓存参数并回去
+            apply_remote_params(cfg, self.params)
+        return True

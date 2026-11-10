@@ -20,7 +20,6 @@ from .flow_engine import (
     ACTION_BOOK,
     ACTION_GAVE_UP,
     ACTION_HANDOFF,
-    DEMO_JOBS,
     INTERVIEW_WINDOW,
     STAGE_ASK_CITY,
     STAGE_ASK_INTERVIEW,
@@ -28,6 +27,7 @@ from .flow_engine import (
     STAGE_DONE,
     STAGE_KB,
     STAGE_SEND_INFO,
+    jobs_for_city,
 )
 
 DEFAULT_URL = "http://127.0.0.1:4222/api/v1/agent/profile"
@@ -47,7 +47,7 @@ _STAGE_MAP = {
 
 
 def _job_of(slots: dict[str, Any]) -> dict[str, str]:
-    jobs = DEMO_JOBS.get(str(slots.get("city") or ""), [])
+    jobs = jobs_for_city(str(slots.get("city") or ""))
     if not jobs:
         return {}
     try:
@@ -87,7 +87,9 @@ def build_profile(
     """
     slots = slots or {}
     job = _job_of(slots)
-    title = job.get("title", "")
+    # 岗位字段统一为 4222 jobs 契约名：job_title 岗位（含工种）、factory_name 厂名
+    title = str(job.get("job_title") or "")
+    factory = str(job.get("factory_name") or "") or (title.split(" ")[0] if title else "")
     interview_date, interview_time = _date_time(slots.get("interview_at"))
     # 默认窗口是「09:00-11:00」，比 interview_at 的整点更准，优先用它
     window = str(slots.get("interview_window") or "").strip() or interview_time
@@ -101,9 +103,8 @@ def build_profile(
         "gender": str(slots.get("gender") or ""),
         "record": str(slots.get("record") or ""),
         "age": slots.get("age") if isinstance(slots.get("age"), int) else None,
-        # 岗位名带工种（「利口福食品厂 普工」），工厂名取前半截
         "job_title": title,
-        "factory_name": title.split(" ")[0] if title else "",
+        "factory_name": factory,
         "interview_date": interview_date,
         "interview_time": window,
         "notes": str(slots.get("notes") or ""),

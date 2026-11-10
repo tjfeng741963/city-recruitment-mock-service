@@ -11,16 +11,17 @@
     kb             任意阶段的插问，答完仍回到原阶段
 
 三条不能破的规矩：
-1. 工作信息只从 DEMO_JOBS 取，话术里不许出现数据里没有的工价
+1. 工作信息只从岗位数据取（4222 真实岗位优先，DEMO_JOBS 兜底），话术里不许出现数据里没有的工价
 2. 面试时间由代码算（默认次日 09:00-11:00），不听客户以外的人瞎说
 3. 客户拒绝面试就到此为止，不再追问
 
-演示数据在 DEMO_JOBS 里，接真实数据时替换它即可，其余逻辑不动。
+演示数据在 DEMO_JOBS 里；4222 有数据时由 api_flow 注入（set_remote_jobs），其余逻辑不动。
 """
 
 from __future__ import annotations
 
 import re
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -47,75 +48,86 @@ INTERVIEW_WINDOW = "09:00-11:00"
 PROFILE_KEYS = ("name", "phone", "province", "district", "age", "notes")
 
 # ── 演示数据：真实数据缺失，这里先编一套能跑通流程的 ──────────────────
+# 字段名与 4222 的 GET /api/v1/agent/jobs 契约保持一致，两套数据源共用一套取数逻辑：
+#   factory_name 厂名 / job_title 岗位（含工种）/ wage_text 工价 / hours_text 班次
+#   age_text 年龄 / welfare_text 吃住 / place 面试地点
 DEMO_JOBS: dict[str, list[dict[str, str]]] = {
     "广州": [
         {
-            "title": "利口福食品厂 普工",
+            "factory_name": "利口福食品厂",
+            "job_title": "利口福食品厂 普工",
+            "wage_text": "16 元/小时",
+            "hours_text": "两班倒，月休 2-4 天",
+            "age_text": "18-48 岁",
+            "welfare_text": "包吃包住",
             "place": "番禺南村员岗地铁站附近",
-            "pay": "16 元/小时",
-            "hours": "两班倒，月休 2-4 天",
-            "age": "18-48 岁",
-            "welfare": "包吃包住",
         },
         {
-            "title": "钟村电子厂 组装工",
+            "factory_name": "钟村电子厂",
+            "job_title": "钟村电子厂 组装工",
+            "wage_text": "18 元/小时",
+            "hours_text": "长白班，月休 4 天",
+            "age_text": "16-43 岁",
+            "welfare_text": "包吃，住宿补贴 200 元/月",
             "place": "番禺钟村工业区",
-            "pay": "18 元/小时",
-            "hours": "长白班，月休 4 天",
-            "age": "16-43 岁",
-            "welfare": "包吃，住宿补贴 200 元/月",
         },
     ],
     "深圳": [
         {
-            "title": "龙华电子厂 质检",
+            "factory_name": "龙华电子厂",
+            "job_title": "龙华电子厂 质检",
+            "wage_text": "20 元/小时",
+            "hours_text": "两班倒，月休 4 天",
+            "age_text": "18-45 岁",
+            "welfare_text": "包吃包住，满三个月奖励 500",
             "place": "龙华大浪街道",
-            "pay": "20 元/小时",
-            "hours": "两班倒，月休 4 天",
-            "age": "18-45 岁",
-            "welfare": "包吃包住，满三个月奖励 500",
         },
         {
-            "title": "宝安玩具厂 包装工",
+            "factory_name": "宝安玩具厂",
+            "job_title": "宝安玩具厂 包装工",
+            "wage_text": "18 元/小时",
+            "hours_text": "长白班，月休 4 天",
+            "age_text": "18-50 岁",
+            "welfare_text": "包住，饭补 260 元/月",
             "place": "宝安沙井街道",
-            "pay": "18 元/小时",
-            "hours": "长白班，月休 4 天",
-            "age": "18-50 岁",
-            "welfare": "包住，饭补 260 元/月",
         },
         {
-            "title": "龙岗物流园 分拣员",
+            "factory_name": "龙岗物流园",
+            "job_title": "龙岗物流园 分拣员",
+            "wage_text": "21 元/小时",
+            "hours_text": "夜班为主，月休 2 天",
+            "age_text": "20-45 岁",
+            "welfare_text": "包住，加班另算",
             "place": "龙岗布吉街道",
-            "pay": "21 元/小时",
-            "hours": "夜班为主，月休 2 天",
-            "age": "20-45 岁",
-            "welfare": "包住，加班另算",
         },
     ],
     "东莞": [
         {
-            "title": "长安五金厂 操作工",
+            "factory_name": "长安五金厂",
+            "job_title": "长安五金厂 操作工",
+            "wage_text": "19 元/小时",
+            "hours_text": "两班倒，月休 2 天",
+            "age_text": "18-50 岁",
+            "welfare_text": "包住，饭补 300 元/月",
             "place": "长安镇乌沙社区",
-            "pay": "19 元/小时",
-            "hours": "两班倒，月休 2 天",
-            "age": "18-50 岁",
-            "welfare": "包住，饭补 300 元/月",
         },
         {
-            "title": "虎门电子厂 组装工",
+            "factory_name": "虎门电子厂",
+            "job_title": "虎门电子厂 组装工",
+            "wage_text": "20 元/小时",
+            "hours_text": "两班倒，月休 4 天",
+            "age_text": "18-45 岁",
+            "welfare_text": "包吃包住，满勤奖 300",
             "place": "虎门镇白沙工业区",
-            "pay": "20 元/小时",
-            "hours": "两班倒，月休 4 天",
-            "age": "18-45 岁",
-            "welfare": "包吃包住，满勤奖 300",
         },
         {
-            "title": "厚街鞋厂 针车工",
+            "factory_name": "厚街鞋厂",
+            "job_title": "厚街鞋厂 针车工",
+            "wage_text": "18.5 元/小时",
+            "hours_text": "长白班，月休 4 天",
+            "age_text": "20-48 岁",
+            "welfare_text": "包住，计件另算",
             "place": "厚街镇汀山村",
-            "pay": "18.5 元/小时",
-            "hours": "长白班，月休 4 天",
-            "age": "20-48 岁",
-            "welfare": "包住，计件另算",
         },
     ],
 }
@@ -287,8 +299,31 @@ def day_label(when: datetime) -> str:
 
 
 # ── 话术 ──────────────────────────────────────────────
+# 本轮请求拿到的 4222 真实岗位（api_flow 注入），用 ContextVar 隔离并发请求。
+# 岗位数据源优先级：本轮远端岗位 → DEMO_JOBS。
+_REMOTE_JOBS: ContextVar[dict[str, list[dict[str, str]]]] = ContextVar(
+    "remote_jobs", default={}
+)
+
+
+def set_remote_jobs(jobs_by_city: dict[str, list[dict[str, str]]]) -> None:
+    """注入本轮可用的远端岗位（api_flow 在调引擎前调一次，无远端数据传空 dict）。"""
+    _REMOTE_JOBS.set(jobs_by_city or {})
+
+
+def jobs_for_city(city: str) -> list[dict[str, str]]:
+    """统一取岗位入口：远端优先，DEMO_JOBS 兜底。"""
+    city = str(city or "")
+    return _REMOTE_JOBS.get().get(city) or DEMO_JOBS.get(city, [])
+
+
+def remote_job_cities() -> list[str]:
+    """本轮注入了远端岗位的城市（给 LLM 简报合并用）。"""
+    return list(_REMOTE_JOBS.get().keys())
+
+
 def _jobs_of(slots: dict[str, Any]) -> list[dict[str, str]]:
-    return DEMO_JOBS.get(str(slots.get("city") or ""), [])
+    return jobs_for_city(str(slots.get("city") or ""))
 
 
 def _job_of(slots: dict[str, Any]) -> dict[str, str]:
@@ -306,7 +341,10 @@ def _city_ask(slots: dict[str, Any] | None = None) -> str:
 
 
 def _factory(job: dict[str, str]) -> str:
-    return job.get("title", "").split(" ")[0] if job.get("title") else ""
+    if job.get("factory_name"):
+        return str(job["factory_name"])
+    # 远端契约里 factory_name 必有；兜底从 job_title 拆（「长安五金厂 操作工」→ 前半截）
+    return str(job.get("job_title", "")).split(" ")[0]
 
 
 def send_info_parts(slots: dict[str, Any], when: datetime | None = None) -> list[str]:
@@ -318,13 +356,15 @@ def send_info_parts(slots: dict[str, Any], when: datetime | None = None) -> list
     if not job:
         return [_city_ask(slots)]
     day = day_label(when or next_interview())
+    title = str(job.get("job_title") or "")
+    kind = title.split(" ")[-1] if " " in title else title
     part1 = "\n".join(
         [
-            f"厂名：{_factory(job)}（{job.get('title', '').split(' ')[-1]}）",
-            f"工价：{job.get('pay', '')}",
-            f"班次：{job.get('hours', '')}",
-            f"年龄：{job.get('age', '')}",
-            f"吃住：{job.get('welfare', '')}",
+            f"厂名：{_factory(job)}（{kind}）",
+            f"工价：{job.get('wage_text', '')}",
+            f"班次：{job.get('hours_text', '')}",
+            f"年龄：{job.get('age_text', '')}",
+            f"吃住：{job.get('welfare_text', '')}",
         ]
     )
     part2 = f"面试地点：{job.get('place', '')}\n面试时间：{day}{INTERVIEW_WINDOW}"
@@ -383,6 +423,11 @@ def _absorb(slots: dict[str, Any], text: str, strict_name: bool = False) -> None
     age = extract_age(text)
     if age:
         slots["age"] = age
+
+
+def absorb_profile(slots: dict[str, Any], text: str, strict_name: bool = False) -> None:
+    """公开版档案抽取：config 话术命中时 api_flow 也要照常记客户顺口报的姓名电话。"""
+    _absorb(slots, text, strict_name=strict_name)
 
 
 def _enter_info(slots: dict[str, Any], when: datetime) -> FlowResult:
