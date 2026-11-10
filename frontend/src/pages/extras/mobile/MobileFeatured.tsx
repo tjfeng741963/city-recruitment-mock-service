@@ -32,7 +32,7 @@ function PickSheet({ city, max, onClose, onSaved }: { city: FeaturedCity; max: n
     setSaving(true);
     setFailure(null);
     try {
-      await mobileApi.setCityFeatured(city.city_name, picked);
+      await mobileApi.setCityFeatured(city.city_id, picked);
       toast(picked.length ? "已保存" : "已清空，恢复跟随公用主推");
       onSaved();
     } catch (err) {
@@ -116,7 +116,7 @@ export function MobileFeatured({ onBack }: { onBack: () => void }) {
         {cities?.map((c) => {
           const chosen = chosenPositions(c);
           return (
-            <article key={c.city_name} className="mx-card">
+            <article key={c.city_id} className="mx-card">
               <div className="mx-card-head">
                 <strong>{c.city_name}</strong>
                 <Badge tone={c.has_custom ? "accent" : "neutral"}>{c.has_custom ? "自定义" : "跟随公用"}</Badge>

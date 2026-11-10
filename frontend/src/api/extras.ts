@@ -216,6 +216,7 @@ export interface FeaturedPosition {
 }
 
 export interface FeaturedCity {
+  city_id: number;
   city_name: string;
   has_custom?: boolean;
   position_ids?: number[];
@@ -252,11 +253,12 @@ export const mobileApi = {
     // The old page sent images and videos through the image endpoint as well.
     return upload<{ url: string }>("/api/v1/upload/image", file);
   },
-  featuredCities() {
-    return request<{ cities?: FeaturedCity[]; max_featured?: number }>("/api/v1/recruiter-featured/cities");
+  async featuredCities() {
+    const result = await request<{ items?: FeaturedCity[]; cities?: FeaturedCity[]; max_featured?: number }>("/api/v1/recruiter-featured/cities");
+    return { cities: result.items ?? result.cities ?? [], max_featured: result.max_featured };
   },
-  setCityFeatured(cityName: string, positionIds: number[]) {
-    return request<unknown>(`/api/v1/recruiter-featured/cities/${encodeURIComponent(cityName)}`, {
+  setCityFeatured(cityId: number, positionIds: number[]) {
+    return request<unknown>(`/api/v1/recruiter-featured/cities/${cityId}`, {
       method: "PUT",
       body: JSON.stringify({ position_ids: positionIds }),
     });

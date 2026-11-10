@@ -53,6 +53,10 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
+    if (response.status === 401) {
+      setToken(null);
+      window.dispatchEvent(new Event("rea:unauthorized"));
+    }
     const detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail ?? body);
     throw new ApiError(response.status, detail);
   }
