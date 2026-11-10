@@ -28,7 +28,8 @@ class UserOut(BaseModel):
 
 
 class DeviceCreate(BaseModel):
-    device_code: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9\-_]*$")
+    # 允许大写：后台「新增设备」弹窗的默认提示就是 AG-001，用户会照抄。
+    device_code: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9\-_]*$")
     name: str = Field(default="", max_length=128)
 
 

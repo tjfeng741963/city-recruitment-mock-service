@@ -104,7 +104,7 @@ export interface StreamNotifier {
 const noop = () => {};
 
 function source(sourceEventId: string): string {
-  if (sourceEventId.startsWith("bridge-inbound:")) return "bridge";
+  if (sourceEventId.startsWith("bridge-inbound:") || sourceEventId.startsWith("bridge-outbound:")) return "bridge";
   if (sourceEventId.startsWith("manual-reply:")) return "manual";
   return "server";
 }

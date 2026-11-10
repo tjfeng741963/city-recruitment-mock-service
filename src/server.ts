@@ -22,6 +22,8 @@ import { registerPermissionRoutes } from "./modules/permissions/permission.route
 import { registerAdminRoutes } from "./modules/admin/admin.routes.js";
 import { registerDeviceBridgeRoutes } from "./modules/messaging/device-bridge.routes.js";
 import { registerStreamRoutes } from "./modules/agent/stream.routes.js";
+import { registerProfileRoutes } from "./modules/agent/profile.routes.js";
+import { registerFollowupRoutes } from "./modules/agent/followup.js";
 import { EventBus, createStreamNotifier } from "./modules/messaging/stream-events.js";
 import { registerWeComRoutes } from "./modules/wecom/wecom.routes.js";
 
@@ -35,7 +37,7 @@ declare module "fastify" {
  * Verified 2026-10-21 against http://47.107.245.246:8080 — these returned 200
  * with real payloads while every other contract returned 403.
  */
-const DEVICE_TOKEN_ROUTES = new Set(["heartbeat", "claim", "receipts", "inbound"].map(action => `POST /api/v1/bridge/devices/:code/${action}`));
+const DEVICE_TOKEN_ROUTES = new Set(["heartbeat", "claim", "receipts", "inbound", "outbound"].map(action => `POST /api/v1/bridge/devices/:code/${action}`));
 const PUBLIC_ROUTES = new Set([
   "POST /api/v1/auth/login",
   "GET /api/v1/agent/reminder-config",
@@ -43,6 +45,9 @@ const PUBLIC_ROUTES = new Set([
   "GET /api/v1/agent/report/account-summary",
   // External message bridges authenticate callbacks with the HMAC header.
   "POST /api/v1/webhooks/dify",
+  // 设备自注册：客户端首次启动没有 JWT，凭共享密钥换 token（方案 A）。
+  // 路由自己校验 X-Register-Key，未配置 REA_REGISTER_KEY 时返回 503。
+  "POST /api/v1/bridge/devices/:code/register",
   ...DEVICE_TOKEN_ROUTES,
   "GET /api/v1/channels/wecom-kf/callback",
   "POST /api/v1/channels/wecom-kf/callback",
@@ -51,6 +56,10 @@ const PUBLIC_ROUTES = new Set([
   // conversation even when the value is fake, with or without a bearer token.
   "PUT /api/v1/agent/conversations/:id/restart",
   "PUT /api/v1/agent/conversations/:id/reset-disqualified",
+  // 候选人档案：8090 服务间调用没有用户 JWT，改为路由内校验 X-Profile-Token
+  // （与 REA_PROFILE_TOKEN 常数时间比较）；带合法 Bearer 时仍按用户 token 放行。
+  "POST /api/v1/agent/profile",
+  "GET /api/v1/agent/profile",
   // EventSource cannot set headers: the JWT is a query parameter and the route
   // authenticates itself (401/403 instead of the header preHandler's 403).
   "GET /api/v1/agent/stream",
@@ -106,6 +115,8 @@ export function buildServer() {
   registerAgentRoutes(app, db, notifier);
   registerDeviceBridgeRoutes(app, db, notifier);
   registerStreamRoutes(app, db, events, auth);
+  registerProfileRoutes(app, db);
+  registerFollowupRoutes(app, db);
   registerWeComRoutes(app, db);
   registerActivationRoutes(app, db);
   registerRelationRoutes(app, db);

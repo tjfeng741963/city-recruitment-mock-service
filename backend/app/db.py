@@ -12,6 +12,7 @@ from sqlalchemy.pool import NullPool
 
 from . import models_kb  # noqa: F401  导入即注册 kb_* / tenant 表到 Base.metadata
 from . import models_lead  # noqa: F401  导入即注册 leads / lead_events 表
+from . import models_flow  # noqa: F401  导入即注册 flow_events 表（会话日志）
 from .models import Base, User
 from .models_kb import Tenant
 from .security import hash_password

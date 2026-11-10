@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
+import math
 import os
 import subprocess
 import sys
@@ -42,6 +43,8 @@ import traceback
 from ctypes import wintypes as wt
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
+from urllib.error import HTTPError
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
@@ -54,20 +57,23 @@ import compat  # noqa: E402
 import login_watch  # noqa: E402
 import reply_store as rlog  # noqa: E402
 import client as agent_client  # noqa: E402
+import register as agent_register  # noqa: E402
 
-# 只打两个补丁：剪贴板写入、进会话后点一下输入框。
-# 抢前台用 core/win.py 原版（ShowWindow + AttachThreadInput），
-# 自己加 Alt / 点标题栏的版本反而会把焦点带偏，实测必失败。
+# 剪贴板兼容 + 长消息解析 + 进会话后点输入框。
+# 抢前台仍用 core/win.py 原版（ShowWindow + AttachThreadInput）；compat 里
+# 自己加 Alt / 点标题栏的版本会把焦点带偏，实测必失败，所以不启用。
 compat.apply()
-compat.apply_click_input()
 compat.apply_pb_text()   # 长消息（>127 字节）的长度前缀不是合法 UTF-8，原解析会丢成空
+# 2026-11-07 实测：本版企业微信回车进会话后焦点不会自动落在输入框，
+# 后续 Ctrl+A/Delete/Ctrl+V 全落在别处，verify_input_box 永远读到哨兵，
+# 发送在「输入框校验」处中止。这个补丁本来就是为这个现象写的，之前被
+# test_autopilot_sender_baseline 冻结；现在解冻（只解这一个，不动动作序列）。
+compat.apply_click_input()
+# 单一比例点会打偏（会话列表宽度、窗口布局变化）：校验失败时换候选点重试。
+compat.apply_input_focus_retry()
 
 from wecom_io_core import send as core_send  # noqa: E402
 from wecom_io_core.store import Store  # noqa: E402
-
-# Ctrl+F 唤出搜索后，等搜索结果渲染完再回车。
-# 原包是 0.8s，本机实测经常抢跑（回车时结果还没出来），改为 2s。
-core_send.SEARCH_DELAY = 2.0
 
 # 企微自带的应用/系统会话，前缀命中就不回复
 SYSTEM_PREFIXES = (
@@ -83,12 +89,15 @@ SYSTEM_NAMES = (
 
 DEFAULTS = {
     "target": "all",
+    "data_dir": "",
     "reply_first": "1",
     "reply_next": "233",
     "interval": 3.0,
     "cooldown": 8.0,
     "backfill_hours": 1.0,   # 首次初始化时，只把最近 N 小时的消息当作待补发
     "brain": None,           # {"mode":"kb","base_url":...} 时走知识库，否则固定文本
+    "register_key": "",      # 空=关闭自注册；填了就在缺 token 时自动注册
+    "device_name": "",       # 注册时展示的名字，留空用 device_code
 }
 
 _last_reply_at = 0.0
@@ -98,6 +107,8 @@ _last_reply_at = 0.0
 # 保证任意时刻只有一个键鼠发送者。轮询按时间戳判断，不额外起线程。
 CLAIM_INTERVAL = 10.0
 _last_claim_at = 0.0
+_last_receipt_retry_at = 0.0
+RECEIPT_RETRY_INTERVAL = 10.0
 
 # ── 上报与心跳 ───────────────────────────────────────────────────────────────
 # 只做 HTTP，不产生任何键鼠事件。失败一律忽略，下一轮自然补。
@@ -317,6 +328,7 @@ class Reporter:
         self._cursor: dict[str, int] = {
             str(k): int(v) for k, v in (self._state.get("cursor") or {}).items()
         }
+        self._bridge_pending: dict[str, dict] = dict(self._state.get("bridge_pending") or {})
         # 首次没有游标时，只把最近 24 小时当作"新增"，避免把历史全灌一遍
         self._baseline = int(self._state.get("baseline_ts") or 0) or int(
             time.time() - REPORT_FIRST_WINDOW
@@ -330,11 +342,12 @@ class Reporter:
         except (OSError, ValueError):
             return {}
 
-    def _save(self) -> None:
+    def _save(self) -> bool:
         with self._lock:
             data = {
                 "device_code": self.device_code,
                 "cursor": dict(self._cursor),
+                "bridge_pending": dict(self._bridge_pending),
                 "baseline_ts": self._baseline,
                 "last_report_at": datetime.now(timezone.utc).isoformat(),
             }
@@ -342,8 +355,10 @@ class Reporter:
         try:
             tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
             tmp.replace(self.state_path)
+            return True
         except OSError as exc:
             log(f"[上报] 游标写盘失败（忽略）：{exc}")
+            return False
 
     # ---------- 对外入口 ----------
     def tick(self, wecom_state: str, queue_size: int, *, force: bool = False) -> None:
@@ -427,7 +442,7 @@ class Reporter:
                     "external_conversation_id": cid,
                     "external_msgid": str(m.get("id") or ""),
                     "direction": "outbound" if m.get("is_self") else "inbound",
-                    "content": (m.get("text") or "")[:4000],
+                    "content": (m.get("text") or "")[:20000],
                     "content_type": "text" if m.get("is_text") else f"type{m.get('type') or 0}",
                     "sent_at": _iso(ts),
                 }
@@ -446,14 +461,21 @@ class Reporter:
             self._send_bridge(heartbeat.get("wecom_state") or "unknown")
         except Exception as exc:  # noqa: BLE001
             log(f"[桥接] 异常（忽略）：{agent_client.describe_error(exc)}")
+        # Persist bridge work before the primary ingest can advance the shared cursor.
+        try:
+            if not self._queue_bridge_messages(batch):
+                return
+        except Exception as exc:  # noqa: BLE001
+            log(f"[桥接] pending persistence failed: {agent_client.describe_error(exc)}")
+            return
         try:
             self._send_ingest(batch)
         except Exception as exc:  # noqa: BLE001
             log(f"[上报] 异常（忽略）：{agent_client.describe_error(exc)}")
         try:
-            self._send_bridge_inbound(batch)
+            self._send_bridge_messages()
         except Exception as exc:  # noqa: BLE001
-            log(f"[桥接] inbound 异常（忽略）：{agent_client.describe_error(exc)}")
+            log(f"[桥接] messages 异常（忽略）：{agent_client.describe_error(exc)}")
 
     def _send_heartbeat(self, heartbeat: dict) -> None:
         if not self.device_code:
@@ -490,22 +512,22 @@ class Reporter:
         except Exception as exc:  # noqa: BLE001
             log(f"[桥接] 失败（忽略，不影响主心跳）：{agent_client.describe_error(exc)}")
 
-    def _send_bridge_inbound(self, batch: dict) -> None:
-        """把入站消息（is_self=False）同步给 Node 桥接（4222），供 4222 会话页实时展示。
+    def _bridge_destination(self) -> list[str]:
+        return [getattr(self.bridge, "base_url", ""), getattr(self.bridge, "device_code", self.device_code)]
 
-        红线：只发 HTTP；失败只打一行日志，绝不影响主心跳/主上报；
-        桥内按 event_id 去重，重复上报幂等；只发入站，出站（键鼠发的）不上报。
-        """
+    def _queue_bridge_messages(self, batch: dict) -> bool:
+        """Stage both directions durably, independently of the primary cursor."""
         bridge = self.bridge
         if bridge is None or not bridge.enabled:
-            return
+            return True
         names = {
             c.get("external_id"): (c.get("name") or "")
             for c in (batch.get("conversations") or [])
         }
-        sent = 0
+        destination = self._bridge_destination()
         for m in batch.get("messages") or []:
-            if m.get("direction") != "inbound":
+            direction = m.get("direction")
+            if direction not in ("inbound", "outbound"):
                 continue
             cid = (m.get("external_conversation_id") or "").strip()
             msg_id = str(m.get("external_msgid") or "").strip()
@@ -515,18 +537,41 @@ class Reporter:
             name = names.get(cid, "")
             if is_system_conv(cid, name):
                 continue  # 系统/官方会话不进 4222 会话页
+            event_id = f"{cid}:{msg_id}"
+            key = json.dumps([*destination, event_id], ensure_ascii=False)
+            with self._lock:
+                self._bridge_pending.setdefault(key, {
+                    "destination": destination,
+                    "direction": direction,
+                    "event": {"event_id": event_id, "contact_id": cid, "content": text, "nickname": name,
+                              "sent_at": m.get("sent_at") or ""},
+                })
+        return self._save() if self._bridge_pending else True
+
+    def _send_bridge_messages(self) -> None:
+        """Retry pending records; the bridge deduplicates stable event IDs."""
+        bridge = self.bridge
+        if bridge is None or not bridge.enabled:
+            return
+        destination = self._bridge_destination()
+        with self._lock:
+            pending = [
+                (key, item.get("direction", "inbound"), item["event"]) for key, item in self._bridge_pending.items()
+                if item["destination"] == destination
+            ][:REPORT_MAX_MESSAGES]
+        sent = 0
+        for key, direction, event in pending:
             try:
-                bridge.inbound(
-                    event_id=f"{cid}:{msg_id}",
-                    contact_id=cid,
-                    content=text,
-                    nickname=name,
-                )
+                bridge._request("POST", f"/api/v1/bridge/devices/{quote(bridge.device_code, safe='')}/{direction}", event)
+                with self._lock:
+                    self._bridge_pending.pop(key, None)
+                self._save()
                 sent += 1
             except Exception as exc:  # noqa: BLE001
-                log(f"[桥接] inbound {cid}:{msg_id} 失败（忽略）：{agent_client.describe_error(exc)}")
+                log(f"[桥接] {direction} {event['event_id']} 失败（忽略）：{agent_client.describe_error(exc)}; retry next cycle")
+                break
         if sent:
-            log(f"[桥接] inbound 上报 {sent} 条")
+            log(f"[桥接] messages 上报 {sent} 条")
 
     def _send_ingest(self, batch: dict) -> None:
         messages = batch.get("messages") or []
@@ -722,11 +767,24 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         return stats
 
     items = rlog.pending(include_failed=True)
+    # 每个会话选一条作为回复目标：优先「有文本」的最新一条。
+    # 企业微信在加好友、撤回、系统提示时会插入 type=1011 之类的空文本记录，
+    # 它们时间更晚；若只按时间取最新，真正要回的文本就被挤掉，知识库拿到
+    # 空字符串直接拒答（实测：Garbo_C 加好友，三条记录里只有第一条有文字）。
     newest: dict[str, dict] = {}
     for it in items:
         cid = it["conv_id"]
         cur = newest.get(cid)
-        if cur is None or int(it["msg_time"] or 0) >= int(cur["msg_time"] or 0):
+        if cur is None:
+            newest[cid] = it
+            continue
+        cur_has_text = bool((cur["in_text"] or "").strip())
+        it_has_text = bool((it["in_text"] or "").strip())
+        if it_has_text != cur_has_text:
+            if it_has_text:
+                newest[cid] = it
+            continue
+        if int(it["msg_time"] or 0) >= int(cur["msg_time"] or 0):
             newest[cid] = it
     for it in items:
         if newest[it["conv_id"]]["message_id"] != it["message_id"]:
@@ -756,18 +814,36 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             log(f"跳过 {cid}：会话没有可搜索的名字")
             continue
 
-        text, scene = pick_reply(cid, cfg)
-        if _brain is not None:
+        if _brain is not None or (cfg.get("brain") or {}).get("mode") in ("kb", "flow"):
             hint = (it["in_text"] or "").strip()
-            if hint:
-                res = _brain.reply(hint, build_history(store, cid))
-                if res["ok"]:
-                    text, scene = res["reply"], "知识库"
-                    log(f"    [brain] {res['detail']}")
-                else:
-                    log(f"    [brain] 未命中（{res['detail']}），回落固定文本 {text!r}")
-            else:
-                log(f"    [brain] 该消息没有文本（type={it['in_type']}），回落固定文本 {text!r}")
+            res = {"ok": False, "detail": "知识库未初始化"}
+            try:
+                if not hint:
+                    res = {"ok": False, "detail": f"消息没有文本（type={it['in_type']}）"}
+                elif _brain is not None:
+                    res = _brain.reply(hint, build_history(store, cid), session_key=cid)
+                # 流程走完（已约到面试）后不再自动回复，这条消息记为跳过
+                if res.get("skip"):
+                    if not dry:
+                        rlog.mark_skipped(mid, res.get("detail") or "流程已结束")
+                    stats["skipped"] += 1
+                    log(f"    [flow] {res.get('detail') or '流程已结束，不再回复'}")
+                    continue
+                text = res.get("reply")
+                if not res.get("ok") or not isinstance(text, str) or not text.strip():
+                    raise ValueError(res.get("detail") or "知识库返回空回复")
+                text, scene = text.strip(), res.get("scene") or "知识库"
+                log(f"    [brain] {res.get('detail', '')}")
+            except Exception as exc:  # noqa: BLE001
+                reason = f"知识库暂停，待人工处理：{type(exc).__name__}: {exc}"
+                if not dry:
+                    rlog.mark_held(mid, reason)
+                    _last_error = reason[:200]
+                stats["blocked"] += 1
+                log(f"    [brain] {reason}")
+                continue
+        else:
+            text, scene = pick_reply(cid, cfg)
 
         wait = cfg["cooldown"] - (time.time() - _last_reply_at)
         if wait > 0:
@@ -788,9 +864,13 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             continue
 
         try:
+            # 打开回读：verify_db=False 时只要按了回车就记 sent，发没发出去不知道
+            # （2026-11-07 实测：reply_log 记 sent，企微库里根本没有这条消息）。
+            # expect_id 锁死落点，防止回车落到别的会话上。
             result = core_send.send(
                 store, name, text,
-                verify_db=False,  # 回读在 core 里有 rowid 兼容问题，落库由下一轮扫描确认
+                expect_id=cid if str(cid).startswith(("S:", "R:")) else "",
+                verify_db=True,
                 log=lambda s: log(f"    {s}"),
             )
             if result["ok"]:
@@ -827,6 +907,53 @@ def _session_names(store: Store) -> set[str]:
     return {(item.get("name") or "").strip() for item in sessions if (item.get("name") or "").strip()}
 
 
+def _outbound_snapshot(store: Store, contact_id: str) -> dict[str, str] | None:
+    """Read the already decrypted database; never refresh or perform input."""
+    try:
+        me = store.self_id()
+        if not isinstance(me, str) or not me:
+            return None
+        return {
+            str(m["id"]): (m.get("text") or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+            for m in store.messages(contact_id, limit=100)
+            if str(m.get("sender_id")) == me and m.get("id")
+        }
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def flush_manual_receipts(bridge, *, force: bool = False) -> bool:
+    """Only retry HTTP receipts, including while WeCom is offline."""
+    global _last_receipt_retry_at, _last_error
+    try:
+        server, device = bridge.base_url, bridge.device_code
+        pending = rlog.pending_manual_receipts(server, device)
+        if not pending:
+            return True
+        if not force and time.time() - _last_receipt_retry_at < RECEIPT_RETRY_INTERVAL:
+            return False
+        _last_receipt_retry_at = time.time()
+        for item in pending:
+            try:
+                response = bridge.receipt(item["command_id"], item["lease_token"], item["status"], item["message_id"])
+                if response.get("ok") is not True:
+                    raise ValueError("Receipt response did not acknowledge success")
+                rlog.mark_manual_receipt(server, device, item["command_id"], item["lease_token"], "acked")
+                log(f"[回执] #{item['command_id'][:8]} {item['status']} 已确认")
+            except HTTPError as exc:
+                if exc.code in (409, 422):
+                    rlog.mark_manual_receipt(server, device, item["command_id"], item["lease_token"], "rejected", f"HTTP {exc.code}; manual review required")
+                    _last_error = f"回执冲突待核对：#{item['command_id'][:8]} HTTP {exc.code}"
+                    log(f"[回执] {_last_error}")
+                    continue
+                raise
+        return not bool(rlog.pending_manual_receipts(server, device, limit=1))
+    except Exception as exc:  # noqa: BLE001
+        _last_error = f"回执未确认：{agent_client.describe_error(exc)}"[:200]
+        log(f"[回执] {_last_error}；保留记录，稍后只补传回执")
+        return False
+
+
 def pump_commands(
     store: Store,
     cfg: dict,
@@ -841,18 +968,20 @@ def pump_commands(
     - 和 drain() 跑在同一个线程、同一轮里，天然互斥，不会同时抢键鼠；
     - 复用 `_last_reply_at` 冷却，人工与自动之间也留够间隔；
     - 只在企微 online 时领指令——离线领了只能失败，还会把指令锁 60 秒；
-    - 任何异常都只记日志并回执 failed，绝不影响主心跳/自动回复；
+    - 未发送的失败回执 failed，执行结果不明确回执 unknown，不自动重发；
     - 自动回复的判定逻辑（知识库、场景、合并）完全不改。
 
     安全护栏（11-05 事故后补）：键鼠发送靠「搜索会话名 → 回车 → 粘贴」，
     搜索不到目标时焦点会落回当前会话，消息会发给上一个聊天对象。
     所以发送前必须确认目标名在企微会话列表里且不是系统会话；
-    发送后再回读解密库，落点不是该 contact_id 就回执 failed。
+    发送后再回读解密库，落点不是该 contact_id 就回执 unknown，待人工核对。
     """
     global _last_reply_at, _last_error, _last_claim_at
     stats = {"claimed": 0, "sent": 0, "failed": 0}
 
     if dry or cfg.get("dry_run") or bridge is None or not getattr(bridge, "enabled", False):
+        return stats
+    if not flush_manual_receipts(bridge):
         return stats
     if wecom_state != "online":
         return stats
@@ -876,14 +1005,43 @@ def pump_commands(
     name = (command.get("nickname") or "").strip()
     if not cmd_id or not lease:
         return stats
+    try:
+        if not rlog.begin_manual_command(bridge.base_url, bridge.device_code, cmd_id, lease):
+            log(f"[指令] #{cmd_id[:8]} 已有执行记录，本轮不再发送")
+            return stats
+    except Exception as exc:  # noqa: BLE001
+        _last_error = f"人工指令记录写盘失败：{type(exc).__name__}"[:200]
+        log(f"[指令] {_last_error}；停止该条发送")
+        stats["failed"] += 1
+        return stats
     log(f"[指令] 人工发送 #{cmd_id[:8]} → {name or '(无昵称)'}：{content[:30]!r}")
 
     def receipt(status: str, message_id: str = "") -> None:
         try:
-            bridge.receipt(cmd_id, lease, status, message_id)
-            log(f"    回执 {status} 已上报")
+            rlog.finish_manual_command(bridge.base_url, bridge.device_code, cmd_id, lease, status, message_id)
         except Exception as exc:  # noqa: BLE001
-            log(f"    回执 {status} 失败（忽略）：{agent_client.describe_error(exc)}")
+            log(f"    回执 {status} 写盘失败，保留 unknown：{type(exc).__name__}")
+            return
+        flush_manual_receipts(bridge, force=True)
+
+    def stop_if_lease_invalid() -> bool:
+        global _last_error
+        deadline = command.get("lease_until")
+        try:
+            valid = type(deadline) in (int, float) and math.isfinite(deadline) and deadline > time.time() * 1000
+        except OverflowError:
+            valid = False
+        if valid:
+            return False
+        _last_error = "人工指令租约已过期或无效，停止发送并保留 unknown，请人工核对"
+        log(f"    {_last_error}")
+        receipt("unknown")
+        stats["failed"] += 1
+        return True
+
+    # Socket timeouts do not bound a streaming response's total duration.
+    if stop_if_lease_invalid():
+        return stats
 
     if not content or not name:
         log("    跳过：指令缺少昵称或内容")
@@ -917,13 +1075,21 @@ def pump_commands(
     if wait > 0:
         time.sleep(wait)
 
-    if not compat.wait_clipboard_writable(timeout=15):
+    if stop_if_lease_invalid():
+        return stats
+    clipboard_ready = compat.wait_clipboard_writable(timeout=15)
+    if stop_if_lease_invalid():
+        return stats
+    if not clipboard_ready:
         _last_error = "剪贴板被占用超过 15 秒"
         log("    失败：剪贴板被占用（向日葵同步？）")
         receipt("failed")
         stats["failed"] += 1
         return stats
 
+    before = _outbound_snapshot(store, contact_id)
+    if stop_if_lease_invalid():
+        return stats
     try:
         result = core_send.send(
             store, name, content,
@@ -937,21 +1103,33 @@ def pump_commands(
         _last_error = f"{type(exc).__name__}: {exc}"[:200]
         log(f"    发送异常：{type(exc).__name__}: {exc}")
         traceback.print_exc(limit=2)
-        receipt("failed")
+        receipt("unknown")
         stats["failed"] += 1
         return stats
 
     if result.get("ok"):
         _last_reply_at = time.time()
+        after = _outbound_snapshot(store, contact_id)
+        normalized = content.replace("\r\n", "\n").replace("\r", "\n").strip()
+        candidates = [mid for mid, text in (after or {}).items()
+                      if before is not None and mid not in before and text == normalized]
+        observed_cid = result.get("conversation_id") or ""
+        # Core may return ok after its legacy rowid readback fails; require stable ID evidence.
+        if (observed_cid and observed_cid != contact_id) or before is None or after is None or len(candidates) != 1:
+            _last_error = "人工发送未找到目标会话中唯一的新消息 ID，请核对实际落点，勿直接重发"
+            stats["failed"] += 1
+            log(f"    {_last_error}")
+            receipt("unknown")
+            return stats
         _last_error = ""
         stats["sent"] += 1
-        log(f"    已发送：{result.get('detail')}")
-        receipt("succeeded", f"keyboard-{cmd_id}")
+        log("    已发送：目标会话中唯一的新消息 ID 已确认")
+        receipt("succeeded", f"{contact_id}:{candidates[0]}")
     else:
         _last_error = str(result.get("detail"))[:200]
         stats["failed"] += 1
         log(f"    发送失败：{result.get('detail')}")
-        receipt("failed")
+        receipt("unknown" if result.get("conversation_id") else "failed")
     return stats
 
 
@@ -970,6 +1148,11 @@ def pump_safely(store: Store, cfg: dict, reporter: "Reporter | None", wecom_stat
 
 
 def print_history(limit: int = 20) -> None:
+    manual = rlog.recent_manual_receipts(limit)
+    if manual:
+        print("人工回执（执行结果 / 上报状态）：")
+        for item in manual:
+            print(f"  {item['command_id']} {item['status']} / {item['receipt_state']} {item['error']}")
     rows = rlog.recent(limit)
     if not rows:
         print("还没有记录")
@@ -977,7 +1160,9 @@ def print_history(limit: int = 20) -> None:
     print(f"{'状态':<9}{'收到时间':<18}{'会话':<18}{'内容':<24}回复")
     for r in rows:
         t = time.strftime("%m-%d %H:%M:%S", time.localtime(r["msg_time"] or 0))
-        err = f"  ⚠ {r['error'][:40]}" if r["error"] and r["status"] != "sent" else ""
+        # 不用 ⚠ 这类符号：Windows 控制台默认 GBK，遇到不可编码字符会直接
+        # UnicodeEncodeError 中断整条命令（历史列表尤其容易踩到）。
+        err = f"  [!] {r['error'][:40]}" if r["error"] and r["status"] != "sent" else ""
         print(f"{r['status']:<9}{t:<18}{(r['conv_name'] or '')[:16]:<18}"
               f"{(r['in_text'] or '')[:20]!r:<24}{r['reply_text'] or '-'}{err}")
     print("\n统计:", rlog.stats())
@@ -1022,49 +1207,184 @@ def _make_reporter(cfg: dict, store: Store) -> Reporter | None:
     return rep
 
 
+def ensure_registration(cfg: dict, cfg_path: Path | None = None) -> dict:
+    """缺 token 时自动注册（方案 A），并把结果写回 config.json。
+
+    只在「配了 register_key 且 token 缺失」时才联网，已有 token 的机器启动
+    路径与以前完全一致——不让自注册影响到正在跑的客户端。
+    任何失败都只打日志不抛异常：注册是便利，不是可用性的前提。
+    """
+    key = (cfg.get("register_key") or "").strip()
+    if not key:
+        return cfg
+    server = (cfg.get("server") or "").strip()
+    bridge_server = (cfg.get("bridge_server") or "").strip()
+    has_token = bool((cfg.get("device_token") or "").strip())
+    has_bridge = bool((cfg.get("bridge_token") or "").strip())
+    if has_token and (has_bridge or not bridge_server):
+        return cfg
+    code = (cfg.get("device_code") or "").strip() or agent_register.derive_device_code()
+    name = (cfg.get("device_name") or "").strip()
+    try:
+        obtained = agent_register.register(server, key, code, name, bridge_server)
+    except (ValueError, OSError) as exc:
+        log(f"[注册] 失败：{exc}")
+        return cfg
+    if not obtained:
+        log("[注册] 服务端未返回 token（自注册可能未开启）")
+        return cfg
+    obtained.setdefault("device_code", code)
+    cfg.update(obtained)
+    try:
+        agent_register.write_back(cfg_path or (ROOT / "config.json"), obtained)
+        log(f"[注册] 完成 device_code={code}，已写回 config.json")
+    except OSError as exc:
+        log(f"[注册] 拿到 token 但写回失败：{exc}")
+    return cfg
+
+
+def load_config(args: argparse.Namespace, config_path: Path | None = None) -> dict:
+    """Apply defaults, file settings, then explicitly supplied CLI options."""
+    cfg = dict(DEFAULTS, dry_run=False)
+    cfg_path = config_path if config_path is not None else ROOT / "config.json"
+    if cfg_path.exists():
+        try:
+            file_cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ValueError("config.json could not be read; refusing to send") from exc
+        if not isinstance(file_cfg, dict):
+            raise ValueError("config.json must contain an object")
+        for key in (*DEFAULTS, "dry_run"):
+            if key in file_cfg:
+                cfg[key] = file_cfg[key]
+        if "interval" not in file_cfg and "interval_seconds" in file_cfg:
+            cfg["interval"] = file_cfg["interval_seconds"]
+        for key in ("server", "device_token", "device_code", "bridge_server", "bridge_token"):
+            value = file_cfg.get(key, "")
+            if not isinstance(value, str):
+                raise ValueError(f"{key} must be a string")
+            cfg[key] = value.strip()
+
+    for key, value in vars(args).items():
+        if key in DEFAULTS or key == "device_code":
+            cfg[key] = value.strip() if key == "device_code" else value
+    if getattr(args, "dry", False):
+        cfg["dry_run"] = True
+    if not isinstance(cfg["dry_run"], bool):
+        raise ValueError("dry_run must be true or false")
+    if not isinstance(cfg["data_dir"], str):
+        raise ValueError("data_dir must be a string")
+    cfg["data_dir"] = cfg["data_dir"].strip()
+    for key in ("target", "reply_first", "reply_next"):
+        if not isinstance(cfg[key], str) or not cfg[key].strip():
+            raise ValueError(f"{key} must be a nonempty string")
+    for key in ("interval", "cooldown", "backfill_hours"):
+        value = cfg[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{key} must be a number")
+        if not math.isfinite(value) or value < 0 or (key == "interval" and value == 0):
+            raise ValueError(f"{key} has an invalid duration")
+    if cfg["brain"] is not None and not isinstance(cfg["brain"], dict):
+        raise ValueError("brain must contain an object")
+    bcfg = cfg.get("brain") or {}
+    if bcfg and bcfg.get("mode") not in ("kb", "flow", "fixed"):
+        raise ValueError("brain.mode must be kb, flow or fixed")
+    if bcfg.get("mode") in ("kb", "flow") and (
+        not isinstance(bcfg.get("base_url"), str) or not bcfg["base_url"].strip()
+    ):
+        raise ValueError("brain.base_url is required for kb/flow mode")
+    return cfg
+
+
+def configured_data_dir(cfg: dict) -> Path | None:
+    value = cfg["data_dir"]
+    if not value:
+        return None
+    directory = Path(value)
+    if not directory.is_absolute():
+        raise ValueError("data_dir must be an absolute path")
+    try:
+        if not directory.is_dir() or not all((directory / name).is_file() for name in ("message.db", "session.db")):
+            raise ValueError("data_dir must contain message.db and session.db")
+    except OSError as exc:
+        raise ValueError("data_dir could not be inspected") from exc
+    return directory
+
+
+# 单实例锁：两个进程同时跑会同时抢前台、同时发消息，客户收到重复回复。
+# 2026-11-07 实测出现过。用命名互斥体，进程退出时由系统释放。
+MUTEX_NAME = "Global\\CityRecruitAutopilot"
+_mutex_handle = None
+
+
+def acquire_single_instance() -> bool:
+    """拿到进程锁返回 True；已有实例在跑返回 False。"""
+    global _mutex_handle
+    try:
+        kernel32 = ctypes.windll.kernel32
+        ERROR_ALREADY_EXISTS = 183
+        handle = kernel32.CreateMutexW(None, True, MUTEX_NAME)
+        if not handle:
+            return True  # 拿不到锁就别拦住用户，当作可以启动
+        if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+            kernel32.CloseHandle(handle)
+            return False
+        _mutex_handle = handle
+        return True
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="企业微信自动回复（队列 + 回复历史）")
-    ap.add_argument("--target", default=DEFAULTS["target"], help="all 或某个会话名")
-    ap.add_argument("--reply-first", default=DEFAULTS["reply_first"])
-    ap.add_argument("--reply-next", default=DEFAULTS["reply_next"])
-    ap.add_argument("--interval", type=float, default=DEFAULTS["interval"])
-    ap.add_argument("--cooldown", type=float, default=DEFAULTS["cooldown"])
-    ap.add_argument("--backfill-hours", type=float, default=DEFAULTS["backfill_hours"])
+    ap.add_argument("--target", default=argparse.SUPPRESS, help="all 或某个会话名")
+    ap.add_argument("--data-dir", default=argparse.SUPPRESS, help="企微 Data 目录绝对路径，覆盖 config.json")
+    ap.add_argument("--reply-first", default=argparse.SUPPRESS)
+    ap.add_argument("--reply-next", default=argparse.SUPPRESS)
+    ap.add_argument("--interval", type=float, default=argparse.SUPPRESS)
+    ap.add_argument("--cooldown", type=float, default=argparse.SUPPRESS)
+    ap.add_argument("--backfill-hours", type=float, default=argparse.SUPPRESS)
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--watch", action="store_true")
     ap.add_argument("--dry", action="store_true", help="只登记不发送")
     ap.add_argument("--list", action="store_true", help="打印回复历史")
     ap.add_argument("--reset", action="store_true", help="把待发/失败的条目全部作废")
-    ap.add_argument("--device-code", default="", help="设备编号，覆盖 config.json（心跳路径参数）")
+    ap.add_argument("--retry-held", action="store_true", help="将知识库暂停记录重新入队后退出，不发送")
+    ap.add_argument("--flush-receipts", action="store_true", help="仅补传人工回执后退出，不操作企微")
+    ap.add_argument("--device-code", default=argparse.SUPPRESS, help="设备编号，覆盖 config.json（心跳路径参数）")
     args = ap.parse_args()
 
-    cfg = dict(DEFAULTS)
-    cfg.update(target=args.target, reply_first=args.reply_first, reply_next=args.reply_next,
-               interval=args.interval, cooldown=args.cooldown,
-               backfill_hours=args.backfill_hours, dry_run=args.dry)
+    # 常驻模式才需要单实例锁；--list / --reset / --once 这类一次性命令允许并行。
+    if args.watch and not acquire_single_instance():
+        log("已有客户端实例在运行，本进程退出（避免两个进程同时发消息）")
+        return 0
 
-    # 从 config.json 读 brain 段（DEFAULTS 里没有，只能从这里进）
-    # server / device_token / device_code 也从这里读，缺了就退化成"只回复、不上报"
-    cfg_path = ROOT / "config.json"
-    if cfg_path.is_file():
-        try:
-            file_cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-            if isinstance(file_cfg.get("brain"), dict):
-                cfg["brain"] = file_cfg["brain"]
-            cfg["server"] = (file_cfg.get("server") or "").strip()
-            cfg["device_token"] = (file_cfg.get("device_token") or "").strip()
-            cfg["device_code"] = (file_cfg.get("device_code") or "").strip()
-            # 桥接心跳（4222）配置；缺失时桥接上报整体跳过，不影响主心跳
-            cfg["bridge_server"] = (file_cfg.get("bridge_server") or "").strip()
-            cfg["bridge_token"] = (file_cfg.get("bridge_token") or "").strip()
-        except (OSError, ValueError) as exc:
-            log(f"config.json 读取失败，按固定文本处理：{exc}")
-    if args.device_code:
-        cfg["device_code"] = args.device_code.strip()
+    try:
+        cfg = load_config(args)
+    except ValueError as exc:
+        log(f"Configuration error: {exc}")
+        return 2
+
+    # 自注册只读配置、只发 HTTP，不影响下面的发送逻辑；失败了就按原样继续。
+    cfg = ensure_registration(cfg, ROOT / "config.json")
+
+    rlog.init()
+    if args.flush_receipts:
+        if cfg["dry_run"]:
+            log("DRY-RUN，未补传回执")
+            return 0
+        bridge = _make_bridge(cfg, resolve_device_code(cfg))
+        if bridge is None:
+            return 2
+        complete = flush_manual_receipts(bridge, force=True)
+        counts = rlog.manual_receipt_counts(bridge.base_url, bridge.device_code)
+        log(f"人工回执：{counts}")
+        return 0 if complete and not counts.get("rejected") else 1
 
     global _brain
+    _brain = None
     bcfg = cfg.get("brain") or {}
-    if bcfg.get("mode") == "kb" and bcfg.get("base_url"):
+    if bcfg.get("mode") in ("kb", "flow") and bcfg.get("base_url"):
         import brain as brain_mod
 
         _brain = brain_mod.Brain(
@@ -1073,19 +1393,27 @@ def main() -> int:
             bcfg.get("password", ""),
             timeout=float(bcfg.get("timeout") or 20),
             history_limit=int(bcfg.get("history_limit") or 6),
-            mode="kb",
+            mode=str(bcfg.get("mode")),
         )
-        log(f"回复来源：知识库 {bcfg['base_url']}（失败回落固定文本）")
+        label = "知识库" if bcfg.get("mode") == "kb" else "流程编排"
+        log(f"回复来源：{label} {bcfg['base_url']}（失败暂停，待人工处理）")
     else:
         log(f"回复来源：固定文本（brain.mode={bcfg.get('mode')!r}）")
 
-    rlog.init()
+    if args.retry_held:
+        log(f"知识库暂停记录重新入队：{rlog.retry_held()} 条；本次未发送")
+        return 0
 
     if args.list:
         print_history()
         return 0
 
-    store = Store()
+    try:
+        data_dir = configured_data_dir(cfg)
+    except ValueError as exc:
+        log(f"Configuration error: {exc}")
+        return 2
+    store = Store(data_dir=data_dir) if data_dir is not None else Store()
     if not store.data_dir:
         print("没找到企业微信数据目录")
         return 1

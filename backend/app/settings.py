@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     seed_admin_username: str = "local-admin"
     seed_admin_password: str = "local-demo-only"
 
+    # 设备自注册共享密钥（方案 A）。客户端首次启动用 X-Register-Key 换
+    # device_token，省掉管理员手工建码。留空表示关闭该入口（返回 503）——
+    # 默认关闭，避免部署后忘配导致任何人都能注册设备。
+    register_key: str = ""
+
     # 默认租户：单租户阶段所有 kb_* 表的 tenant_id 都指向它。
     # 接第二个客户后这里只是租户 1 的元数据，不影响其他租户。
     default_tenant_name: str = "默认租户"

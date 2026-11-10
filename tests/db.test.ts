@@ -21,6 +21,18 @@ describe("SQLite migrations and seed", () => {
     expect(second).toBe(first);
   });
 
+  it("adds the candidate profile columns and stays idempotent across restarts", () => {
+    const db = openDatabase(":memory:");
+    migrateDatabase(db);
+    migrateDatabase(db); // 老库升级/进程重启后再跑一遍不能炸（016 由 schema_migrations 记录跳过）
+    seedDatabase(db);
+    const columns = (db.prepare("PRAGMA table_info(agent_conversations)").all() as Array<{ name: string }>).map((row) => row.name);
+    expect(columns).toEqual(expect.arrayContaining(["name", "phone", "remark", "factory_name", "interview_date", "interview_time", "profile_json"]));
+    const row = db.prepare("SELECT * FROM agent_conversations WHERE device_code='local-device-001' AND customer_id=700001").get() as Record<string, unknown>;
+    expect(row).toMatchObject({ name: "", phone: "", remark: "", factory_name: "", interview_date: "", interview_time: "", profile_json: "{}" });
+    db.close();
+  });
+
   it("keeps user scopes unique and preserves audit history after account deletion", () => {
     const db = openDatabase(":memory:");
     migrateDatabase(db);

@@ -21,8 +21,14 @@ RUN pip install --no-cache-dir uv && \
 
 COPY app ./app
 
+# /app/data 与 /run/kb 必须先在镜像里存在且属于 appuser：容器以只读根文件
+# 系统运行，两者都由命名卷覆盖。Docker 用镜像里的目录内容初始化新卷并保留
+# 属主；目录不存在时会被建成 root 属主，appuser 就写不进去 ——
+#   /app/data -> instance.json 写失败，启动直接退出
+#   /run/kb   -> 服务令牌生成失败，Node 调知识库 401（线上已踩这两个）
 RUN useradd -m -u 1000 appuser && \
-    chown -R appuser:appuser /app
+    mkdir -p /app/data /run/kb && \
+    chown -R appuser:appuser /app /run/kb
 
 USER appuser
 

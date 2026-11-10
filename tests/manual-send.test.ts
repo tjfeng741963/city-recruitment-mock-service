@@ -84,6 +84,26 @@ describe("manual send from the console", () => {
       .toMatchObject({ status: "succeeded", provider_message_id: "keyboard-1" });
   });
 
+  it("holds uncertain sends without requeueing and accepts a late successful receipt", async () => {
+    await send("Outcome uncertain", "uncertain-command");
+    const command = (await app.inject({ method: "POST", url: "/api/v1/bridge/devices/pc-office-01/claim", headers: device })).json().command;
+    const receipt = (status: string, messageId = "") => app.inject({
+      method: "POST", url: "/api/v1/bridge/devices/pc-office-01/receipts", headers: device,
+      payload: { command_id: command.id, lease_token: command.lease_token, status, message_id: messageId },
+    });
+    expect((await receipt("unknown")).statusCode).toBe(200);
+    expect((await receipt("unknown")).statusCode).toBe(200);
+    expect(app.db.prepare("SELECT status FROM agent_messages WHERE device_code='pc-office-01' AND direction='outbound'").get()).toMatchObject({ status: "unknown" });
+    expect(app.db.prepare("SELECT status,next_retry_at FROM message_deliveries").get()).toMatchObject({ status: "sending", next_retry_at: null });
+    expect((await send("Outcome uncertain", "uncertain-command")).json().status).toBe("unknown");
+    expect((await app.inject({ method: "POST", url: "/api/v1/bridge/devices/pc-office-01/claim", headers: device })).json().command).toBeNull();
+    expect((await receipt("succeeded", "S:wxid_test:102")).statusCode).toBe(200);
+    expect((await receipt("succeeded", "S:wxid_test:102")).statusCode).toBe(200);
+    expect(app.db.prepare("SELECT status FROM agent_messages WHERE device_code='pc-office-01' AND direction='outbound'").get()).toMatchObject({ status: "sent" });
+    expect(app.db.prepare("SELECT status FROM message_deliveries").get()).toMatchObject({ status: "succeeded" });
+    expect((await receipt("unknown")).statusCode).toBe(409);
+  });
+
   it("reports a failed device send back onto the message instead of leaving it queued", async () => {
     await send("这条会失败", "manual-send-3");
     const command = (await app.inject({ method: "POST", url: "/api/v1/bridge/devices/pc-office-01/claim", headers: device })).json().command;

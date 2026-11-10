@@ -268,6 +268,59 @@ def apply_click_input() -> None:
     core_win.tap = tap
 
 
+# ── 输入框没命中就换点重试 ──────────────────────────────────────────────────
+# 单一比例点在窗口布局变化时（登录页→主界面、会话列表宽度变化、不同分辨率）
+# 会打偏；打偏后 verify_input_box 只能报"焦点未落在输入框"，整次发送作废。
+# 这里包一层：首次校验失败时，逐个候选点"点击 → 重新粘贴 → 再校验"。
+# 不改 send.py 的动作序列，只替换它调用的校验函数。
+INPUT_ATTEMPTS = (
+    (0.45, 0.86),   # 主点：输入框中部
+    (0.45, 0.80),   # 偏上（多行输入框上部）
+    (0.55, 0.86),   # 偏右
+    (0.35, 0.86),   # 偏左（避开右侧按钮）
+    (0.45, 0.90),   # 偏下（贴近发送按钮上方）
+    (0.50, 0.78),
+)
+
+
+def apply_input_focus_retry() -> None:
+    """校验失败时换候选点重试，最多走完 INPUT_ATTEMPTS。"""
+    from wecom_io_core import send as core_send
+    from wecom_io_core import win as core_win
+
+    orig_verify = core_send.verify_input_box
+
+    def verify(text: str, retries: int = 5) -> tuple[bool, str]:
+        ok, hint = orig_verify(text, retries=retries)
+        if ok:
+            return ok, hint
+
+        target = core_win.find_window()
+        if not target:
+            return ok, hint
+        hwnd = target["hwnd"]
+
+        for rx, ry in INPUT_ATTEMPTS:
+            core_win.ensure_foreground(hwnd, tries=3)
+            time.sleep(0.15)
+            if not click_client(hwnd, rx, ry):
+                continue
+            # 点击后重新粘贴，再走一遍原始校验
+            core_win.set_clipboard(text)
+            time.sleep(0.12)
+            core_win.hotkey("ctrl", "a")
+            time.sleep(0.08)
+            core_win.hotkey("ctrl", "v")
+            time.sleep(0.35)
+            ok, hint = orig_verify(text, retries=2)
+            if ok:
+                return True, f"{hint}（候选点 {rx:.2f},{ry:.2f}）"
+
+        return False, hint
+
+    core_send.verify_input_box = verify
+
+
 # ── 长消息解析 ──────────────────────────────────────────────────────────────
 # core/store.py 的 `_pb_text` 对每个 length-delimited 字段直接 `decode("utf-8")`，
 # 一旦失败就 `continue` 整段丢弃。消息体超过 127 字节时，长度前缀会变成两字节

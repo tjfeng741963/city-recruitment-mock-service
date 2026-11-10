@@ -129,6 +129,24 @@ describe("agent SSE stream", () => {
     expect(frame.data.conversation).toMatchObject({ customer_id: customerId(), nickname: "测试会话", last_msg: "你们还招人吗", unread: 1 });
   });
 
+  it("pushes one outbound bubble and no extra event on replay", async () => {
+    await heartbeat();
+    const stream = await openStream(`token=${token}&device_code=pc-office-01`);
+    await waitFor(() => stream.state.text.includes("event: ready"), () => "no ready frame");
+    const payload = { event_id: "S:wxid_test:outbound-1", contact_id: "S:wxid_test", nickname: "Customer", content: "Actual local reply" };
+    const observe = () => app.inject({ method: "POST", url: "/api/v1/bridge/devices/pc-office-01/outbound", headers: device, payload });
+    expect((await observe()).statusCode).toBe(200);
+    await waitFor(() => parseFrames(stream.state.text).some(frame => frame.type === "message.created"), () => "no outbound frame");
+    expect((await observe()).json().created).toBe(false);
+    // A subsequent heartbeat provides an ordering barrier for the stream.
+    await app.inject({ method: "POST", url: "/api/v1/bridge/devices/pc-office-01/heartbeat", headers: device, payload: { state: "offline" } });
+    await waitFor(() => parseFrames(stream.state.text).some(frame => frame.type === "device.updated"), () => "no barrier frame");
+    const frames = parseFrames(stream.state.text).filter(frame => frame.type === "message.created");
+    expect(frames).toHaveLength(1);
+    expect(frames[0].data.message).toMatchObject({ role: "agent", direction: "outbound", source: "bridge", content: payload.content });
+    expect(frames[0].data.conversation.unread).toBe(0);
+  });
+
   it("pushes command.updated for queued, claimed and succeeded receipts", async () => {
     await heartbeat();
     await inbound("stream-inbound-2", "在吗");

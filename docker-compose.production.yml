@@ -66,6 +66,10 @@ services:
     volumes:
       # 服务间令牌：启动时生成写入这里，Node 侧读同一个卷
       - kb-token:/run/kb
+      # install_id 落在 /app/data/instance.json。根文件系统只读，不挂这个卷
+      # 启动就会 OSError: [Errno 30] Read-only file system 直接退出（线上已踩）。
+      # 用命名卷而非 tmpfs：install_id 必须跨重启保持同一个值。
+      - api-data:/app/data
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=64m
     cap_drop:
@@ -95,4 +99,7 @@ networks:
 
 volumes:
   kb-token:
+    driver: local
+  # Python 侧 /app/data（install_id）。命名卷而非 tmpfs：值必须跨重启不变。
+  api-data:
     driver: local
