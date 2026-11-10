@@ -262,7 +262,20 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
     }>;
 
     const pick = (raw: string): Record<string, string> => {
-      try { return JSON.parse(raw || "{}") as Record<string, string>; } catch { return {}; }
+      try {
+        const parsed = JSON.parse(raw || "{}") as Record<string, unknown>;
+        // POST /service-positions 把整个请求体存进 data_json，真实字段在再嵌一层里
+        const nested = parsed.data_json;
+        const inner = (nested && typeof nested === "object" ? nested : {}) as Record<string, unknown>;
+        const merged = { ...parsed, ...inner } as Record<string, unknown>;
+        const out: Record<string, string> = {};
+        for (const [key, value] of Object.entries(merged)) {
+          if (value !== null && value !== undefined && typeof value !== "object") {
+            out[key] = String(value);
+          }
+        }
+        return out;
+      } catch { return {}; }
     };
     const items = rows.map((row) => {
       const sp = pick(row.sp_json);

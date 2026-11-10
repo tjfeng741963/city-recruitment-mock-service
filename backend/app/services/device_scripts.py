@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import time
+import re
 from typing import Any
 
 import httpx
@@ -91,9 +92,14 @@ def render_script(content: str, job: dict[str, Any], window: str = INTERVIEW_WIN
         "{{place}}": str(job.get("place") or ""),
         "{{window}}": str(window or ""),
     }
+    # 岗位数据里的任意键都能当占位符（{{job_title}} {{hours_text}} {{age_text}}…）
+    for key, value in job.items():
+        mapping.setdefault("{{%s}}" % key, str(value or ""))
     text = str(content or "")
     for key, value in mapping.items():
         text = text.replace(key, value)
+    # 兜底：没匹配上的占位符一律清空，绝不把 {{x}} 发给客户
+    text = re.sub(r"\{\{[a-zA-Z0-9_]+\}\}", "", text)
     return text
 
 
