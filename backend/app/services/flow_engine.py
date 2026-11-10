@@ -260,7 +260,9 @@ def _record_ask(slots: dict[str, Any]) -> str:
 
 def _confirm_text(slots: dict[str, Any], when: datetime) -> str:
     job = _job_of(slots)
-    stamp = when.strftime("%m月%d日 %H:%M").replace(" 13:00", " 中午1点")
+    # Keep the locale-sensitive strftime format ASCII-only: Windows runners
+    # may use a legacy code page that cannot encode the Chinese labels.
+    stamp = f"{when.month:02d}月{when.day:02d}日 {when:%H:%M}".replace(" 13:00", " 中午1点")
     return (
         f"我确认一下：{slots.get('city', '')} · {job.get('title', '')} · "
         f"{job.get('pay', '')} · {slots.get('gender', '')} · "
@@ -271,7 +273,7 @@ def _confirm_text(slots: dict[str, Any], when: datetime) -> str:
 
 def _welcome_text(slots: dict[str, Any], when: datetime) -> str:
     job = _job_of(slots)
-    stamp = when.strftime("%m月%d日 %H:%M").replace(" 13:00", " 中午1点")
+    stamp = f"{when.month:02d}月{when.day:02d}日 {when:%H:%M}".replace(" 13:00", " 中午1点")
     return (
         f"好嘞，约好了：明天（{stamp}）{job.get('place', '')}。\n"
         f"到时候带上身份证，到了给我发个消息，我出来接你。祝你面试顺利！"
