@@ -1,4 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
+import { authorizeProfileRequest } from "../agent/profile.routes.js";
 import type { FastifyInstance } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
 import { canAccessDevice, getUserScope } from "../../auth/user-scopes.js";
@@ -81,8 +82,11 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
   app.get<{ Params: { code: string } }>("/api/v1/bridge/devices/:code/config", async (req, reply) => {
     const code = req.params.code;
     const token = (req.headers.authorization ?? "").replace(/^Bearer /, "");
-    if (!store.authenticate(code, token)) return reply.code(401).send({ detail: "Invalid device token" });
-    if (!store.enabled(code)) return reply.code(403).send({ detail: "Device disabled" });
+    // 8090 服务间调用走 X-Profile-Token（常熟比较），设备自身仍走 device token。
+    if (!authorizeProfileRequest(req)) {
+      if (!store.authenticate(code, token)) return reply.code(401).send({ detail: "Invalid device token" });
+      if (!store.enabled(code)) return reply.code(403).send({ detail: "Device disabled" });
+    }
     const device = db.prepare("SELECT data_json,updated_at FROM agent_devices WHERE json_extract(data_json,'$.device_code')=?")
       .get(code) as { data_json: string; updated_at: string | null } | undefined;
     if (!device) return reply.code(404).send({ detail: "Device not found" });

@@ -231,3 +231,54 @@ export async function registerProfileRoutes(app: FastifyInstance, db: DatabaseSy
     };
   });
 }
+
+/**
+ * 按城市查可推岗位（给 8090 的 flow 用）。
+ *
+ * 数据源是运营在「城市/工厂/岗位」页维护的三张表，join 出一条可直接念给客户听的
+ * 岗位信息；没有数据的字段回空串，由调用方决定兜底。
+ *
+ * 鉴权：X-Profile-Token（8090 服务间）或正常用户 token，二选一。
+ */
+export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) {
+  app.get<{ Querystring: { city?: string } }>("/api/v1/agent/jobs", async (request, reply) => {
+    if (!authorizeProfileRequest(request) && !request.auth) {
+      return reply.code(403).send({ detail: "Not authenticated" });
+    }
+    const city = String((request.query as { city?: string }).city ?? "").trim();
+    if (!city) return reply.code(422).send({ detail: "city is required" });
+
+    const rows = db.prepare(
+      `SELECT sp.position_name, sp.data_json AS sp_json, f.factory_name, f.data_json AS f_json,
+              c.city_name, c.province
+       FROM service_positions sp
+       JOIN factories f ON sp.factory_id = f.id
+       JOIN cities c ON sp.city_id = c.id
+       WHERE sp.status='enabled' AND f.status='enabled' AND c.recruitment_status='enabled'
+         AND (c.city_name = ? OR c.city_name LIKE '%' || ? || '%')`
+    ).all(city, city) as Array<{
+      position_name: string; sp_json: string; factory_name: string;
+      f_json: string; city_name: string; province: string;
+    }>;
+
+    const pick = (raw: string): Record<string, string> => {
+      try { return JSON.parse(raw || "{}") as Record<string, string>; } catch { return {}; }
+    };
+    const items = rows.map((row) => {
+      const sp = pick(row.sp_json);
+      const f = pick(row.f_json);
+      return {
+        factory_name: row.factory_name,
+        job_title: row.position_name,
+        wage_text: String(sp.wage_text ?? ""),
+        hours_text: String(sp.hours_text ?? ""),
+        age_text: String(sp.age_text ?? ""),
+        welfare_text: String(sp.welfare_text ?? ""),
+        place: String(sp.place ?? f.place ?? row.factory_name),
+        province: row.province ?? "",
+        city: row.city_name,
+      };
+    });
+    return { items };
+  });
+}

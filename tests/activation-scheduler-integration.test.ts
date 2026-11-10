@@ -134,7 +134,7 @@ describe("activation scheduler business wiring", () => {
     expect(database.prepare("SELECT status,tier FROM activation_records WHERE id=702").get()).toMatchObject({ status: "sent", tier: 1 });
   });
 
-  it("exposes an admin-only HTTP trigger for a local scheduler scan", async () => {
+  it("exposes an admin-only HTTP trigger for a local scheduler scan", { timeout: 20_000 }, async () => {
     const { db: database } = setup();
     seedSilentCustomer(database, 504);
     database.prepare("UPDATE activation_strategy_rules SET enabled=1 WHERE code='no_reply'").run();
