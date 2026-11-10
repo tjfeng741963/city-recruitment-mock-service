@@ -58,6 +58,11 @@ async def lookup_jobs(city: str) -> list[dict[str, Any]]:
         items = await _fetch_items(city, token, url)
     except Exception:  # noqa: BLE001  超时/4222 挂了/返回乱码：一律空结果
         items = []
+    # 字段齐全的排前面：示例/占位岗位往往什么都没填，别让它们抢第一位
+    items = sorted(items, key=lambda j: (
+        not str(j.get("wage_text") or "").strip(),
+        not str(j.get("factory_name") or "").strip(),
+    ))
     _cache[city] = (time.monotonic() + CACHE_TTL, items)
     return items
 
