@@ -125,6 +125,7 @@ class Brain:
             return {
                 "ok": True,
                 "reply": reply,
+                "parts": [str(p) for p in (data.get("parts") or []) if str(p).strip()],
                 "source": "flow",
                 "scene": "流程",
                 "detail": f"阶段 {stage}",

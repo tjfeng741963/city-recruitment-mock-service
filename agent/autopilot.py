@@ -833,6 +833,11 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 if not res.get("ok") or not isinstance(text, str) or not text.strip():
                     raise ValueError(res.get("detail") or "知识库返回空回复")
                 text, scene = text.strip(), res.get("scene") or "知识库"
+                # 流程可返回多段（先岗位信息再邀约），逐条分开发
+                raw_parts = res.get("parts") or []
+                parts = [str(p).strip() for p in raw_parts if str(p).strip()]
+                if len(parts) < 2:
+                    parts = [text]
                 log(f"    [brain] {res.get('detail', '')}")
             except Exception as exc:  # noqa: BLE001
                 reason = f"知识库暂停，待人工处理：{type(exc).__name__}: {exc}"
@@ -867,12 +872,19 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             # 打开回读：verify_db=False 时只要按了回车就记 sent，发没发出去不知道
             # （2026-11-07 实测：reply_log 记 sent，企微库里根本没有这条消息）。
             # expect_id 锁死落点，防止回车落到别的会话上。
-            result = core_send.send(
-                store, name, text,
-                expect_id=cid if str(cid).startswith(("S:", "R:")) else "",
-                verify_db=True,
-                log=lambda s: log(f"    {s}"),
-            )
+            # 多段回复（parts）逐条发送，段间隔 2 秒防折叠/限流；任何一段失败即止。
+            result = {"ok": False, "detail": "未发送"}
+            for idx, part in enumerate(parts):
+                result = core_send.send(
+                    store, name, part,
+                    expect_id=cid if str(cid).startswith(("S:", "R:")) else "",
+                    verify_db=True,
+                    log=lambda s: log(f"    {s}"),
+                )
+                if not result["ok"]:
+                    break
+                if idx < len(parts) - 1:
+                    time.sleep(2.0)
             if result["ok"]:
                 rlog.mark_sent(mid, scene, text)
                 _last_reply_at = time.time()
