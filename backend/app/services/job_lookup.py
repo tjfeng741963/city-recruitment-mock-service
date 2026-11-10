@@ -63,6 +63,15 @@ async def lookup_jobs(city: str) -> list[dict[str, Any]]:
         not str(j.get("wage_text") or "").strip(),
         not str(j.get("factory_name") or "").strip(),
     ))
+    # 全空字段岗位（示例数据）直接剔除——发出去就是「：，，，。」
+    filled = [j for j in items if any(
+        str(j.get(k) or "").strip() for k in ("wage_text", "hours_text", "welfare_text")
+    )]
+    if filled:
+        items = filled
+    else:
+        # 远端全是空壳岗位（示例数据）→ 返回空，让上层回落到 DEMO_JOBS
+        items = []
     _cache[city] = (time.monotonic() + CACHE_TTL, items)
     return items
 

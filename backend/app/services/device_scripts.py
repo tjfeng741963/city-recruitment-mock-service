@@ -80,7 +80,8 @@ def pick_script(scripts: list[dict[str, Any]], stage: str, city: str) -> dict[st
     for script in candidates:
         if not str(script.get("city") or "").strip():
             return script
-    return candidates[0] if candidates else None
+    # 城市对不上就不命中：广州的话术发给东莞客户是事故（2026-11-11 模拟实测）
+    return None
 
 
 def render_script(content: str, job: dict[str, Any], window: str = INTERVIEW_WINDOW) -> str:

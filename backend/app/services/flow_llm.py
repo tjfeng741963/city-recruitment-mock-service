@@ -175,6 +175,38 @@ def _parse_json(raw: str) -> dict[str, Any]:
     return data
 
 
+_WANTS_MORE = re.compile(r"别的|其他|其它|换一|换家|还有没有|多几个")
+
+
+def _list_other_jobs(state: dict[str, Any], now: datetime | None = None) -> FlowResult:
+    """客户要换岗位：代码列出该城市其他岗位（排除已发过的），不调模型。"""
+    slots: dict[str, Any] = state.setdefault("slots", {})
+    stage = str(state.get("stage") or STAGE_ASK_INTERVIEW)
+    city = str(slots.get("city") or "")
+    current = int(slots.get("job_index") or 0)
+    jobs = [j for i, j in enumerate(jobs_for_city(city)) if i != current]
+    if not jobs:
+        return FlowResult(
+            reply=f"{city}这边暂时就这一个岗位在招，有了新岗位我第一时间告诉你。",
+            stage=stage,
+            slots=slots,
+        )
+    lines = []
+    for job in jobs:
+        title = str(job.get("job_title") or "")
+        factory = str(job.get("factory_name") or "")
+        kind = title[len(factory):].strip() if factory and title.startswith(factory) else title
+        lines.append(
+            f"{factory}（{kind}）：{job.get('wage_text', '')}，"
+            f"{job.get('hours_text', '')}，{job.get('age_text', '')}，{job.get('welfare_text', '')}，"
+            f"地点{job.get('place', '')}"
+        )
+    body = "这边还有这几个：\n" + "\n".join(f"{i}. {line}" for i, line in enumerate(lines, start=1))
+    parts = [body, "想看哪个跟我说，或者说下你的要求我帮你挑。"]
+    slots["interview_offer_sent"] = True
+    return FlowResult(reply="\n".join(parts), parts=parts, stage=stage, slots=slots)
+
+
 def _job_of(slots: dict[str, Any]) -> dict[str, str]:
     jobs = jobs_for_city(str(slots.get("city") or ""))
     if not jobs:
@@ -388,6 +420,10 @@ async def a_step(
             slots=state.get("slots") or {},
             finished=True,
         )
+
+    # 「还有别的厂吗 / 换一个」→ 代码列岗位。模型不知道岗位列表，让它答必然编造。
+    if stage in (STAGE_SEND_INFO, STAGE_ASK_INTERVIEW) and _WANTS_MORE.search(text):
+        return _list_other_jobs(state, now=now)
 
     # 插问交给确定性分支：命中就回知识库原话，没命中就兜底 + 记未知问题。
     # 这类问题让模型自由发挥，最容易编出「体检费厂里全报」这种要赔钱的话。
