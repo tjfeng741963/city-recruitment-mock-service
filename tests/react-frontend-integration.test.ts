@@ -28,7 +28,7 @@ describe("React frontend served by the Node backend", () => {
     await app.close();
   });
 
-  it.each(["/", "/conversations", "/agent-devices", "/knowledge"]) ("serves the React SPA shell for %s", async (route) => {
+  it.each(["/", "/conversations", "/agent-devices", "/knowledge", "/settings/wecom"]) ("serves the React SPA shell for %s", async (route) => {
     const response = await app.inject({ method: "GET", url: route });
     expect(response.statusCode).toBe(200);
     expect(response.headers["content-type"]).toContain("text/html");

@@ -82,6 +82,31 @@
   font-size: var(--t-subhead);
 }
 
+.wecom-status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s-3) var(--s-6);
+}
+
+.wecom-status-grid div {
+  min-width: 0;
+}
+
+.wecom-status-grid dt {
+  color: var(--ink-3);
+  font-size: var(--t-caption);
+}
+
+.wecom-status-grid dd {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--ink-1);
+}
+
+@media (max-width: 640px) {
+  .wecom-status-grid { grid-template-columns: 1fr; }
+}
+
 .mod-form {
   display: flex;
   flex-direction: column;

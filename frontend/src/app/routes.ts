@@ -25,7 +25,7 @@ export type Route =
   | { module: "devices"; deviceId?: number }
   | { module: "positions"; view: "list"; cityId?: number; featuredOnly?: boolean }
   | { module: "positions"; view: "edit"; positionId: number }
-  | { module: "settings"; tab: "general" | "recruiters" | "accounts" }
+  | { module: "settings"; tab: "general" | "recruiters" | "accounts" | "wecom" }
   | { module: ModuleKey; legacyPath: string };
 
 const LEGACY_PREFIXES: Array<[ModuleKey, string[]]> = [
@@ -63,6 +63,7 @@ export function matchRoute(rawPath: string): Route {
 
   if (under(path, "/recruiters")) return { module: "settings", tab: "recruiters" };
   if (under(path, "/users")) return { module: "settings", tab: "accounts" };
+  if (under(path, "/settings/wecom")) return { module: "settings", tab: "wecom" };
   if (under(path, "/settings")) return { module: "settings", tab: "general" };
 
   return { module: "reception" };

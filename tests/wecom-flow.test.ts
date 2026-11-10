@@ -78,6 +78,25 @@ describe('WeCom customer service end to end through official-shaped HTTP APIs', 
     expect(status.statusCode).toBe(200); expect(status.body).not.toContain(fakeSecret);
   });
 
+  it('reports missing configuration without exposing secrets when the channel is disabled', async () => {
+    const originalEnabled = process.env.REA_WECOM_ENABLED;
+    const originalCorp = process.env.REA_WECOM_CORP_ID;
+    const originalSecret = process.env.REA_WECOM_APP_SECRET;
+    process.env.REA_WECOM_ENABLED = 'false';
+    delete process.env.REA_WECOM_CORP_ID;
+    delete process.env.REA_WECOM_APP_SECRET;
+    try {
+      const response = await app.inject({ url: '/api/v1/channels/wecom-kf/status', headers: admin });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({ enabled: false, missing: expect.arrayContaining(['REA_WECOM_CORP_ID', 'REA_WECOM_APP_SECRET']) });
+      expect(response.body).not.toContain(fakeSecret);
+    } finally {
+      process.env.REA_WECOM_ENABLED = originalEnabled;
+      process.env.REA_WECOM_CORP_ID = originalCorp;
+      process.env.REA_WECOM_APP_SECRET = originalSecret;
+    }
+  });
+
   it('takes an encrypted callback through sync, real HTTP Dify and send_msg, deduplicating all stages', async () => {
     pages.push({ errcode: 0, next_cursor: 'one', has_more: 0, msg_list: [customer()] });
     expect((await notify()).body).toBe('success'); expect((await notify()).body).toBe('success');

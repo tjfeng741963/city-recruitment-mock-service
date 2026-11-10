@@ -4,9 +4,10 @@ import { ApiError } from "../../api/client";
 import { Alert, Button, Input, Skeleton } from "@ui";
 import { useAuth } from "../../context/AuthContext";
 import { AccountsTab, RecruitersTab } from "./SettingsLists";
+import { WeComStatusTab } from "./WeComStatusTab";
 
-type Tab = "general" | "recruiters" | "accounts";
-const TAB_PATH: Record<Tab, string> = { general: "/settings", recruiters: "/recruiters", accounts: "/users" };
+type Tab = "general" | "recruiters" | "accounts" | "wecom";
+const TAB_PATH: Record<Tab, string> = { general: "/settings", recruiters: "/recruiters", accounts: "/users", wecom: "/settings/wecom" };
 
 interface Draft {
   company: string;
@@ -116,8 +117,8 @@ function GeneralTab({ canEdit }: { canEdit: boolean }) {
 export function SettingsPage({ tab }: { tab: Tab }) {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
-  const active: Tab = tab === "accounts" && !isAdmin ? "general" : tab;
-  const tabs: Array<[Tab, string]> = [["general", "通用"], ["recruiters", "招聘员"]];
+  const active: Tab = (tab === "accounts" || tab === "wecom") && !isAdmin ? "general" : tab;
+  const tabs: Array<[Tab, string]> = [["general", "通用"], ["recruiters", "招聘员"], ["wecom", "企业微信"]];
   if (isAdmin) tabs.push(["accounts", "账号"]);
 
   return (
@@ -137,6 +138,7 @@ export function SettingsPage({ tab }: { tab: Tab }) {
       {active === "general" && <GeneralTab canEdit={isAdmin} />}
       {active === "recruiters" && <RecruitersTab isAdmin={isAdmin} />}
       {active === "accounts" && <AccountsTab selfName={user?.username ?? ""} />}
+      {active === "wecom" && <WeComStatusTab />}
     </div>
   );
 }
