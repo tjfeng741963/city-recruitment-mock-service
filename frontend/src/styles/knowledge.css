@@ -1,0 +1,178 @@
+/* 知识库模块：知识条目 / 未知问题 / 回复规则. Tokens only. */
+
+.kn-note {
+  margin: 0;
+  font-size: var(--t-subhead);
+  color: var(--ink-2);
+}
+
+.kn-muted {
+  font-size: var(--t-footnote);
+  color: var(--ink-3);
+}
+
+.kn-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s-3);
+  flex-wrap: wrap;
+}
+
+.kn-toolbar > .ui-filterbar {
+  flex: 1;
+  min-width: 280px;
+}
+
+.kn-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.kn-question {
+  font-weight: 600;
+  color: var(--ink-1);
+}
+
+.kn-cell-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.kn-tags {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-1);
+  flex-wrap: wrap;
+}
+
+.kn-tags .ui-tag {
+  height: 22px;
+  font-size: var(--t-footnote);
+}
+
+.kn-more {
+  font-size: var(--t-footnote);
+  color: var(--ink-3);
+}
+
+.kn-row-actions {
+  display: inline-flex;
+  gap: var(--s-1);
+}
+
+.kn-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+}
+
+.kn-pager .ui-field {
+  width: 140px;
+}
+
+.kn-pager .ui-field-message:empty {
+  display: none;
+}
+
+.kn-sheet-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+}
+
+/* Keyword chips sit inside an input-looking box. */
+.kn-keywords-box {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s-1);
+  min-height: var(--control-h);
+  padding: var(--s-1) var(--s-2);
+  border: 1px solid var(--control-border);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+}
+
+.kn-keywords-box:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.kn-keywords-input {
+  flex: 1;
+  min-width: 120px;
+  height: 28px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--ink-1);
+  font: inherit;
+  font-size: 14px;
+}
+
+.kn-keywords-input::placeholder {
+  color: var(--ink-3);
+}
+
+/* 回复规则 */
+.mod-page > .kn-rule-card {
+  margin-top: 0;
+}
+
+.kn-rule-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-4);
+}
+
+.kn-rule-head h2 {
+  margin: 0;
+  font-size: var(--t-headline);
+  font-weight: 600;
+  color: var(--ink-1);
+}
+
+.kn-rule-head .ui-switch {
+  gap: var(--s-2);
+}
+
+.kn-rule-card .ui-radio-group {
+  margin-bottom: var(--s-3);
+}
+
+.kn-scripts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  margin: 0;
+  padding: 0;
+  border: none;
+  min-width: 0;
+}
+
+.kn-scripts:disabled {
+  opacity: 0.6;
+}
+
+.kn-script-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-2);
+}
+
+.kn-script-row .ui-field {
+  flex: 1;
+}
+
+.kn-script-row .ui-field-message:empty {
+  display: none;
+}
+
+.kn-script-row .ui-btn {
+  margin-top: 6px;
+}
