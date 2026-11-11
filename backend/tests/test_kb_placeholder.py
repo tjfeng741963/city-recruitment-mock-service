@@ -35,6 +35,7 @@ async def _entry(
     kind: str = "script",
     status: str = "enabled",
     city: str | None = None,
+    factory_name: str | None = None,
 ) -> KbEntry:
     entry = KbEntry(
         tenant_id=DEFAULT_TENANT_ID,
@@ -43,6 +44,7 @@ async def _entry(
         body=body,
         status=status,
         city=city,
+        factory_name=factory_name,
         search_text=title,
     )
     session.add(entry)
@@ -235,6 +237,86 @@ async def test_lookup_city_empty_is_wildcard(session: AsyncSession) -> None:
     try:
         assert await kb_placeholder.lookup(session, f"工资发放{marker}时间", city="广州") == "每月 15 号发。"
         assert await kb_placeholder.lookup(session, f"工资发放{marker}时间", city=None) == "每月 15 号发。"
+    finally:
+        await session.execute(delete(KbEntry).where(KbEntry.id == entry.id))
+        await session.commit()
+
+
+# ---- 工厂加权（契约 docs/对齐-设备工厂绑定与资料导入.md §2）----
+
+FULL_NAME = "松下万宝(广州)压缩机有限公司"
+
+
+@pytest.mark.asyncio
+async def test_lookup_factory_same_beats_wildcard(session: AsyncSession) -> None:
+    """同厂 +5：关键词打平时，带工厂名的那条胜出。"""
+    marker = uuid.uuid4().hex[:6]
+    own = await _entry(session, f"住宿条件{marker}", "本厂答：万宝宿舍。", factory_name=FULL_NAME)
+    wildcard = await _entry(session, f"住宿条件{marker}", "通配答：有宿舍。")
+    try:
+        assert await kb_placeholder.lookup(
+            session, f"住宿条件{marker}怎么样", factory=FULL_NAME
+        ) == "本厂答：万宝宿舍。"
+    finally:
+        await session.execute(delete(KbEntry).where(KbEntry.id.in_([own.id, wildcard.id])))
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_lookup_factory_abbreviation_containment_hits(session: AsyncSession) -> None:
+    """简称双向包含：绑定值是简称也按同厂算 +5。"""
+    marker = uuid.uuid4().hex[:6]
+    entry = await _entry(session, f"宿舍几人间{marker}", "万宝宿舍四人间。", factory_name=FULL_NAME)
+    try:
+        assert await kb_placeholder.lookup(
+            session, f"宿舍几人间{marker}", factory="松下万宝"
+        ) == "万宝宿舍四人间。"
+        # 反向也行：条目存简称、绑定值是全称
+        assert await kb_placeholder.lookup(
+            session, f"宿舍几人间{marker}", factory=FULL_NAME
+        ) == "万宝宿舍四人间。"
+    finally:
+        await session.execute(delete(KbEntry).where(KbEntry.id == entry.id))
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_lookup_factory_mismatch_is_excluded(session: AsyncSession) -> None:
+    """异厂排除：互不包含不许命中，别家的厂规不能发给本厂客户。"""
+    marker = uuid.uuid4().hex[:6]
+    entry = await _entry(session, f"体检报销{marker}", "富士康的规则。", factory_name="富士康深圳")
+    try:
+        assert await kb_placeholder.lookup(session, f"体检报销{marker}吗", factory="松下万宝") is None
+        # 没绑工厂（factory 为空）→ 通配，条目照样命中
+        assert await kb_placeholder.lookup(session, f"体检报销{marker}吗") == "富士康的规则。"
+    finally:
+        await session.execute(delete(KbEntry).where(KbEntry.id == entry.id))
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_lookup_factory_empty_entry_is_wildcard(session: AsyncSession) -> None:
+    """条目 factory_name 为空 → 通配：绑了工厂的设备也能命中通用话术。"""
+    marker = uuid.uuid4().hex[:6]
+    entry = await _entry(session, f"工资发放{marker}", "每月 15 号发。")
+    try:
+        assert await kb_placeholder.lookup(session, f"工资发放{marker}时间", factory="松下万宝") == "每月 15 号发。"
+    finally:
+        await session.execute(delete(KbEntry).where(KbEntry.id == entry.id))
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_lookup_city_and_factory_both_empty_all_wildcard(session: AsyncSession) -> None:
+    """兼容：city/factory 都为空 → factory 维度全部通配（原行为）。
+
+    city 维度沿用既有规则：没传城市时带城市条目不命中（见上面的异城排除用例），
+    所以这里条目不带 city，只验 factory_name 不拦路。
+    """
+    marker = uuid.uuid4().hex[:6]
+    entry = await _entry(session, f"体检报销{marker}", "通用规则。", factory_name="富士康")
+    try:
+        assert await kb_placeholder.lookup(session, f"体检报销{marker}吗") == "通用规则。"
     finally:
         await session.execute(delete(KbEntry).where(KbEntry.id == entry.id))
         await session.commit()

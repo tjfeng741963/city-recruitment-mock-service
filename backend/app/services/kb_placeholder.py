@@ -68,18 +68,31 @@ def match(question: str, title: str) -> bool:
     return any(word in text for word in keywords_of(title))
 
 
-async def lookup(session: AsyncSession, question: str, city: str | None = None) -> str | None:
+async def lookup(
+    session: AsyncSession,
+    question: str,
+    city: str | None = None,
+    factory: str | None = None,
+) -> str | None:
     """查一条话术。命中返回正文，未命中返回 None。
 
     城市加权（只在本层做，match() 不变）：
     - entry.city 与 city 相同 → 该条总分 +3（同城话术优先）
     - entry.city 非空且 != city → 直接排除（城市不符不许命中）
     - entry.city 为空 → 通配，无加权
+
+    工厂加权（契约 docs/对齐-设备工厂绑定与资料导入.md §2）：
+    - entry.factory_name 与 factory 相同 → 总分 +5（本厂话术优先级最高）
+      「相同」按双向包含判断（绑定值可能是简称：「松下万宝」⊂ 全称也算同厂）
+    - 双方都非空且互不包含 → 直接排除（别家的厂规发给本厂客户是事故）
+    - 任一方为空 → 通配，无加权
+    - city/factory 都为空 → 全部通配（原行为）
     """
     text = (question or "").strip()
     if not text:
         return None
     city_hint = (city or "").strip()
+    factory_hint = (factory or "").strip()
     rows = (
         await session.execute(
             select(KbEntry)
@@ -102,9 +115,19 @@ async def lookup(session: AsyncSession, question: str, city: str | None = None) 
         entry_city = str(getattr(entry, "city", None) or "").strip()
         if entry_city and entry_city != city_hint:
             continue
+        entry_factory = str(getattr(entry, "factory_name", None) or "").strip()
+        if (
+            entry_factory
+            and factory_hint
+            and entry_factory not in factory_hint
+            and factory_hint not in entry_factory
+        ):
+            continue
         score = sum(len(w) for w in words)
         if entry_city:
             score += 3
+        if entry_factory and factory_hint:
+            score += 5
         # 命中总长最长的算最相关：「体检报销吗」输给「体检报销多少钱一个月」
         if best is None or score > best[0]:
             best = (score, str(entry.body).strip())

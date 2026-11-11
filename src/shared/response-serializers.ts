@@ -49,7 +49,7 @@ const CANDIDATE_KEYS = [
 ] as const;
 
 const DEVICE_KEYS = [
-  "id", "device_code", "name", "dify_url", "dify_key", "recruiter_id", "status", "online", "mode",
+  "id", "device_code", "name", "dify_url", "dify_key", "recruiter_id", "factory_name", "city", "status", "online", "mode",
   "config", "last_online", "created_at", "last_offline", "queue_depth", "queue_stale",
 ] as const;
 
@@ -183,6 +183,9 @@ export function serializeAgentDevice(row: Row): Row {
     dify_url: String(source.dify_url ?? ""),
     dify_key: String(source.dify_key ?? ""),
     recruiter_id: String(source.recruiter_id ?? ""),
+    // 设备绑定的工厂/城市（data_json 透传，供 admin 设备列表展示；空串 = 通用）
+    factory_name: String(source.factory_name ?? ""),
+    city: String(source.city ?? ""),
     status: Boolean(source.online ?? source.status === true),
     online: Boolean(source.online),
     mode: String(source.mode ?? ""),

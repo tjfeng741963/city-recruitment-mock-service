@@ -57,11 +57,31 @@ describe("device config distribution", () => {
       interval_seconds: 35,
       cooldown: 12,
       merge_delay_seconds: 0,
+      factory_name: "",
+      city: "",
       scripts: [{ stage: "send_info", city: "深圳", title: "龙华厂标准介绍", content: "您好，龙华电子厂…" }],
     });
     // 话术更新时间更晚 → version 取较新者
     app.db.prepare("UPDATE device_scripts SET updated_at='2026-11-11T00:00:00Z' WHERE device_code='local-device-001'").run();
     expect((await configOf("local-device-001")).json().version).toBe("2026-11-11T00:00:00Z");
+  });
+
+  // 契约：docs/对齐-设备工厂绑定与资料导入.md §1
+  // config 下发设备绑定的 factory_name/city（透传 agent_devices.data_json，缺失回空串）
+  it("serves bound factory_name and city from data_json, empty strings when absent", async () => {
+    app.db.prepare("UPDATE agent_devices SET data_json=? WHERE json_extract(data_json,'$.device_code')='local-device-001'")
+      .run(JSON.stringify({ device_code: "local-device-001", factory_name: "松下万宝(广州)压缩机有限公司", city: "广州" }));
+    expect(await configOf("local-device-001").then((r) => r.json()))
+      .toMatchObject({ factory_name: "松下万宝(广州)压缩机有限公司", city: "广州" });
+
+    // 没绑的设备：空串 = 通用/不限，绝不回 undefined/null
+    const created = await app.inject({ method: "POST", url: "/api/v1/agent/devices", headers: admin, payload: { device_code: "dev-unbound" } });
+    expect(created.statusCode).toBe(200);
+    const pair = await app.inject({ method: "POST", url: "/api/v1/bridge/devices/dev-unbound/pair", headers: admin });
+    const unbound = { authorization: `Bearer ${pair.json().device_token}` };
+    const body = (await configOf("dev-unbound", unbound)).json();
+    expect(body.factory_name).toBe("");
+    expect(body.city).toBe("");
   });
 
   it("authenticates with the bridge device token like other /bridge routes", async () => {

@@ -101,6 +101,10 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
       interval_seconds: positive(params.interval_seconds, 20),
       cooldown: positive(params.cooldown, 8),
       merge_delay_seconds: positive(params.merge_delay_seconds, 0),
+      // 设备绑定的工厂/城市（契约 docs/对齐-设备工厂绑定与资料导入.md §1）：
+      // 8090 拿去做知识库过滤，data_json 没绑就回空串 = 通用/不限。
+      factory_name: typeof params.factory_name === "string" ? params.factory_name : "",
+      city: typeof params.city === "string" ? params.city : "",
       scripts,
     };
   });

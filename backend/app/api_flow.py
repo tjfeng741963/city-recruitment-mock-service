@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 from .deps import ServiceOrUser, SessionDep
 from .services import flow_session as store
 from .services import kb_placeholder, profile_push, unknown_questions
-from .services.device_scripts import fetch_scripts, pick_script, render_script
+from .services.device_scripts import fetch_device_meta, fetch_scripts, pick_script, render_script
 from .services.flow_engine import (
     STAGE_ASK_CITY,
     STAGE_ASK_INTERVIEW,
@@ -84,19 +84,33 @@ async def flow_answer(
     stage_before = str(state.get("stage") or "")
     slots = state.setdefault("slots", {})
 
-    # 知识库只做占位命中（标题关键词包含匹配），没命中交给流程走兜底话术。
-    # 城市线索一并传下去：同城话术加权、异城话术不命中。
-    kb_answer: str | None = None
-    if stage_before in _KB_STAGES:
-        try:
-            city_hint_for_kb = extract_city(payload.text) or str(slots.get("city") or "")
-            kb_answer = await kb_placeholder.lookup(session, payload.text, city_hint_for_kb)
-        except Exception:  # noqa: BLE001  查库失败等同于没命中，不能挡住回复
-            kb_answer = None
-
     device_code = payload.device_code or os.getenv(
         "FLOW_PROFILE_DEVICE", profile_push.DEFAULT_DEVICE
     )
+
+    # 知识库只做占位命中（标题关键词包含匹配），没命中交给流程走兜底话术。
+    # 城市/工厂线索来自设备绑定（fetch_device_meta 60s 缓存，拉不到回空 = 通配）；
+    # 设备没绑城市时退回客户自己说的城市（老行为）。同城 +3、同厂 +5，异城/异厂排除。
+    kb_answer: str | None = None
+    if stage_before in _KB_STAGES:
+        try:
+            meta = await fetch_device_meta(device_code)
+        except Exception:  # noqa: BLE001  meta 拉不到按通配，流程不中断
+            meta = {"factory_name": "", "city": ""}
+        try:
+            city_hint_for_kb = (
+                str(meta.get("city") or "")
+                or extract_city(payload.text)
+                or str(slots.get("city") or "")
+            )
+            kb_answer = await kb_placeholder.lookup(
+                session,
+                payload.text,
+                city=city_hint_for_kb,
+                factory=str(meta.get("factory_name") or ""),
+            )
+        except Exception:  # noqa: BLE001  查库失败等同于没命中，不能挡住回复
+            kb_answer = None
 
     # 城市线索：先看客户这轮说的，再看已有槽位（别名归一在 4222 侧，这里只透传）
     city_hint = extract_city(payload.text) or str(slots.get("city") or "")

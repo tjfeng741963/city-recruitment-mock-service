@@ -57,6 +57,47 @@ export function BindDialog({ onClose, onCreated }: { onClose: () => void; onCrea
   );
 }
 
+export function LocationDialog({ device, onClose, onSaved }: { device: DeviceDetail; onClose: () => void; onSaved: () => void }) {
+  const [factory, setFactory] = useState(device.factory_name ?? "");
+  const [city, setCity] = useState(device.city ?? "");
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    setSaving(true);
+    setError(null);
+    try {
+      await devicesApi.saveLocation(device.id, factory.trim(), city.trim());
+      onSaved();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.detail : "保存失败");
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={`「${device.name || device.device_code}」的账号定位`}
+      description="设置这个微信号服务的工厂和城市，设备端会据此过滤知识库。留空表示通用，不限工厂或城市。"
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>取消</Button>
+          <Button type="submit" form="dv-location" loading={saving}>保存</Button>
+        </>
+      }
+    >
+      <form id="dv-location" className="mod-form" onSubmit={submit}>
+        <Input id="dv-factory" label="所属工厂" placeholder="留空 = 通用" value={factory} onChange={(e) => setFactory(e.target.value)} />
+        <Input id="dv-city" label="服务城市" placeholder="留空 = 通用" value={city} onChange={(e) => setCity(e.target.value)} />
+        {error && <Alert tone="danger" title={error} />}
+      </form>
+    </Dialog>
+  );
+}
+
 export function PairDialog({ device, onClose }: { device: DeviceDetail; onClose: () => void }) {
   const [token, setToken] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);

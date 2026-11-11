@@ -74,6 +74,8 @@ function Card({ card, now }: { card: DeviceCard; now: number }) {
         <Badge tone={STATE_TONE[card.state]} dot>{stateLine(card, now)}</Badge>
       </div>
       <dl className="dv-card-meta">
+        <div><dt>所属工厂</dt><dd>{card.device.factory_name || "通用"}</dd></div>
+        <div><dt>服务城市</dt><dd>{card.device.city || "通用"}</dd></div>
         <div><dt>今天接待</dt><dd className="ui-num">{card.today} 人</dd></div>
         <div><dt>工作流</dt><dd>{card.workflow ? "已挂" : <span className="dv-muted">未挂</span>}</dd></div>
       </dl>
@@ -96,7 +98,7 @@ export function DevicesPage({ deviceId }: { deviceId?: number }) {
     const card = cards?.find((c) => c.device.id === deviceId);
     return (
       <>
-        <DeviceDetailView card={card} loading={!cards} canPair={isAdmin} onPair={() => card && setPairing(card.device)} onRenamed={refresh} />
+        <DeviceDetailView card={card} loading={!cards} canPair={isAdmin} onPair={() => card && setPairing(card.device)} onChanged={refresh} />
         {pairDialog}
       </>
     );

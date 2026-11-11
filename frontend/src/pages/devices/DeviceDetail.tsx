@@ -4,6 +4,7 @@ import { ApiError } from "../../api/client";
 import { Badge, Button, EmptyState, Input, ListGroup, ListRow, Skeleton } from "@ui";
 import { formatWait, minutesSince } from "../reception/triage";
 import type { DeviceCard } from "./DevicesPage";
+import { LocationDialog } from "./DeviceDialogs";
 import { STATE_LABEL, STATE_TONE, failedCommands } from "./model";
 
 const LEGACY_ORIGIN = import.meta.env.VITE_LEGACY_ORIGIN ?? "http://127.0.0.1:8080";
@@ -48,15 +49,16 @@ export function DeviceDetailView({
   loading,
   canPair,
   onPair,
-  onRenamed,
+  onChanged,
 }: {
   card: DeviceCard | undefined;
   loading: boolean;
   canPair: boolean;
   onPair: () => void;
-  onRenamed: () => void;
+  onChanged: () => void;
 }) {
   const now = Date.now();
+  const [locating, setLocating] = useState(false);
   if (loading) {
     return (
       <div className="mod-page">
@@ -96,9 +98,15 @@ export function DeviceDetailView({
       )}
 
       <ListGroup header="基本信息">
-        <div className="ui-row"><RenameRow key={card.device.name} card={card} onRenamed={onRenamed} /></div>
+        <div className="ui-row"><RenameRow key={card.device.name} card={card} onRenamed={onChanged} /></div>
         <ListRow title="设备编号" detail={<code>{card.device.device_code}</code>} />
         <ListRow title="登录的微信" detail={card.accountId || <span className="dv-muted">还没登录过</span>} />
+        <ListRow
+          title="账号定位"
+          subtitle="设备端按工厂/城市过滤知识库，留空 = 通用"
+          detail={`所属工厂 ${card.device.factory_name || "通用"} · 服务城市 ${card.device.city || "通用"}`}
+          trailing={<Button variant="ghost" size="sm" onClick={() => setLocating(true)}>编辑</Button>}
+        />
         <ListRow title="今天接待" detail={`${card.today} 人`} />
       </ListGroup>
 
@@ -139,6 +147,8 @@ export function DeviceDetailView({
           <ListRow title="重新生成连接口令" trailing={<Button variant="ghost" size="sm" onClick={onPair}>重新生成</Button>} />
         </ListGroup>
       )}
+
+      {locating && <LocationDialog device={card.device} onClose={() => setLocating(false)} onSaved={onChanged} />}
     </div>
   );
 }

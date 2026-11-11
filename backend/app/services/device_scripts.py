@@ -25,11 +25,16 @@ CACHE_TTL = 60.0
 
 # {device_code: (过期时刻 monotonic, scripts)}
 _cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+# {device_code: (过期时刻 monotonic, factory_name/city)}
+_meta_cache: dict[str, tuple[float, dict[str, str]]] = {}
+
+EMPTY_META: dict[str, str] = {"factory_name": "", "city": ""}
 
 
 def clear_cache() -> None:
     """测试用：清空缓存。"""
     _cache.clear()
+    _meta_cache.clear()
 
 
 async def _fetch_scripts(device_code: str, token: str, url: str) -> list[dict[str, Any]]:
@@ -63,6 +68,50 @@ async def fetch_scripts(device_code: str) -> list[dict[str, Any]]:
         scripts = []
     _cache[device_code] = (time.monotonic() + CACHE_TTL, scripts)
     return scripts
+
+
+def _normalize_meta(data: Any) -> dict[str, str]:
+    """config 响应 → 只留 factory_name/city 两个键，缺失/类型不对回空串。"""
+    if not isinstance(data, dict):
+        return dict(EMPTY_META)
+    return {
+        "factory_name": str(data.get("factory_name") or ""),
+        "city": str(data.get("city") or ""),
+    }
+
+
+async def _fetch_meta(device_code: str, token: str, url: str) -> dict[str, str]:
+    """发一次真实请求。只在这层碰网络，测试 monkeypatch 这里。"""
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        resp = await client.get(url, headers={"X-Profile-Token": token})
+        resp.raise_for_status()
+        return _normalize_meta(resp.json())
+
+
+async def fetch_device_meta(device_code: str) -> dict[str, str]:
+    """拉设备绑定的工厂/城市（契约 docs/对齐-设备工厂绑定与资料导入.md §2）。
+
+    GET config（X-Profile-Token，60s 缓存与 fetch_scripts 同款写法），
+    返回 {"factory_name": str, "city": str}；任何失败都回空值（通配），
+    流程不中断——4222 挂了顶多做不了知识库过滤，不能挡住回复。
+    """
+    device_code = str(device_code or "").strip()
+    if not device_code:
+        return dict(EMPTY_META)
+    now = time.monotonic()
+    cached = _meta_cache.get(device_code)
+    if cached and now < cached[0]:
+        return cached[1]
+    token = os.getenv("FLOW_PROFILE_TOKEN", "").strip()
+    if not token:
+        return dict(EMPTY_META)
+    url = os.getenv("FLOW_CONFIG_URL", DEFAULT_CONFIG_URL).format(device_code=device_code)
+    try:
+        meta = await _fetch_meta(device_code, token, url)
+    except Exception:  # noqa: BLE001  超时/4222 挂了：按通配走原逻辑
+        meta = dict(EMPTY_META)
+    _meta_cache[device_code] = (time.monotonic() + CACHE_TTL, meta)
+    return meta
 
 
 def pick_script(scripts: list[dict[str, Any]], stage: str, city: str) -> dict[str, Any] | None:
@@ -106,6 +155,7 @@ def render_script(content: str, job: dict[str, Any], window: str = INTERVIEW_WIN
 
 __all__ = [
     "fetch_scripts",
+    "fetch_device_meta",
     "pick_script",
     "render_script",
     "clear_cache",

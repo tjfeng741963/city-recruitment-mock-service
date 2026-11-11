@@ -33,6 +33,8 @@ export interface DeviceDetail {
   name: string;
   recruiter_id: string;
   mode: string;
+  factory_name: string;
+  city: string;
   created_at: string;
 }
 
@@ -108,6 +110,10 @@ export const devicesApi = {
     request<DeviceDetail>("/api/v1/agent/devices", { method: "POST", ...json({ device_code, name, device_name: name, status: "enabled" }) }),
   rename: (id: number, name: string) =>
     request<unknown>(`/api/v1/agent/devices/${id}`, { method: "PUT", ...json({ name, device_name: name }) }),
+  // 账号定位：只 PUT 这两个字段，服务端把它们合并进现有 data_json，
+  // interval/cooldown 等其余键不会丢。空串 = 通用（不限工厂/城市）。
+  saveLocation: (id: number, factory_name: string, city: string) =>
+    request<unknown>(`/api/v1/agent/devices/${id}`, { method: "PUT", ...json({ factory_name, city }) }),
   bridge: (code: string) =>
     request<{ device: { state: string; heartbeat_at: number; account_id: string } | null; commands: BridgeCommand[] }>(
       `/api/v1/bridge/devices/${enc(code)}`,
