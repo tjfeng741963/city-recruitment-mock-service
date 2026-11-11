@@ -580,8 +580,19 @@ class Reporter:
                 self._save()
                 sent += 1
             except Exception as exc:  # noqa: BLE001
-                log(f"[桥接] {direction} {event['event_id']} 失败（忽略）：{agent_client.describe_error(exc)}; retry next cycle")
-                break
+                desc = agent_client.describe_error(exc)
+                # 服务器返回 502 且 status=processed：消息本身已入库，只是
+                # 自动回复投递失败（指令已终态）。这种重试永远不会成功，
+                # 留在队首还会堵住后面的消息（2026-11-11 实测）→ 直接放弃。
+                if "reply_status" in desc and ("Device delivery failed" in desc or '"failed"' in desc):
+                    with self._lock:
+                        self._bridge_pending.pop(key, None)
+                    self._save()
+                    log(f"[桥接] {direction} {event['event_id']} 服务器已处理但自动回复投递失败，放弃重试")
+                    continue
+                log(f"[桥接] {direction} {event['event_id']} 失败（忽略）：{desc}; retry next cycle")
+                # 单条失败不堵队：继续发后面的 pending
+                continue
         if sent:
             log(f"[桥接] messages 上报 {sent} 条")
 
