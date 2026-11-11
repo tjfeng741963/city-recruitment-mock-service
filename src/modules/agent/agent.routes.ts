@@ -107,7 +107,7 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     const deviceCode = request.query.device_code ?? "";
     if (!canAccessDevice(getUserScope(db, request.auth!), deviceCode)) return reply.code(403).send({ detail: "Device scope required" });
     bridgeStore.expireClaims(deviceCode);
-    const rows = db.prepare("SELECT * FROM agent_messages WHERE device_code=? AND customer_id=? AND id>? ORDER BY id").all(deviceCode, Number(request.query.customer_id ?? 0), Number(request.query.after_id ?? 0)) as Array<Record<string, unknown>>;
+    const rows = db.prepare("SELECT * FROM agent_messages WHERE device_code=? AND customer_id=? AND id>? ORDER BY created_at, id").all(deviceCode, Number(request.query.customer_id ?? 0), Number(request.query.after_id ?? 0)) as Array<Record<string, unknown>>;
     // 会话页按 role 决定气泡左右；agent_messages 只有 direction，这里补一层映射。
     return { items: rows.map((row) => ({ ...row, role: row.direction === "inbound" ? "customer" : "agent" })), takeover: false };
   });
