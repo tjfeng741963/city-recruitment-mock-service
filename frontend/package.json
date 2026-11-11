@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:admin": "tsc -b && vite build --base=/admin/",
     "dev:showcase": "vite --config vite.showcase.config.ts",
     "build:showcase": "tsc -b && vite build --config vite.showcase.config.ts",
     "preview": "vite preview"
