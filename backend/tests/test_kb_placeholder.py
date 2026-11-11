@@ -147,3 +147,43 @@ async def test_record_body_and_swallows_errors(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(unknown_questions.httpx, "AsyncClient", BoomClient)
     assert await unknown_questions.record("宿舍有没有空调") is False
+
+
+def test_generic_connector_words_never_match():
+    """回归：话术标题里混着「还有法定节假日…」时，客户问「还有什么岗位」不许命中。"""
+    title = "这边长期/短期做都可以，能做一个月以上都行，这边属于国企还是比较不错的，你如果能长期做的话，转正之后我们都是入编制的，还有法定节假日三倍工资，有意向可以直接找我报名面试"
+    kws = kb_placeholder.keywords_of(title)
+    assert "还有" not in kws
+    assert kb_placeholder.match("还有什么岗位", title) is False
+
+
+def test_lookup_prefers_most_relevant(monkeypatch):
+    """多条命中时选关键词覆盖最长的，而不是库里第一条。"""
+    import asyncio
+    import sys
+    import types
+
+    from app.services import kb_placeholder as mod
+
+    class Row:
+        def __init__(self, title, body):
+            self.title, self.body = title, body
+            self.status = "enabled"
+            self.kind = "script"
+            self.tenant_id = 1
+
+    rows = [Row("体检", "短答"), Row("体检报销多少钱一个月", "长答")]
+
+    class Scalars:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return rows
+
+    class FakeSession:
+        async def execute(self, *_a, **_k):
+            return Scalars()
+
+    out = asyncio.run(mod.lookup(FakeSession(), "体检报销多少钱一个月"))
+    assert out == "长答", out

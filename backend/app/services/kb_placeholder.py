@@ -29,6 +29,12 @@ MIN_KEYWORD = 2
 _STOPWORDS = {
     "什么", "怎么", "如何", "可以", "能不", "不能", "我们", "你们", "这个", "那个",
     "一个", "是不", "不是", "有没", "没有", "多少", "哪些", "的话",
+    # 2026-11-11 模拟实测：条目 #152 标题里带「还有法定节假日…」，
+    # 客户问「还有什么岗位」被「还有」误命中。以下连接词/客套词永远不当主题词。
+    "还有", "以及", "而且", "但是", "可是", "如果", "或者", "就是", "都是", "也是",
+    "直接", "需要", "然后", "这边", "那边", "咱们", "现在", "今天", "明天", "后天",
+    "昨天", "属于", "感觉", "比较", "非常", "特别", "之类", "一下", "一直", "一定",
+    "全部", "所有", "情况", "后续", "后续有", "大家", "自己", "做的话", "来说",
 }
 
 
@@ -79,12 +85,18 @@ async def lookup(session: AsyncSession, question: str) -> str | None:
             .limit(MAX_ENTRIES)
         )
     ).scalars().all()
+    best: tuple[int, str] | None = None  # (得分, 正文)
     for entry in rows:
         if not (entry.body or "").strip():
             continue
-        if match(text, entry.title):
-            return str(entry.body).strip()
-    return None
+        words = [w for w in keywords_of(entry.title) if w in text]
+        if not words:
+            continue
+        score = sum(len(w) for w in words)
+        # 命中总长最长的算最相关：「体检报销吗」输给「体检报销多少钱一个月」
+        if best is None or score > best[0]:
+            best = (score, str(entry.body).strip())
+    return best[1] if best else None
 
 
 __all__ = ["keywords_of", "lookup", "match"]
