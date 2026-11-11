@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { unknownQuestionsApi, type UnknownQuestion } from "../../api/knowledge";
 import { Alert, Badge, Button, DataTable, Dialog, EmptyState, FilterBar, Input, SearchField, SegmentedControl, Tag, Textarea, useFeedback, type Column, type Tone } from "@ui";
-import { KeywordInput, ModuleTabs, PagerRow, RetryAlertAction, errorText, useDebounced } from "./shared";
+import { ModuleTabs, PagerRow, RetryAlertAction, errorText, useDebounced } from "./shared";
 
 type Row = Omit<UnknownQuestion, "id"> & { id: string; num: number; actions?: never };
 
@@ -22,26 +22,27 @@ const MERGED_SHOWN = 3;
 
 function ConvertDialog({ row, onClose, onDone }: { row: Row; onClose: () => void; onDone: () => void }) {
   const { toast } = useFeedback();
-  const [question, setQuestion] = useState(row.question);
   const [answer, setAnswer] = useState("");
-  const [keywords, setKeywords] = useState<string[]>([]);
-  const [errors, setErrors] = useState<{ question?: string; answer?: string }>({});
+  const [title, setTitle] = useState("");
+  const [errors, setErrors] = useState<{ answer?: string }>({});
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    const found = { question: question.trim() ? undefined : "请填写问题", answer: answer.trim() ? undefined : "请填写标准回答" };
-    setErrors(found);
-    if (found.question || found.answer) return;
+    if (!answer.trim()) {
+      setErrors({ answer: "请填写答案" });
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
-      await unknownQuestionsApi.convert(row.num, { question: question.trim(), answer: answer.trim(), keywords });
+      // 标题不传时后端默认取问题原话截断；8090 不可达时后端返回 502，错误信息直接展示给运营。
+      await unknownQuestionsApi.convert(row.num, { answer: answer.trim(), title: title.trim() || undefined });
       toast("已转入知识库", "success");
       onDone();
     } catch (err) {
-      setError(errorText(err, "转入失败"));
+      setError(errorText(err, "转入失败，请稍后再试"));
       setSaving(false);
     }
   }
@@ -51,7 +52,7 @@ function ConvertDialog({ row, onClose, onDone }: { row: Row; onClose: () => void
       open
       onClose={onClose}
       title="转为知识条目"
-      description="写好标准回答后，AI 下次遇到这个问题就能直接回复。"
+      description={`问题：${row.question}。写好答案转入知识库后，AI 下次遇到这个问题就能直接回复。`}
       footer={
         <>
           <Button variant="secondary" onClick={onClose}>取消</Button>
@@ -60,9 +61,8 @@ function ConvertDialog({ row, onClose, onDone }: { row: Row; onClose: () => void
       }
     >
       <form id="uq-convert-form" className="mod-form" onSubmit={submit} noValidate>
-        <Input id="uq-question" label="问题" required value={question} error={errors.question} onChange={(e) => setQuestion(e.target.value)} />
-        <Textarea id="uq-answer" label="回答" required rows={5} placeholder="输入标准回答" value={answer} error={errors.answer} onChange={(e) => setAnswer(e.target.value)} autoFocus />
-        <KeywordInput id="uq-keywords" value={keywords} onChange={setKeywords} />
+        <Input id="uq-title" label="标题" placeholder="不填则默认使用问题原文" value={title} onChange={(e) => setTitle(e.target.value)} />
+        <Textarea id="uq-answer" label="答案" required rows={6} placeholder="输入标准答案" value={answer} error={errors.answer} onChange={(e) => { setAnswer(e.target.value); if (errors.answer) setErrors({}); }} autoFocus />
         {error && <Alert tone="danger" title={error} />}
       </form>
     </Dialog>

@@ -121,6 +121,28 @@ function upsertCandidateEvent(db: DatabaseSync, row: ConversationRow, eventType:
   return Number(inserted.lastInsertRowid);
 }
 
+/**
+ * 「沟通中」事件（Task：collect 沟通中显示）：8090 一进 collect 阶段就推
+ * {"stage":"collect"}，这里给候选人页建一条 event_type='communicating'、
+ * status='pending'。与 invited 的 upsert 不同：**已存在就不动**——
+ * 反复推送不刷新时间，避免「沟通中」排序被顶到最上面。
+ */
+function ensureCommunicatingEvent(db: DatabaseSync, row: ConversationRow): number {
+  const existing = db.prepare("SELECT id FROM candidate_events WHERE device_code=? AND customer_id=? AND event_type='communicating' ORDER BY id DESC LIMIT 1")
+    .get(row.device_code, String(row.customer_id)) as { id: number } | undefined;
+  if (existing) return existing.id;
+  const inserted = db.prepare(`INSERT INTO candidate_events(device_code,customer_id,nickname,event_type,event_at,status,data_json)
+    VALUES (?,?,?,'communicating',CURRENT_TIMESTAMP,'pending',?)`)
+    .run(row.device_code, String(row.customer_id), row.nickname, JSON.stringify({ source: "profile", customer_id: row.customer_id, stage: "collect" }));
+  return Number(inserted.lastInsertRowid);
+}
+
+/** 拿到姓名电话建 invited 事件时，把还在「沟通中」的事件推进到已转化。 */
+function convertCommunicatingEvents(db: DatabaseSync, row: ConversationRow) {
+  db.prepare("UPDATE candidate_events SET status='converted',updated_at=CURRENT_TIMESTAMP WHERE device_code=? AND customer_id=? AND event_type='communicating' AND status='pending'")
+    .run(row.device_code, String(row.customer_id));
+}
+
 export async function registerProfileRoutes(app: FastifyInstance, db: DatabaseSync) {
   app.post<{ Body: { device_code?: unknown; customer_id?: unknown; external_conversation_id?: unknown; profile?: unknown } }>("/api/v1/agent/profile", async (request, reply) => {
     if (!authorizeProfileRequest(request)) return reply.code(403).send({ detail: "Not authenticated" });
@@ -192,7 +214,14 @@ export async function registerProfileRoutes(app: FastifyInstance, db: DatabaseSy
       district: merged.district,
     };
     if (gaveUp) upsertCandidateEvent(db, row, "disqualified", eventFields);
-    else if (invited) upsertCandidateEvent(db, row, "invited", eventFields);
+    else if (invited) {
+      upsertCandidateEvent(db, row, "invited", eventFields);
+      // 沟通中 → 已约面：invited 建好的同一推送里把 pending 的 communicating 收尾
+      convertCommunicatingEvents(db, row);
+    } else if (asText(profile.stage) === "collect") {
+      // collect 阶段只建「沟通中」；部分更新语义不受影响，profile 照常合并
+      ensureCommunicatingEvent(db, row);
+    }
 
     return { ok: true, customer_id: String(conversation.customer_id), recruit_status: recruitStatus };
   });

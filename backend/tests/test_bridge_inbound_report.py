@@ -102,7 +102,11 @@ def test_both_directions_reported_except_system_and_empty_messages(tmp_path, cap
 
 
 def test_bridge_inbound_failure_does_not_break_reporting(tmp_path, capsys):
-    """桥接 inbound 全部失败：只打日志，主心跳/主上报照常，进程不崩。"""
+    """桥接 inbound 全部失败：只打日志，主心跳/主上报照常，进程不崩。
+
+    4687c48 起「单条失败不堵队」：一轮里所有 pending 都会被尝试一遍，
+    失败的留在队列里下轮重试，而不是失败一条就停整队。
+    """
     autopilot = _load_autopilot()
     api = FakeApi()
     bridge = FakeBridge(exc=TimeoutError("timed out"))
@@ -110,8 +114,10 @@ def test_bridge_inbound_failure_does_not_break_reporting(tmp_path, capsys):
 
     rep._run({"wecom_state": "online", "queue_size": 0, "last_error": ""}, BATCH)
 
-    # Stop after one failure; all eligible records remain queued for retry.
-    assert len(bridge.inbounds) == 1
+    # FakeBridge 先记账再抛异常：两条 inbound、一条 outbound 都被尝试过
+    assert len(bridge.inbounds) == 2
+    assert len(bridge.outbounds) == 1
+    # 全部失败，全部留在队列等待下轮重试
     assert len(rep._bridge_pending) == 3
     assert len(api.calls) == 1  # 主心跳照常
     out = capsys.readouterr().out

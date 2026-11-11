@@ -11,6 +11,9 @@ import { authorizeProfileRequest } from "./profile.routes.js";
  *    （服务间调用，X-Profile-Token；同一句问法按 question 归一化后累加 occurrence_count）
  * 2. 知识库页列表 → GET /api/v1/unknown-questions（列表/筛选在 resource.routes 里）
  * 3. 运营点「已处理」→ POST /api/v1/unknown-questions/:id/resolve
+ * 4. 运营点「转知识库」→ POST /api/v1/unknown-questions/:id/convert
+ *    （拿运营填的答案去 8090 建一条 script 话术，成功才标 resolved；
+ *     写法与 resolve 一致：同 scope 校验、幂等返回成功不报 409）
  *
  * 本期只做占位：不接 LLM 生成回答，也不做自动合并相似问法。
  */
@@ -20,6 +23,17 @@ export function normalizeQuestion(text: unknown): string {
   const raw = typeof text === "string" ? text : "";
   return raw.replace(/\s+/g, " ").trim().replace(/[?？。.!！~ ]+$/u, "");
 }
+
+/** 8090 知识库条目的默认标题：问题去掉标点再截 30 字，运营没填标题时兜底。 */
+export function defaultKbTitle(question: unknown): string {
+  const raw = typeof question === "string" ? question : "";
+  const stripped = raw.replace(/[\p{P}\p{S}\p{C}\s]+/gu, "");
+  const base = stripped || raw.trim();
+  return base.slice(0, 30);
+}
+
+/** convert 到 8090 的超时：运营在弹窗里等，太长会以为按钮坏了。 */
+const BRAIN_TIMEOUT_MS = 5000;
 
 function asText(value: unknown): string {
   if (typeof value === "string") return value;
@@ -96,4 +110,58 @@ export async function registerUnknownQuestionRoutes(app: FastifyInstance, db: Da
     }
     return { success: true, id, status: "resolved" };
   });
+
+  // 运营点「转知识库」：答案拿到 8090 建一条 script 话术，建成功才标 resolved。
+  // 幂等与 resolve 一致：已是 resolved 直接返回成功，不再重复调 8090。
+  app.post<{ Params: { id: string }; Body: { answer?: unknown; title?: unknown } }>(
+    "/api/v1/unknown-questions/:id/convert",
+    async (request, reply) => {
+      const id = Number(request.params.id);
+      if (!Number.isSafeInteger(id)) return reply.code(404).send({ detail: "未知问题不存在" });
+
+      const answer = typeof request.body?.answer === "string" ? request.body.answer.trim() : "";
+      if (!answer) return reply.code(422).send({ detail: "Answer cannot be empty" });
+
+      const row = db.prepare("SELECT * FROM unknown_questions WHERE id=?").get(id) as UnknownQuestionRow | undefined;
+      if (!row) return reply.code(404).send({ detail: "未知问题不存在" });
+
+      const scope = getUserScope(db, request.auth!);
+      let data: Record<string, unknown> = {};
+      try {
+        const parsed: unknown = JSON.parse(row.data_json || "{}");
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) data = parsed as Record<string, unknown>;
+      } catch {
+        data = {};
+      }
+      if (!scope.isAdmin && !canAccessRecruiter(scope, String(data.recruiter_id ?? ""))) {
+        return reply.code(404).send({ detail: "未知问题不存在" });
+      }
+
+      if (row.status === "resolved") return { success: true, id, status: "resolved" };
+
+      const customTitle = typeof request.body?.title === "string" ? request.body.title.trim() : "";
+      const title = customTitle || defaultKbTitle(row.question);
+      const brainUrl = (process.env.REA_BRAIN_URL ?? "http://127.0.0.1:8090").replace(/\/+$/, "");
+      const token = process.env.REA_PROFILE_TOKEN ?? "";
+
+      try {
+        const response = await fetch(`${brainUrl}/api/v1/kb/entries`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Profile-Token": token },
+          body: JSON.stringify({ kind: "script", title, body: answer, status: "enabled" }),
+          signal: AbortSignal.timeout(BRAIN_TIMEOUT_MS),
+        });
+        if (response.status !== 201) {
+          return reply.code(502).send({ detail: `知识库服务返回 ${response.status}，条目未创建` });
+        }
+      } catch (error) {
+        // 8090 挂了/超时：明确报错，不标 resolved，运营可以重试
+        const reason = error instanceof Error ? error.message : String(error);
+        return reply.code(502).send({ detail: `知识库服务不可达：${reason}` });
+      }
+
+      db.prepare("UPDATE unknown_questions SET status='resolved',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status<>'resolved'").run(id);
+      return { success: true, id, status: "resolved", title, kb_title: title };
+    },
+  );
 }

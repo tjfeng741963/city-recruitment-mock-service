@@ -28,13 +28,21 @@ async def session() -> AsyncSession:
         yield db
 
 
-async def _entry(session: AsyncSession, title: str, body: str, kind: str = "script", status: str = "enabled") -> KbEntry:
+async def _entry(
+    session: AsyncSession,
+    title: str,
+    body: str,
+    kind: str = "script",
+    status: str = "enabled",
+    city: str | None = None,
+) -> KbEntry:
     entry = KbEntry(
         tenant_id=DEFAULT_TENANT_ID,
         kind=kind,
         title=title,
         body=body,
         status=status,
+        city=city,
         search_text=title,
     )
     session.add(entry)
@@ -187,3 +195,46 @@ def test_lookup_prefers_most_relevant(monkeypatch):
 
     out = asyncio.run(mod.lookup(FakeSession(), "体检报销多少钱一个月"))
     assert out == "长答", out
+
+
+@pytest.mark.asyncio
+async def test_lookup_city_same_city_beats_wildcard(session: AsyncSession) -> None:
+    """同城加权：标题关键词打平时，带城市的那条 +3 胜出。"""
+    marker = uuid.uuid4().hex[:6]
+    local = await _entry(session, f"住宿条件{marker}", "同城答：厂区宿舍。", city="广州")
+    wildcard = await _entry(session, f"住宿条件{marker}", "通配答：有宿舍。")
+    try:
+        assert await kb_placeholder.lookup(session, f"住宿条件{marker}怎么样", city="广州") == "同城答：厂区宿舍。"
+        # 换个城市：同城条目被排除，只剩通配条目
+        assert await kb_placeholder.lookup(session, f"住宿条件{marker}怎么样", city="深圳") == "通配答：有宿舍。"
+    finally:
+        await session.execute(delete(KbEntry).where(KbEntry.id.in_([local.id, wildcard.id])))
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_lookup_city_mismatch_is_excluded(session: AsyncSession) -> None:
+    """异城排除：城市不符不许命中，宁可答不上来也不答错城市的事。"""
+    marker = uuid.uuid4().hex[:6]
+    entry = await _entry(session, f"体检报销{marker}", "深圳的规则。", city="深圳")
+    try:
+        assert await kb_placeholder.lookup(session, f"体检报销{marker}吗", city="广州") is None
+        # 没传城市（客户还没说城市）时，带城市的话术也不命中
+        assert await kb_placeholder.lookup(session, f"体检报销{marker}吗", city=None) is None
+        assert await kb_placeholder.lookup(session, f"体检报销{marker}吗", city="深圳") == "深圳的规则。"
+    finally:
+        await session.execute(delete(KbEntry).where(KbEntry.id == entry.id))
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_lookup_city_empty_is_wildcard(session: AsyncSession) -> None:
+    """空 city 通配：任何城市（包括不传）都能命中，无加权。"""
+    marker = uuid.uuid4().hex[:6]
+    entry = await _entry(session, f"工资发放{marker}", "每月 15 号发。")
+    try:
+        assert await kb_placeholder.lookup(session, f"工资发放{marker}时间", city="广州") == "每月 15 号发。"
+        assert await kb_placeholder.lookup(session, f"工资发放{marker}时间", city=None) == "每月 15 号发。"
+    finally:
+        await session.execute(delete(KbEntry).where(KbEntry.id == entry.id))
+        await session.commit()

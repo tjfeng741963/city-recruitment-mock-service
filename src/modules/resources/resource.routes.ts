@@ -155,66 +155,8 @@ function list(db: DatabaseSync, resource: Resource, query: Record<string, unknow
 }
 
 export async function registerResourceRoutes(app: FastifyInstance, db: DatabaseSync) {
-  app.post<{ Params: { id: string }; Body: { question: string; answer: string; keywords?: string[]; sort_order?: number; recruiter_id?: string } }>(
-    "/api/v1/unknown-questions/:id/convert",
-    async (request, reply) => {
-      const answer = request.body.answer;
-      if (typeof answer !== "string" || answer.trim() === "") {
-        return reply.code(422).send({ detail: "Answer cannot be empty" });
-      }
-
-      let transactionOpen = false;
-      try {
-        db.exec("BEGIN IMMEDIATE");
-        transactionOpen = true;
-        const id = Number(request.params.id);
-        const unknown = db.prepare("SELECT * FROM unknown_questions WHERE id=?").get(id) as Record<string, unknown> | undefined;
-        if (!unknown) {
-          db.exec("ROLLBACK");
-          transactionOpen = false;
-          return reply.code(404).send({ detail: "Unknown question not found" });
-        }
-        const scope = getUserScope(db, request.auth!);
-        const unknownResource = resources.find((resource) => resource.name === "unknown-questions")!;
-        if (!canAccessResource(unknownResource, unknown, scope)) {
-          db.exec("ROLLBACK");
-          transactionOpen = false;
-          return reply.code(404).send({ detail: "Unknown question not found" });
-        }
-        if (unknown.status !== "pending" || unknown.converted_knowledge_id !== null) {
-          db.exec("ROLLBACK");
-          transactionOpen = false;
-          return reply.code(409).send({ detail: "Unknown question already converted or is not pending" });
-        }
-
-        const question = request.body.question.trim() || String(unknown.question);
-        const keywords = Array.isArray(request.body.keywords)
-          ? request.body.keywords.filter((keyword): keyword is string => typeof keyword === "string").map((keyword) => keyword.trim()).filter(Boolean)
-          : [];
-        const sourceData = typeof unknown.data_json === "string" ? JSON.parse(unknown.data_json) as Record<string, unknown> : {};
-        const sortOrder = Number(request.body.sort_order ?? sourceData.sort_order ?? 0) || 0;
-        const recruiterId = String(request.body.recruiter_id ?? sourceData.recruiter_id ?? "");
-        const data = { question, keywords, is_active: true, sort_order: sortOrder, recruiter_id: recruiterId };
-        const knowledgeResource = resources.find((resource) => resource.name === "knowledge")!;
-        if (!canAccessResource(knowledgeResource, { data_json: JSON.stringify(data) }, scope)) {
-          db.exec("ROLLBACK");
-          transactionOpen = false;
-          return reply.code(403).send({ detail: "Resource scope required" });
-        }
-        const knowledge = db.prepare("INSERT INTO knowledge_items(title,content,status,data_json) VALUES (?,?,?,?) RETURNING *")
-          .get(question, answer, "enabled", JSON.stringify(data)) as Record<string, unknown>;
-        const transition = db.prepare("UPDATE unknown_questions SET status='resolved',converted_knowledge_id=?,converted_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='pending' AND converted_knowledge_id IS NULL")
-          .run(Number(knowledge.id), id);
-        if (transition.changes !== 1) throw new Error("Unknown question state changed during conversion");
-        db.exec("COMMIT");
-        transactionOpen = false;
-        return toOutput(knowledge, resources.find((resource) => resource.name === "knowledge"));
-      } catch {
-        if (transactionOpen) db.exec("ROLLBACK");
-        return reply.code(500).send({ detail: "Knowledge conversion failed" });
-      }
-    },
-  );
+  // 「转知识库」convert 已迁到 agent/unknown-questions.routes.ts：
+  // 现在是拿答案去 8090 建 script 话术（X-Profile-Token），成功才标 resolved。
 
   for (const resource of resources) {
     const base = `/api/v1/${resource.name}`;

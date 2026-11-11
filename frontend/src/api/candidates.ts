@@ -1,6 +1,7 @@
 import { request } from "./client";
 
-export type CandidateEventType = "invited" | "disqualified" | "checked_in";
+/** communicating：客户已答应面试、还没留姓名电话（链路补全新增事件类型）。 */
+export type CandidateEventType = "invited" | "communicating" | "disqualified" | "checked_in";
 
 export interface Candidate {
   id: number;

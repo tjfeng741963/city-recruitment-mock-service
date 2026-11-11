@@ -6,6 +6,7 @@ import { LoadError, ModHead, PageSizeSelect, downloadCsv, errorText, useLoader, 
 
 const TABS: Array<{ value: CandidateEventType; label: string }> = [
   { value: "invited", label: "报名成功" },
+  { value: "communicating", label: "沟通中" },
   { value: "disqualified", label: "不符合" },
   { value: "checked_in", label: "已签到" },
 ];
@@ -18,6 +19,8 @@ function buildColumns(
   onMark: (c: Candidate) => void,
   onRemind: (c: Candidate) => void,
   remindingId: string | null,
+  onQuickMark: (c: Candidate, status: "checked_in" | "no_show") => void,
+  quickMarkingId: string | null,
 ): Column<Row>[] {
   const dash = (v: string) => v || "—";
   const cols: Array<Column<Row> | false> = [
@@ -32,7 +35,10 @@ function buildColumns(
         </span>
       ),
     },
-    { key: "phone", header: "电话", render: (r) => <span className="ui-num">{dash(r.phone)}</span> },
+    // 沟通中还没有姓名电话，电话列的位置改为阶段提示。
+    tab === "communicating"
+      ? { key: "phone", header: "状态提示", render: () => <Badge tone="accent" dot>已答应面试，等待联系方式</Badge> }
+      : { key: "phone", header: "电话", render: (r) => <span className="ui-num">{dash(r.phone)}</span> },
     { key: "event_at", header: "事件时间", sortable: true, render: (r) => <span className="ui-num" title={r.event_at}>{r.event_at ? r.event_at.slice(5, 16) : "—"}</span> },
     tab === "invited" && {
       key: "interview_date",
@@ -51,15 +57,29 @@ function buildColumns(
       render: (r) => (r.remind_count > 0 ? <Badge tone="success">已提醒 {r.remind_count} 次</Badge> : <Badge>未提醒</Badge>),
     },
     tab === "disqualified" && { key: "disqualified_reason", header: "不符合原因", render: (r) => dash(r.disqualified_reason) },
-    { key: "status", header: "当前标记", render: (r) => <Badge tone={r.status === "disqualified" ? "warning" : "accent"}>{STATUS_LABEL[r.status] ?? r.status ?? "—"}</Badge> },
+    {
+      key: "status",
+      header: "当前标记",
+      render: (r) => (
+        tab === "communicating"
+          ? <Badge tone="accent" dot>沟通中</Badge>
+          : <Badge tone={r.status === "disqualified" ? "warning" : "accent"}>{STATUS_LABEL[r.status] ?? r.status ?? "—"}</Badge>
+      ),
+    },
     {
       key: "ops",
       header: "操作",
       render: (r) => (
         <span className="cd-row-ops">
           <Button size="sm" variant="ghost" onClick={() => onChat(r.raw)}>对话记录</Button>
-          <Button size="sm" variant="ghost" onClick={() => onMark(r.raw)}>标记</Button>
-          {r.status === "invited" && (
+          {tab !== "communicating" && <Button size="sm" variant="ghost" onClick={() => onMark(r.raw)}>标记</Button>}
+          {tab === "invited" && r.status === "invited" && (
+            <>
+              <Button size="sm" variant="tinted" loading={quickMarkingId === r.id} onClick={() => onQuickMark(r.raw, "checked_in")}>已签到</Button>
+              <Button size="sm" variant="tinted" loading={quickMarkingId === r.id} onClick={() => onQuickMark(r.raw, "no_show")}>未到</Button>
+            </>
+          )}
+          {tab === "invited" && r.status === "invited" && (
             <Button size="sm" variant="tinted" loading={remindingId === r.id} onClick={() => onRemind(r.raw)}>提醒到场</Button>
           )}
         </span>
@@ -81,13 +101,15 @@ export function CandidatesPage() {
   const [chat, setChat] = useState<Candidate | null>(null);
   const [marking, setMarking] = useState<Candidate[] | null>(null);
   const [remindingId, setRemindingId] = useState<string | null>(null);
+  const [quickMarkingId, setQuickMarkingId] = useState<string | null>(null);
 
   const interview = tab === "invited" ? interviewDate : "";
   const { data, error, loading, reload } = useLoader(
     () => candidatesApi.list({ event_type: tab, page, page_size: pageSize, device_code: device, event_date: eventDate, interview_date: interview }),
     [tab, page, pageSize, device, eventDate, interview],
   );
-  const items = data?.items ?? [];
+  // 沟通中：拿到姓名电话后原事件会被后端置为 converted，这里只展示仍待联系的（pending）。
+  const items = (data?.items ?? []).filter((c) => tab !== "communicating" || c.status === "pending");
   const total = data?.total ?? 0;
 
   const rows: Row[] = useMemo(
@@ -103,7 +125,10 @@ export function CandidatesPage() {
       })),
     [items, names],
   );
-  const columns = useMemo(() => buildColumns(tab, setChat, (c) => setMarking([c]), remind, remindingId), [tab, remindingId]);
+  const columns = useMemo(
+    () => buildColumns(tab, setChat, (c) => setMarking([c]), remind, remindingId, quickMark, quickMarkingId),
+    [tab, remindingId, quickMarkingId],
+  );
 
   function resetPage<T>(set: (v: T) => void) {
     return (v: T) => {
@@ -131,6 +156,21 @@ export function CandidatesPage() {
       toast(errorText(err, "提醒失败，请稍后再试"), "danger");
     } finally {
       setRemindingId(null);
+    }
+  }
+
+  /** 邀约行快捷标记：签到 / 未到，直接落库并提示结果。 */
+  async function quickMark(c: Candidate, status: "checked_in" | "no_show") {
+    const id = String(c.id);
+    setQuickMarkingId(id);
+    try {
+      await candidatesApi.mark(c.id, c.device_code, status);
+      toast(status === "checked_in" ? "已标记为「已签到」" : "已标记为「未到」", "success");
+      reload();
+    } catch (err) {
+      toast(errorText(err, "标记失败，请稍后再试"), "danger");
+    } finally {
+      setQuickMarkingId(null);
     }
   }
 

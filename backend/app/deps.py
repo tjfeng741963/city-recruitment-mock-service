@@ -69,19 +69,29 @@ async def get_service_or_user(
     session: SessionDep,
     authorization: Annotated[str | None, Header()] = None,
     x_service_token: Annotated[str | None, Header()] = None,
+    x_profile_token: Annotated[str | None, Header()] = None,
 ) -> User | None:
     """服务间调用或用户调用。
 
     Node 侧的自动回复链路没有用户身份，用 X-Service-Token 直连。
     只有配置了 APP_KB_SERVICE_TOKEN 且请求头匹配时才放行——
     未配置时这条路径关闭，避免默认裸奔。
+
+    X-Profile-Token：4222 → 8090 的服务间通道（如「未知问题转知识库」），
+    与 8090 推档案给 4222 用的 FLOW_PROFILE_TOKEN 是同一把共享密钥，
+    配置了且匹配才放行。
     """
     import hmac
+    import os
 
     from .settings import settings
 
     if x_service_token and settings.kb_service_token:
         if hmac.compare_digest(x_service_token, settings.kb_service_token):
+            return None
+    if x_profile_token:
+        profile_token = os.getenv("FLOW_PROFILE_TOKEN", "").strip()
+        if profile_token and hmac.compare_digest(x_profile_token, profile_token):
             return None
     return await get_current_user(session, authorization)
 

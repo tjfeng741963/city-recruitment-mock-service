@@ -2,18 +2,38 @@ import { useEffect, useState } from "react";
 
 const EVENT = "app:navigate";
 
+/**
+ * 构建时注入的部署前缀：dev 与默认 build 均为 "/"（归一后为空串），`build:admin` 为 "/admin/"。
+ * 项目未使用 react-router（BrowserRouter/HashRouter），自研 History 路由在此统一拼接/剥离前缀。
+ */
+const BASE = import.meta.env.BASE_URL.replace(/\/+$/, "");
+
+function withBase(path: string): string {
+  return `${BASE}${path}`;
+}
+
+/** 去掉部署前缀，还原应用内部路径（如 /admin/candidates → /candidates）。 */
+function stripBase(path: string): string {
+  if (BASE && (path === BASE || path.startsWith(`${BASE}/`))) {
+    const rest = path.slice(BASE.length);
+    return rest || "/";
+  }
+  return path;
+}
+
 export function navigate(path: string, { replace = false } = {}): void {
-  if (path === window.location.pathname + window.location.search) return;
-  if (replace) window.history.replaceState(null, "", path);
-  else window.history.pushState(null, "", path);
+  if (path === stripBase(window.location.pathname) + window.location.search) return;
+  const target = withBase(path);
+  if (replace) window.history.replaceState(null, "", target);
+  else window.history.pushState(null, "", target);
   window.dispatchEvent(new Event(EVENT));
   window.scrollTo(0, 0);
 }
 
 export function usePathname(): string {
-  const [path, setPath] = useState(() => window.location.pathname);
+  const [path, setPath] = useState(() => stripBase(window.location.pathname));
   useEffect(() => {
-    const sync = () => setPath(window.location.pathname);
+    const sync = () => setPath(stripBase(window.location.pathname));
     window.addEventListener("popstate", sync);
     window.addEventListener(EVENT, sync);
     return () => {

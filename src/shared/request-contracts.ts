@@ -62,7 +62,7 @@ export const ROUTE_CONTRACTS: RouteContract[] = [
   { method: "POST", path: "/api/v1/service-positions/:id/holidays", body: { year: "number", holiday_name: "string", start_date: "string", end_date: "string" } },
   { method: "POST", path: "/api/v1/service-positions/holidays-import", body: { file: "file" } },
   { method: "POST", path: "/api/v1/service-positions/jingcai-import", query: { recruiter_id: "string" }, body: { file: "file" } },
-  { method: "POST", path: "/api/v1/unknown-questions/:id/convert", body: { question: "string", answer: "string" } },
+  { method: "POST", path: "/api/v1/unknown-questions/:id/convert", body: { answer: "string" } },
   { method: "POST", path: "/api/v1/upload/image", body: { file: "file" } },
   { method: "POST", path: "/api/v1/upload/video", body: { file: "file" } },
   { method: "PUT", path: "/api/v1/activation/config/paused", body: { paused: "boolean" } },

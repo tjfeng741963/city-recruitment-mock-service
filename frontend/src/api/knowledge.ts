@@ -54,9 +54,9 @@ export interface UnknownQuestion {
 }
 
 export interface ConvertInput {
-  question: string;
+  /** 答案必填；标题选填，不传时后端默认取问题原话截断。 */
   answer: string;
-  keywords: string[];
+  title?: string;
 }
 
 export interface ReminderConfig {

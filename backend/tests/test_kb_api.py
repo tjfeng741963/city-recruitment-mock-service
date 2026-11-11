@@ -173,8 +173,8 @@ class TestServiceToken:
         )
         assert resp.status_code == 401
 
-    async def test_admin_endpoints_still_require_user(self, client: AsyncClient, monkeypatch) -> None:
-        """写操作不接受服务令牌——服务令牌只给检索用。"""
+    async def test_create_entry_accepts_service_token(self, client: AsyncClient, monkeypatch) -> None:
+        """「未知问题转知识库」后，写条目也接受服务间令牌（契约 2026-11-11）。"""
         from app.settings import settings
 
         monkeypatch.setattr(settings, "kb_service_token", "svc-secret")
@@ -183,4 +183,31 @@ class TestServiceToken:
             json={"kind": "script", "title": "x", "body": "y"},
             headers={"X-Service-Token": "svc-secret"},
         )
-        assert resp.status_code == 401
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["status"] == "enabled"  # 模型默认值不变
+
+    async def test_create_entry_accepts_profile_token(self, client: AsyncClient, monkeypatch) -> None:
+        """4222 的 convert 用 X-Profile-Token（= FLOW_PROFILE_TOKEN 共享密钥）调 8090。"""
+        monkeypatch.setenv("FLOW_PROFILE_TOKEN", "svc-profile-tok")
+        resp = await client.post(
+            "/api/v1/kb/entries",
+            json={"kind": "script", "title": "体检报销吗", "body": "先自付后报销。", "status": "enabled"},
+            headers={"X-Profile-Token": "svc-profile-tok"},
+        )
+        assert resp.status_code == 201, resp.text
+
+        wrong = await client.post(
+            "/api/v1/kb/entries",
+            json={"kind": "script", "title": "体检报销吗", "body": "x"},
+            headers={"X-Profile-Token": "wrong"},
+        )
+        assert wrong.status_code == 401
+
+        # 未配置 FLOW_PROFILE_TOKEN 时这条通道整体关闭
+        monkeypatch.delenv("FLOW_PROFILE_TOKEN", raising=False)
+        closed = await client.post(
+            "/api/v1/kb/entries",
+            json={"kind": "script", "title": "体检报销吗", "body": "x"},
+            headers={"X-Profile-Token": "svc-profile-tok"},
+        )
+        assert closed.status_code == 401

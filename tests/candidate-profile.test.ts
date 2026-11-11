@@ -119,6 +119,52 @@ describe("candidate profile api", () => {
     expect(candidates.json().items.filter((item: Record<string, unknown>) => String(item.customer_id) === "700001")).toHaveLength(1);
   });
 
+  it("records a communicating event on stage=collect and converts it when invited", async () => {
+    // profile 接口不新建会话（那是入站消息的职责），先造一行会话
+    app.db.prepare("INSERT OR IGNORE INTO agent_conversations(device_code,customer_id,nickname) VALUES ('local-device-001',700002,'沟通中客户')").run();
+
+    // ① collect 阶段推送：建一条「沟通中」，反复推不动它（不刷新、不重复）
+    const first = await app.inject({
+      method: "POST",
+      url: "/api/v1/agent/profile",
+      headers: headers(),
+      payload: { device_code: "local-device-001", customer_id: "700002", profile: { stage: "collect" } },
+    });
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).toMatchObject({ ok: true, customer_id: "700002" });
+
+    const communicating = app.db.prepare("SELECT id,nickname,status,event_type FROM candidate_events WHERE device_code=? AND customer_id=? AND event_type='communicating'")
+      .all("local-device-001", "700002") as Array<{ id: number; nickname: string; status: string; event_type: string }>;
+    expect(communicating).toHaveLength(1);
+    expect(communicating[0]).toMatchObject({ status: "pending", event_type: "communicating" });
+
+    // 再推一次 stage=collect：不重复建行（无则建、有则不动）
+    await app.inject({ method: "POST", url: "/api/v1/agent/profile", headers: headers(), payload: { device_code: "local-device-001", customer_id: "700002", profile: { stage: "collect" } } });
+    expect((app.db.prepare("SELECT COUNT(*) count FROM candidate_events WHERE device_code=? AND customer_id=? AND event_type='communicating'").all("local-device-001", "700002") as Array<unknown>).length).toBe(1);
+
+    // ② 部分更新语义没被破坏：collect 推送只建事件，不动已有字段
+    const read = await profileOf("device_code=local-device-001&customer_id=700002");
+    expect(read.statusCode).toBe(200);
+
+    // ③ 姓名电话到手、interview_date 推来：invited 建档，communicating 收尾成 converted
+    const invited = await app.inject({
+      method: "POST",
+      url: "/api/v1/agent/profile",
+      headers: headers(),
+      payload: { device_code: "local-device-001", customer_id: "700002", profile: { name: "王五", phone: "13700000000", interview_date: "2026-12-05", stage: "booked" } },
+    });
+    expect(invited.statusCode).toBe(200);
+    expect(invited.json()).toMatchObject({ ok: true, recruit_status: "invited" });
+
+    const after = app.db.prepare("SELECT status FROM candidate_events WHERE device_code=? AND customer_id=? AND event_type='communicating'")
+      .get("local-device-001", "700002") as { status: string };
+    expect(after.status).toBe("converted");
+
+    const invitedEvents = app.db.prepare("SELECT COUNT(*) count FROM candidate_events WHERE device_code=? AND customer_id=? AND event_type='invited'")
+      .get("local-device-001", "700002") as { count: number };
+    expect(invitedEvents.count).toBe(1);
+  });
+
   it("answers 404 instead of creating a conversation for an unknown candidate", async () => {
     const before = (app.db.prepare("SELECT COUNT(*) count FROM agent_conversations").get() as { count: number }).count;
     const response = await app.inject({ method: "POST", url: "/api/v1/agent/profile", headers: headers(), payload: { device_code: "local-device-001", customer_id: "999999", profile: { name: "不存在" } } });

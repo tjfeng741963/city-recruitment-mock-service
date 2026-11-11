@@ -315,7 +315,10 @@ async def list_fragments(
 
 
 @router.post("/entries", response_model=EntryOut, status_code=status.HTTP_201_CREATED)
-async def create_entry(payload: EntryIn, session: SessionDep, admin: AdminUser) -> KbEntry:
+async def create_entry(payload: EntryIn, session: SessionDep, user: ServiceOrUser) -> KbEntry:
+    # ServiceOrUser：除了管理后台的用户 token，4222 的「未知问题转知识库」
+    # 也走这条（X-Profile-Token 服务间通道，见 deps.get_service_or_user）。
+    del user
     if payload.age_min is not None and payload.age_max is not None:
         if payload.age_min > payload.age_max:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "年龄下限不能大于上限")
@@ -340,7 +343,6 @@ async def create_entry(payload: EntryIn, session: SessionDep, admin: AdminUser) 
         body=payload.body,
         search_text=_build_search_text(payload),
     )
-    del admin
     session.add(entry)
     await session.flush()
     for position, fragment in enumerate(payload.fragments):

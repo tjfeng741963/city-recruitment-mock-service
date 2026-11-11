@@ -84,11 +84,13 @@ async def flow_answer(
     stage_before = str(state.get("stage") or "")
     slots = state.setdefault("slots", {})
 
-    # 知识库只做占位命中（标题关键词包含匹配），没命中交给流程走兜底话术
+    # 知识库只做占位命中（标题关键词包含匹配），没命中交给流程走兜底话术。
+    # 城市线索一并传下去：同城话术加权、异城话术不命中。
     kb_answer: str | None = None
     if stage_before in _KB_STAGES:
         try:
-            kb_answer = await kb_placeholder.lookup(session, payload.text)
+            city_hint_for_kb = extract_city(payload.text) or str(slots.get("city") or "")
+            kb_answer = await kb_placeholder.lookup(session, payload.text, city_hint_for_kb)
         except Exception:  # noqa: BLE001  查库失败等同于没命中，不能挡住回复
             kb_answer = None
 
@@ -143,6 +145,15 @@ async def flow_answer(
         # ③ 主路径交给模型；没配模型或调用失败时，a_step 内部退到确定性状态机
         result = await a_step(state, payload.text, build_provider(), kb_answer=kb_answer)
 
+    # 「沟通中」标记：一进 collect 就给 4222 发一次 stage=collect，让候选人页
+    # 先出现「已答应面试，等联系方式」的一条。绕过 has_content 强推一次；
+    # 槽位先记下保证整轮只推一次，推送本身尽力而为（失败不回滚不影响回复）。
+    communicating = result.stage == STAGE_COLLECT and not result.slots.get(
+        "communicating_pushed"
+    )
+    if communicating:
+        result.slots["communicating_pushed"] = True
+
     records: list[tuple[str, dict[str, Any]]] = [
         (store.EVENT_INBOUND, {"text": payload.text})
     ]
@@ -170,6 +181,13 @@ async def flow_answer(
         try:
             await profile_push.push(device_code, payload.session_key, out_profile)
         except Exception:  # noqa: BLE001  推送是附加动作，不许影响客户收到话
+            pass
+
+    # 「沟通中」推送：{"stage": "collect"}，4222 据此建 communicating 事件
+    if communicating:
+        try:
+            await profile_push.push(device_code, payload.session_key, {"stage": "collect"})
+        except Exception:  # noqa: BLE001  尽力而为，推不动就下一轮再说
             pass
 
     # 知识库没答上来的原话：记一条给运营补话术（同样不许影响回复）
