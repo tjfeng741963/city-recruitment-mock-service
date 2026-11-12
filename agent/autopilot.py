@@ -584,6 +584,16 @@ class Reporter:
                 # 服务器返回 502 且 status=processed：消息本身已入库，只是
                 # 自动回复投递失败（指令已终态）。这种重试永远不会成功，
                 # 留在队首还会堵住后面的消息（2026-11-11 实测）→ 直接放弃。
+                # 图片等媒体消息：发送本体已凭人工指令回执入库，观察上报
+                # 与回执内容判定不一致（图片消息无文本）会永远 409 → 放弃
+                if "conflicts with command receipt" in desc:
+                    with self._lock:
+                        self._bridge_pending.pop(key, None)
+                    self._save()
+                    log(f"[桥接] {direction} {event['event_id']} 与指令回执冲突（媒体消息），放弃重试")
+                    continue
+                # 服务器返回 502 且 status=processed：消息本身已入库，只是
+                # 自动回复投递失败（指令已终态）。这种重试永远不会成功 → 直接放弃。
                 if "reply_status" in desc and ("Device delivery failed" in desc or '"failed"' in desc):
                     with self._lock:
                         self._bridge_pending.pop(key, None)
@@ -880,6 +890,13 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
 
         log(f"[{scene}] {name} ← {preview!r} → {text!r}")
         if dry:
+            # DRY-RUN 也走一遍标记解析，上线前核对素材是否就位
+            for raw in parts:
+                _, medias = core_send.split_media_marks(raw)
+                for kind, mname in medias:
+                    found = core_send.find_media(mname)
+                    log(f"    [媒体] DRY-RUN 解析 {kind}:{mname} → "
+                        f"{found.name if found else '未找到'}")
             log("    DRY-RUN，未发送")
             stats["sent"] += 1
             continue
@@ -897,16 +914,31 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             # （2026-11-07 实测：reply_log 记 sent，企微库里根本没有这条消息）。
             # expect_id 锁死落点，防止回车落到别的会话上。
             # 多段回复（parts）逐条发送，段间隔 2 秒防折叠/限流；任何一段失败即止。
+            # 每段先剥离【图片:x】/【视频:x】标记：剩余文本照常走键鼠发送，
+            # 文本发出后媒体逐个粘贴；媒体任何异常不影响文本已发状态。
             result = {"ok": False, "detail": "未发送"}
-            for idx, part in enumerate(parts):
-                result = core_send.send(
-                    store, name, part,
-                    expect_id=cid if str(cid).startswith(("S:", "R:")) else "",
-                    verify_db=True,
-                    log=lambda s: log(f"    {s}"),
-                )
-                if not result["ok"]:
-                    break
+            for idx, raw_part in enumerate(parts):
+                body, medias = core_send.split_media_marks(raw_part)
+                if body:
+                    result = core_send.send(
+                        store, name, body,
+                        expect_id=cid if str(cid).startswith(("S:", "R:")) else "",
+                        verify_db=True,
+                        log=lambda s: log(f"    {s}"),
+                    )
+                    if not result["ok"]:
+                        break
+                else:
+                    result = {"ok": True, "detail": "纯媒体段，无文本"}
+                for kind, mname in medias:
+                    try:
+                        ok_m, detail_m = core_send.paste_media(
+                            mname, log=lambda s: log(f"    {s}")
+                        )
+                        log(f"    [媒体] {kind}:{mname} "
+                            f"{'成功' if ok_m else '失败'}：{detail_m}")
+                    except Exception as exc:  # noqa: BLE001
+                        log(f"    [媒体] {kind}:{mname} 异常（忽略）：{type(exc).__name__}: {exc}")
                 if idx < len(parts) - 1:
                     time.sleep(2.0)
             if result["ok"]:
@@ -1107,6 +1139,23 @@ def pump_commands(
         return stats
 
     # 与自动回复共用冷却：同一时间只允许一个发送者，且两条消息之间留间隔。
+    # 媒体标记剥离（G2）：人工指令同样支持【图片:x】/【视频:x】，
+    # 剥离后的文本才是真正要发的内容（回读比对也用它）。
+    content, cmd_medias = core_send.split_media_marks(content)
+    if not content and cmd_medias:
+        # 纯媒体指令：没有文本可供回读确认落点，贴完媒体后回执 unknown 待人工核对
+        log("    纯媒体指令（无文本），贴完媒体后需人工核对落点")
+        for kind, mname in cmd_medias:
+            try:
+                ok_m, detail_m = core_send.paste_media(
+                    mname, log=lambda s: log(f"    {s}")
+                )
+                log(f"    [媒体] {kind}:{mname} {'成功' if ok_m else '失败'}：{detail_m}")
+            except Exception as exc:  # noqa: BLE001
+                log(f"    [媒体] {kind}:{mname} 异常（忽略）：{type(exc).__name__}: {exc}")
+        receipt("unknown")
+        stats["failed"] += 1
+        return stats
     wait = cfg["cooldown"] - (time.time() - _last_reply_at)
     if wait > 0:
         time.sleep(wait)
@@ -1144,6 +1193,15 @@ def pump_commands(
         return stats
 
     if result.get("ok"):
+        # 文本已发出：媒体逐个粘贴，任何媒体异常不影响文本已发状态与回执
+        for kind, mname in cmd_medias:
+            try:
+                ok_m, detail_m = core_send.paste_media(
+                    mname, log=lambda s: log(f"    {s}")
+                )
+                log(f"    [媒体] {kind}:{mname} {'成功' if ok_m else '失败'}：{detail_m}")
+            except Exception as exc:  # noqa: BLE001
+                log(f"    [媒体] {kind}:{mname} 异常（忽略）：{type(exc).__name__}: {exc}")
         _last_reply_at = time.time()
         after = _outbound_snapshot(store, contact_id)
         normalized = content.replace("\r\n", "\n").replace("\r", "\n").strip()
@@ -1405,6 +1463,12 @@ def main() -> int:
     cfg = ensure_registration(cfg, ROOT / "config.json")
 
     rlog.init()
+    # 媒体目录每次启动确保存在（G2：C:\agent\media，不存在即创建）
+    try:
+        core_send.ensure_media_dir()
+        log(f"媒体目录 {core_send.media_dir()} 就绪")
+    except Exception as exc:  # noqa: BLE001
+        log(f"[媒体] 目录初始化失败（忽略）：{type(exc).__name__}: {exc}")
     if args.flush_receipts:
         if cfg["dry_run"]:
             log("DRY-RUN，未补传回执")

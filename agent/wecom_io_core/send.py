@@ -19,7 +19,12 @@
 """
 from __future__ import annotations
 
+import io
+import os
+import re
+import struct
 import time
+from pathlib import Path
 from typing import Callable
 
 from . import win
@@ -272,3 +277,210 @@ def _find_new_sent(store, text: str, before: set) -> str:
         if _pb_text(r["content"]).strip() == text:
             return r["conversation_id"]
     return ""
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 媒体发送（G2 契约：docs/对齐-数据治理与图片发送.md）
+#
+# 标记协议：回复文本里写【图片:名称】/【视频:名称】，发送时：
+#   1. split_media_marks 剥离标记、拿到剩余文本与媒体清单；
+#   2. 先发剩余文本（走上面的 send，动作序列一行不改）；
+#   3. 文本发出后逐个 paste_media（图=DIB/PNG 进剪贴板，视频=CF_HDROP 文件列表）；
+#   4. 找不到本地文件 → 只发文本 + 日志「[媒体] 未找到 {name}」；
+#   5. 任何媒体异常都不影响文本的已发状态（调用方兜底，不回滚、不重发文本）。
+#
+# 媒体存放：C:\agent\media\{名称}.{jpg|jpeg|png|mp4}，可用环境变量
+# AGENT_MEDIA_DIR 覆盖（单测用）。目录不存在时启动即创建。
+# ═════════════════════════════════════════════════════════════════════════════
+
+MEDIA_MARK_RE = re.compile(r"【(图片|视频):([^】]{1,80})】")
+MEDIA_EXTS = (".jpg", ".jpeg", ".png", ".mp4")
+CF_DIB = 8  # win32clipboard.CF_DIB
+_PNG_FORMAT: int | None = None
+
+
+def media_dir() -> Path:
+    """媒体目录：默认 C:\\agent\\media，AGENT_MEDIA_DIR 可覆盖（单测）。"""
+    return Path(os.environ.get("AGENT_MEDIA_DIR") or r"C:\agent\media")
+
+
+def ensure_media_dir() -> Path:
+    """媒体目录不存在就创建；失败只返回路径，由调用方记日志。"""
+    d = media_dir()
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return d
+
+
+def find_media(name: str) -> Path | None:
+    """按名称在媒体目录里找 {name}.{jpg|jpeg|png|mp4}，找不到返回 None。"""
+    name = (name or "").strip()
+    if not name or any(ch in name for ch in ("/", "\\", ":")):
+        return None
+    d = ensure_media_dir()
+    for ext in MEDIA_EXTS:          # 精确匹配优先，扩展名按序
+        p = d / f"{name}{ext}"
+        if p.is_file():
+            return p
+    try:                            # 兜底：同主名不同大小写/少见后缀
+        for p in d.iterdir():
+            if p.is_file() and p.stem == name and p.suffix.lower() in MEDIA_EXTS:
+                return p
+    except OSError:
+        return None
+    return None
+
+
+def split_media_marks(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """剥离【图片:名称】/【视频:名称】标记。
+
+    返回 (剩余文本, [(kind, name), ...])，媒体按出现顺序排列；
+    剩余文本压掉标记删除后留下的连续空行并去首尾空白。
+    """
+    text = text or ""
+    medias = [(m.group(1), m.group(2).strip()) for m in MEDIA_MARK_RE.finditer(text)]
+    cleaned = MEDIA_MARK_RE.sub("", text)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned, medias
+
+
+def _png_clipboard_format() -> int:
+    """注册 PNG 剪贴板格式（进程内缓存）。"""
+    import win32clipboard
+
+    global _PNG_FORMAT
+    if _PNG_FORMAT is None:
+        _PNG_FORMAT = win32clipboard.RegisterClipboardFormat("PNG")
+    return _PNG_FORMAT
+
+
+def _dib_from_image(path: Path) -> bytes | None:
+    """jpg/png → CF_DIB 字节（BMP 体，去掉 14 字节文件头）。
+
+    依赖 Pillow；没装就返回 None，调用方退化为只放 PNG 原始字节。
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    try:
+        with Image.open(path) as img:
+            buf = io.BytesIO()
+            img.convert("RGB").save(buf, "BMP")
+            return buf.getvalue()[14:]
+    except Exception:
+        return None
+
+
+def set_clipboard_image(path: Path) -> str:
+    """把图片写进剪贴板（DIB + PNG 双格式，企微认哪个用哪个）。返回格式说明。"""
+    import win32clipboard
+
+    dib = _dib_from_image(path)
+    png = path.read_bytes()
+    fmt_png = _png_clipboard_format()
+    last_err: Exception | None = None
+    for _ in range(40):  # 向日葵最长占剪贴板约 5 秒
+        try:
+            win32clipboard.OpenClipboard()
+            try:
+                win32clipboard.EmptyClipboard()
+                if dib:
+                    win32clipboard.SetClipboardData(CF_DIB, dib)
+                win32clipboard.SetClipboardData(fmt_png, png)
+            finally:
+                win32clipboard.CloseClipboard()
+            return "DIB+PNG" if dib else "PNG"
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+            time.sleep(0.12)
+    raise RuntimeError(f"写图片剪贴板失败：{last_err}")
+
+
+def set_clipboard_files(paths: list[Path]) -> None:
+    """把文件路径列表写进剪贴板（CF_HDROP），企微输入框可直接粘贴文件。
+
+    pywin32 的 SetClipboardData 不接受 list（报 bytes-like required），
+    这里手工构造 DROPFILES 结构：头 20 字节（pFiles=20, pt=(0,0), fNC=0,
+    fWide=1）+ 双 \\0 结尾的宽字符路径表，按 HGLOBAL 内容体传入。
+    """
+    import win32clipboard
+
+    targets = [str(p) for p in paths]
+    payload = struct.pack("IiiII", 20, 0, 0, 0, 1)  # DROPFILES 头
+    payload += b"".join((t + "\0").encode("utf-16-le") for t in targets) + b"\0\0"
+    last_err: Exception | None = None
+    for _ in range(40):
+        try:
+            win32clipboard.OpenClipboard()
+            try:
+                win32clipboard.EmptyClipboard()
+                win32clipboard.SetClipboardData(win32clipboard.CF_HDROP, payload)
+            finally:
+                win32clipboard.CloseClipboard()
+            return
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+            time.sleep(0.12)
+    raise RuntimeError(f"写文件剪贴板失败：{last_err}")
+
+
+def paste_media(name: str, log: Callable[[str], None] = _log_default) -> tuple[bool, str]:
+    """把 media/{name}.* 粘贴进当前会话并回车发送。
+
+    调用时机：文本 send() 刚成功、目标会话已打开。动作序列照现有输入框
+    动作精简（会话已在）：抢前台 → 等可见 → 点输入框 → 写剪贴板 →
+    Ctrl+V → 等可见 → 回车。图片无法哨兵回读，发送确认靠等待窗口可见。
+
+    失败不影响文本已发状态：只返回 (False, 原因)，不抛异常不碰文本。
+    """
+    ensure_media_dir()
+    path = find_media(name)
+    if path is None:
+        log(f"[媒体] 未找到 {name}（目录 {media_dir()}）")
+        return False, f"未找到 {name}"
+
+    kind = "视频" if path.suffix.lower() == ".mp4" else "图片"
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+    log(f"[媒体] {kind}:{name} → {path.name}（{size} 字节）")
+
+    target = win.find_window()
+    if not target:
+        return False, "没找到企业微信窗口"
+    hwnd = target["hwnd"]
+    try:
+        if not win.ensure_foreground(hwnd, tries=4):
+            return False, "抢不到前台，媒体粘贴中止"
+        if _wait_visible(hwnd, "媒体粘贴前") is not None:
+            return False, "企微窗口持续隐藏，媒体粘贴中止"
+        time.sleep(0.2)
+        # 焦点到输入框（比例与 compat.CLICK_INPUT_RATIO 一致：0.45, 0.86）
+        left, top, w, h = target["rect"]
+        win.click(int(left + w * 0.45), int(top + h * 0.86))
+
+        if kind == "视频":
+            set_clipboard_files([path])
+        else:
+            fmt = set_clipboard_image(path)
+            log(f"[媒体] 剪贴板格式 {fmt}")
+        time.sleep(0.15)
+        win.hotkey("ctrl", "v")
+        time.sleep(1.0)  # 图片/视频渲染比文本慢
+        if _wait_visible(hwnd, "媒体发送前") is not None:
+            return False, "企微窗口持续隐藏，媒体发送中止"
+        win.tap("enter")
+        time.sleep(0.4)
+        log(f"[媒体] {kind}:{name} 已回车发送")
+        return True, f"已发送 {path.name}"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"{type(exc).__name__}: {exc}"
+    finally:
+        try:
+            win.release_modifiers()
+        except Exception:
+            pass
