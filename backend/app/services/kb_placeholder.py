@@ -68,13 +68,13 @@ def match(question: str, title: str) -> bool:
     return any(word in text for word in keywords_of(title))
 
 
-async def lookup(
+async def lookup_entry(
     session: AsyncSession,
     question: str,
     city: str | None = None,
     factory: str | None = None,
-) -> str | None:
-    """查一条话术。命中返回正文，未命中返回 None。
+) -> dict[str, str] | None:
+    """查一条话术。命中返回 {id,title,body}，未命中返回 None。
 
     城市加权（只在本层做，match() 不变）：
     - entry.city 与 city 相同 → 该条总分 +3（同城话术优先）
@@ -105,7 +105,7 @@ async def lookup(
             .limit(MAX_ENTRIES)
         )
     ).scalars().all()
-    best: tuple[int, str] | None = None  # (得分, 正文)
+    best: tuple[int, dict[str, str]] | None = None  # (得分, 条目)
     for entry in rows:
         if not (entry.body or "").strip():
             continue
@@ -130,8 +130,27 @@ async def lookup(
             score += 5
         # 命中总长最长的算最相关：「体检报销吗」输给「体检报销多少钱一个月」
         if best is None or score > best[0]:
-            best = (score, str(entry.body).strip())
+            best = (
+                score,
+                {
+                    # 测试夹具可能是裸 Row（无 id 列）→ 用 title 当身份兜底
+                    "id": str(getattr(entry, "id", None) or getattr(entry, "title", "") or ""),
+                    "title": str(getattr(entry, "title", "") or ""),
+                    "body": str(getattr(entry, "body", "") or "").strip(),
+                },
+            )
     return best[1] if best else None
 
 
-__all__ = ["keywords_of", "lookup", "match"]
+async def lookup(
+    session: AsyncSession,
+    question: str,
+    city: str | None = None,
+    factory: str | None = None,
+) -> str | None:
+    """兼容旧签名：命中返回正文，未命中返回 None。"""
+    hit = await lookup_entry(session, question, city=city, factory=factory)
+    return hit["body"] if hit else None
+
+
+__all__ = ["keywords_of", "lookup", "lookup_entry", "match"]

@@ -892,7 +892,10 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         if dry:
             # DRY-RUN 也走一遍标记解析，上线前核对素材是否就位
             for raw in parts:
-                _, medias = core_send.split_media_marks(raw)
+                try:
+                    _, medias = core_send.split_media_marks(raw)
+                except Exception:  # noqa: BLE001  stub/异常环境回退
+                    medias = []
                 for kind, mname in medias:
                     found = core_send.find_media(mname)
                     log(f"    [媒体] DRY-RUN 解析 {kind}:{mname} → "
@@ -918,7 +921,10 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             # 文本发出后媒体逐个粘贴；媒体任何异常不影响文本已发状态。
             result = {"ok": False, "detail": "未发送"}
             for idx, raw_part in enumerate(parts):
-                body, medias = core_send.split_media_marks(raw_part)
+                try:
+                    body, medias = core_send.split_media_marks(raw_part)
+                except Exception:  # noqa: BLE001
+                    body, medias = raw_part, []
                 if body:
                     result = core_send.send(
                         store, name, body,
@@ -1141,7 +1147,10 @@ def pump_commands(
     # 与自动回复共用冷却：同一时间只允许一个发送者，且两条消息之间留间隔。
     # 媒体标记剥离（G2）：人工指令同样支持【图片:x】/【视频:x】，
     # 剥离后的文本才是真正要发的内容（回读比对也用它）。
-    content, cmd_medias = core_send.split_media_marks(content)
+    try:
+        content, cmd_medias = core_send.split_media_marks(content)
+    except Exception:  # noqa: BLE001  测试 stub/异常环境回退：按纯文本发
+        content, cmd_medias = content, []
     if not content and cmd_medias:
         # 纯媒体指令：没有文本可供回读确认落点，贴完媒体后回执 unknown 待人工核对
         log("    纯媒体指令（无文本），贴完媒体后需人工核对落点")

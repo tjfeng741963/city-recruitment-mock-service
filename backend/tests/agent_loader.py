@@ -27,6 +27,11 @@ def load_autopilot():
             "wecom_io_core.store", "compat", "reply_store", "login_watch",
         )
     }
+    # send 的媒体函数给真实签名：MagicMock 迭代默认是空的，直接解包会炸
+    stubs["wecom_io_core.send"].split_media_marks = MagicMock(
+        side_effect=lambda text: (text or "", [])
+    )
+    stubs["wecom_io_core.send"].paste_media = MagicMock(return_value=(True, "stub"))
     with (
         patch.dict(sys.modules, stubs),
         patch.object(sys, "path", list(sys.path)),

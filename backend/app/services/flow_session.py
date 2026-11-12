@@ -27,6 +27,7 @@ EVENT_SLOT = "slot_set"
 EVENT_STAGE = "stage_change"
 EVENT_ACTION = "action"
 EVENT_PROFILE = "profile"
+EVENT_KB = "kb_hit"  # KB 条目已对本会话发过（去重基准，见 api_flow）
 EVENT_RESET = "reset"
 
 

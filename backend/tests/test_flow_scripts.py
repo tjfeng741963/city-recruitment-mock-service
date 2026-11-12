@@ -98,7 +98,7 @@ async def test_send_info_without_jobs_says_will_ask(
     assert "龙华电子厂" not in info["reply"] and "元/小时" not in info["reply"]
 
 
-async def test_config_script_hit_bypasses_model(
+async def test_config_script_feeds_model_as_material(
     admin_client: AsyncClient, monkeypatch
 ) -> None:  # noqa: ANN001
     async def remote_jobs(city: str, token: str, url: str) -> list[dict]:
@@ -124,17 +124,36 @@ async def test_config_script_hit_bypasses_model(
     key = f"test-{uuid.uuid4().hex[:8]}"
     await _say(admin_client, key, "你好")
 
-    probe = ProviderProbe()
+    # 新契约：话术作为素材进模型（模型可见占位符替换后的完整事实文本）
+    seen_material: list[str] = []
+
+    class MaterialProbe:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *args, **kwargs):  # noqa: ANN002, ANN003
+            self.calls += 1
+            for m in messages if isinstance(messages, list) else []:
+                body = str(m.get("content", "")) if isinstance(m, dict) else str(m)
+                if "观澜精密厂" in body:
+                    seen_material.append(body)
+            return {
+                "reply": "观澜精密厂在招人，工价23 元/小时，过来看看？",
+                "stage": "send_info",
+                "slots": {"city": "深圳"},
+                "action": None,
+            }
+
+    probe = MaterialProbe()
     monkeypatch.setattr("app.api_flow.build_provider", lambda: probe)
     info = await _say(admin_client, key, "深圳", device_code="pc-office-07")
 
-    # 整段直接作 parts，占位符已替换成岗位事实（远端深圳 0 号岗）
-    assert info["parts"] == [
-        "观澜精密厂在招人，工价23 元/小时，面试地点观澜大道 88 号，时间09:00-11:00，过来看看？"
-    ]
-    assert info["reply"] == info["parts"][0]
+    # 模型被调用且素材里含渲染后的岗位事实
+    assert probe.calls == 1
+    assert seen_material, "话术素材没有进模型上下文"
+    # 回复来自模型；stage 语义保持：已发岗位+邀约 → ask_interview
     assert info["stage"] == "ask_interview"
-    assert probe.calls == 0  # 不过模型
+    assert "观澜精密厂" in info["reply"]
 
 
 async def test_config_script_miss_uses_original_logic(

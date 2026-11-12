@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
@@ -92,6 +93,8 @@ async def flow_answer(
     # 城市/工厂线索来自设备绑定（fetch_device_meta 60s 缓存，拉不到回空 = 通配）；
     # 设备没绑城市时退回客户自己说的城市（老行为）。同城 +3、同厂 +5，异城/异厂排除。
     kb_answer: str | None = None
+    kb_entry_id: str | None = None
+    kb_markers: list[str] = []
     if stage_before in _KB_STAGES:
         try:
             meta = await fetch_device_meta(device_code)
@@ -103,14 +106,32 @@ async def flow_answer(
                 or extract_city(payload.text)
                 or str(slots.get("city") or "")
             )
-            kb_answer = await kb_placeholder.lookup(
+            kb_hit = await kb_placeholder.lookup_entry(
                 session,
                 payload.text,
                 city=city_hint_for_kb,
                 factory=str(meta.get("factory_name") or ""),
             )
         except Exception:  # noqa: BLE001  查库失败等同于没命中，不能挡住回复
-            kb_answer = None
+            kb_hit = None
+        if kb_hit:
+            kb_entry_id = kb_hit["id"]
+            kb_markers = re.findall(r"【(?:图片|视频):[^】]+】", kb_hit["body"])
+            already_sent = any(
+                e.type == store.EVENT_KB
+                and f'"id": "{kb_entry_id}"' in (e.body or "")
+                or (e.type == store.EVENT_KB and f'"id":"{kb_entry_id}"' in (e.body or ""))
+                for e in events
+            )
+            if already_sent:
+                # 二次命中：不再重发整段（2026-11-12 青冥会话实测重复教训）。
+                # 只给模型媒体标记 + 短句；条目没配媒体就一句收尾话。
+                if kb_markers:
+                    kb_answer = "（这条内容刚才已经发过你啦，媒体资料再给你发一遍）\n" + "\n".join(kb_markers)
+                else:
+                    kb_answer = "（这个问题刚才已经回复过你啦，有其他想了解的随时问我）"
+            else:
+                kb_answer = kb_hit["body"]
 
     # 城市线索：先看客户这轮说的，再看已有槽位（别名归一在 4222 侧，这里只透传）
     city_hint = extract_city(payload.text) or str(slots.get("city") or "")
@@ -143,23 +164,22 @@ async def flow_answer(
     )
 
     if script and will_send_info and str(script.get("content") or "").strip():
-        # config 话术命中：岗位数据照常注入占位符，档案抽取照常做，
-        # 只是发出去的话换成运营配的整段话术
+        # 全部交给智能体编排（2026-11-12 用户指令）：运营话术不再是整段直发，
+        # 而是作为素材交给模型组织（工价护栏保护数字）；话术里的媒体标记
+        # 【图片/视频:x】也由模型取舍。档案抽取照常做。
         slots["city"] = city_hint
         slots.setdefault("job_index", 0)
         absorb_profile(slots, payload.text)
-        slots["interview_offer_sent"] = True
         job = (jobs_for_city(city_hint) or [{}])[0]
-        result = FlowResult(
-            reply="",
-            parts=[render_script(str(script.get("content") or ""), job)],
-            stage=STAGE_ASK_INTERVIEW,
-            slots=slots,
-        )
+        script_material = render_script(str(script.get("content") or ""), job)
+        material = script_material if not kb_answer else kb_answer + "\n" + script_material
+        result = await a_step(state, payload.text, build_provider(), kb_answer=material)
+        # 语义保持：这轮按「已发岗位+邀约」推进，下一站 ask_interview
+        result.stage = STAGE_ASK_INTERVIEW
+        result.slots["interview_offer_sent"] = True
     else:
         # ③ 主路径交给模型；没配模型或调用失败时，a_step 内部退到确定性状态机
         result = await a_step(state, payload.text, build_provider(), kb_answer=kb_answer)
-
     # 「沟通中」标记：一进 collect 就给 4222 发一次 stage=collect，让候选人页
     # 先出现「已答应面试，等联系方式」的一条。绕过 has_content 强推一次；
     # 槽位先记下保证整轮只推一次，推送本身尽力而为（失败不回滚不影响回复）。
@@ -180,8 +200,17 @@ async def flow_answer(
     profile_records = store.diff_profile(before_profile, result.slots)
     records.extend(profile_records)
     if result.reply:
+        # 媒体兜底：命中的条目带【图片/视频:名称】而模型回复里弄丢了 → 补回，
+        # 保证客户真的能收到视频/图片（2026-11-12「我的视频呢」教训）
+        if kb_markers and not re.search(r"【(?:图片|视频):[^】]+】", result.reply):
+            result.reply = result.reply.rstrip() + "\n" + "\n".join(kb_markers)
+            if result.parts:
+                result.parts = [p.rstrip() for p in result.parts] + [kb_markers[-1]]
         # parts 一并落库：回放时能看出「那轮其实发了两条」
         records.append((store.EVENT_REPLY, {"text": result.reply, "parts": result.parts}))
+        if kb_entry_id:
+            # 记住这条 KB 已对本会话发过：同条目再命中就走短版+补媒体，不重发整段
+            records.append((store.EVENT_KB, {"id": kb_entry_id}))
     if result.action:
         records.append(
             (store.EVENT_ACTION, {"name": result.action, "stage": result.stage})
