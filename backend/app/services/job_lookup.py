@@ -67,6 +67,28 @@ async def lookup_jobs(city: str) -> list[dict[str, Any]]:
     filled = [j for j in items if any(
         str(j.get(k) or "").strip() for k in ("wage_text", "hours_text", "welfare_text")
     )]
+    # 阶段性主推开关（2026-11-12 运营指令「暂时按地铁的来」）：
+    # FLOW_ONLY_SUBWAY=1（默认）只推地铁/安检岗，工厂岗暂时下架；
+    # 过滤后为空则回退全量（防呆：关键词漏配时不至于无岗可推）。
+    if os.getenv("FLOW_ONLY_SUBWAY", "1").strip() == "1":
+        subway = [
+            j for j in filled
+            if any(k in (str(j.get("factory_name") or "") + str(j.get("job_title") or ""))
+                   for k in ("地铁", "安检"))
+        ]
+        if subway:
+            filled = subway
+    # 阶段性主推开关（2026-11-12 运营指令「暂时按地铁的来」）：
+    # FLOW_ONLY_SUBWAY=1（默认）只推地铁/安检岗，工厂岗暂时下架；
+    # 过滤后为空则回退全量（防呆：关键词漏配时不至于无岗可推）。
+    if os.getenv("FLOW_ONLY_SUBWAY", "1").strip() == "1":
+        subway = [
+            j for j in filled
+            if any(k in (str(j.get("factory_name") or "") + str(j.get("job_title") or ""))
+                   for k in ("地铁", "安检"))
+        ]
+        if subway:
+            filled = subway
     if filled:
         items = filled
     else:

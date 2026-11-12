@@ -287,7 +287,16 @@ def send_info_parts(slots: dict[str, Any], when: datetime | None = None) -> list
     )
     part2 = f"面试地点：{job.get('place', '')}\n面试时间：{day}{INTERVIEW_WINDOW}"
     part3 = "这两天能不能过来面试？能来的话我把名额给你留着。"
-    return [part1, part2, part3]
+    parts = [part1, part2, part3]
+    # 地铁岗：附城市面试点图 + 工作实拍视频（2026-11-12 按地铁话术节奏）。
+    # 标记名按城市约定（广州面试点/深圳面试点…），客户端 media 缺文件自动跳过
+    _f = str(job.get("factory_name") or "")
+    _t = str(job.get("job_title") or "")
+    if "地铁" in _f or "安检" in _t or "地铁" in _t:
+        city = str(slots.get("city") or "").strip()
+        if city:
+            parts[1] = part2 + f"\n【图片:{city}面试点】【视频:安检工作】"
+    return parts
 
 
 def _interview_ask() -> str:
