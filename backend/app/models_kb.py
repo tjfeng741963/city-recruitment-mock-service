@@ -202,3 +202,150 @@ class KbFragment(Base):
         UniqueConstraint("entry_id", "position", name="uq_kb_fragment_position"),
         CheckConstraint("kind IN ('text', 'image')", name="ck_kb_fragment_kind"),
     )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 知识库 v3：品类 / 位置树 / 招工方 / 场景问答 / 模板包
+# 设计见 docs/知识库方案-流程驱动-20261113.md
+# 迁移见 src/db/migrations/021_kb_verticals.sql、022_kb_faq_seed.sql
+#
+# 这些表由 Node 侧迁移创建（SQLite 是唯一真相），Python 侧只读不建。
+# 注意：SQLite 的数字主键在这里一律用 BigIntPK，否则自增失效。
+# ─────────────────────────────────────────────────────────────────────
+
+
+class Vertical(Base):
+    """招聘品类：工厂 / 地铁安检 / 白领 / 保姆 / 船员。
+
+    加一个品类 = 插一行 + 一份 config_json，不改代码、不改表结构。
+    config_json 决定这个品类在界面上长什么样：
+        employer_label     招工方的称谓（工厂 / 雇主 / 船东）
+        location_levels    位置树用到哪几级
+        position_schema    岗位动态字段（前端据此渲染表单）
+        faq_pack           默认问答包 code
+        flow_template      默认流程模板 code
+    """
+
+    __tablename__ = "vertical"
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, default=DEFAULT_TENANT_ID, index=True)
+    code: Mapped[str] = mapped_column(String(50))
+    name: Mapped[str] = mapped_column(String(100))
+    config_json: Mapped[str] = mapped_column(Text, default="{}")
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(20), default="enabled")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    __table_args__ = (UniqueConstraint("tenant_id", "code", name="uq_vertical_tenant_code"),)
+
+
+class Location(Base):
+    """位置树：省 → 市 → 区 → 园区 → 面试点。
+
+    level 是开放字符串而非枚举，不同品类用不同深度：
+        工厂  province → city → district → park → point
+        保姆  province → city → district → point
+        船员  province → city → point
+    面试点 / 雇主家 / 港口都是 point，靠 walk_guide + image_key 支撑「发地址」。
+    """
+
+    __tablename__ = "location"
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    parent_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    level: Mapped[str] = mapped_column(String(20), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    code: Mapped[str] = mapped_column(String(50), default="")
+    lat: Mapped[float | None] = mapped_column(Numeric(10, 6), nullable=True)
+    lng: Mapped[float | None] = mapped_column(Numeric(10, 6), nullable=True)
+    address: Mapped[str] = mapped_column(Text, default="")
+    walk_guide: Mapped[str] = mapped_column(Text, default="")
+    image_key: Mapped[str] = mapped_column(String(200), default="")
+    status: Mapped[str] = mapped_column(String(20), default="enabled")
+    data_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class Employer(Base):
+    """招工方：工厂 / 家庭 / 船东 的统一抽象。
+
+    工厂品类下就是「厂」；保姆品类下是「雇主家庭」；船员品类下是「船东/船」。
+    employer_code 是稳定编码（GZ-PY-001），厂名改了、被并购了都不影响历史引用。
+    """
+
+    __tablename__ = "employer"
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, default=DEFAULT_TENANT_ID, index=True)
+    vertical_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    employer_code: Mapped[str] = mapped_column(String(50))
+    display_name: Mapped[str] = mapped_column(String(255))
+    short_name: Mapped[str] = mapped_column(String(100), default="")
+    location_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="enabled")
+    data_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "employer_code", name="uq_employer_tenant_code"),
+    )
+
+
+class EmployerAlias(Base):
+    """客户口语 vs 系统全名：松下 / 万宝 / 狄原（错别字也收）。
+
+    没有别名表，"分不清厂"永远无解——系统不知道客户说的这两个字指谁。
+    """
+
+    __tablename__ = "employer_alias"
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    employer_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    alias: Mapped[str] = mapped_column(String(100), index=True)
+    weight: Mapped[int] = mapped_column(Integer, default=0)
+
+    __table_args__ = (UniqueConstraint("employer_id", "alias", name="uq_alias_employer_text"),)
+
+
+class KbFaq(Base):
+    """场景问答：客户 90% 的问题都落在这 15 组里。
+
+    检索是**硬过滤**不是打分：
+        1. vertical_id 匹配（NULL 视为所有品类通用）
+        2. scope 从窄到宽：employer → city → vertical → global
+        3. 同层 keywords 命中，取 priority 最大
+        4. 都不命中 → unknown_questions + 兜底话术
+
+    answer 里含 {wage} {welfare} {address} 等占位符，运行时从 position.data_json
+    和 location 取值——模板本身不含任何数字，所以换工价不用改话术。
+    """
+
+    __tablename__ = "kb_faq"
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, default=DEFAULT_TENANT_ID, index=True)
+    vertical_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    scope_level: Mapped[str] = mapped_column(String(20), default="global")
+    scope_location_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    scope_employer_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    question: Mapped[str] = mapped_column(String(500))
+    keywords: Mapped[str] = mapped_column(Text, default="[]")
+    answer: Mapped[str] = mapped_column(Text)
+    media: Mapped[str] = mapped_column(Text, default="[]")
+    priority: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(20), default="enabled")
+    template_item_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
