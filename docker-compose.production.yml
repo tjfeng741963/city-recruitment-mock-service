@@ -11,6 +11,8 @@ services:
       REA_HOST: 0.0.0.0
       REA_PORT: 4222
       REA_DATABASE_PATH: /data/app.sqlite
+      # React 管理台由同一个 Fastify 进程同源托管；旧 Vue 资源仍保留作回滚备用。
+      REA_FRONTEND_DIR: /app/frontend/dist
       # 走知识库链路。534 条存量数据已经从易歪歪备份导进 PostgreSQL。
       REA_DIFY_PROVIDER: kb
       REA_KB_API_URL: http://city-recruitment-api:8090

@@ -4,10 +4,14 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 
+COPY frontend/package.json frontend/package-lock.json ./frontend/
+RUN npm ci --prefix frontend
+
 COPY tsconfig.json ./
 COPY src ./src
 COPY public ./public
-RUN npm run build && npm prune --omit=dev
+COPY frontend ./frontend
+RUN npm run build:all && npm prune --omit=dev
 
 FROM node:22.21.1-bookworm-slim AS runtime
 ENV NODE_ENV=production
