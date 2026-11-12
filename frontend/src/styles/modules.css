@@ -88,6 +88,18 @@
   gap: var(--s-1);
 }
 
+/* 输入框 + 侧边按钮同一行（如「设备编号」旁的「自动生成」） */
+.mod-form-row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--s-2);
+}
+
+.mod-form-row > :first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .mod-legacy {
   padding: var(--s-12) 0;
 }

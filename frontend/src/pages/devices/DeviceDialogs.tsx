@@ -5,6 +5,20 @@ import { Alert, Button, Dialog, Input } from "@ui";
 
 const CODE_PATTERN = /^[A-Za-z0-9_-]{3,64}$/;
 
+// 设备码字符集：去掉容易看错的 0/O/1/I/L，前缀 AG- 便于人工识别。
+// 与客户端 register.py 自动注册的 pc-xxxx 前缀区分开：AG- 表示人工指定。
+const CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+const CODE_PREFIX = "AG-";
+const CODE_LENGTH = 6;
+
+function generateDeviceCode(): string {
+  const bytes = new Uint8Array(CODE_LENGTH);
+  crypto.getRandomValues(bytes);
+  let out = "";
+  for (const byte of bytes) out += CODE_ALPHABET[byte % CODE_ALPHABET.length];
+  return CODE_PREFIX + out;
+}
+
 export function BindDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (device: DeviceDetail) => void }) {
   const [name, setName] = useState("");
   const [code, setCode] = useState("");
@@ -41,16 +55,21 @@ export function BindDialog({ onClose, onCreated }: { onClose: () => void; onCrea
     >
       <form id="dv-bind" className="mod-form" onSubmit={submit}>
         <Input id="dv-name" label="名称" placeholder="客服 3 号" value={name} onChange={(e) => setName(e.target.value)} required autoFocus />
-        <Input
-          id="dv-code"
-          label="设备编号"
-          placeholder="device-003"
-          helperText="设备端 REA_DEVICE_CODE 填同一个值，之后不能改"
-          value={code}
-          onChange={(e) => setCode(e.target.value.trim())}
-          error={codeError}
-          required
-        />
+        <div className="mod-form-row">
+          <Input
+            id="dv-code"
+            label="设备编号"
+            placeholder="AG-7XK2M9"
+            helperText="设备端 REA_DEVICE_CODE 填同一个值，之后不能改"
+            value={code}
+            onChange={(e) => setCode(e.target.value.trim())}
+            error={codeError}
+            required
+          />
+          <Button variant="secondary" onClick={() => setCode(generateDeviceCode())}>
+            自动生成
+          </Button>
+        </div>
         {error && <Alert tone="danger" title={error} />}
       </form>
     </Dialog>
