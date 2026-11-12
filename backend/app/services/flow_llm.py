@@ -3,7 +3,7 @@
 与 flow_engine 的分工：
 - flow_engine 是**确定性兜底**：模型挂了也保证客户收到一句像样的话
 - 本模块是**主路径**：模型自己读懂客户、自己说人话
-- 但工作信息（厂名/工价/班次/年龄/吃住）永远由代码从 DEMO_JOBS 拼，
+- 但工作信息（厂名/工价/班次/年龄/吃住）永远由代码从 4222 岗位数据拼，
   模型碰不到——它只要说了数据里没有的工价，整句就作废退回兜底
 
 对应 DeepSeek Harness 的几个关键取舍：
@@ -26,7 +26,6 @@ from .flow_engine import (
     ACTION_BOOK,
     ACTION_GAVE_UP,
     ACTION_HANDOFF,
-    DEMO_JOBS,
     INTERVIEW_WINDOW,
     PROFILE_KEYS,
     STAGE_ASK_CITY,
@@ -36,11 +35,11 @@ from .flow_engine import (
     STAGE_KB,
     STAGE_SEND_INFO,
     FlowResult,
+    enter_info_result,
     jobs_for_city,
     looks_like_question,
     next_interview,
     remote_job_cities,
-    send_info_parts,
     step as fallback_step,
 )
 from .llm_provider import ChatMessage, LLMProvider
@@ -67,7 +66,7 @@ SYSTEM_PROMPT = """你是一家劳务中介的招聘顾问，叫「陈姐」，�
 
 # 你的目标
 把每一个来咨询的人，聊到「约好面试」为止。顺序是：
-1. 问客户投递的是哪个城市（广州 / 深圳 / 东莞）
+1. 问客户投递的是哪个城市
 2. 按城市发工作信息（厂名、工价、班次、年龄、吃住，系统会自己发，你不用重复）
 3. 问「这两天能不能过来面试」
 4. 客户答应 → 一次要**姓名 + 手机号**两个
@@ -120,9 +119,8 @@ action 只能是 null / "book_interview" / "gave_up"：
 
 
 def _jobs_brief() -> str:
-    cities = sorted(set(DEMO_JOBS) | set(remote_job_cities()))
     lines: list[str] = []
-    for city in cities:
+    for city in sorted(remote_job_cities()):
         for index, job in enumerate(jobs_for_city(city)):
             lines.append(
                 f"- [{city}#{index}] {job.get('job_title', '')}｜{job.get('place', '')}"
@@ -231,8 +229,9 @@ def _clean_slots(raw: Any) -> dict[str, Any]:
     slots: dict[str, Any] = {}
     if not isinstance(raw, dict):
         return slots
-    city = str(raw.get("city") or "").strip()
-    if city in DEMO_JOBS:
+    # 城市归一在 4222 侧做，这里只做基本清洗；查不到岗位时引擎走「帮你问问」
+    city = str(raw.get("city") or "").strip()[:20]
+    if city:
         slots["city"] = city
     index = raw.get("job_index")
     if isinstance(index, int) and index >= 0:
@@ -312,15 +311,11 @@ def apply_result(
 
     # 一拿到城市，工作信息就由代码发（多段），模型的措辞在这轮不采用：
     # 工价/班次一个字都不能错，让模型复述等于把事故概率交给运气。
+    # 城市查不到岗位时由 enter_info_result 走「帮你问问」并记未知问题。
     if slots.get("city") and not slots.get("interview_offer_sent"):
-        slots["interview_offer_sent"] = True
-        state["stage"] = STAGE_ASK_INTERVIEW
-        return FlowResult(
-            reply="",
-            parts=send_info_parts(slots, when),
-            stage=STAGE_ASK_INTERVIEW,
-            slots=slots,
-        )
+        result = enter_info_result(slots, when)
+        state["stage"] = result.stage
+        return result
 
     action = data.get("action")
     action = action if action in (ACTION_BOOK, ACTION_GAVE_UP, ACTION_HANDOFF) else None

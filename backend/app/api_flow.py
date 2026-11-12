@@ -117,7 +117,8 @@ async def flow_answer(
 
     # ① 按城市查真实岗位（60s 缓存，失败返回 []）并注入引擎：
     #    本轮所有取岗位的地方（发信息/模型简报/工价护栏/档案推送）统一走
-    #    jobs_for_city：远端优先，DEMO_JOBS 兜底。无城市线索时清空注入。
+    #    jobs_for_city：只认远端数据。无城市线索时清空注入；
+    #    城市查不到岗位时引擎走「已记下，帮你问问」话术并记未知问题。
     if city_hint:
         try:
             remote_jobs = await lookup_jobs(city_hint)

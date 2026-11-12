@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
+import pytest
+
 from app.models_flow import FlowEvent
 from app.services.flow_engine import (
     ACTION_BOOK,
@@ -26,11 +28,21 @@ from app.services.flow_engine import (
     extract_phone,
     new_state,
     next_interview,
+    set_remote_jobs,
     step,
 )
 from app.services.flow_session import EVENT_INBOUND, EVENT_REPLY, EVENT_STAGE, project
+from tests.fixture_jobs import JOBS_BY_CITY
 
 NOW = datetime(2026, 11, 8, 13, 30, tzinfo=TZ)
+
+
+@pytest.fixture(autouse=True)
+def _remote_jobs():
+    """引擎只认注入的远端岗位：测试统一注入岗位夹具。"""
+    set_remote_jobs(JOBS_BY_CITY)
+    yield
+    set_remote_jobs({})
 
 
 def _run(turns: list[str], kb: str | None = None):

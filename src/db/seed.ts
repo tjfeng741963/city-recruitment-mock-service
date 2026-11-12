@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
+import { readFileSync } from "node:fs";
 import { scryptSync, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { openDatabase } from "./connection.js";
@@ -7,6 +8,76 @@ import { ACTIVATION_STRATEGY_DEFAULTS } from "../modules/activation/activation.s
 
 export function hashPassword(password: string, salt = randomBytes(16).toString("hex")): string {
   return `${salt}:${scryptSync(password, salt, 64).toString("hex")}`;
+}
+
+// 演示夹具（假厂/假岗位/假设备/假会话）只服务于本地与测试环境的列表填充，
+// 生产环境默认不注入；需要显式设 REA_SEED_DEMO=1 才会写入。
+// 数据本体在 demo-fixtures.json，生产部署不设置该变量即可保证库里只有真实数据。
+interface DemoFixtures {
+  factories: Array<[number, string, number]>;
+  service_positions: Array<[number, string, number, number]>;
+  knowledge_items: Array<[number, string, string]>;
+  activation_strategies: Array<[number, string]>;
+  activation_devices: Array<[number, string]>;
+  recruiter: { id: number; username: string; city_id: number; data: Record<string, unknown>; scope_users: string[]; scope_city_id: string };
+  candidate_events: Array<[number, string, string, string, string, string, string, string]>;
+  old_friend_records: Array<[number, string, string, string, string, string]>;
+  agent_device: { id: number; device_name: string; device_code: string; recruiter_id: string; scope_users: string[] };
+  conversation: { device_code: string; customer_id: number; nickname: string; city: string; district: string; last_msg: string; unread: number };
+  messages: Array<[number, string, number, string, string, string]>;
+}
+
+function seedDemoFixtures(db: DatabaseSync, seedScope: ReturnType<DatabaseSync["prepare"]>): void {
+  const raw = readFileSync(new URL("./demo-fixtures.json", import.meta.url), "utf-8");
+  const d = JSON.parse(raw) as DemoFixtures;
+  for (const [id, factory_name, city_id] of d.factories) {
+    db.prepare("INSERT OR IGNORE INTO factories(id,factory_name,city_id) VALUES (?,?,?)").run(id, factory_name, city_id);
+  }
+  for (const [id, position_name, factory_id, city_id] of d.service_positions) {
+    db.prepare("INSERT OR IGNORE INTO service_positions(id,position_name,factory_id,city_id) VALUES (?,?,?,?)").run(id, position_name, factory_id, city_id);
+  }
+  for (const [id, title, content] of d.knowledge_items) {
+    db.prepare("INSERT OR IGNORE INTO knowledge_items(id,title,content) VALUES (?,?,?)").run(id, title, content);
+  }
+  for (const [id, strategy_name] of d.activation_strategies) {
+    db.prepare("INSERT OR IGNORE INTO activation_strategies(id,strategy_name) VALUES (?,?)").run(id, strategy_name);
+  }
+  for (const [id, device_name] of d.activation_devices) {
+    db.prepare("INSERT OR IGNORE INTO activation_devices(id,device_name,status,data_json) VALUES (?,?,'enabled','{}')").run(id, device_name);
+  }
+  db.prepare("INSERT OR IGNORE INTO recruiters(id,username,city_id,data_json) VALUES (?,?,?,?)")
+    .run(d.recruiter.id, d.recruiter.username, d.recruiter.city_id, JSON.stringify(d.recruiter.data));
+  db.prepare("UPDATE users SET recruiter_id=? WHERE username IN (?,?) AND recruiter_id=''")
+    .run(d.recruiter.username, ...d.recruiter.scope_users);
+  for (const username of d.recruiter.scope_users) {
+    seedScope.run("recruiter", d.recruiter.username, username);
+    seedScope.run("city", d.recruiter.scope_city_id, username);
+  }
+  for (const [id, device_code, customer_id, nickname, event_type, name, phone, city] of d.candidate_events) {
+    db.prepare("INSERT OR IGNORE INTO candidate_events(id,device_code,customer_id,nickname,event_type,name,phone,city,status) VALUES (?,?,?,?,?,?,?,?,?)")
+      .run(id, device_code, customer_id, nickname, event_type, name, phone, city, event_type);
+  }
+  for (const [id, account, customer_id, nickname, device_code, status] of d.old_friend_records) {
+    db.prepare("INSERT OR IGNORE INTO old_friend_records(id,account,customer_id,nickname,device_code,status) VALUES (?,?,?,?,?,?)").run(id, account, customer_id, nickname, device_code, status);
+  }
+  db.prepare("INSERT OR IGNORE INTO agent_devices(id,device_name,status,data_json) VALUES (?,?,'enabled','{}')").run(d.agent_device.id, d.agent_device.device_name);
+  const agentDevice = db.prepare("SELECT data_json FROM agent_devices WHERE id=?").get(d.agent_device.id) as { data_json: string } | undefined;
+  if (agentDevice) {
+    let deviceData: Record<string, unknown> = {};
+    try { deviceData = JSON.parse(agentDevice.data_json) as Record<string, unknown>; } catch { deviceData = {}; }
+    if (!deviceData.device_code) {
+      deviceData.device_code = d.agent_device.device_code;
+      deviceData.recruiter_id = d.agent_device.recruiter_id;
+      db.prepare("UPDATE agent_devices SET data_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(JSON.stringify(deviceData), d.agent_device.id);
+    }
+  }
+  for (const username of d.agent_device.scope_users) seedScope.run("device", d.agent_device.device_code, username);
+  db.prepare("INSERT OR IGNORE INTO agent_conversations(device_code,customer_id,nickname,city,district,last_msg,last_msg_at,unread) VALUES (?,?,?,?,?,?,?,?)")
+    .run(d.conversation.device_code, d.conversation.customer_id, d.conversation.nickname, d.conversation.city, d.conversation.district, d.conversation.last_msg, new Date().toISOString(), d.conversation.unread);
+  for (const [id, device_code, customer_id, direction, content, status] of d.messages) {
+    db.prepare("INSERT OR IGNORE INTO agent_messages(id,device_code,customer_id,direction,content,status) VALUES (?,?,?,?,?,?)")
+      .run(id, device_code, customer_id, direction, content, status);
+  }
 }
 
 export function seedDatabase(db: DatabaseSync): void {
@@ -20,75 +91,29 @@ export function seedDatabase(db: DatabaseSync): void {
     db.prepare("INSERT OR IGNORE INTO users(username,password_hash,role,recruiter_type) VALUES (?,?,?,?)")
       .run(user.username, hashPassword(password), user.role, user.recruiter_type);
   }
-  // Mock fixtures below are entirely fabricated placeholder data (fictional
-  // district lists, synthetic phone numbers, made-up candidate names) — they
-  // are not copied from or derived from the target production site. Purpose:
-  // give list endpoints non-empty data so parity probes can compare item
-  // shapes, not reproduce real business data.
-  const mockCities = [
+  const cities = [
     { id: 1, city_name: "广州", province: "广东", districts: ["天河区", "白云区", "番禺区"] },
     { id: 2, city_name: "深圳", province: "广东", districts: ["南山区", "宝安区", "龙华区"] },
     { id: 3, city_name: "东莞", province: "广东", districts: ["南城区", "长安镇", "虎门镇"] },
   ];
-  for (const city of mockCities) {
+  for (const city of cities) {
     db.prepare("INSERT OR IGNORE INTO cities(id,city_name,province,data_json) VALUES (?,?,?,?)")
-      .run(city.id, city.city_name, city.province, JSON.stringify({ districts: city.districts, interview_site_name: `${city.city_name}示例面试点` }));
+      .run(city.id, city.city_name, city.province, JSON.stringify({ districts: city.districts }));
   }
   db.prepare("INSERT OR IGNORE INTO city_links(city_id,linked_city_id) VALUES (1,2)").run();
   db.prepare("INSERT OR IGNORE INTO city_links(city_id,linked_city_id) VALUES (2,3)").run();
 
-  db.prepare("INSERT OR IGNORE INTO factories(id,factory_name,city_id) VALUES (1,'本地示例工厂',1)").run();
-  db.prepare("INSERT OR IGNORE INTO factories(id,factory_name,city_id) VALUES (2,'示例电子厂',2)").run();
-  db.prepare("INSERT OR IGNORE INTO service_positions(id,position_name,factory_id,city_id) VALUES (1,'本地示例岗位',1,1)").run();
-  db.prepare("INSERT OR IGNORE INTO service_positions(id,position_name,factory_id,city_id) VALUES (2,'示例产线岗位',2,2)").run();
-  db.prepare("INSERT OR IGNORE INTO knowledge_items(id,title,content) VALUES (1,'本地示例知识','仅供测试')").run();
-
-  db.prepare("INSERT OR IGNORE INTO recruiters(id,username,city_id,data_json) VALUES (1,'mock-recruiter',1,?)")
-    .run(JSON.stringify({ recruiter_id: "mock-recruiter", name: "示例招聘员", recruiter_type: "service" }));
-  db.prepare("UPDATE users SET recruiter_id='mock-recruiter' WHERE username IN ('local-customer','local-recruiter') AND recruiter_id=''").run();
-  const seedScope = db.prepare("INSERT OR IGNORE INTO user_scope_assignments(user_id,scope_type,scope_id) SELECT id,?,? FROM users WHERE username=?");
-  for (const username of ["local-customer", "local-recruiter"]) {
-    seedScope.run("recruiter", "mock-recruiter", username);
-    seedScope.run("city", "1", username);
-  }
-
-  const candidates = [
-    { customer_id: "mock-c1", nickname: "示例候选人A", name: "张三（示例）", phone: "13800000001", city: "广州" },
-    { customer_id: "mock-c2", nickname: "示例候选人B", name: "李四（示例）", phone: "13800000002", city: "深圳" },
-  ];
-  for (const [index, c] of candidates.entries()) {
-    db.prepare("INSERT OR IGNORE INTO candidate_events(id,device_code,customer_id,nickname,event_type,name,phone,city,status) VALUES (?,?,?,?,?,?,?,?,?)")
-      .run(9001 + index, "mock-device-1", c.customer_id, c.nickname, "invited", c.name, c.phone, c.city, "invited");
-  }
-  db.prepare("INSERT OR IGNORE INTO old_friend_records(id,account,customer_id,nickname,device_code,status) VALUES (9001,'mock-account-1','mock-c1','示例老友A','mock-device-1','active')").run();
-  db.prepare("INSERT OR IGNORE INTO activation_strategies(id,strategy_name) VALUES (1,'本地示例策略')").run();
   const insertActivationStrategy = db.prepare("INSERT OR IGNORE INTO activation_strategy_rules(code,enabled,config_json) VALUES (?,?,?)");
   for (const strategy of ACTIVATION_STRATEGY_DEFAULTS) insertActivationStrategy.run(strategy.code, strategy.enabled ? 1 : 0, JSON.stringify(strategy.config));
   db.prepare("INSERT OR IGNORE INTO activation_config(id) VALUES (1)").run();
-  db.prepare("INSERT OR IGNORE INTO activation_devices(id,device_name,status,data_json) VALUES (1,'本地示例设备','enabled','{}')").run();
-  db.prepare("INSERT OR IGNORE INTO agent_devices(id,device_name,status,data_json) VALUES (1,'本地示例设备','enabled','{}')").run();
-  const demoDevice = db.prepare("SELECT data_json FROM agent_devices WHERE id=1").get() as { data_json: string } | undefined;
-  if (demoDevice) {
-    let deviceData: Record<string, unknown> = {};
-    try { deviceData = JSON.parse(demoDevice.data_json) as Record<string, unknown>; } catch { deviceData = {}; }
-    if (!deviceData.device_code) {
-      deviceData.device_code = "local-device-001";
-      deviceData.recruiter_id = "mock-recruiter";
-      db.prepare("UPDATE agent_devices SET data_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=1").run(JSON.stringify(deviceData));
-    }
-  }
-  for (const username of ["local-customer", "local-recruiter"]) seedScope.run("device", "local-device-001", username);
-  db.prepare("INSERT OR IGNORE INTO agent_conversations(device_code,customer_id,nickname,city,district,last_msg,last_msg_at,unread) VALUES (?,?,?,?,?,?,?,?)")
-    .run("local-device-001", 700001, "示例客户A", "广州", "天河区", "想了解一下长白班岗位", new Date().toISOString(), 1);
-  db.prepare("INSERT OR IGNORE INTO agent_messages(id,device_code,customer_id,direction,content,status) VALUES (700001,?,?,?,?,?)")
-    .run("local-device-001", 700001, "inbound", "想了解一下长白班岗位", "sent");
-  db.prepare("INSERT OR IGNORE INTO agent_messages(id,device_code,customer_id,direction,content,status) VALUES (700002,?,?,?,?,?)")
-    .run("local-device-001", 700001, "outbound", "可以的，我先给你发几个示例岗位。", "sent");
   const scripts = [
     [25, "有收到吗？收到回复下我呢", "寒暄召回"], [22, "这边还要找工作的么，这几天岗位都挺好的呢", "寒暄召回"], [16, "这边看的咋样啦，我们继续聊聊呗", "岗位推荐"],
   ] as const;
   for (const [id, content, category] of scripts) db.prepare("INSERT OR IGNORE INTO activation_scripts(id,script_name,content,status,data_json) VALUES (?,?,?,?,?)").run(id, category, content, "enabled", JSON.stringify({ category, is_active: true, used_count: 0 }));
   const knowledge = ["超龄", "可以不加班吗", "买社保吗", "有试用期吗", "合同签多久"]; for (const [index, question] of knowledge.entries()) db.prepare("INSERT OR IGNORE INTO knowledge_items(id,title,content,status,data_json) VALUES (?,?,?,?,?)").run(4176 + index, question, question, "enabled", JSON.stringify({ question, keywords: [], is_active: true, sort_order: 0 }));
+
+  const seedScope = db.prepare("INSERT OR IGNORE INTO user_scope_assignments(user_id,scope_type,scope_id) SELECT id,?,? FROM users WHERE username=?");
+  if (process.env.REA_SEED_DEMO === "1") seedDemoFixtures(db, seedScope);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
@@ -98,4 +123,3 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   db.close();
   console.log("seed data ready");
 }
-

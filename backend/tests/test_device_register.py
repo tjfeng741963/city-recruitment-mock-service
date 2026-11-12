@@ -90,3 +90,26 @@ async def test_disabled_device_is_not_reenabled(client):
         await session.commit()
 
     assert (await _register(client)).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_admin_can_delete_test_device(admin_client):
+    await _register(admin_client)
+    assert (
+        await admin_client.delete(f"/api/v1/devices/{CODE}")
+    ).status_code == 204
+    assert (
+        await admin_client.get(f"/api/v1/devices/{CODE}")
+    ).status_code == 404
+    # 删除是幂等收敛：再删一次 404
+    assert (
+        await admin_client.delete(f"/api/v1/devices/{CODE}")
+    ).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_device_requires_admin(client):
+    await _register(client)
+    assert (
+        await client.delete(f"/api/v1/devices/{CODE}")
+    ).status_code in (401, 403)

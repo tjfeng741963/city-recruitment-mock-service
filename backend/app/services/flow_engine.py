@@ -11,11 +11,12 @@
     kb             任意阶段的插问，答完仍回到原阶段
 
 三条不能破的规矩：
-1. 工作信息只从岗位数据取（4222 真实岗位优先，DEMO_JOBS 兜底），话术里不许出现数据里没有的工价
+1. 工作信息只从岗位数据取（4222 注入的远端岗位），话术里不许出现数据里没有的工价
 2. 面试时间由代码算（默认次日 09:00-11:00），不听客户以外的人瞎说
 3. 客户拒绝面试就到此为止，不再追问
 
-演示数据在 DEMO_JOBS 里；4222 有数据时由 api_flow 注入（set_remote_jobs），其余逻辑不动。
+岗位数据全部来自 4222（api_flow 每轮注入 set_remote_jobs）；某城市查不到岗位时
+不编岗位，走「已记下，帮你问问」话术并记未知问题。
 """
 
 from __future__ import annotations
@@ -46,91 +47,6 @@ INTERVIEW_WINDOW = "09:00-11:00"
 
 # 档案字段：与业务槽位同放 state["slots"]，另由 profile 事件单独记一份便于回放/推送
 PROFILE_KEYS = ("name", "phone", "province", "district", "age", "notes")
-
-# ── 演示数据：真实数据缺失，这里先编一套能跑通流程的 ──────────────────
-# 字段名与 4222 的 GET /api/v1/agent/jobs 契约保持一致，两套数据源共用一套取数逻辑：
-#   factory_name 厂名 / job_title 岗位（含工种）/ wage_text 工价 / hours_text 班次
-#   age_text 年龄 / welfare_text 吃住 / place 面试地点
-DEMO_JOBS: dict[str, list[dict[str, str]]] = {
-    "广州": [
-        {
-            "factory_name": "利口福食品厂",
-            "job_title": "利口福食品厂 普工",
-            "wage_text": "16 元/小时",
-            "hours_text": "两班倒，月休 2-4 天",
-            "age_text": "18-48 岁",
-            "welfare_text": "包吃包住",
-            "place": "番禺南村员岗地铁站附近",
-        },
-        {
-            "factory_name": "钟村电子厂",
-            "job_title": "钟村电子厂 组装工",
-            "wage_text": "18 元/小时",
-            "hours_text": "长白班，月休 4 天",
-            "age_text": "16-43 岁",
-            "welfare_text": "包吃，住宿补贴 200 元/月",
-            "place": "番禺钟村工业区",
-        },
-    ],
-    "深圳": [
-        {
-            "factory_name": "龙华电子厂",
-            "job_title": "龙华电子厂 质检",
-            "wage_text": "20 元/小时",
-            "hours_text": "两班倒，月休 4 天",
-            "age_text": "18-45 岁",
-            "welfare_text": "包吃包住，满三个月奖励 500",
-            "place": "龙华大浪街道",
-        },
-        {
-            "factory_name": "宝安玩具厂",
-            "job_title": "宝安玩具厂 包装工",
-            "wage_text": "18 元/小时",
-            "hours_text": "长白班，月休 4 天",
-            "age_text": "18-50 岁",
-            "welfare_text": "包住，饭补 260 元/月",
-            "place": "宝安沙井街道",
-        },
-        {
-            "factory_name": "龙岗物流园",
-            "job_title": "龙岗物流园 分拣员",
-            "wage_text": "21 元/小时",
-            "hours_text": "夜班为主，月休 2 天",
-            "age_text": "20-45 岁",
-            "welfare_text": "包住，加班另算",
-            "place": "龙岗布吉街道",
-        },
-    ],
-    "东莞": [
-        {
-            "factory_name": "长安五金厂",
-            "job_title": "长安五金厂 操作工",
-            "wage_text": "19 元/小时",
-            "hours_text": "两班倒，月休 2 天",
-            "age_text": "18-50 岁",
-            "welfare_text": "包住，饭补 300 元/月",
-            "place": "长安镇乌沙社区",
-        },
-        {
-            "factory_name": "虎门电子厂",
-            "job_title": "虎门电子厂 组装工",
-            "wage_text": "20 元/小时",
-            "hours_text": "两班倒，月休 4 天",
-            "age_text": "18-45 岁",
-            "welfare_text": "包吃包住，满勤奖 300",
-            "place": "虎门镇白沙工业区",
-        },
-        {
-            "factory_name": "厚街鞋厂",
-            "job_title": "厚街鞋厂 针车工",
-            "wage_text": "18.5 元/小时",
-            "hours_text": "长白班，月休 4 天",
-            "age_text": "20-48 岁",
-            "welfare_text": "包住，计件另算",
-            "place": "厚街镇汀山村",
-        },
-    ],
-}
 
 _CITY_ALIASES = {
     "广州": "广州", "广州市": "广州", "番禺": "广州", "天河": "广州", "白云": "广州",
@@ -300,7 +216,7 @@ def day_label(when: datetime) -> str:
 
 # ── 话术 ──────────────────────────────────────────────
 # 本轮请求拿到的 4222 真实岗位（api_flow 注入），用 ContextVar 隔离并发请求。
-# 岗位数据源优先级：本轮远端岗位 → DEMO_JOBS。
+# 岗位数据源只有这一处；城市查不到就返回空，上层走「帮你问问」。
 _REMOTE_JOBS: ContextVar[dict[str, list[dict[str, str]]]] = ContextVar(
     "remote_jobs", default={}
 )
@@ -312,9 +228,9 @@ def set_remote_jobs(jobs_by_city: dict[str, list[dict[str, str]]]) -> None:
 
 
 def jobs_for_city(city: str) -> list[dict[str, str]]:
-    """统一取岗位入口：远端优先，DEMO_JOBS 兜底。"""
+    """统一取岗位入口：只认本轮注入的远端岗位，查不到返回空列表。"""
     city = str(city or "")
-    return _REMOTE_JOBS.get().get(city) or DEMO_JOBS.get(city, [])
+    return _REMOTE_JOBS.get().get(city, [])
 
 
 def remote_job_cities() -> list[str]:
@@ -336,8 +252,10 @@ def _job_of(slots: dict[str, Any]) -> dict[str, str]:
 
 def _city_ask(slots: dict[str, Any] | None = None) -> str:
     del slots
-    cities = "、".join(DEMO_JOBS) or "本地"
-    return f"你投递的是哪个城市的简历？我们这边{cities}都有厂在招。"
+    cities = "、".join(remote_job_cities())
+    if cities:
+        return f"你投递的是哪个城市的简历？我们这边{cities}都有厂在招。"
+    return "你投递的是哪个城市的简历？"
 
 
 def _factory(job: dict[str, str]) -> str:
@@ -430,7 +348,28 @@ def absorb_profile(slots: dict[str, Any], text: str, strict_name: bool = False) 
     _absorb(slots, text, strict_name=strict_name)
 
 
-def _enter_info(slots: dict[str, Any], when: datetime) -> FlowResult:
+def _no_job_parts(city: str) -> list[str]:
+    return [
+        f"已记下，你找{city}的厂。我帮你问问这边有没有合适的岗位，有消息马上回你。"
+    ]
+
+
+def enter_info_result(slots: dict[str, Any], when: datetime | None = None) -> FlowResult:
+    """拿到城市后由代码发工作信息（多段）。
+
+    该城市在 4222 岗位库查不到时：不编岗位，回「已记下，帮你问问」并把需求
+    记成未知问题（由运营补话术/补数据）。阶段保持 ask_city、不发面试邀约，
+    等岗位数据补上后客户再提城市就能正常走发信息流程。
+    """
+    city = str(slots.get("city") or "")
+    if not jobs_for_city(city):
+        return FlowResult(
+            reply="",
+            parts=_no_job_parts(city),
+            stage=STAGE_ASK_CITY,
+            slots=slots,
+            unknown_question=f"{city}有哪些厂在招" if city else "客户没说清想找哪个城市的厂",
+        )
     slots["interview_offer_sent"] = True
     return FlowResult(
         reply="",
@@ -488,13 +427,13 @@ def step(
         slots["city"] = city
         slots.setdefault("job_index", 0)
         _absorb(slots, text)
-        result = _enter_info(slots, when)
+        result = enter_info_result(slots, when)
         state["stage"] = result.stage
         return result
 
     if stage == STAGE_SEND_INFO:
         _absorb(slots, text)
-        result = _enter_info(slots, when)
+        result = enter_info_result(slots, when)
         state["stage"] = result.stage
         return result
 

@@ -19,9 +19,19 @@ from httpx import AsyncClient
 from app.models_flow import FlowEvent
 from app.services import flow_session as store
 from app.services import profile_push
-from app.services.flow_engine import new_state
+from app.services.flow_engine import new_state, set_remote_jobs
 from app.services.flow_llm import apply_result
 from app.services.profile_push import build_profile, push
+from tests.fixture_jobs import JOBS_BY_CITY
+
+
+@pytest.fixture(autouse=True)
+def _remote_jobs():
+    """build_profile 会按城市取岗位拼 job_title/factory_name：注入岗位夹具。"""
+    set_remote_jobs(JOBS_BY_CITY)
+    yield
+    set_remote_jobs({})
+
 
 PROFILE = {
     "name": "张三",

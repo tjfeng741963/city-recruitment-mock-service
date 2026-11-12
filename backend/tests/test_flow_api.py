@@ -7,13 +7,25 @@ import uuid
 import pytest
 from httpx import AsyncClient
 
+from app.services import job_lookup
+from tests.fixture_jobs import JOBS_BY_CITY
+
 pytestmark = pytest.mark.asyncio
 
 
 @pytest.fixture(autouse=True)
-def _no_llm(monkeypatch) -> None:  # noqa: ANN001
-    """接口测试不碰真模型：走确定性兜底，断言才稳定。"""
+def _no_llm_and_remote_jobs(monkeypatch) -> None:  # noqa: ANN001
+    """接口测试不碰真模型也不碰 4222：岗位查询单测替身注入岗位夹具。"""
     monkeypatch.setattr("app.api_flow.build_provider", lambda: None)
+    monkeypatch.setenv("FLOW_PROFILE_TOKEN", "test-profile-token")
+
+    async def fake_fetch(city: str, token: str, url: str) -> list[dict]:
+        return JOBS_BY_CITY.get(city, [])
+
+    monkeypatch.setattr(job_lookup, "_fetch_items", fake_fetch)
+    job_lookup.clear_cache()
+    yield
+    job_lookup.clear_cache()
 
 
 async def _say(client: AsyncClient, key: str, text: str, **extra) -> dict:

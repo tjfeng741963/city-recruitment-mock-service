@@ -42,7 +42,7 @@ async def _fetch_items(city: str, token: str, url: str) -> list[dict[str, Any]]:
 
 
 async def lookup_jobs(city: str) -> list[dict[str, Any]]:
-    """按城市查岗位。任何失败都返回 []，由调用方回落 DEMO_JOBS。"""
+    """按城市查岗位。任何失败都返回 []，由上层走「已记下，帮你问问」话术。"""
     city = str(city or "").strip()
     if not city:
         return []
@@ -58,19 +58,19 @@ async def lookup_jobs(city: str) -> list[dict[str, Any]]:
         items = await _fetch_items(city, token, url)
     except Exception:  # noqa: BLE001  超时/4222 挂了/返回乱码：一律空结果
         items = []
-    # 字段齐全的排前面：示例/占位岗位往往什么都没填，别让它们抢第一位
+    # 字段齐全的排前面：占位/空壳岗位往往什么都没填，别让它们抢第一位
     items = sorted(items, key=lambda j: (
         not str(j.get("wage_text") or "").strip(),
         not str(j.get("factory_name") or "").strip(),
     ))
-    # 全空字段岗位（示例数据）直接剔除——发出去就是「：，，，。」
+    # 全空字段岗位直接剔除——发出去就是「：，，，。」
     filled = [j for j in items if any(
         str(j.get(k) or "").strip() for k in ("wage_text", "hours_text", "welfare_text")
     )]
     if filled:
         items = filled
     else:
-        # 远端全是空壳岗位（示例数据）→ 返回空，让上层回落到 DEMO_JOBS
+        # 远端全是空壳岗位 → 返回空，上层走「帮你问问」话术
         items = []
     _cache[city] = (time.monotonic() + CACHE_TTL, items)
     return items

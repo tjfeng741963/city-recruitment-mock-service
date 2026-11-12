@@ -1,7 +1,7 @@
 """flow 串接测试：jobs 数据源切换 + config 话术命中（mock 网络，不打真请求）。
 
 数据源优先级：config.scripts 命中 → 整段直发不过模型；
-未命中 → 4222 真实岗位优先 → DEMO_JOBS 回落。
+未命中 → 4222 注入的远端岗位；城市查不到岗位 → 「已记下，帮你问问」。
 """
 
 from __future__ import annotations
@@ -80,9 +80,10 @@ async def test_send_info_uses_remote_jobs(
     assert info["stage"] == "ask_interview"
 
 
-async def test_send_info_falls_back_to_demo_jobs_on_failure(
+async def test_send_info_without_jobs_says_will_ask(
     admin_client: AsyncClient, monkeypatch
 ) -> None:  # noqa: ANN001
+    """4222 挂了/查不到岗位：不编岗位，走「已记下，帮你问问」并记未知问题。"""
     async def boom(*args, **kwargs):  # noqa: ANN002, ANN003
         raise RuntimeError("4222 down")
 
@@ -91,23 +92,25 @@ async def test_send_info_falls_back_to_demo_jobs_on_failure(
     await _say(admin_client, key, "你好")
     info = await _say(admin_client, key, "深圳")
 
-    assert "龙华电子厂" in info["reply"]  # DEMO_JOBS 兜底
-    assert info["stage"] == "ask_interview"
+    assert "已记下" in info["reply"] and "帮你问问" in info["reply"]
+    assert info["stage"] == "ask_city"
+    # 不许出现编造的岗位事实
+    assert "龙华电子厂" not in info["reply"] and "元/小时" not in info["reply"]
 
 
 async def test_config_script_hit_bypasses_model(
     admin_client: AsyncClient, monkeypatch
 ) -> None:  # noqa: ANN001
-    async def no_jobs(*args, **kwargs):  # noqa: ANN002, ANN003
-        return []  # 岗位接口空 → 用 DEMO 数据填占位符
+    async def remote_jobs(city: str, token: str, url: str) -> list[dict]:
+        return REMOTE_JOBS  # 岗位接口返回远端真实岗位 → 填占位符
 
-    monkeypatch.setattr(job_lookup, "_fetch_items", no_jobs)
+    monkeypatch.setattr(job_lookup, "_fetch_items", remote_jobs)
 
     scripts = [
         {
             "stage": "send_info",
             "city": "深圳",
-            "title": "龙华厂标准介绍",
+            "title": "观澜厂标准介绍",
             "content": "{{factory}}在招人，工价{{wage}}，面试地点{{place}}，时间{{window}}，过来看看？",
         }
     ]
@@ -125,9 +128,9 @@ async def test_config_script_hit_bypasses_model(
     monkeypatch.setattr("app.api_flow.build_provider", lambda: probe)
     info = await _say(admin_client, key, "深圳", device_code="pc-office-07")
 
-    # 整段直接作 parts，占位符已替换成岗位事实（DEMO 深圳 0 号岗）
+    # 整段直接作 parts，占位符已替换成岗位事实（远端深圳 0 号岗）
     assert info["parts"] == [
-        "龙华电子厂在招人，工价20 元/小时，面试地点龙华大浪街道，时间09:00-11:00，过来看看？"
+        "观澜精密厂在招人，工价23 元/小时，面试地点观澜大道 88 号，时间09:00-11:00，过来看看？"
     ]
     assert info["reply"] == info["parts"][0]
     assert info["stage"] == "ask_interview"
@@ -140,18 +143,18 @@ async def test_config_script_miss_uses_original_logic(
     async def no_scripts(*args, **kwargs):  # noqa: ANN002, ANN003
         return []
 
-    async def no_jobs(*args, **kwargs):  # noqa: ANN002, ANN003
-        return []
+    async def remote_jobs(*args, **kwargs):  # noqa: ANN002, ANN003
+        return REMOTE_JOBS
 
     monkeypatch.setattr(device_scripts, "_fetch_scripts", no_scripts)
-    monkeypatch.setattr(job_lookup, "_fetch_items", no_jobs)
+    monkeypatch.setattr(job_lookup, "_fetch_items", remote_jobs)
 
     key = f"test-{uuid.uuid4().hex[:8]}"
     await _say(admin_client, key, "你好")
     info = await _say(admin_client, key, "深圳")
 
     # 未命中 → 原逻辑：代码拼三段（厂名/工价/吃住 + 地点时间 + 邀约问句）
-    assert "厂名：" in info["parts"][0] and "龙华电子厂" in info["parts"][0]
+    assert "厂名：" in info["parts"][0] and "观澜精密厂" in info["parts"][0]
     assert any("这两天能不能过来面试" in part for part in info["parts"])
     assert info["stage"] == "ask_interview"
 
@@ -167,11 +170,11 @@ async def test_script_only_applies_to_send_info_turn(
     async def fake_scripts(*args, **kwargs):  # noqa: ANN002, ANN003
         return scripts
 
-    async def no_jobs(*args, **kwargs):  # noqa: ANN002, ANN003
-        return []
+    async def remote_jobs(*args, **kwargs):  # noqa: ANN002, ANN003
+        return REMOTE_JOBS
 
     monkeypatch.setattr(device_scripts, "_fetch_scripts", fake_scripts)
-    monkeypatch.setattr(job_lookup, "_fetch_items", no_jobs)
+    monkeypatch.setattr(job_lookup, "_fetch_items", remote_jobs)
 
     key = f"test-{uuid.uuid4().hex[:8]}"
     await _say(admin_client, key, "你好")

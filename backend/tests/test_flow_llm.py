@@ -1,6 +1,6 @@
 """LLM 驱动层的测试：模型说了算，但三条红线不能被它踩。
 
-1. 工作信息只能由代码从 DEMO_JOBS 拼（模型复述就有编工价的可能）
+1. 工作信息只能由代码从岗位数据拼（模型复述就有编工价的可能）
 2. 约面试的时间由代码算，姓名手机不齐不许约
 3. 模型挂了，客户也必须有话说；插问一律走知识库占位，不让模型自由发挥
 """
@@ -21,10 +21,20 @@ from app.services.flow_engine import (
     STAGE_DONE,
     TZ,
     new_state,
+    set_remote_jobs,
 )
 from app.services.flow_llm import a_step, build_messages
+from tests.fixture_jobs import JOBS_BY_CITY
 
 NOW = datetime(2026, 11, 8, 14, 0, tzinfo=TZ)
+
+
+@pytest.fixture(autouse=True)
+def _remote_jobs():
+    """引擎只认注入的远端岗位：测试统一注入岗位夹具。"""
+    set_remote_jobs(JOBS_BY_CITY)
+    yield
+    set_remote_jobs({})
 
 
 class ScriptedProvider:

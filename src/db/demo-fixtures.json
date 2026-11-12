@@ -1,0 +1,40 @@
+{
+  "factories": [[1, "本地示例工厂", 1], [2, "示例电子厂", 2]],
+  "service_positions": [[1, "本地示例岗位", 1, 1], [2, "示例产线岗位", 2, 2]],
+  "knowledge_items": [[1, "本地示例知识", "仅供测试"]],
+  "activation_strategies": [[1, "本地示例策略"]],
+  "activation_devices": [[1, "本地示例设备"]],
+  "recruiter": {
+    "id": 1,
+    "username": "mock-recruiter",
+    "city_id": 1,
+    "data": { "recruiter_id": "mock-recruiter", "name": "示例招聘员", "recruiter_type": "service" },
+    "scope_users": ["local-customer", "local-recruiter"],
+    "scope_city_id": "1"
+  },
+  "candidate_events": [
+    [9001, "mock-device-1", "mock-c1", "示例候选人A", "invited", "张三（示例）", "13800000001", "广州"],
+    [9002, "mock-device-1", "mock-c2", "示例候选人B", "invited", "李四（示例）", "13800000002", "深圳"]
+  ],
+  "old_friend_records": [[9001, "mock-account-1", "mock-c1", "示例老友A", "mock-device-1", "active"]],
+  "agent_device": {
+    "id": 1,
+    "device_name": "本地示例设备",
+    "device_code": "local-device-001",
+    "recruiter_id": "mock-recruiter",
+    "scope_users": ["local-customer", "local-recruiter"]
+  },
+  "conversation": {
+    "device_code": "local-device-001",
+    "customer_id": 700001,
+    "nickname": "示例客户A",
+    "city": "广州",
+    "district": "天河区",
+    "last_msg": "想了解一下长白班岗位",
+    "unread": 1
+  },
+  "messages": [
+    [700001, "local-device-001", 700001, "inbound", "想了解一下长白班岗位", "sent"],
+    [700002, "local-device-001", 700001, "outbound", "可以的，我先给你发几个示例岗位。", "sent"]
+  ]
+}

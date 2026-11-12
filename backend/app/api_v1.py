@@ -139,6 +139,27 @@ async def get_device(device_code: str, user: CurrentUser, session: SessionDep) -
     return device
 
 
+@router.delete("/devices/{device_code}", status_code=status.HTTP_204_NO_CONTENT, tags=["devices"])
+async def delete_device(device_code: str, admin: AdminUser, session: SessionDep) -> None:
+    """删除测试/废弃设备（管理员）。仍有客服通道挂靠时拒绝，先解绑再删。"""
+    device = (
+        await session.execute(select(Device).where(Device.device_code == device_code))
+    ).scalar_one_or_none()
+    if not device:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "设备不存在")
+    bound = (
+        await session.execute(
+            select(ChannelAccount.id).where(ChannelAccount.device_id == device.id)
+        )
+    ).first()
+    if bound:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "该设备仍绑有客服通道，先解绑再删除"
+        )
+    await session.delete(device)
+    await session.commit()
+
+
 @router.post("/devices/{device_code}/heartbeat", response_model=HeartbeatOut, tags=["devices"])
 async def heartbeat(
     device_code: str, payload: HeartbeatIn, device: DeviceDep, session: SessionDep
