@@ -112,6 +112,11 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
       // 8090 拿去做知识库过滤，data_json 没绑就回空串 = 通用/不限。
       factory_name: typeof params.factory_name === "string" ? params.factory_name : "",
       city: typeof params.city === "string" ? params.city : "",
+      // 知识库 v3：品类与招工方 id（docs/知识库方案-流程驱动-20261113.md §3.7）。
+      // 绑了 id 就走 kb_faq 硬过滤（别家厂的问答不进候选集）；
+      // 没绑回 0，8090 退回按 factory_name 匹配的旧路径。
+      vertical_id: Number.isInteger(params.vertical_id) ? Number(params.vertical_id) : 0,
+      employer_id: Number.isInteger(params.employer_id) ? Number(params.employer_id) : 0,
       scripts,
     };
   });

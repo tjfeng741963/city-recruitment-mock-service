@@ -59,6 +59,9 @@ describe("device config distribution", () => {
       merge_delay_seconds: 0,
       factory_name: "",
       city: "",
+      // 知识库 v3：品类/招工方 id，未绑定时回 0
+      vertical_id: 0,
+      employer_id: 0,
       scripts: [{ stage: "send_info", city: "深圳", title: "龙华厂标准介绍", content: "您好，龙华电子厂…" }],
     });
     // 话术更新时间更晚 → version 取较新者

@@ -38,8 +38,11 @@ from ..models_kb import DEFAULT_TENANT_ID, Employer, KbFaq, Location, Vertical
 # scope 从窄到宽的检索顺序
 SCOPE_ORDER = ("employer", "city", "vertical", "global")
 
-# 占位符：单花括号，与旧路径的双花括号 {{x}} 区分开
-_PLACEHOLDER = re.compile(r"\{([a-z_][a-z0-9_]*)\}")
+# 占位符：单花括号，与旧路径的双花括号 {{x}} 区分开。
+# 支持兜底写法 {name|兜底文案}：有值用值，没值用兜底，两者都没有才整句丢弃。
+# 为什么要兜底：「买社保吗」「多久转正」这类问题，岗位字段常常空着，
+# 但客户问了必须有答——整句丢弃等于不回复，比给个不含数字的通用说法更糟。
+_PLACEHOLDER = re.compile(r"\{([^{}\n|]{1,40})(?:\|([^{}\n]{1,200}))?\}")
 
 # 一句话里含这些字，说明客户在问事（才去查 FAQ）
 _QUESTION_HINTS = (
@@ -219,18 +222,40 @@ def render(
     if not text:
         return ""
 
+    def resolve(match: re.Match[str]) -> str | None:
+        """返回替换值；None 表示这个占位符填不上（整句要丢）。"""
+        name = match.group(1)
+        fallback = (match.group(2) or "").strip()
+        value = values.get(name, "").strip()
+        if value:
+            return value
+        # 有兜底文案就用兜底：客户问了必须有答，空着不如给个不含数字的通用说法
+        return fallback or None
+
     sentences = re.split(r"(?<=[。！？；\n])", text)
     kept: list[str] = []
     for sentence in sentences:
         if not sentence.strip():
             continue
-        names = _PLACEHOLDER.findall(sentence)
-        if not names:
+        placeholders = list(_PLACEHOLDER.finditer(sentence))
+        if not placeholders:
             kept.append(sentence)
             continue
-        # 句子里的占位符必须全部有值，否则整句丢
-        if all(values.get(name, "").strip() for name in names):
-            kept.append(_PLACEHOLDER.sub(lambda m: values[m.group(1)].strip(), sentence))
+        # 句子里每个占位符都要能填上（有值或有兜底），否则整句丢
+        replacements: list[tuple[re.Match[str], str]] = []
+        dropped = False
+        for match in placeholders:
+            value = resolve(match)
+            if value is None:
+                dropped = True
+                break
+            replacements.append((match, value))
+        if dropped:
+            continue
+        rendered = sentence
+        for match, value in reversed(replacements):
+            rendered = rendered[: match.start()] + value + rendered[match.end() :]
+        kept.append(rendered)
     return "".join(kept).strip()
 
 

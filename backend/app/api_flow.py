@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 
 from .deps import ServiceOrUser, SessionDep
 from .services import flow_session as store
-from .services import kb_placeholder, profile_push, unknown_questions
+from .services import kb_faq, kb_placeholder, profile_push, unknown_questions
 from .services.device_scripts import fetch_device_meta, fetch_scripts, pick_script, render_script
 from .services.flow_engine import (
     STAGE_ASK_CITY,
@@ -99,55 +99,90 @@ async def flow_answer(
         "FLOW_PROFILE_DEVICE", profile_push.DEFAULT_DEVICE
     )
 
-    # 知识库只做占位命中（标题关键词包含匹配），没命中交给流程走兜底话术。
-    # 城市/工厂线索来自设备绑定（fetch_device_meta 60s 缓存，拉不到回空 = 通配）；
-    # 设备没绑城市时退回客户自己说的城市（老行为）。同城 +3、同厂 +5，异城/异厂排除。
+    # 知识库两段式：
+    #   ① 新路径 kb_faq —— 按品类 + 招工方硬过滤，命中就用岗位事实渲染占位符。
+    #      别家厂的问答根本不进候选集，这是「分不清厂」的直接解法。
+    #   ② 旧路径 kb_placeholder —— 扫存量话术，城市 +3 / 同厂 +5 打分。
+    # 新路径没命中才回落旧路径，保证已有 534 条数据继续可用。
     kb_answer: str | None = None
     kb_entry_id: str | None = None
     kb_markers: list[str] = []
     kb_repeat = False
-    kb_entry_id: str | None = None
-    kb_markers: list[str] = []
-    kb_repeat = False
-    kb_entry_id: str | None = None
-    kb_markers: list[str] = []
     if stage_before in _KB_STAGES:
         try:
             meta = await fetch_device_meta(device_code)
         except Exception:  # noqa: BLE001  meta 拉不到按通配，流程不中断
             meta = {"factory_name": "", "city": ""}
+        city_hint_for_kb = (
+            str(meta.get("city") or "")
+            or extract_city(payload.text)
+            or str(slots.get("city") or "")
+        )
+        employer_id_hint = int(meta.get("employer_id") or 0) or None
+        location_id_hint = int(meta.get("location_id") or 0) or None
+
+        # ① 新路径：kb_faq 硬过滤（vertical → employer → city → global）
         try:
-            city_hint_for_kb = (
-                str(meta.get("city") or "")
-                or extract_city(payload.text)
-                or str(slots.get("city") or "")
-            )
-            kb_hit = await kb_placeholder.lookup_entry(
+            faq_hit = await kb_faq.lookup(
                 session,
                 payload.text,
-                city=city_hint_for_kb,
-                factory=str(meta.get("factory_name") or ""),
+                vertical_code="factory",
+                employer_id=employer_id_hint,
+                location_id=location_id_hint,
             )
         except Exception:  # noqa: BLE001  查库失败等同于没命中，不能挡住回复
-            kb_hit = None
-        if kb_hit:
-            kb_entry_id = kb_hit["id"]
-            kb_markers = re.findall(r"【(?:图片|视频):[^】]+】", kb_hit["body"])
-            already_sent = any(
-                e.type == store.EVENT_KB
-                and f'"id": "{kb_entry_id}"' in (e.body or "")
-                or (e.type == store.EVENT_KB and f'"id":"{kb_entry_id}"' in (e.body or ""))
-                for e in events
+            faq_hit = None
+        if faq_hit:
+            # 占位符用岗位事实渲染：工价/年龄/吃住都来自运营维护的岗位字段，
+            # 模板里一个数字都没有，所以换工价不用改话术。
+            job_for_faq = (jobs_for_city(city_hint_for_kb) or [{}])[0]
+            try:
+                location_ctx, employer_name = await kb_faq.resolve_context(
+                    session,
+                    employer_id=employer_id_hint,
+                    location_id=location_id_hint,
+                )
+            except Exception:  # noqa: BLE001
+                location_ctx, employer_name = {}, ""
+            rendered = kb_faq.render(
+                faq_hit.answer,
+                job=job_for_faq,
+                location=location_ctx,
+                employer_name=employer_name,
             )
-            kb_repeat = False
-            if already_sent:
-                # 二次命中：不再重发整段（2026-11-12 青冥会话实测重复教训）。
-                # 模型只负责推进状态；最终回复在下方用确定性自然短句覆盖，
-                # 括号提示语这类内部元语言绝不下发给客户（2026-11-12 实测被复读）
-                kb_repeat = True
-                kb_answer = "\n".join(kb_markers) if kb_markers else ""
-            else:
-                kb_answer = kb_hit["body"]
+            if rendered.strip():
+                kb_answer = rendered
+                kb_entry_id = f"faq:{faq_hit.id}"
+                kb_markers = list(faq_hit.media)
+
+        # ② 旧路径：kb_faq 没命中才查存量话术
+        if not kb_answer:
+            try:
+                kb_hit = await kb_placeholder.lookup_entry(
+                    session,
+                    payload.text,
+                    city=city_hint_for_kb,
+                    factory=str(meta.get("factory_name") or ""),
+                )
+            except Exception:  # noqa: BLE001  查库失败等同于没命中，不能挡住回复
+                kb_hit = None
+            if kb_hit:
+                kb_entry_id = kb_hit["id"]
+                kb_markers = re.findall(r"【(?:图片|视频):[^】]+】", kb_hit["body"])
+                already_sent = any(
+                    e.type == store.EVENT_KB
+                    and f'"id": "{kb_entry_id}"' in (e.body or "")
+                    or (e.type == store.EVENT_KB and f'"id":"{kb_entry_id}"' in (e.body or ""))
+                    for e in events
+                )
+                if already_sent:
+                    # 二次命中：不再重发整段（2026-11-12 青冥会话实测重复教训）。
+                    # 模型只负责推进状态；最终回复在下方用确定性自然短句覆盖，
+                    # 括号提示语这类内部元语言绝不下发给客户（2026-11-12 实测被复读）
+                    kb_repeat = True
+                    kb_answer = "\n".join(kb_markers) if kb_markers else ""
+                else:
+                    kb_answer = kb_hit["body"]
 
     # 城市线索：先看客户这轮说的，再看已有槽位（别名归一在 4222 侧，这里只透传）
     city_hint = extract_city(payload.text) or str(slots.get("city") or "")

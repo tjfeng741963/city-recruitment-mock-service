@@ -70,17 +70,28 @@ async def fetch_scripts(device_code: str) -> list[dict[str, Any]]:
     return scripts
 
 
-def _normalize_meta(data: Any) -> dict[str, str]:
-    """config 响应 → 只留 factory_name/city 两个键，缺失/类型不对回空串。"""
+def _normalize_meta(data: Any) -> dict[str, Any]:
+    """config 响应 → 工厂/城市/品类/招工方。缺失或类型不对回空值/0。
+
+    知识库 v3 起多了 vertical_id / employer_id（docs/知识库方案-流程驱动-20261113.md §3.7）：
+    绑了 id 走 kb_faq 硬过滤，没绑（0）退回按 factory_name 匹配的旧路径。
+    """
     if not isinstance(data, dict):
         return dict(EMPTY_META)
+
+    def as_int(value: Any) -> int:
+        # bool 是 int 的子类，显式排除，免得 True 被当成 1 号品类
+        return int(value) if isinstance(value, int) and not isinstance(value, bool) else 0
+
     return {
         "factory_name": str(data.get("factory_name") or ""),
         "city": str(data.get("city") or ""),
+        "vertical_id": as_int(data.get("vertical_id")),
+        "employer_id": as_int(data.get("employer_id")),
     }
 
 
-async def _fetch_meta(device_code: str, token: str, url: str) -> dict[str, str]:
+async def _fetch_meta(device_code: str, token: str, url: str) -> dict[str, Any]:
     """发一次真实请求。只在这层碰网络，测试 monkeypatch 这里。"""
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         resp = await client.get(url, headers={"X-Profile-Token": token})
@@ -88,12 +99,12 @@ async def _fetch_meta(device_code: str, token: str, url: str) -> dict[str, str]:
         return _normalize_meta(resp.json())
 
 
-async def fetch_device_meta(device_code: str) -> dict[str, str]:
-    """拉设备绑定的工厂/城市（契约 docs/对齐-设备工厂绑定与资料导入.md §2）。
+async def fetch_device_meta(device_code: str) -> dict[str, Any]:
+    """拉设备绑定的工厂/城市/品类/招工方。
 
     GET config（X-Profile-Token，60s 缓存与 fetch_scripts 同款写法），
-    返回 {"factory_name": str, "city": str}；任何失败都回空值（通配），
-    流程不中断——4222 挂了顶多做不了知识库过滤，不能挡住回复。
+    任何失败都回空值（通配），流程不中断——4222 挂了顶多做不了知识库过滤，
+    不能挡住回复。
     """
     device_code = str(device_code or "").strip()
     if not device_code:

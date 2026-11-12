@@ -43,7 +43,8 @@ def _isolate_device_meta(monkeypatch):
     from app.services import device_scripts
 
     async def no_meta(device_code: str, token: str, url: str) -> dict:
-        return {"factory_name": "", "city": ""}
+        # 知识库 v3 起 meta 还带品类/招工方 id；默认不绑（0），走通用问答
+        return {"factory_name": "", "city": "", "vertical_id": 0, "employer_id": 0}
 
     monkeypatch.setattr(device_scripts, "_fetch_meta", no_meta)
     device_scripts.clear_cache()
