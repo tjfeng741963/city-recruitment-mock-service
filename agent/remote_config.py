@@ -22,6 +22,10 @@ REMOTE_PARAM_KEYS = {
     "merge_delay_seconds": "merge_delay",
 }
 
+# 远端可以切换的 brain.mode。改动需要重建 Brain 实例，由 autopilot 的
+# brain_mode_changed 回调处理；这里只负责把值合并进 cfg["brain"]。
+BRAIN_MODES = ("kb", "flow", "fixed")
+
 # 全量话术存内存；发送侧（brain/flow）按 device+stage+city 匹配
 _device_scripts: list[dict] = []
 
@@ -41,6 +45,7 @@ def apply_remote_params(cfg: dict, remote: dict) -> list[str]:
     """远端有的键覆盖本地，返回发生变化的本地键名。
 
     只动运行参数；interval 不接受 0（与 load_config 的校验一致，0 会死循环）。
+    brain_mode 只接受 kb/flow/fixed，写进 cfg["brain"]["mode"]，调用方据此重建 Brain。
     """
     changed: list[str] = []
     for remote_key, local_key in REMOTE_PARAM_KEYS.items():
@@ -50,6 +55,15 @@ def apply_remote_params(cfg: dict, remote: dict) -> list[str]:
         if cfg.get(local_key) != value:
             cfg[local_key] = value
             changed.append(local_key)
+    mode = remote.get("brain_mode")
+    if isinstance(mode, str) and mode in BRAIN_MODES:
+        brain = cfg.get("brain")
+        if not isinstance(brain, dict):
+            brain = {}
+        if brain.get("mode") != mode:
+            brain = {**brain, "mode": mode}
+            cfg["brain"] = brain
+            changed.append("brain_mode")
     return changed
 
 
@@ -84,6 +98,10 @@ class RemoteConfig:
         self.version = ""
         self.scripts: list[dict] = []
         self.params: dict = {}
+        # 最近一次 sync 里真正发生变化的本地键（含 "brain_mode"）。
+        # 调用方据此决定要不要重建 Brain——Brain 在 main() 只构造一次，
+        # 光改 cfg["brain"]["mode"] 不会切换行为。
+        self.last_changed: list[str] = []
         cached = load_remote_cache(self.cache_path)
         if cached:
             self.version = str(cached.get("version") or "")
@@ -133,9 +151,12 @@ class RemoteConfig:
             except OSError as exc:
                 self.log_fn(f"[远端配置] 缓存写盘失败（忽略）：{exc}")
             changed = apply_remote_params(cfg, remote) if cfg is not None else []
+            self.last_changed = changed
             detail = f"，热更 {', '.join(changed)}" if changed else ""
             self.log_fn(f"[远端配置] version={version or '(空)'} scripts={len(self.scripts)} 条{detail}")
         elif cfg is not None and self.params:
             # 重启后 version 未变：config.json 可能还是旧值，把缓存参数并回去
-            apply_remote_params(cfg, self.params)
+            self.last_changed = apply_remote_params(cfg, self.params)
+        else:
+            self.last_changed = []
         return True

@@ -21,6 +21,10 @@ const REGISTER_KEY_MIN_LENGTH = 16;
 // device_code 在库里按原样存、按原样匹配，所以这里也不能擅自转小写。
 const DEVICE_CODE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
+// 网页可远程切换的回复来源。fixed 表示不调后端、用本地固定文本。
+// 只在 data_json.brain_mode 命中枚举时下发，避免脏值覆盖客户端本地配置。
+const BRAIN_MODES = new Set(["kb", "flow", "fixed"]);
+
 function matchesRegisterKey(supplied: string, expected: string): boolean {
   const a = Buffer.from(supplied, "utf8");
   const b = Buffer.from(expected, "utf8");
@@ -101,6 +105,9 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
       interval_seconds: positive(params.interval_seconds, 20),
       cooldown: positive(params.cooldown, 8),
       merge_delay_seconds: positive(params.merge_delay_seconds, 0),
+      // brain.mode 允许网页远程切换（kb 知识库 / flow 流程编排 / fixed 固定文本）。
+      // 客户端检测到变化后会重建 Brain 实例；缺省或非法值不下发，保留客户端本地配置。
+      ...(BRAIN_MODES.has(String(params.brain_mode)) ? { brain_mode: String(params.brain_mode) } : {}),
       // 设备绑定的工厂/城市（契约 docs/对齐-设备工厂绑定与资料导入.md §1）：
       // 8090 拿去做知识库过滤，data_json 没绑就回空串 = 通用/不限。
       factory_name: typeof params.factory_name === "string" ? params.factory_name : "",

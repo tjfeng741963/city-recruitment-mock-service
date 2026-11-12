@@ -471,6 +471,12 @@ class Reporter:
         try:
             if self.remote_config is not None:
                 self.remote_config.sync(self.cfg)
+                # brain_mode 变了要重建 Brain：Brain 在启动时构造一次，
+                # 只改 cfg["brain"]["mode"] 不会切换行为。
+                if "brain_mode" in getattr(self.remote_config, "last_changed", []):
+                    global _brain
+                    _brain = build_brain(self.cfg, log)
+                    log("[远端配置] 回复来源已切换，即时生效")
         except Exception as exc:  # noqa: BLE001
             log(f"[远端配置] 异常（忽略）：{agent_client.describe_error(exc)}")
         # Persist bridge work before the primary ingest can advance the shared cursor.
@@ -699,6 +705,31 @@ def pick_reply(conv_id: str, cfg: dict) -> tuple[str, str]:
 
 
 _brain = None  # 由 main() 注入；None 表示用固定文本
+
+
+def build_brain(cfg: dict, log_fn=print):
+    """按 cfg["brain"] 构造回复来源；mode 不是 kb/flow 或没配 base_url 时返回 None。
+
+    抽成函数是为了支持网页远程切换：心跳周期检测到 brain_mode 变化后，
+    重新调用本函数替换全局 _brain，不必重启客户端。
+    """
+    bcfg = cfg.get("brain") or {}
+    if bcfg.get("mode") in ("kb", "flow") and bcfg.get("base_url"):
+        import brain as brain_mod
+
+        instance = brain_mod.Brain(
+            bcfg["base_url"],
+            bcfg.get("username", ""),
+            bcfg.get("password", ""),
+            timeout=float(bcfg.get("timeout") or 20),
+            history_limit=int(bcfg.get("history_limit") or 6),
+            mode=str(bcfg.get("mode")),
+        )
+        label = "知识库" if bcfg.get("mode") == "kb" else "流程编排"
+        log_fn(f"回复来源：{label} {bcfg['base_url']}（失败暂停，待人工处理）")
+        return instance
+    log_fn(f"回复来源：固定文本（brain.mode={bcfg.get('mode')!r}）")
+    return None
 
 
 def build_history(store: Store, conv_id: str, limit: int = 6) -> list[str]:
@@ -1491,23 +1522,7 @@ def main() -> int:
         return 0 if complete and not counts.get("rejected") else 1
 
     global _brain
-    _brain = None
-    bcfg = cfg.get("brain") or {}
-    if bcfg.get("mode") in ("kb", "flow") and bcfg.get("base_url"):
-        import brain as brain_mod
-
-        _brain = brain_mod.Brain(
-            bcfg["base_url"],
-            bcfg.get("username", ""),
-            bcfg.get("password", ""),
-            timeout=float(bcfg.get("timeout") or 20),
-            history_limit=int(bcfg.get("history_limit") or 6),
-            mode=str(bcfg.get("mode")),
-        )
-        label = "知识库" if bcfg.get("mode") == "kb" else "流程编排"
-        log(f"回复来源：{label} {bcfg['base_url']}（失败暂停，待人工处理）")
-    else:
-        log(f"回复来源：固定文本（brain.mode={bcfg.get('mode')!r}）")
+    _brain = build_brain(cfg, log)
 
     if args.retry_held:
         log(f"知识库暂停记录重新入队：{rlog.retry_held()} 条；本次未发送")
