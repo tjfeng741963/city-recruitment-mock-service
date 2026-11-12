@@ -154,6 +154,7 @@ def render_script(content: str, job: dict[str, Any], window: str = INTERVIEW_WIN
 
 
 __all__ = [
+    "fetch_takeover",
     "fetch_scripts",
     "fetch_device_meta",
     "pick_script",

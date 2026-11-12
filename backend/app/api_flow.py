@@ -83,6 +83,16 @@ async def flow_answer(
     before = dict(state.get("slots") or {})
     before_profile = dict(state.get("profile") or {})
     stage_before = str(state.get("stage") or "")
+    # done 重激活：流程结束后客户再来消息（问工资/换岗位…），AI 要继续服务
+    # 而不是永远沉默——重置流程从问城市重新开始，老客户档案抽取照常
+    flow_reset = stage_before == "done"
+    if flow_reset:
+        # 只重置阶段、保留 slots/profile——老客户的档案和城市不能丢。
+        # 回到 ask_interview（老客户已看过岗位）：插问 KB 分支继续可用
+        state["stage"] = "ask_interview"
+        before["stage"] = "ask_interview"
+        before_profile = dict(state.get("profile") or {})
+        stage_before = "ask_interview"
     slots = state.setdefault("slots", {})
 
     device_code = payload.device_code or os.getenv(
@@ -93,6 +103,12 @@ async def flow_answer(
     # 城市/工厂线索来自设备绑定（fetch_device_meta 60s 缓存，拉不到回空 = 通配）；
     # 设备没绑城市时退回客户自己说的城市（老行为）。同城 +3、同厂 +5，异城/异厂排除。
     kb_answer: str | None = None
+    kb_entry_id: str | None = None
+    kb_markers: list[str] = []
+    kb_repeat = False
+    kb_entry_id: str | None = None
+    kb_markers: list[str] = []
+    kb_repeat = False
     kb_entry_id: str | None = None
     kb_markers: list[str] = []
     if stage_before in _KB_STAGES:
@@ -123,13 +139,13 @@ async def flow_answer(
                 or (e.type == store.EVENT_KB and f'"id":"{kb_entry_id}"' in (e.body or ""))
                 for e in events
             )
+            kb_repeat = False
             if already_sent:
                 # 二次命中：不再重发整段（2026-11-12 青冥会话实测重复教训）。
-                # 只给模型媒体标记 + 短句；条目没配媒体就一句收尾话。
-                if kb_markers:
-                    kb_answer = "（这条内容刚才已经发过你啦，媒体资料再给你发一遍）\n" + "\n".join(kb_markers)
-                else:
-                    kb_answer = "（这个问题刚才已经回复过你啦，有其他想了解的随时问我）"
+                # 模型只负责推进状态；最终回复在下方用确定性自然短句覆盖，
+                # 括号提示语这类内部元语言绝不下发给客户（2026-11-12 实测被复读）
+                kb_repeat = True
+                kb_answer = "\n".join(kb_markers) if kb_markers else ""
             else:
                 kb_answer = kb_hit["body"]
 
@@ -189,9 +205,10 @@ async def flow_answer(
     if communicating:
         result.slots["communicating_pushed"] = True
 
-    records: list[tuple[str, dict[str, Any]]] = [
-        (store.EVENT_INBOUND, {"text": payload.text})
-    ]
+    records: list[tuple[str, dict[str, Any]]] = []
+    if flow_reset:
+        records.append((store.EVENT_STAGE, {"from": "done", "to": "ask_interview"}))
+    records.append((store.EVENT_INBOUND, {"text": payload.text}))
     if result.stage != stage_before:
         records.append(
             (store.EVENT_STAGE, {"from": stage_before, "to": result.stage})
@@ -200,12 +217,31 @@ async def flow_answer(
     profile_records = store.diff_profile(before_profile, result.slots)
     records.extend(profile_records)
     if result.reply:
+        # 回声防护：模型把客户原话当回复复读（2026-11-12 实测「能了解一下。广州
+        # 地铁的那个工作吗」被原样发出）→ 丢弃模型输出，回退到知识库正文/通用接话
+        inbound_text = (payload.text or "").strip()
+        if (
+            len(inbound_text) >= 6
+            and inbound_text in result.reply
+            and not kb_repeat
+        ):
+            fallback = (kb_answer or "").strip() or "我在的，你想了解哪方面？工作内容、工资待遇还是面试时间？"
+            result.reply = fallback
+            result.parts = [fallback]
         # 媒体兜底：命中的条目带【图片/视频:名称】而模型回复里弄丢了 → 补回，
         # 保证客户真的能收到视频/图片（2026-11-12「我的视频呢」教训）
         if kb_markers and not re.search(r"【(?:图片|视频):[^】]+】", result.reply):
             result.reply = result.reply.rstrip() + "\n" + "\n".join(kb_markers)
             if result.parts:
                 result.parts = [p.rstrip() for p in result.parts] + [kb_markers[-1]]
+        # 二次命中：回复覆盖为自然短句（stage/slots 推进保留）。
+        # 括号元语言绝不下发——2026-11-12 被模型复读给客户的教训
+        if kb_repeat and kb_entry_id:
+            if kb_markers:
+                result.reply = "好的，这就再给你发一遍~\n" + "\n".join(kb_markers)
+            else:
+                result.reply = "这个问题刚才已经回复过你啦，有其他想了解的随时问我。"
+            result.parts = [result.reply]
         # parts 一并落库：回放时能看出「那轮其实发了两条」
         records.append((store.EVENT_REPLY, {"text": result.reply, "parts": result.parts}))
         if kb_entry_id:

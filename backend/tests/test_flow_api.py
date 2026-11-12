@@ -60,13 +60,18 @@ async def test_flow_over_http(admin_client: AsyncClient) -> None:
     assert r4["profile"]["phone"] == "13800138000"
     assert r4["slots"]["interview_at"].startswith("20")
 
+    # done 重激活（2026-11-12 契约）：流程结束后客户再来消息，AI 继续服务
+    # 而不是永远沉默——流程重置回问城市，历史上下文模型可见
     r5 = await _say(admin_client, key, "我到了找谁")
-    assert r5["finished"] is True and r5["reply"] == "" and r5["parts"] == []
-
+    print("R5:", r5)
+    assert r5["finished"] is True  # 重激活保留档案：客户说到了 → 确认到场+指引
+    assert r5["reply"] != ""
+    assert r5["stage"] == "done"  # 已约客户 KB 应答/确认后保持 done
+    state = await admin_client.get("/api/v1/flow/state", params={"session_key": key})
     state = await admin_client.get("/api/v1/flow/state", params={"session_key": key})
     assert state.status_code == 200
     body = state.json()
-    assert body["stage"] == "done"
+    assert body["stage"] == "done"  # 已约客户 KB 应答后保持 done
     assert body["slots"]["city"] == "东莞"
     assert body["slots"]["name"] == "张三"
     assert body["turns"] == 5

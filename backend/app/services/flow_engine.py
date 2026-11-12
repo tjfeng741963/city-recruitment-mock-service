@@ -413,6 +413,7 @@ def step(
     when = next_interview(now)
 
     if stage == STAGE_DONE:
+        print("DBG_DONE_ENTER text=", repr(text), "stage=", stage)
         return FlowResult(reply="", stage=STAGE_DONE, slots=slots, finished=True)
 
     # kb 只是插问的暂存标签，真进来就按"面试邀约"继续

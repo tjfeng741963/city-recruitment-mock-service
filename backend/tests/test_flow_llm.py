@@ -251,7 +251,8 @@ async def test_done_never_calls_model() -> None:
     state["slots"] = {"city": "广州", "booked": True}
 
     result = await a_step(state, "我到了找谁", provider, now=NOW)
-    assert result.reply == ""
+    # 新契约（2026-11-12）：已约客户再来消息不再静默——回确认信息，但绝不调模型
+    assert "约好面试" in result.reply and result.reply != ""
     assert result.finished is True
     assert result.stage == STAGE_DONE
     assert provider.calls == []

@@ -407,12 +407,32 @@ async def a_step(
     """一个 turn：模型读懂 + 回话；失败就退到确定性状态机。"""
     stage = str(state.get("stage") or STAGE_ASK_CITY)
 
-    # 已约好（done）就不再叫模型：省一次调用，也避免它把状态改回去
+    # 已约好（done/booked）不再叫模型：省一次调用，也避免它把状态改回去。
+    # 但不再静默（2026-11-12「我的视频呢」教训）——已约客户再来消息：
+    # KB 命中就答 KB（问工资/带视频都正常答），没命中就回约面确认信息。
     if stage == STAGE_DONE or (state.get("slots") or {}).get("booked"):
+        slots_kept = state.get("slots") or {}
+        if kb_answer:
+            return FlowResult(
+                reply=kb_answer,
+                parts=[kb_answer],
+                stage=STAGE_DONE,
+                slots=slots_kept,
+                finished=True,
+            )
+        _when_txt = "，".join(
+            x for x in (str(slots_kept.get("interview_window", "")), str(slots_kept.get("interview_place", ""))) if x
+        )
+        booked_reply = "你之前已经约好面试啦" + (
+            f"（{_when_txt}），到时候直接联系我就行~有其他想了解的也随时问我。"
+            if _when_txt
+            else "，到时候直接联系我就行~有其他想了解的也随时问我。"
+        )
         return FlowResult(
-            reply="",
+            reply=booked_reply,
+            parts=[booked_reply],
             stage=STAGE_DONE,
-            slots=state.get("slots") or {},
+            slots=slots_kept,
             finished=True,
         )
 
