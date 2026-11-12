@@ -11,9 +11,9 @@ export function hashPassword(password: string, salt = randomBytes(16).toString("
 }
 
 // 演示夹具（假厂/假岗位/假设备/假会话）只服务于本地与测试环境的列表填充，
-// 生产环境默认不注入；需要显式设 REA_SEED_DEMO=1 才会写入。
-// 数据本体在 demo-fixtures.json，生产部署不设置该变量即可保证库里只有真实数据。
-interface DemoFixtures {
+// 生产环境默认不注入；需要显式设 REA_SEED_FIXTURES=1 才会写入。
+// 数据本体在 seed-fixtures.json，生产部署不设置该变量即可保证库里只有真实数据。
+interface SeedFixtures {
   factories: Array<[number, string, number]>;
   service_positions: Array<[number, string, number, number]>;
   knowledge_items: Array<[number, string, string]>;
@@ -27,9 +27,9 @@ interface DemoFixtures {
   messages: Array<[number, string, number, string, string, string]>;
 }
 
-function seedDemoFixtures(db: DatabaseSync, seedScope: ReturnType<DatabaseSync["prepare"]>): void {
-  const raw = readFileSync(new URL("./demo-fixtures.json", import.meta.url), "utf-8");
-  const d = JSON.parse(raw) as DemoFixtures;
+function seedFixtures(db: DatabaseSync, seedScope: ReturnType<DatabaseSync["prepare"]>): void {
+  const raw = readFileSync(new URL("./seed-fixtures.json", import.meta.url), "utf-8");
+  const d = JSON.parse(raw) as SeedFixtures;
   for (const [id, factory_name, city_id] of d.factories) {
     db.prepare("INSERT OR IGNORE INTO factories(id,factory_name,city_id) VALUES (?,?,?)").run(id, factory_name, city_id);
   }
@@ -113,7 +113,7 @@ export function seedDatabase(db: DatabaseSync): void {
   const knowledge = ["超龄", "可以不加班吗", "买社保吗", "有试用期吗", "合同签多久"]; for (const [index, question] of knowledge.entries()) db.prepare("INSERT OR IGNORE INTO knowledge_items(id,title,content,status,data_json) VALUES (?,?,?,?,?)").run(4176 + index, question, question, "enabled", JSON.stringify({ question, keywords: [], is_active: true, sort_order: 0 }));
 
   const seedScope = db.prepare("INSERT OR IGNORE INTO user_scope_assignments(user_id,scope_type,scope_id) SELECT id,?,? FROM users WHERE username=?");
-  if (process.env.REA_SEED_DEMO === "1") seedDemoFixtures(db, seedScope);
+  if (process.env.REA_SEED_FIXTURES === "1") seedFixtures(db, seedScope);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

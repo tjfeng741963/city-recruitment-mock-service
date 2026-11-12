@@ -261,7 +261,7 @@ def _city_ask(slots: dict[str, Any] | None = None) -> str:
 def _factory(job: dict[str, str]) -> str:
     if job.get("factory_name"):
         return str(job["factory_name"])
-    # 远端契约里 factory_name 必有；兜底从 job_title 拆（「长安五金厂 操作工」→ 前半截）
+    # 远端契约里 factory_name 必有；兜底从 job_title 拆（「厂名 岗位」取前半截）
     return str(job.get("job_title", "")).split(" ")[0]
 
 
