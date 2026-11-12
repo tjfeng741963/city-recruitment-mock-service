@@ -22,6 +22,7 @@ interface StreamClient {
 /**
  * In-process fan-out for the SSE endpoint. Events are routed by device_code so
  * a browser tab watching one device never sees another device's traffic.
+ * 订阅 device_code='all'（仅 admin 可建立）的连接接收所有 device 事件的广播。
  * Writes are synchronous socket writes; a dead client throws and is dropped
  * instead of blocking the caller.
  */
@@ -44,7 +45,7 @@ export class EventBus {
     const frame = serializeEvent(event);
     let delivered = 0;
     for (const client of [...this.clients.values()]) {
-      if (client.deviceCode !== deviceCode) continue;
+      if (client.deviceCode !== deviceCode && client.deviceCode !== "all") continue;
       try {
         client.write(frame);
         delivered += 1;
@@ -98,10 +99,26 @@ export interface CommandSnapshot {
 export interface StreamNotifier {
   messageCreated(deviceCode: string, customerId: number, sourceEventId: string): void;
   commandUpdated(deviceCode: string, command: CommandSnapshot): void;
-  deviceUpdated(deviceCode: string, state: string): void;
+  /** reason 可选：'reported'=设备上报的状态变化，'heartbeat_timeout'=清扫兜底。 */
+  deviceUpdated(deviceCode: string, state: string, reason?: string): void;
 }
 
 const noop = () => {};
+
+// device.updated 对 offline/scanning 做 5 分钟节流，防止状态抖动刷屏。节流基准
+// 是 device_events 里上一条同类型事件（OFFSET 1 跳过本次状态转移刚写入的那条——
+// 每次推送都伴随一条新事件落库，所以窗口从“上一次转移”起算），查询走 DB，
+// 重启不丢。online 是恢复信号，永不节流；节流命中只拦推送，事件照常落库。
+const DEVICE_PUSH_THROTTLE_MS = 5 * 60_000;
+const PREVIOUS_DEVICE_EVENT_SQL =
+  "SELECT created_at FROM device_events WHERE device_code=? AND event_type=? ORDER BY id DESC LIMIT 1 OFFSET 1";
+
+/** device_events.created_at 兼容两种写法：JS ISO 与 SQLite CURRENT_TIMESTAMP。 */
+function eventStamp(value: string): number {
+  const normalized = value.includes("T") ? value : `${value.replace(" ", "T")}Z`;
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) ? parsed : NaN;
+}
 
 function source(sourceEventId: string): string {
   if (sourceEventId.startsWith("bridge-inbound:") || sourceEventId.startsWith("bridge-outbound:")) return "bridge";
@@ -143,7 +160,7 @@ export function messageCreatedEvent(db: DatabaseSync, deviceCode: string, custom
   };
 }
 
-export function createStreamNotifier(db: DatabaseSync, bus: EventBus, log: (error: unknown) => void = (error) => console.warn("[sse] event dropped", error)): StreamNotifier {
+export function createStreamNotifier(db: DatabaseSync, bus: EventBus, log: (error: unknown) => void = (error) => console.warn("[sse] event dropped", error), now: () => number = Date.now): StreamNotifier {
   return {
     messageCreated(deviceCode, customerId, sourceEventId) {
       try {
@@ -159,11 +176,16 @@ export function createStreamNotifier(db: DatabaseSync, bus: EventBus, log: (erro
         });
       } catch (error) { log(error); }
     },
-    deviceUpdated(deviceCode, state) {
+    deviceUpdated(deviceCode, state, reason) {
       try {
+        if (state !== "online") {
+          const row = db.prepare(PREVIOUS_DEVICE_EVENT_SQL).get(deviceCode, state) as { created_at: string } | undefined;
+          const previousAt = row ? eventStamp(row.created_at) : NaN;
+          if (Number.isFinite(previousAt) && now() - previousAt < DEVICE_PUSH_THROTTLE_MS) return;
+        }
         bus.publish(deviceCode, {
           type: "device.updated",
-          data: { device_code: deviceCode, online: state === "online", wecom_state: state },
+          data: { device_code: deviceCode, online: state === "online", wecom_state: state, ...(reason ? { reason } : {}) },
         });
       } catch (error) { log(error); }
     },

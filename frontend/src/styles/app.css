@@ -225,6 +225,69 @@ a.rail-item {
   min-width: 0;
 }
 
+/* ---------- Device offline alerts (Shell) ---------- */
+
+.device-alert-stack {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 16px 0;
+  pointer-events: none;
+}
+
+.device-alert-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: var(--t-callout);
+  font-weight: 600;
+  box-shadow: var(--shadow-md);
+  pointer-events: auto;
+}
+
+.device-alert-close {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: var(--r-sm);
+}
+
+.device-alert-close:hover {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.device-recovery-toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(72px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  z-index: 91;
+  padding: 10px 18px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--up);
+  background: var(--up-soft);
+  color: var(--up);
+  font-size: var(--t-callout);
+  font-weight: 600;
+  box-shadow: var(--shadow-lg);
+  pointer-events: none;
+}
+
 /* ---------- Dashboard ---------- */
 
 .dashboard-header h1 {

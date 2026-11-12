@@ -188,9 +188,10 @@ describe("agent SSE stream", () => {
     await waitFor(() => parseFrames(stream.state.text).some((frame) => frame.type === "device.updated" && frame.data.online === false), () => `no offline event: ${stream.state.text}`);
 
     const states = parseFrames(stream.state.text).filter((frame) => frame.type === "device.updated").map((frame) => frame.data);
+    // 契约：device.updated 携带可选 reason（reported=设备上报的状态变化）。
     expect(states).toEqual([
-      { device_code: "pc-office-01", online: true, wecom_state: "online" },
-      { device_code: "pc-office-01", online: false, wecom_state: "offline" },
+      { device_code: "pc-office-01", online: true, wecom_state: "online", reason: "reported" },
+      { device_code: "pc-office-01", online: false, wecom_state: "offline", reason: "reported" },
     ]);
   });
 

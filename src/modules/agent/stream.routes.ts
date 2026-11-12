@@ -26,7 +26,13 @@ export function registerStreamRoutes(app: FastifyInstance, db: DatabaseSync, bus
     catch { return reply.code(401).send(AUTH_INVALID); }
 
     if (!deviceCode) return reply.code(422).send({ detail: "device_code is required" });
-    if (!canAccessDevice(getUserScope(db, user), deviceCode)) return reply.code(403).send({ detail: "Device scope required" });
+    // device_code=all 是掉线提醒大盘的全局订阅：只放行 admin。普通用户仍按
+    // 设备白名单订阅单台设备，行为不变。
+    if (deviceCode === "all") {
+      if (!getUserScope(db, user).isAdmin) return reply.code(403).send({ detail: "Device scope required" });
+    } else if (!canAccessDevice(getUserScope(db, user), deviceCode)) {
+      return reply.code(403).send({ detail: "Device scope required" });
+    }
 
     // Take the socket away from Fastify: the response never ends on its own.
     reply.hijack();

@@ -27,7 +27,7 @@ function matchesRegisterKey(supplied: string, expected: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSync, notifier: StreamNotifier = NOOP_NOTIFIER): void {
+export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSync, notifier: StreamNotifier = NOOP_NOTIFIER): DeviceBridgeStore {
   const store = new DeviceBridgeStore(db, Date.now, notifier);
   const events = new MessageEventService(db, { webhookSecret: process.env.REA_WEBHOOK_SECRET ?? "local-webhook-secret" });
   const automation = new MessageAutomationService(db, events, createDifyProvider(), createMessageChannelProvider(undefined, db), notifier);
@@ -123,13 +123,10 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
       if (action === "heartbeat") {
         const state = field(body, "state");
         if (!["online", "offline", "scanning"].includes(state)) return reply.code(422).send({ detail: "Invalid device state" });
-        // Only a *change* is worth a push: the client heartbeats every few
-        // seconds and re-emitting "online" would flood every open tab.
-        const before = store.status(code)?.state ?? "offline";
+        // 状态变化的 device_events 落表与推送都收敛在 store.heartbeat 里：
+        // 只有真正变化才落一条 reason='reported' 的事件并推 device.updated。
         store.heartbeat(code, state as "online" | "offline" | "scanning", field(body, "account_id"));
-        const after = store.status(code);
-        if (after && after.state !== before) notifier.deviceUpdated(code, after.state);
-        return { device: after };
+        return { device: store.status(code) };
       }
       if (action === "claim") {
         const command = store.claim(code);
@@ -174,4 +171,6 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
       return reply.code(result.reply_status === "failed" ? 502 : 200).send({ ...result, customer_id: customerId });
     });
   }
+  // 返回 store 供 server.ts 挂 30s 掉线清扫定时器。
+  return store;
 }

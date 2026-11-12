@@ -70,7 +70,10 @@ function Card({ card, now }: { card: DeviceCard; now: number }) {
   return (
     <a href={`/agent-devices/${card.device.id}`} className={`dv-card is-${card.state}`}>
       <div className="dv-card-top">
-        <span className="dv-card-name">{card.name}</span>
+        <span className="dv-card-name">
+          {card.state === "offline" && <span className="dv-offline-dot" aria-hidden="true" />}
+          {card.name}
+        </span>
         <Badge tone={STATE_TONE[card.state]} dot>{stateLine(card, now)}</Badge>
       </div>
       <dl className="dv-card-meta">

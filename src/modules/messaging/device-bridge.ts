@@ -90,12 +90,50 @@ export class DeviceBridgeStore {
     if (!device) throw new BridgeError("Device not paired", 404);
     if (state === "online" && !accountId) throw new BridgeError("Logged-in account id is required", 422);
     if (accountId && device.account_id && accountId !== device.account_id) throw new BridgeError("Device is bound to a different account");
+    // status() 返回的是生效状态（超时的 online 已折算成 offline），所以这里
+    // 的“变化”与路由层观察到的一致：设备重复上报同一状态时既不落流水也不推送。
+    const changed = device.state !== state;
     this.db.prepare("UPDATE bridge_devices SET state=?,heartbeat_at=?,account_id=CASE WHEN ?<>'' THEN ? ELSE account_id END WHERE device_code=?")
       .run(state, this.now(), accountId, accountId, code);
+    if (changed) {
+      // 掉线事件流水：推送节流以它为基准，重启不丢。
+      this.db.prepare("INSERT INTO device_events(device_code,event_type,reason,created_at) VALUES (?,?,?,?)")
+        .run(code, state, "reported", new Date(this.now()).toISOString());
+      this.notifier.deviceUpdated(code, state, "reported");
+    }
     // The admin UI (GET /api/v1/agent/devices) reads online/last_online from
     // agent_devices.data_json, not from bridge_devices — mirror each heartbeat
     // there so the Vue device dot follows the bridge state.
     this.syncAgentDevice(code, state === "online");
+  }
+
+  /**
+   * 心跳超时清扫：把 `state='online'` 且超过 60s 没有心跳的设备条件 UPDATE 成
+   * offline。只有 rowcount>0 的行才落 device_events(reason='heartbeat_timeout')
+   * 并计入返回列表——重复扫描天然幂等，不会重复推送。调用方（server.ts 定时器）
+   * 负责对扫到的设备逐个 notifier.deviceUpdated(code, "offline")。
+   */
+  sweepStale(): string[] {
+    const cutoff = this.now() - 60_000;
+    const stale = this.db.prepare("SELECT device_code FROM bridge_devices WHERE state='online' AND heartbeat_at<?")
+      .all(cutoff) as unknown as Array<{ device_code: string }>;
+    if (!stale.length) return [];
+    const swept: string[] = [];
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const { device_code } of stale) {
+        const flipped = this.db.prepare("UPDATE bridge_devices SET state='offline' WHERE device_code=? AND state='online' AND heartbeat_at<?")
+          .run(device_code, cutoff);
+        if (flipped.changes) {
+          swept.push(device_code);
+          this.db.prepare("INSERT INTO device_events(device_code,event_type,reason,created_at) VALUES (?,'offline','heartbeat_timeout',?)")
+            .run(device_code, new Date(this.now()).toISOString());
+        }
+      }
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    for (const code of swept) this.syncAgentDevice(code, false);
+    return swept;
   }
 
   private syncAgentDevice(code: string, online: boolean): void {

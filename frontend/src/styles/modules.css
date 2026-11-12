@@ -143,6 +143,16 @@
   white-space: nowrap;
 }
 
+.dv-offline-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: var(--down);
+  vertical-align: 1px;
+}
+
 .dv-card-meta {
   display: grid;
   grid-template-columns: 1fr 1fr;
