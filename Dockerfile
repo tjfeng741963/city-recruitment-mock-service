@@ -21,6 +21,7 @@ COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/src/db/migrations ./src/db/migrations
 COPY --from=build --chown=node:node /app/public ./public
+COPY --from=build --chown=node:node /app/frontend/dist ./frontend/dist
 
 USER node
 EXPOSE 4222
