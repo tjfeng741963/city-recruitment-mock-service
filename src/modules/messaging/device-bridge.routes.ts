@@ -98,8 +98,20 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
     try { params = JSON.parse(device.data_json || "{}") as Record<string, unknown>; } catch { params = {}; }
     const scripts = db.prepare("SELECT stage,city,title,content FROM device_scripts WHERE device_code=? AND status='enabled' ORDER BY id")
       .all(code) as Array<{ stage: string; city: string; title: string; content: string }>;
+    // 人工接管名单：客户端回复前查这里，命中就跳过（网页上点「接管」= 让 AI 别回）。
+    // 用 external_conversation_id 而不是 customer_id —— 客户端的会话标识是企微
+    // 会话 ID，落到库里就是这一列（见 DeviceBridgeStore.contact）。
+    const takeoverRows = db.prepare(
+      "SELECT external_conversation_id,updated_at FROM agent_conversations WHERE device_code=? AND takeover=1 AND external_conversation_id IS NOT NULL AND external_conversation_id<>''",
+    ).all(code) as Array<{ external_conversation_id: string; updated_at: string | null }>;
+    const takeoverSessions = takeoverRows.map((row) => row.external_conversation_id);
+    const takeoverUpdated = takeoverRows.reduce<string | null>(
+      (latest, row) => (stampOf(row.updated_at) > stampOf(latest) ? row.updated_at : latest),
+      null,
+    );
     const scriptUpdated = (db.prepare("SELECT MAX(updated_at) AS at FROM device_scripts WHERE device_code=?").get(code) as { at: string | null }).at;
-    const newer = stampOf(scriptUpdated) > stampOf(device.updated_at) ? (scriptUpdated ?? "") : (device.updated_at ?? "");
+    const newer = [scriptUpdated, device.updated_at, takeoverUpdated]
+      .reduce<string | null>((latest, value) => (stampOf(value) > stampOf(latest) ? (value ?? null) : latest), null) ?? "";
     return {
       version: newer,
       interval_seconds: positive(params.interval_seconds, 20),
@@ -108,6 +120,8 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
       // brain.mode 允许网页远程切换（kb 知识库 / flow 流程编排 / fixed 固定文本）。
       // 客户端检测到变化后会重建 Brain 实例；缺省或非法值不下发，保留客户端本地配置。
       ...(BRAIN_MODES.has(String(params.brain_mode)) ? { brain_mode: String(params.brain_mode) } : {}),
+      // 人工接管中的会话：客户端 drain 时跳过，避免人工和 AI 同时往一个客户发消息。
+      takeover_sessions: takeoverSessions,
       // 设备绑定的工厂/城市（契约 docs/对齐-设备工厂绑定与资料导入.md §1）：
       // 8090 拿去做知识库过滤，data_json 没绑就回空串 = 通用/不限。
       factory_name: typeof params.factory_name === "string" ? params.factory_name : "",

@@ -57,6 +57,7 @@ describe("device config distribution", () => {
       interval_seconds: 35,
       cooldown: 12,
       merge_delay_seconds: 0,
+      takeover_sessions: [],
       factory_name: "",
       city: "",
       scripts: [{ stage: "send_info", city: "深圳", title: "龙华厂标准介绍", content: "您好，龙华电子厂…" }],
@@ -82,6 +83,43 @@ describe("device config distribution", () => {
     const body = (await configOf("dev-unbound", unbound)).json();
     expect(body.factory_name).toBe("");
     expect(body.city).toBe("");
+  });
+
+  // R4：人工接管名单随 /config 下发。客户端 drain 命中就跳过，避免人与 AI 同时发言。
+  it("serves takeover_sessions for conversations under human takeover", async () => {
+    app.db.prepare(`INSERT INTO bridge_contacts(device_code,contact_id,customer_id,nickname)
+      VALUES ('local-device-001','S:alice',9001,'Alice')`).run();
+    app.db.prepare(`INSERT INTO agent_conversations(device_code,customer_id,nickname,takeover,external_conversation_id)
+      VALUES ('local-device-001',9001,'Alice',1,'S:alice')`).run();
+    app.db.prepare(`INSERT INTO agent_conversations(device_code,customer_id,nickname,takeover,external_conversation_id)
+      VALUES ('local-device-001',9002,'Bob',0,'S:bob')`).run();
+    app.db.prepare(`INSERT INTO agent_conversations(device_code,customer_id,nickname,takeover,external_conversation_id)
+      VALUES ('other-device',9003,'Carol',1,'S:carol')`).run();
+
+    const body = (await configOf("local-device-001")).json();
+    expect(body.takeover_sessions).toEqual(["S:alice"]);
+
+    // 空 external_conversation_id 的历史行不能出现在名单里（客户端拿它匹配不上任何会话）
+    app.db.prepare(`INSERT INTO agent_conversations(device_code,customer_id,nickname,takeover)
+      VALUES ('local-device-001',9004,'Legacy',1)`).run();
+    expect((await configOf("local-device-001")).json().takeover_sessions).toEqual(["S:alice"]);
+  });
+
+  it("bumps version when a conversation is put under takeover", async () => {
+    // 设备自身的 updated_at 固定成较早时间，否则它（当前时间）会盖过接管时间戳，
+    // 版本号的变化就测不出来——这里要验的正是「接管也会推动 version」。
+    app.db.prepare("UPDATE agent_devices SET updated_at='2026-11-10 12:00:00' WHERE json_extract(data_json,'$.device_code')='local-device-001'").run();
+    app.db.prepare(`INSERT INTO agent_conversations(device_code,customer_id,nickname,takeover,external_conversation_id,updated_at)
+      VALUES ('local-device-001',9010,'Dave',0,'S:dave','2026-11-10 12:00:00')`).run();
+    const before = (await configOf("local-device-001")).json();
+    expect(before.takeover_sessions).toEqual([]);
+
+    // 网页点「接管」：只改 agent_conversations，不动 agent_devices
+    app.db.prepare("UPDATE agent_conversations SET takeover=1, updated_at='2026-11-12 09:30:00' WHERE device_code=? AND customer_id=?").run("local-device-001", 9010);
+    const after = (await configOf("local-device-001")).json();
+    expect(after.takeover_sessions).toEqual(["S:dave"]);
+    expect(after.version).not.toBe(before.version);
+    expect(after.version).toBe("2026-11-12 09:30:00");
   });
 
   it("authenticates with the bridge device token like other /bridge routes", async () => {

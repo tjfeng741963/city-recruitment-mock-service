@@ -871,6 +871,15 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             log(f"跳过 {name or cid}：系统/官方会话")
             continue
 
+        # 人工接管：网页点「接管」后，服务器把它写进 agent_conversations.takeover，
+        # 随 /config 下发到这里。命中就整轮不碰这个会话——否则人工和 AI 会同时发言。
+        if cid in remote_cfg.takeover_sessions():
+            if not dry:
+                rlog.mark_skipped(mid, "人工接管中")
+            stats["skipped"] += 1
+            log(f"跳过 {name or cid}：人工接管中")
+            continue
+
         if not name or name == cid:
             if not dry:
                 rlog.mark_skipped(mid, "会话没有可搜索的名字")
