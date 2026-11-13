@@ -15,11 +15,15 @@ from typing import Any
 import httpx
 
 DEFAULT_JOBS_URL = "http://127.0.0.1:4222/api/v1/agent/jobs"
+DEFAULT_CITIES_URL = "http://127.0.0.1:4222/api/v1/agent/cities"
 TIMEOUT = 3.0
 CACHE_TTL = 60.0
 
 # {city: (过期时刻 monotonic, items)}
 _cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+
+# 城市清单缓存：(过期时刻 monotonic, items)
+_cities_cache: tuple[float, list[dict[str, Any]]] | None = None
 
 
 def clear_cache() -> None:
@@ -39,6 +43,41 @@ async def _fetch_items(city: str, token: str, url: str) -> list[dict[str, Any]]:
     if not isinstance(items, list):
         return []
     return [item for item in items if isinstance(item, dict)]
+
+
+async def _fetch_cities(token: str, url: str) -> list[dict[str, Any]]:
+    """城市清单。同样只在这一层碰网络。"""
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        resp = await client.get(url, headers={"X-Profile-Token": token})
+        resp.raise_for_status()
+        data = resp.json()
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)]
+
+
+async def lookup_cities() -> list[dict[str, Any]]:
+    """后台在招的城市与区县，给「客户说地名」这一步用。
+
+    过去城市识别是 flow_engine 里硬编码的广州/深圳/东莞，运营在后台新建北京
+    也认不出来，客户说「我要找北京的工作」直接被当成没说城市。这里改成读库。
+    任何失败都返回 []，上层退回硬编码别名，不至于一个字都识别不出。
+    """
+    global _cities_cache
+    now = time.monotonic()
+    if _cities_cache and now < _cities_cache[0]:
+        return _cities_cache[1]
+    token = os.getenv("FLOW_PROFILE_TOKEN", "").strip()
+    if not token:
+        return []
+    url = os.getenv("FLOW_CITIES_URL", DEFAULT_CITIES_URL)
+    try:
+        items = await _fetch_cities(token, url)
+    except Exception:  # noqa: BLE001  超时/4222 挂了/返回乱码：退回硬编码别名
+        items = []
+    _cities_cache = (time.monotonic() + CACHE_TTL, items)
+    return items
 
 
 async def lookup_jobs(city: str, vertical_hint: str = "") -> list[dict[str, Any]]:
@@ -122,9 +161,11 @@ def vertical_hint_of(text: str) -> str:
 
 __all__ = [
     "lookup_jobs",
+    "lookup_cities",
     "vertical_hint_of",
     "clear_cache",
     "DEFAULT_JOBS_URL",
+    "DEFAULT_CITIES_URL",
     "TIMEOUT",
     "CACHE_TTL",
 ]

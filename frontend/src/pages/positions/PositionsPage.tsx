@@ -213,7 +213,8 @@ export function PositionsPage({ cityId, featuredOnly = false }: { cityId?: numbe
       {dialog === "position" && city && (
         <CreatePositionDialog
           city={city}
-          stores={groups.map((g) => g.store)}
+          factories={data.factoriesByCity.get(city.id) ?? []}
+          onFactoryCreated={refresh}
           onClose={() => setDialog(null)}
           onCreated={(p) => navigate(`/service-positions/${p.id}/edit`)}
         />
