@@ -262,6 +262,14 @@ export async function registerProfileRoutes(app: FastifyInstance, db: DatabaseSy
 }
 
 /**
+ * 从名称猜品类：没匹配到 employer 的老数据兜底用。
+ * 「深圳地铁安检」不该按工厂处理，卡片标题也不该写「厂名」。
+ */
+function inferVertical(name: string): string {
+  return /地铁|安检/.test(name || "") ? "subway" : "factory";
+}
+
+/**
  * 按城市查可推岗位（给 8090 的 flow 用）。
  *
  * 数据源是运营在「城市/工厂/岗位」页维护的三张表，join 出一条可直接念给客户听的
@@ -279,15 +287,19 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
 
     const rows = db.prepare(
       `SELECT sp.id AS position_id, sp.position_name, sp.data_json AS sp_json, f.factory_name, f.data_json AS f_json,
-              c.city_name, c.province
+              c.city_name, c.province,
+              v.code AS vertical_code, v.config_json AS vertical_config
        FROM service_positions sp
        JOIN factories f ON sp.factory_id = f.id
        JOIN cities c ON sp.city_id = c.id
+       LEFT JOIN employer e ON e.tenant_id = 1 AND e.display_name = f.factory_name
+       LEFT JOIN vertical v ON v.id = e.vertical_id
        WHERE sp.status='enabled' AND f.status='enabled' AND c.recruitment_status='enabled'
          AND (c.city_name = ? OR c.city_name LIKE '%' || ? || '%')`
     ).all(city, city) as Array<{
       position_id: number; position_name: string; sp_json: string; factory_name: string;
       f_json: string; city_name: string; province: string;
+      vertical_code: string | null; vertical_config: string | null;
     }>;
 
     const pick = (raw: string): Record<string, string> => {
@@ -309,15 +321,38 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
     const items = rows.map((row) => {
       const sp = pick(row.sp_json);
       const f = pick(row.f_json);
+      // 品类决定卡片长什么样：工厂显示「厂名/工价/吃住」，地铁显示「线路/薪资/身高/安排线路」。
+      // 之前卡片标签写死成工厂的形状，地铁的「安排线路」只能挤进「吃住」那一行。
+      let verticalConfig: Record<string, unknown> = {};
+      try {
+        verticalConfig = JSON.parse(row.vertical_config || "{}") as Record<string, unknown>;
+      } catch { verticalConfig = {}; }
+      const schema = Array.isArray(verticalConfig.position_schema)
+        ? (verticalConfig.position_schema as Array<{ key?: string; label?: string }>)
+            .filter((field) => typeof field?.key === "string" && typeof field?.label === "string")
+            .map((field) => ({ key: String(field.key), label: String(field.label) }))
+        : [];
       return {
         position_id: row.position_id,
         factory_name: row.factory_name,
         job_title: row.position_name,
+        // 品类：没有匹配到 employer 时按名字猜（地铁/安检 → 地铁），再不行按工厂
+        vertical_code: row.vertical_code ?? inferVertical(row.factory_name),
+        // 「厂名」还是「线路」，由品类配置给，不再写死
+        employer_label: String(verticalConfig.employer_label ?? "厂名"),
+        position_schema: schema,
         wage_text: String(sp.wage_text ?? ""),
         hours_text: String(sp.hours_text ?? ""),
         age_text: String(sp.age_text ?? ""),
         welfare_text: String(sp.welfare_text ?? ""),
+        // 地铁特有字段：之前没透出，导致「安排线路/身高/月休/民族限制」只能塞进吃住
+        rest_text: String(sp.rest_text ?? ""),
+        height_text: String(sp.height_text ?? ""),
+        line_text: String(sp.line_text ?? ""),
+        ethnicity_policy: String(sp.ethnicity_policy ?? ""),
+        cert_text: String(sp.cert_text ?? ""),
         place: String(sp.place ?? f.place ?? row.factory_name),
+        interview_time: String(sp.interview_time ?? f.interview_time ?? ""),
         province: row.province ?? "",
         city: row.city_name,
       };

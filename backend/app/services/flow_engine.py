@@ -269,22 +269,17 @@ def send_info_parts(slots: dict[str, Any], when: datetime | None = None) -> list
     """工作信息多段文本：段1 岗位事实，段2 面试地点+时间窗口，段3 邀约问句。
 
     这三段必须**由代码拼**，不能交给模型——工价一改就是事故。
+
+    卡片标题和字段顺序来自品类配置（vertical.config_json）：
+      factory → employer_label=工厂，字段 工价/班次/吃住/年龄/纹身要求
+      subway  → employer_label=线路，字段 薪资/班次/身高要求/纹身要求/安排线路
+    以前写死成工厂的五段，地铁的「安排线路」没处放，只能挤进「吃住」那一行。
     """
     job = _job_of(slots)
     if not job:
         return [_city_ask(slots)]
     day = day_label(when or next_interview())
-    title = str(job.get("job_title") or "")
-    kind = title.split(" ")[-1] if " " in title else title
-    part1 = "\n".join(
-        [
-            f"厂名：{_factory(job)}（{kind}）",
-            f"工价：{job.get('wage_text', '')}",
-            f"班次：{job.get('hours_text', '')}",
-            f"年龄：{job.get('age_text', '')}",
-            f"吃住：{job.get('welfare_text', '')}",
-        ]
-    )
+    part1 = "\n".join(_job_card_lines(job))
     part2 = f"面试地点：{job.get('place', '')}\n面试时间：{day}{INTERVIEW_WINDOW}"
     part3 = "这两天能不能过来面试？能来的话我把名额给你留着。"
     parts = [part1, part2, part3]
@@ -297,6 +292,46 @@ def send_info_parts(slots: dict[str, Any], when: datetime | None = None) -> list
         if city:
             parts[1] = part2 + f"\n【图片:{city}面试点】【视频:安检工作】"
     return parts
+
+
+def _job_card_lines(job: dict[str, Any]) -> list[str]:
+    """按品类 schema 拼卡片。schema 缺失时退回工厂的五段，保持旧行为。"""
+    title = str(job.get("job_title") or "")
+    kind = title.split(" ")[-1] if " " in title else title
+    # 「厂名」/「线路」由品类给；老数据没有 vertical_id 时按名字猜
+    default_label = "线路" if _looks_subway(job) else "厂名"
+    employer_label = str(job.get("employer_label") or default_label)
+    lines = [f"{employer_label}：{_factory(job)}（{kind}）"]
+
+    schema = job.get("position_schema")
+    if isinstance(schema, list) and schema:
+        for field in schema:
+            if not isinstance(field, dict):
+                continue
+            key = str(field.get("key") or "")
+            label = str(field.get("label") or "")
+            value = str(job.get(key) or "").strip()
+            # 空字段不出现：「吃住：」后面空着比不写更奇怪
+            if key and label and value:
+                lines.append(f"{label}：{value}")
+        return lines
+
+    # 老路径（没有 schema）：保持原来的五段
+    for label, key in (
+        ("工价", "wage_text"),
+        ("班次", "hours_text"),
+        ("年龄", "age_text"),
+        ("吃住", "welfare_text"),
+    ):
+        value = str(job.get(key) or "").strip()
+        if value:
+            lines.append(f"{label}：{value}")
+    return lines
+
+
+def _looks_subway(job: dict[str, Any]) -> bool:
+    text = f"{job.get('factory_name') or ''}{job.get('job_title') or ''}"
+    return "地铁" in text or "安检" in text
 
 
 def _interview_ask() -> str:
