@@ -128,7 +128,43 @@ def new_state() -> dict[str, Any]:
 
 
 # ── 抽取 ──────────────────────────────────────────────
+# 运行时城市/区县表，由 api_flow 每轮从 4222 注入（GET /api/v1/agent/cities）。
+# 硬编码别名只覆盖最早对接的 3 个城市；运营在后台新建的城市靠这张表才认得出来。
+# [(别名, 城市名), ...]，长别名排前面，避免「广州市」被「广州」先吃掉。
+_REMOTE_PLACES: ContextVar[list[tuple[str, str]]] = ContextVar(
+    "remote_places", default=[]
+)
+
+
+def set_remote_cities(items: list[dict[str, Any]] | None) -> None:
+    """注入后台维护的城市与区县。失败时传空列表，退回硬编码别名。"""
+    places: list[tuple[str, str]] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        city = str(item.get("city_name") or "").strip()
+        if not city:
+            continue
+        places.append((city, city))
+        districts = item.get("districts")
+        if isinstance(districts, list):
+            for district in districts:
+                alias = str(district or "").strip()
+                if alias:
+                    places.append((alias, city))
+    places.sort(key=lambda pair: len(pair[0]), reverse=True)
+    _REMOTE_PLACES.set(places)
+
+
+def remote_city_names() -> list[str]:
+    """后台在招的城市名（给「我们这边X都有厂在招」这类话术用）。"""
+    return list(dict.fromkeys(city for _, city in _REMOTE_PLACES.get()))
+
+
 def extract_city(text: str) -> str:
+    for alias, city in _REMOTE_PLACES.get():
+        if alias in text:
+            return city
     for alias, city in _CITY_ALIASES.items():
         if alias in text:
             return city

@@ -83,7 +83,7 @@ describe("public response serializers", () => {
       data_json: JSON.stringify({ interview_days: ["周一"], interview_points: [{ name: "东门" }], base_sections: { positions: "装配" } }),
     });
 
-    expect(Object.keys(position)).toHaveLength(29);
+    expect(Object.keys(position)).toHaveLength(30);
     expect(position).toMatchObject({
       id: 21,
       position_name: "示例岗位",

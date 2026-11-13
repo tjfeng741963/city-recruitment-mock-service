@@ -278,6 +278,31 @@ function inferVertical(name: string): string {
  * 鉴权：X-Profile-Token（8090 服务间）或正常用户 token，二选一。
  */
 export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) {
+  /**
+   * 给 8090 用的城市清单：客户说「我要找北京的工作」时，Python 侧靠它识别城市。
+   * 之前城市识别是 flow_engine 里硬编码的 3 个城市，后台新建任何城市都认不出来。
+   * 只返回招聘中的城市，带上区县别名（「番禺」「龙华」这类客户常说的小地名）。
+   */
+  app.get("/api/v1/agent/cities", async (request, reply) => {
+    if (!authorizeProfileRequest(request) && !request.auth) {
+      return reply.code(403).send({ detail: "Not authenticated" });
+    }
+    const rows = db.prepare(
+      "SELECT city_name, province, data_json FROM cities WHERE recruitment_status='enabled' ORDER BY id",
+    ).all() as Array<{ city_name: string; province: string; data_json: string }>;
+    const items = rows.map((row) => {
+      let districts: string[] = [];
+      try {
+        const parsed = JSON.parse(row.data_json || "{}") as { districts?: unknown };
+        if (Array.isArray(parsed.districts)) {
+          districts = parsed.districts.filter((d): d is string => typeof d === "string" && d.trim() !== "");
+        }
+      } catch { districts = []; }
+      return { city_name: row.city_name, province: row.province ?? "", districts };
+    });
+    return { items, total: items.length };
+  });
+
   app.get<{ Querystring: { city?: string } }>("/api/v1/agent/jobs", async (request, reply) => {
     if (!authorizeProfileRequest(request) && !request.auth) {
       return reply.code(403).send({ detail: "Not authenticated" });
@@ -290,11 +315,11 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
               c.city_name, c.province,
               v.code AS vertical_code, v.config_json AS vertical_config
        FROM service_positions sp
-       JOIN factories f ON sp.factory_id = f.id
+       LEFT JOIN factories f ON sp.factory_id = f.id
        JOIN cities c ON sp.city_id = c.id
        LEFT JOIN employer e ON e.tenant_id = 1 AND e.display_name = f.factory_name
        LEFT JOIN vertical v ON v.id = e.vertical_id
-       WHERE sp.status='enabled' AND f.status='enabled' AND c.recruitment_status='enabled'
+       WHERE sp.status='enabled' AND (f.status IS NULL OR f.status='enabled') AND c.recruitment_status='enabled'
          AND (c.city_name = ? OR c.city_name LIKE '%' || ? || '%')`
     ).all(city, city) as Array<{
       position_id: number; position_name: string; sp_json: string; factory_name: string;
@@ -318,9 +343,30 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
         return out;
       } catch { return {}; }
     };
+    /**
+     * 后台「工价与要求」写的是 base_sections（salary_detail / work_hours / meal_dorm …），
+     * 而回复层读的是 wage_text / hours_text / welfare_text。过去两者没有任何映射：
+     * 表单建的岗位这三个字段全空，job_lookup 把它当「空壳岗位」直接丢掉，AI 永远念不出来。
+     * 这里在源头补齐，后台表单不用改。
+     */
+    const sectionsOf = (raw: string): Record<string, string> => {
+      try {
+        const parsed = JSON.parse(raw || "{}") as Record<string, unknown>;
+        const nested = parsed.data_json;
+        const inner = (nested && typeof nested === "object" ? nested : {}) as Record<string, unknown>;
+        const sections = { ...parsed, ...inner }.base_sections;
+        if (!sections || typeof sections !== "object") return {};
+        const out: Record<string, string> = {};
+        for (const [key, value] of Object.entries(sections as Record<string, unknown>)) {
+          if (typeof value === "string" && value.trim() !== "") out[key] = value.trim();
+        }
+        return out;
+      } catch { return {}; }
+    };
     const items = rows.map((row) => {
       const sp = pick(row.sp_json);
       const f = pick(row.f_json);
+      const sec = sectionsOf(row.sp_json);
       // 品类决定卡片长什么样：工厂显示「厂名/工价/吃住」，地铁显示「线路/薪资/身高/安排线路」。
       // 之前卡片标签写死成工厂的形状，地铁的「安排线路」只能挤进「吃住」那一行。
       let verticalConfig: Record<string, unknown> = {};
@@ -341,10 +387,11 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
         // 「厂名」还是「线路」，由品类配置给，不再写死
         employer_label: String(verticalConfig.employer_label ?? "厂名"),
         position_schema: schema,
-        wage_text: String(sp.wage_text ?? ""),
-        hours_text: String(sp.hours_text ?? ""),
-        age_text: String(sp.age_text ?? ""),
-        welfare_text: String(sp.welfare_text ?? ""),
+        // 优先用岗位上的独立字段（回填 SQL 写的），没有就取后台表单填的 base_sections
+        wage_text: String(sp.wage_text || sec.salary_detail || sec.salary_ask || ""),
+        hours_text: String(sp.hours_text || sec.work_hours || sec.shift_info || ""),
+        age_text: String(sp.age_text || sp.age_range || ""),
+        welfare_text: String(sp.welfare_text || sec.meal_dorm || ""),
         // 地铁特有字段：之前没透出，导致「安排线路/身高/月休/民族限制」只能塞进吃住
         rest_text: String(sp.rest_text ?? ""),
         height_text: String(sp.height_text ?? ""),

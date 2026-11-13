@@ -39,6 +39,29 @@ describe("core CRUD modules", () => {
     expect(positions.json().items[0]).not.toHaveProperty("featured");
   });
 
+  it("creates a position bound to a factory and returns factory_id", async () => {
+    const city = await app.inject({ method: "POST", url: "/api/v1/cities", headers: { authorization: `Bearer ${token}` }, payload: { city_name: "测试城市乙", province: "广东" } });
+    const cityId = city.json().id;
+    const factory = await app.inject({ method: "POST", url: "/api/v1/factories", headers: { authorization: `Bearer ${token}` }, payload: { factory_name: "测试厂区", city_id: cityId } });
+    expect(factory.statusCode).toBe(200);
+    const factoryId = factory.json().id;
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/service-positions",
+      headers: { authorization: `Bearer ${token}` },
+      payload: { position_name: "测试岗位", store_name: "测试厂区", city_id: cityId, factory_id: factoryId, is_active: true },
+    });
+    expect(created.statusCode).toBe(200);
+    expect(created.json().factory_id).toBe(factoryId);
+
+    const reloaded = await app.inject({ method: "GET", url: `/api/v1/service-positions/${created.json().id}`, headers: { authorization: `Bearer ${token}` } });
+    expect(reloaded.json().factory_id).toBe(factoryId);
+
+    const byCity = await app.inject({ method: "GET", url: `/api/v1/factories?city_id=${cityId}`, headers: { authorization: `Bearer ${token}` } });
+    expect(byCity.json().items.map((f: { factory_name: string }) => f.factory_name)).toEqual(["测试厂区"]);
+  });
+
   it("updates city status and toggles a featured service position", async () => {
     const city = await app.inject({ method: "PATCH", url: "/api/v1/cities/1/status", headers: { authorization: `Bearer ${token}` }, payload: { recruitment_status: "inactive" } });
     expect(city.statusCode).toBe(200);

@@ -20,7 +20,7 @@ const CITY_DEFAULTS: Record<string, unknown> = {
 };
 
 const POSITION_KEYS = [
-  "id", "position_name", "gender", "age_range", "height_require", "city_name", "district",
+  "id", "position_name", "factory_id", "gender", "age_range", "height_require", "city_name", "district",
   "address", "coordinates", "interview_time", "image_url", "contact_phone", "store_name",
   "store_address", "store_coordinates", "job_type", "accommodation", "health_cert",
   "experience", "interview_days", "interview_points", "recruiter_id", "base_sections",
@@ -28,6 +28,7 @@ const POSITION_KEYS = [
 ] as const;
 
 const POSITION_DEFAULTS: Record<string, unknown> = {
+  factory_id: null,
   gender: "", age_range: "", height_require: "", city_name: "", district: "", address: "",
   coordinates: "", interview_time: "", image_url: "", contact_phone: "", store_name: "",
   store_address: "", store_coordinates: "", job_type: "", accommodation: "", health_cert: "",
