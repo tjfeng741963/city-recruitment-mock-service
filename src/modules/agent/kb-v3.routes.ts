@@ -508,6 +508,124 @@ export async function registerKbV3Routes(app: FastifyInstance, db: DatabaseSync)
 
   // 一键导入：模板项 → 租户的 kb_faq。
   // 已存在同 question 的跳过，不覆盖运营改过的内容。
+  // ── 节点化编排：节点与边 ─────────────────────────────────────────────
+  // 一个板块一套节点图；device_code 非空表示该设备专属覆盖。
+  // 读允许已登录用户，写仅管理员——与上面各资源一致。
+  app.get<{ Querystring: { vertical_code?: string; device_code?: string } }>(
+    "/api/v1/flow-nodes",
+    async (request) => {
+      const vertical = text(request.query.vertical_code);
+      const device = text(request.query.device_code);
+      const conditions: string[] = [];
+      const params: string[] = [];
+      if (vertical) { conditions.push("vertical_code=?"); params.push(vertical); }
+      if (device) { conditions.push("(device_code='' OR device_code=?)"); params.push(device); }
+      else { conditions.push("device_code=''"); }
+      const where = conditions.length ? ` WHERE ${conditions.join(" AND ")}` : "";
+      const rows = db.prepare(`SELECT * FROM flow_nodes${where} ORDER BY vertical_code,sort_order,id`).all(...params) as Array<Record<string, unknown>>;
+      return { items: rows, total: rows.length };
+    },
+  );
+
+  app.post<{ Body: Json }>("/api/v1/flow-nodes", async (request, reply) => {
+    if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
+    const body = request.body ?? {};
+    const verticalCode = text(body.vertical_code);
+    const nodeKey = text(body.node_key);
+    if (!verticalCode) return reply.code(422).send({ detail: "vertical_code is required" });
+    if (!nodeKey) return reply.code(422).send({ detail: "node_key is required" });
+    const existing = db.prepare(
+      "SELECT id FROM flow_nodes WHERE tenant_id=1 AND device_code=? AND vertical_code=? AND node_key=?",
+    ).get(text(body.device_code), verticalCode, nodeKey) as { id: number } | undefined;
+    if (existing) {
+      // upsert：同一 (device, vertical, node_key) 视为同一节点
+      db.prepare(
+        `UPDATE flow_nodes SET title=?,body=?,media=?,is_entry=?,status=?,sort_order=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+      ).run(
+        text(body.title), text(body.body), text(body.media),
+        int(body.is_entry) ? 1 : 0, text(body.status, "enabled"), int(body.sort_order), existing.id,
+      );
+      return db.prepare("SELECT * FROM flow_nodes WHERE id=?").get(existing.id);
+    }
+    const created = db.prepare(
+      `INSERT INTO flow_nodes(tenant_id,device_code,vertical_code,node_key,title,body,media,is_entry,status,sort_order)
+       VALUES (1,?,?,?,?,?,?,?,?,?) RETURNING *`,
+    ).get(
+      text(body.device_code), verticalCode, nodeKey, text(body.title), text(body.body), text(body.media),
+      int(body.is_entry) ? 1 : 0, text(body.status, "enabled"), int(body.sort_order),
+    );
+    return reply.code(201).send(created);
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/v1/flow-nodes/:id", async (request, reply) => {
+    if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
+    const id = int(request.params.id);
+    const row = db.prepare("SELECT device_code,vertical_code,node_key FROM flow_nodes WHERE id=?").get(id) as
+      | { device_code: string; vertical_code: string; node_key: string }
+      | undefined;
+    if (!row) return reply.code(404).send({ detail: "Node not found" });
+    // 还有边指向/来自它就不删——静默删掉会让流程断在半路
+    const used = db.prepare(
+      "SELECT COUNT(*) c FROM flow_edges WHERE tenant_id=1 AND device_code=? AND vertical_code=? AND (from_node=? OR to_node=?)",
+    ).get(row.device_code, row.vertical_code, row.node_key, row.node_key) as { c: number };
+    if (used.c > 0) {
+      return reply.code(409).send({ detail: `该节点还被 ${used.c} 条边引用，请先删除连线` });
+    }
+    db.prepare("DELETE FROM flow_nodes WHERE id=?").run(id);
+    return { success: true };
+  });
+
+  app.get<{ Querystring: { vertical_code?: string; device_code?: string } }>(
+    "/api/v1/flow-edges",
+    async (request) => {
+      const vertical = text(request.query.vertical_code);
+      const device = text(request.query.device_code);
+      const conditions: string[] = [];
+      const params: string[] = [];
+      if (vertical) { conditions.push("vertical_code=?"); params.push(vertical); }
+      if (device) { conditions.push("(device_code='' OR device_code=?)"); params.push(device); }
+      else { conditions.push("device_code=''"); }
+      const where = conditions.length ? ` WHERE ${conditions.join(" AND ")}` : "";
+      const rows = db.prepare(`SELECT * FROM flow_edges${where} ORDER BY vertical_code,from_node,priority,id`).all(...params) as Array<Record<string, unknown>>;
+      return { items: rows, total: rows.length };
+    },
+  );
+
+  app.post<{ Body: Json }>("/api/v1/flow-edges", async (request, reply) => {
+    if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
+    const body = request.body ?? {};
+    const verticalCode = text(body.vertical_code);
+    const fromNode = text(body.from_node);
+    const toNode = text(body.to_node);
+    if (!verticalCode) return reply.code(422).send({ detail: "vertical_code is required" });
+    if (!fromNode || !toNode) return reply.code(422).send({ detail: "from_node 和 to_node 必填" });
+    // 两端节点必须存在，否则流程会断在半路
+    const deviceCode = text(body.device_code);
+    const findNode = db.prepare(
+      "SELECT 1 AS ok FROM flow_nodes WHERE tenant_id=1 AND device_code=? AND vertical_code=? AND node_key=?",
+    );
+    for (const key of [fromNode, toNode]) {
+      const hit = findNode.get(deviceCode, verticalCode, key) ?? findNode.get("", verticalCode, key);
+      if (!hit) return reply.code(422).send({ detail: `节点 ${key} 不存在` });
+    }
+    const created = db.prepare(
+      `INSERT INTO flow_edges(tenant_id,device_code,vertical_code,from_node,to_node,condition_type,condition_value,priority,status)
+       VALUES (1,?,?,?,?,?,?,?,?) RETURNING *`,
+    ).get(
+      deviceCode, verticalCode, fromNode, toNode,
+      text(body.condition_type, "always"), text(body.condition_value),
+      int(body.priority) || 100, text(body.status, "enabled"),
+    );
+    return reply.code(201).send(created);
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/v1/flow-edges/:id", async (request, reply) => {
+    if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
+    const result = db.prepare("DELETE FROM flow_edges WHERE id=?").run(int(request.params.id));
+    return result.changes ? { success: true } : reply.code(404).send({ detail: "Edge not found" });
+  });
+
+
   app.post<{ Params: { code: string } }>("/api/v1/kb-templates/:code/import", async (request, reply) => {
     if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
     const template = db.prepare("SELECT * FROM kb_template WHERE code=?").get(request.params.code) as
