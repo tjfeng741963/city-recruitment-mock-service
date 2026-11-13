@@ -35,7 +35,10 @@ from .flow_engine import (
     STAGE_KB,
     STAGE_SEND_INFO,
     FlowResult,
+    _day_offset_of,
     enter_info_result,
+    extract_day_offset,
+    interview_window_of,
     jobs_for_city,
     looks_like_question,
     next_interview,
@@ -80,9 +83,14 @@ SYSTEM_PROMPT = """你是一家劳务中介的招聘顾问，叫「陈姐」，�
 
 # 硬性规则
 - **不许编数字**。工价、年龄、吃住只能照下面岗位数据说，一个字都不能改
+- **不许编自己在做什么**。绝不说「我在打印面试表」「我叫了主管去门口接你」
+  「我给你登记工号」「我帮你留着名额」这类你并没有真的做的事——
+  你只是在微信上打字，没有线下动作。客户问到具体流程，就答「面试当天到了联系我」
+- 不许编电话号码、联系人、工牌、宿舍号、班车时间；这些数据里没有就说有就说不清楚
 - 不知道就说「我确认一下，稍后回你」，不要猜体检报销、住宿条件这类细节
 - 客户拒绝面试：客气一句就结束（action="gave_up"），别再追
 - 已经约好之后又发消息：不再回复
+- **不要重复上一句**。客户没接话就换个说法问，同一句话不许连发两次
 
 # 进度纪律
 - 顺序是 城市 → 发信息 → 问面试 → 收姓名手机号，缺一个都不能往下走
@@ -299,7 +307,11 @@ def apply_result(
     slots.update(_clean_slots(data.get("slots")))
     # 档案沿用同一份槽位，只是来源不同（模型单独给的 profile 对象）
     slots.update(_clean_profile(data.get("profile")))
-    when = next_interview(now)
+    # 客户说了「后天」就按他的来；模型给的时间不作数
+    day_offset = extract_day_offset(text)
+    if day_offset is not None:
+        slots["interview_day_offset"] = day_offset
+    when = next_interview(now, _day_offset_of(slots))
 
     stage = str(data.get("stage") or state.get("stage") or STAGE_ASK_CITY)
     if stage not in ALLOWED_STAGES:
@@ -344,7 +356,7 @@ def apply_result(
             stage, finished = STAGE_COLLECT, False
         else:
             slots["interview_at"] = when.isoformat()
-            slots["interview_window"] = INTERVIEW_WINDOW
+            slots["interview_window"] = interview_window_of(_job_of(slots))
             slots["interview_place"] = _job_of(slots).get("place", "")
             slots["interview_agreed"] = True
             slots["booked"] = True

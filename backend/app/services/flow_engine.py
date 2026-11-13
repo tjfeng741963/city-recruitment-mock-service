@@ -58,11 +58,14 @@ _AGREE = (
     "可以", "好的", "好呀", "好啊", "行", "没问题", "方便", "能来", "过去",
     "嗯", "ok", "OK", "Ok", "准时", "去",
 )
-# 「不能」不算拒绝：「能不能过来」里有它。只认完整的否定说法。
+# 「不能」本身是拒绝，但「能不能过来」里也含它——先排掉疑问句式再判断。
+# 2026-11-13 实测：客户回「不能」，系统当成含糊答非所问，又追问一遍。
 _DISAGREE = (
     "不行", "不方便", "没空", "改天", "再说", "来不了", "不能来", "不去了",
-    "不过去", "不想去", "去不了", "再等等",
+    "不过去", "不想去", "去不了", "再等等", "不能", "不去", "算了",
 )
+# 这些是「询问能否」的句式，不能当拒绝
+_ASK_FORM = ("能不能", "可不可以", "行不行", "来不来", "去不去", "要不要")
 
 # 判断"这句话是不是在问事"，决定要不要走知识库
 _QUESTION_MARKS = (
@@ -195,23 +198,53 @@ def is_agree(text: str) -> bool:
 
 
 def is_disagree(text: str) -> bool:
-    return any(word in text for word in _DISAGREE)
+    value = text or ""
+    # 「能不能过来」是问句，不是拒绝：先把它抹掉再判
+    for form in _ASK_FORM:
+        value = value.replace(form, "")
+    return any(word in value for word in _DISAGREE)
 
 
 def looks_like_question(text: str) -> bool:
     return any(mark in (text or "") for mark in _QUESTION_MARKS)
 
 
-def next_interview(now: datetime | None = None) -> datetime:
-    """默认面试时间：第二天 09:00（配合 INTERVIEW_WINDOW 用）。"""
+def next_interview(now: datetime | None = None, day_offset: int = 1) -> datetime:
+    """面试时间：默认第二天 09:00，`day_offset` 可改成今天(0)/后天(2)。
+
+    2026-11-13 实测：客户说「后天面试是吧」，系统回「明天（11月14日）」。
+    原来这里写死 +1 天，客户说什么都不影响。
+    """
     base = now or datetime.now(TZ)
     if base.tzinfo is None:
         base = base.replace(tzinfo=TZ)
-    return (base + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+    offset = max(int(day_offset or 0), 0)
+    return (base + timedelta(days=offset)).replace(hour=9, minute=0, second=0, microsecond=0)
 
 
-def day_label(when: datetime) -> str:
-    return f"明天（{when.month}月{when.day}日）"
+# 「大后天」必须排在「后天」前面，否则只匹配到「后天」
+_DAY_WORDS = (("大后天", 3), ("后天", 2), ("明天", 1), ("今天", 0))
+
+
+def extract_day_offset(text: str) -> int | None:
+    """客户这句话里说的是哪天。没说返回 None（走默认的明天）。"""
+    value = text or ""
+    for word, offset in _DAY_WORDS:
+        if word in value:
+            return offset
+    return None
+
+
+def day_label(when: datetime, now: datetime | None = None) -> str:
+    """日期标签按实际差天数说「今天/明天/后天」，差得远就直接写日期。"""
+    base = now or datetime.now(TZ)
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=TZ)
+    days = (when.date() - base.date()).days
+    prefix = {0: "今天", 1: "明天", 2: "后天", 3: "大后天"}.get(days)
+    if prefix:
+        return f"{prefix}（{when.month}月{when.day}日）"
+    return f"{when.month}月{when.day}日"
 
 
 # ── 话术 ──────────────────────────────────────────────
@@ -265,7 +298,19 @@ def _factory(job: dict[str, str]) -> str:
     return str(job.get("job_title", "")).split(" ")[0]
 
 
-def send_info_parts(slots: dict[str, Any], when: datetime | None = None) -> list[str]:
+def interview_window_of(job: dict[str, Any]) -> str:
+    """该岗位真实面试时段。运营在岗位/工厂数据里填了就用，没填才用默认。
+
+    2026-11-13 实测：深圳地铁真实是「周一至周六 上午11:00-12:00、下午14:00-17:00」，
+    系统却发「明天 09:00-11:00」——因为窗口写死成常量，岗位数据里的值没读。
+    """
+    value = str(job.get("interview_time") or "").strip()
+    return value or INTERVIEW_WINDOW
+
+
+def send_info_parts(
+    slots: dict[str, Any], when: datetime | None = None, now: datetime | None = None
+) -> list[str]:
     """工作信息多段文本：段1 岗位事实，段2 面试地点+时间窗口，段3 邀约问句。
 
     这三段必须**由代码拼**，不能交给模型——工价一改就是事故。
@@ -278,20 +323,12 @@ def send_info_parts(slots: dict[str, Any], when: datetime | None = None) -> list
     job = _job_of(slots)
     if not job:
         return [_city_ask(slots)]
-    day = day_label(when or next_interview())
+    when = when or next_interview(now, _day_offset_of(slots))
+    day = day_label(when, now)
     part1 = "\n".join(_job_card_lines(job))
-    part2 = f"面试地点：{job.get('place', '')}\n面试时间：{day}{INTERVIEW_WINDOW}"
-    part3 = "这两天能不能过来面试？能来的话我把名额给你留着。"
-    parts = [part1, part2, part3]
-    # 地铁岗：附城市面试点图 + 工作实拍视频（2026-11-12 按地铁话术节奏）。
-    # 标记名按城市约定（广州面试点/深圳面试点…），客户端 media 缺文件自动跳过
-    _f = str(job.get("factory_name") or "")
-    _t = str(job.get("job_title") or "")
-    if "地铁" in _f or "安检" in _t or "地铁" in _t:
-        city = str(slots.get("city") or "").strip()
-        if city:
-            parts[1] = part2 + f"\n【图片:{city}面试点】【视频:安检工作】"
-    return parts
+    part2 = f"面试地点：{job.get('place', '')}\n面试时间：{day} {interview_window_of(job)}"
+    part3 = _interview_ask(slots)
+    return [part1, part2, part3]
 
 
 def _job_card_lines(job: dict[str, Any]) -> list[str]:
@@ -334,8 +371,27 @@ def _looks_subway(job: dict[str, Any]) -> bool:
     return "地铁" in text or "安检" in text
 
 
-def _interview_ask() -> str:
-    return "这两天能不能过来面试？能来的话我把名额给你留着。"
+def _day_offset_of(slots: dict[str, Any]) -> int:
+    """客户说的「后天」记在 slots 里；没说就是默认的明天。"""
+    try:
+        return int(slots.get("interview_day_offset") or 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def _interview_ask(slots: dict[str, Any] | None = None) -> str:
+    """邀约问句。连续追问时换说法，不把同一句连发三遍。
+
+    2026-11-13 实测：客户答非所问，系统把同一句「这两天能不能过来面试」
+    连发了 3 次。这里按重问次数轮换，第 3 次之后再回到第一句。
+    """
+    retries = int((slots or {}).get("ask_retries") or 0)
+    variants = (
+        "这两天能不能过来面试？能来的话我把名额给你留着。",
+        "你看是明天还是后天方便过来？我好提前给你登记。",
+        "要是这两天来不了也没事，你说个大概时间，我给你留着名额。",
+    )
+    return variants[retries % len(variants)]
 
 
 def _collect_ask(missing: str = "") -> str:
@@ -350,21 +406,26 @@ def _gave_up_text() -> str:
     return "好的，那就不打扰你了。后面想过来的话随时找我，名额一直有。"
 
 
-def _done_parts(slots: dict[str, Any], when: datetime | None = None) -> list[str]:
+def _done_parts(
+    slots: dict[str, Any],
+    when: datetime | None = None,
+    now: datetime | None = None,
+) -> list[str]:
     job = _job_of(slots)
-    day = day_label(when or next_interview())
+    when = when or next_interview(now, _day_offset_of(slots))
+    day = day_label(when, now)
     who = " ".join(
         part for part in (str(slots.get("name") or ""), str(slots.get("phone") or "")) if part
     )
-    detail = f"{day}{INTERVIEW_WINDOW} 在{job.get('place', '')}面试"
+    detail = f"{day} {interview_window_of(job)} 在{job.get('place', '')}面试"
     head = f"好嘞，登记好了：{who}，{detail}。" if who else f"好嘞，{detail}。"
     return [head, "期待你来面试，到了联系我。"]
 
 
 def _faq_retry(stage: str, slots: dict[str, Any]) -> str:
     if stage == STAGE_COLLECT:
-        return _collect_prompt(slots) or _interview_ask()
-    return _interview_ask()
+        return _collect_prompt(slots) or _interview_ask(slots)
+    return _interview_ask(slots)
 
 
 # ── 主流程 ────────────────────────────────────────────
@@ -398,7 +459,11 @@ def _no_job_parts(city: str) -> list[str]:
     ]
 
 
-def enter_info_result(slots: dict[str, Any], when: datetime | None = None) -> FlowResult:
+def enter_info_result(
+    slots: dict[str, Any],
+    when: datetime | None = None,
+    now: datetime | None = None,
+) -> FlowResult:
     """拿到城市后由代码发工作信息（多段）。
 
     该城市在 4222 岗位库查不到时：不编岗位，回「已记下，帮你问问」并把需求
@@ -417,21 +482,22 @@ def enter_info_result(slots: dict[str, Any], when: datetime | None = None) -> Fl
     slots["interview_offer_sent"] = True
     return FlowResult(
         reply="",
-        parts=send_info_parts(slots, when),
+        parts=send_info_parts(slots, when, now),
         stage=STAGE_ASK_INTERVIEW,
         slots=slots,
     )
 
 
-def _book(slots: dict[str, Any], when: datetime) -> FlowResult:
+def _book(slots: dict[str, Any], when: datetime, now: datetime | None = None) -> FlowResult:
+    job = _job_of(slots)
     slots["interview_at"] = when.isoformat()
-    slots["interview_window"] = INTERVIEW_WINDOW
-    slots["interview_place"] = _job_of(slots).get("place", "")
+    slots["interview_window"] = interview_window_of(job)
+    slots["interview_place"] = job.get("place", "")
     slots["interview_agreed"] = True
     slots["booked"] = True
     return FlowResult(
         reply="",
-        parts=_done_parts(slots, when),
+        parts=_done_parts(slots, when, now),
         stage=STAGE_DONE,
         slots=slots,
         finished=True,
@@ -454,10 +520,13 @@ def step(
     stage = str(state.get("stage") or STAGE_ASK_CITY)
     slots: dict[str, Any] = state.setdefault("slots", {})
     state["turns"] = int(state.get("turns") or 0) + 1
-    when = next_interview(now)
+    # 客户说了「后天/明天/今天」就按他的来，没说才用默认的明天
+    day_offset = extract_day_offset(text)
+    if day_offset is not None:
+        slots["interview_day_offset"] = day_offset
+    when = next_interview(now, _day_offset_of(slots))
 
     if stage == STAGE_DONE:
-        print("DBG_DONE_ENTER text=", repr(text), "stage=", stage)
         return FlowResult(reply="", stage=STAGE_DONE, slots=slots, finished=True)
 
     # kb 只是插问的暂存标签，真进来就按"面试邀约"继续
@@ -472,13 +541,13 @@ def step(
         slots["city"] = city
         slots.setdefault("job_index", 0)
         _absorb(slots, text)
-        result = enter_info_result(slots, when)
+        result = enter_info_result(slots, when, now)
         state["stage"] = result.stage
         return result
 
     if stage == STAGE_SEND_INFO:
         _absorb(slots, text)
-        result = enter_info_result(slots, when)
+        result = enter_info_result(slots, when, now)
         state["stage"] = result.stage
         return result
 
@@ -496,19 +565,21 @@ def step(
                 action=ACTION_GAVE_UP,
             )
         if is_agree(text) and not looks_like_question(text):
-            return _agree_interview(state, slots, when)
+            return _agree_interview(state, slots, when, now)
         # 插问（体检 / 住宿 / 地点）：先答，答完还停在邀约
         if kb_answer or looks_like_question(text):
             return _answer_side_question(state, stage, slots, text, kb_answer)
         if is_agree(text):
-            return _agree_interview(state, slots, when)
-        return FlowResult(reply=_interview_ask(), stage=stage, slots=slots)
+            return _agree_interview(state, slots, when, now)
+        # 答非所问：换一种说法重问，不把同一句连发三遍
+        slots["ask_retries"] = int(slots.get("ask_retries") or 0) + 1
+        return FlowResult(reply=_interview_ask(slots), stage=stage, slots=slots)
 
     if stage == STAGE_COLLECT:
         _absorb(slots, text, strict_name=True)
         prompt = _collect_prompt(slots)
         if not prompt:
-            result = _book(slots, when)
+            result = _book(slots, when, now)
             state["stage"] = result.stage
             return result
         if not (slots.get("name") or slots.get("phone")):
@@ -536,14 +607,19 @@ def _collect_prompt(slots: dict[str, Any]) -> str:
     return _collect_ask()
 
 
-def _agree_interview(state: dict[str, Any], slots: dict[str, Any], when: datetime) -> FlowResult:
+def _agree_interview(
+    state: dict[str, Any],
+    slots: dict[str, Any],
+    when: datetime,
+    now: datetime | None = None,
+) -> FlowResult:
     """客户答应来：姓名手机都在就直接约成，缺一个就进 collect 只要缺的那个。"""
     slots["interview_agreed"] = True
     state["stage"] = STAGE_COLLECT
     prompt = _collect_prompt(slots)
     if prompt:
         return FlowResult(reply=prompt, stage=STAGE_COLLECT, slots=slots)
-    result = _book(slots, when)
+    result = _book(slots, when, now)
     state["stage"] = result.stage
     return result
 

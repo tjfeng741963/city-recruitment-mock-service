@@ -36,7 +36,7 @@ from .services.flow_engine import (
     jobs_for_city,
     set_remote_jobs,
 )
-from .services.job_lookup import lookup_jobs
+from .services.job_lookup import lookup_jobs, vertical_hint_of
 from .services.flow_llm import a_step
 from .services.llm_provider import build_provider
 
@@ -120,15 +120,18 @@ async def flow_answer(
         )
         employer_id_hint = int(meta.get("employer_id") or 0) or None
         location_id_hint = int(meta.get("location_id") or 0) or None
+        position_id_hint = int(meta.get("position_id") or 0) or None
 
-        # ① 新路径：kb_faq 硬过滤（vertical → employer → city → global）
+        # ① 新路径：kb_faq 硬过滤（position → employer → city → global）
+        # vertical_code 必须跟设备绑定走：写死 factory 会让地铁设备永远查不到自己的包。
         try:
             faq_hit = await kb_faq.lookup(
                 session,
                 payload.text,
-                vertical_code="factory",
+                vertical_code=str(meta.get("vertical_code") or "factory"),
                 employer_id=employer_id_hint,
                 location_id=location_id_hint,
+                position_id=position_id_hint,
             )
         except Exception:  # noqa: BLE001  查库失败等同于没命中，不能挡住回复
             faq_hit = None
@@ -193,7 +196,8 @@ async def flow_answer(
     #    城市查不到岗位时引擎走「已记下，帮你问问」话术并记未知问题。
     if city_hint:
         try:
-            remote_jobs = await lookup_jobs(city_hint)
+            # 客户这轮明确说了「工厂/普工」就不再按「只推地铁」过滤
+            remote_jobs = await lookup_jobs(city_hint, vertical_hint_of(payload.text))
         except Exception:  # noqa: BLE001
             remote_jobs = []
         set_remote_jobs({city_hint: remote_jobs})

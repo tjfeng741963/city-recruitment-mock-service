@@ -41,13 +41,20 @@ async def _fetch_items(city: str, token: str, url: str) -> list[dict[str, Any]]:
     return [item for item in items if isinstance(item, dict)]
 
 
-async def lookup_jobs(city: str) -> list[dict[str, Any]]:
-    """按城市查岗位。任何失败都返回 []，由上层走「已记下，帮你问问」话术。"""
+async def lookup_jobs(city: str, vertical_hint: str = "") -> list[dict[str, Any]]:
+    """按城市查岗位。任何失败都返回 []，由上层走「已记下，帮你问问」话术。
+
+    `vertical_hint` 是客户这轮明确说的品类（factory / subway）。2026-11-13 实测：
+    客户说「我是去工厂，不是去安检」，系统还在推地铁——因为下面的「只推地铁」
+    是全局开关，客户说什么都不影响。客户一开口说工厂，开关就不再生效。
+    """
     city = str(city or "").strip()
     if not city:
         return []
+    hint = vertical_hint if vertical_hint in ("factory", "subway") else ""
+    cache_key = f"{city}|{hint}"
     now = time.monotonic()
-    cached = _cache.get(city)
+    cached = _cache.get(cache_key)
     if cached and now < cached[0]:
         return cached[1]
     token = os.getenv("FLOW_PROFILE_TOKEN", "").strip()
@@ -67,35 +74,57 @@ async def lookup_jobs(city: str) -> list[dict[str, Any]]:
     filled = [j for j in items if any(
         str(j.get(k) or "").strip() for k in ("wage_text", "hours_text", "welfare_text")
     )]
-    # 阶段性主推开关（2026-11-12 运营指令「暂时按地铁的来」）：
-    # FLOW_ONLY_SUBWAY=1（默认）只推地铁/安检岗，工厂岗暂时下架；
-    # 过滤后为空则回退全量（防呆：关键词漏配时不至于无岗可推）。
-    if os.getenv("FLOW_ONLY_SUBWAY", "1").strip() == "1":
-        subway = [
-            j for j in filled
-            if any(k in (str(j.get("factory_name") or "") + str(j.get("job_title") or ""))
-                   for k in ("地铁", "安检"))
-        ]
-        if subway:
-            filled = subway
-    # 阶段性主推开关（2026-11-12 运营指令「暂时按地铁的来」）：
-    # FLOW_ONLY_SUBWAY=1（默认）只推地铁/安检岗，工厂岗暂时下架；
-    # 过滤后为空则回退全量（防呆：关键词漏配时不至于无岗可推）。
-    if os.getenv("FLOW_ONLY_SUBWAY", "1").strip() == "1":
-        subway = [
-            j for j in filled
-            if any(k in (str(j.get("factory_name") or "") + str(j.get("job_title") or ""))
-                   for k in ("地铁", "安检"))
-        ]
-        if subway:
-            filled = subway
+    # 「只推地铁」是 2026-11-12 运营的阶段性指令。只在客户没表态时生效：
+    # 客户明确说去工厂就不过滤，明确说做地铁就强制过滤。
+    if hint == "subway":
+        filled = _only_subway(filled) or filled
+    elif hint == "factory":
+        factory_only = [j for j in filled if not _is_subway(j)]
+        filled = factory_only or filled
+    elif _only_subway_enabled():
+        filled = _only_subway(filled) or filled
     if filled:
         items = filled
     else:
         # 远端全是空壳岗位 → 返回空，上层走「帮你问问」话术
         items = []
-    _cache[city] = (time.monotonic() + CACHE_TTL, items)
+    _cache[cache_key] = (time.monotonic() + CACHE_TTL, items)
     return items
 
 
-__all__ = ["lookup_jobs", "clear_cache", "DEFAULT_JOBS_URL", "TIMEOUT", "CACHE_TTL"]
+def _is_subway(job: dict[str, Any]) -> bool:
+    text = f"{job.get('factory_name') or ''}{job.get('job_title') or ''}"
+    return "地铁" in text or "安检" in text
+
+
+def _only_subway(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [job for job in jobs if _is_subway(job)]
+
+
+def _only_subway_enabled() -> bool:
+    return os.getenv("FLOW_ONLY_SUBWAY", "1").strip() == "1"
+
+
+# 客户这几类说法表示「我要工厂」，不能被地铁过滤掉
+FACTORY_HINTS = ("工厂", "厂里", "进厂", "普工", "车间", "流水线", "焊工", "叉车")
+SUBWAY_HINTS = ("地铁", "安检")
+
+
+def vertical_hint_of(text: str) -> str:
+    """从客户这句话判断他要哪个品类。判断不出来返回空串。"""
+    value = text or ""
+    if any(word in value for word in FACTORY_HINTS):
+        return "factory"
+    if any(word in value for word in SUBWAY_HINTS):
+        return "subway"
+    return ""
+
+
+__all__ = [
+    "lookup_jobs",
+    "vertical_hint_of",
+    "clear_cache",
+    "DEFAULT_JOBS_URL",
+    "TIMEOUT",
+    "CACHE_TTL",
+]
