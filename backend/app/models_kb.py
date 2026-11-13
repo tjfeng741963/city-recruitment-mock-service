@@ -338,6 +338,8 @@ class KbFaq(Base):
     scope_level: Mapped[str] = mapped_column(String(20), default="global")
     scope_location_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     scope_employer_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # 岗位级：同厂不同工种工价不同（华荻普工 24-26 / 焊工 35-40）
+    scope_position_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     question: Mapped[str] = mapped_column(String(500))
     keywords: Mapped[str] = mapped_column(Text, default="[]")
     answer: Mapped[str] = mapped_column(Text)

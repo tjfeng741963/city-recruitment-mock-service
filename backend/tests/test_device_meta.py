@@ -50,10 +50,9 @@ async def test_failure_falls_back_to_empty(monkeypatch) -> None:  # noqa: ANN001
 
     monkeypatch.setenv("FLOW_PROFILE_TOKEN", "tok-meta")
     monkeypatch.setattr(device_scripts, "_fetch_meta", boom)
-    assert await device_scripts.fetch_device_meta("pc-win-01") == {
-        "factory_name": "",
-        "city": "",
-    }
+    # 用 EMPTY_META 本身比对：以后加字段（vertical_id / employer_id / position_id…）
+    # 不用再改这三处断言，只有「失败要回空」这个语义是关键
+    assert await device_scripts.fetch_device_meta("pc-win-01") == dict(device_scripts.EMPTY_META)
 
 
 async def test_no_token_means_no_request(monkeypatch) -> None:  # noqa: ANN001
@@ -64,10 +63,9 @@ async def test_no_token_means_no_request(monkeypatch) -> None:  # noqa: ANN001
         return META
 
     monkeypatch.setattr(device_scripts, "_fetch_meta", spy)
-    assert await device_scripts.fetch_device_meta("pc-win-01") == {
-        "factory_name": "",
-        "city": "",
-    }
+    # 用 EMPTY_META 本身比对：以后加字段（vertical_id / employer_id / position_id…）
+    # 不用再改这三处断言，只有「失败要回空」这个语义是关键
+    assert await device_scripts.fetch_device_meta("pc-win-01") == dict(device_scripts.EMPTY_META)
     assert called == []
 
 
@@ -108,7 +106,4 @@ async def test_cache_expires(monkeypatch) -> None:  # noqa: ANN001
 
 
 async def test_empty_device_code_skips_request() -> None:
-    assert await device_scripts.fetch_device_meta("") == {
-        "factory_name": "",
-        "city": "",
-    }
+    assert await device_scripts.fetch_device_meta("") == dict(device_scripts.EMPTY_META)

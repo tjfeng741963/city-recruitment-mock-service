@@ -92,6 +92,7 @@ async def _ensure_faq_schema(session) -> None:
           scope_level TEXT NOT NULL DEFAULT 'global',
           scope_location_id INTEGER,
           scope_employer_id INTEGER,
+          scope_position_id INTEGER,
           question TEXT NOT NULL,
           keywords TEXT NOT NULL DEFAULT '[]',
           answer TEXT NOT NULL,
@@ -187,6 +188,70 @@ class TestVerticalIsolation:
     async def test_subway_cannot_hit_factory_faq(self, faq_db, session) -> None:
         hit = await kb_faq.lookup(session, "包吃住吗", vertical_code="subway", employer_id=None)
         assert hit is None, "地铁品类命中了工厂问答 = 品类隔离失效"
+
+
+class TestPositionScope:
+    """岗位级作用域：同厂不同工种工价不同，不能被厂级答案盖住。"""
+
+    @pytest_asyncio.fixture
+    async def position_db(self, session):
+        await _ensure_faq_schema(session)
+        for table in ("kb_faq", "employer", "vertical", "location"):
+            await session.execute(text(f"DELETE FROM {table}"))
+        await session.execute(
+            text(
+                "INSERT INTO vertical(id, tenant_id, code, name, config_json, sort_order, status) "
+                "VALUES (1, 1, 'factory', '工厂', '{}', 1, 'enabled')"
+            )
+        )
+        await session.execute(
+            text(
+                "INSERT INTO employer(id, tenant_id, vertical_id, employer_code, display_name, short_name, status, data_json) "
+                "VALUES (11, 1, 1, 'GZ-PY-004', '广州华荻科技有限公司', '华荻', 'enabled', '{}')"
+            )
+        )
+        await session.execute(
+            text(
+                "INSERT INTO kb_faq(tenant_id, vertical_id, scope_level, scope_employer_id, question, keywords, answer, priority) VALUES "
+                "(1, 1, 'employer', 11, '工资多少', '[\"工资\",\"工价\",\"多少钱\"]', '这边工价 24-26 元/小时', 10)"
+            )
+        )
+        await session.execute(
+            text(
+                "INSERT INTO kb_faq(tenant_id, vertical_id, scope_level, scope_position_id, question, keywords, answer, priority) VALUES "
+                "(1, 1, 'position', 101, '工资多少', '[\"工资\",\"工价\",\"多少钱\"]', '焊工工价 35-40 元/小时', 12), "
+                "(1, 1, 'position', 102, '工资多少', '[\"工资\",\"工价\",\"多少钱\"]', '叉车工工价 24-26 元/小时', 12)"
+            )
+        )
+        await session.commit()
+        yield
+        for table in ("kb_faq", "employer", "vertical", "location"):
+            await session.execute(text(f"DELETE FROM {table}"))
+        await session.commit()
+
+    async def test_position_answer_beats_employer_answer(self, position_db, session) -> None:
+        hit = await kb_faq.lookup(
+            session, "焊工多少钱", vertical_code="factory", employer_id=11, position_id=101
+        )
+        assert hit is not None
+        assert hit.tier == "position"
+        assert "35-40" in hit.answer
+
+    async def test_two_positions_in_same_factory_differ(self, position_db, session) -> None:
+        welder = await kb_faq.lookup(
+            session, "工资多少", vertical_code="factory", employer_id=11, position_id=101
+        )
+        forklift = await kb_faq.lookup(
+            session, "工资多少", vertical_code="factory", employer_id=11, position_id=102
+        )
+        assert welder is not None and forklift is not None
+        assert welder.answer != forklift.answer, "同厂两个工种拿到同一个工价 = 岗位隔离失效"
+
+    async def test_falls_back_to_employer_when_no_position_bound(self, position_db, session) -> None:
+        hit = await kb_faq.lookup(session, "工资多少", vertical_code="factory", employer_id=11)
+        assert hit is not None
+        assert hit.tier == "employer"
+        assert "24-26" in hit.answer
 
 
 class TestPlaceholderRender:
