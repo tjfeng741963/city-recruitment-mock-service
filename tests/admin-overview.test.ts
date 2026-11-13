@@ -26,8 +26,8 @@ describe("admin operations overview", () => {
       admins: 1,
       customers: 1,
       recruiters: 1,
-      // 种子 3 城 + 029 回填写入的佛山/南昌/南宁
-      cities: 6,
+      // 种子 3 城 + 029 的 3 城 + 030 的 8 城
+      cities: 14,
       // 种子 2 条示例岗位 + 028 的 11 条工厂岗位 + 029 的 6 条安检岗位
       positions: 19,
       devices: 1,
