@@ -880,6 +880,16 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             log(f"跳过 {name or cid}：人工接管中")
             continue
 
+        # 已流失：客户说过「我不去了」（8090 标记 stage=gave_up →
+        # recruit_status=disqualified）。按业务要求「只标记、不发消息」——
+        # 整轮不碰这个会话，一句都不发，等运营在网页上手动恢复。
+        if cid in remote_cfg.abandoned_sessions():
+            if not dry:
+                rlog.mark_skipped(mid, "客户已流失")
+            stats["skipped"] += 1
+            log(f"跳过 {name or cid}：客户已流失")
+            continue
+
         if not name or name == cid:
             if not dry:
                 rlog.mark_skipped(mid, "会话没有可搜索的名字")

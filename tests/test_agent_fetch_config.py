@@ -235,3 +235,61 @@ def test_takeover_kept_when_server_omits_the_key(tmp_path):
     remote.sync()
     remote.sync()
     assert rc.takeover_sessions() == {"S:alice"}
+
+
+# ── 已流失名单（步骤 3）：客户说「我不去了」后不再发任何消息 ──────────────────
+
+def test_abandoned_sessions_come_from_remote(tmp_path):
+    remote_payload = payload(version="v-abandon", scripts=[])
+    remote_payload["abandoned_sessions"] = ["S:quit-1"]
+    remote = rc.RemoteConfig(FakeClient([remote_payload]), cache_path=tmp_path / "c.json")
+    assert remote.sync() is True
+    assert rc.abandoned_sessions() == {"S:quit-1"}
+
+
+def test_abandoned_and_takeover_are_independent(tmp_path):
+    # 两者语义不同：接管可交还，流失要人工恢复。混成一个集合会让
+    # 「交还 AI」把流失的人也放回自动回复。
+    remote_payload = payload(version="v-pair", scripts=[])
+    remote_payload["takeover_sessions"] = ["S:human"]
+    remote_payload["abandoned_sessions"] = ["S:quit"]
+    remote = rc.RemoteConfig(FakeClient([remote_payload]), cache_path=tmp_path / "c.json")
+    remote.sync()
+    assert rc.takeover_sessions() == {"S:human"}
+    assert rc.abandoned_sessions() == {"S:quit"}
+
+
+def test_abandoned_dirty_values_ignored(tmp_path):
+    remote_payload = payload(version="v-dirty-abandon", scripts=[])
+    remote_payload["abandoned_sessions"] = [None, 1, "  ", "S:ok"]
+    remote = rc.RemoteConfig(FakeClient([remote_payload]), cache_path=tmp_path / "c.json")
+    remote.sync()
+    assert rc.abandoned_sessions() == {"S:ok"}
+
+
+def test_abandoned_survives_cached_restart(tmp_path):
+    cache = tmp_path / "config.remote.json"
+    cache.write_text(
+        json.dumps({"version": "v1", "interval_seconds": 20, "cooldown": 8, "scripts": [],
+                    "abandoned_sessions": ["S:quit"]}),
+        encoding="utf-8",
+    )
+    # 重启且远端拉不到：仍按缓存工作，绝不擅自恢复发送
+    remote = rc.RemoteConfig(FakeClient([None]), cache_path=cache)
+    assert rc.abandoned_sessions() == {"S:quit"}
+    assert remote.sync({"interval": 20, "cooldown": 8}) is False
+    assert rc.abandoned_sessions() == {"S:quit"}
+
+
+def test_abandoned_cleared_when_server_removes_it(tmp_path):
+    # 运营在网页上「恢复跟进」→ 名单里没人了 → 客户端恢复发送
+    cache = tmp_path / "config.remote.json"
+    first = payload(version="v1", scripts=[])
+    first["abandoned_sessions"] = ["S:quit"]
+    second = payload(version="v2", scripts=[])
+    second["abandoned_sessions"] = []
+    remote = rc.RemoteConfig(FakeClient([first, second]), cache_path=cache)
+    remote.sync()
+    assert rc.abandoned_sessions() == {"S:quit"}
+    remote.sync()
+    assert rc.abandoned_sessions() == set()

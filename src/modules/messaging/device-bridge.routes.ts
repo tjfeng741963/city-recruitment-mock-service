@@ -113,8 +113,19 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
       (latest, row) => (stampOf(row.updated_at) > stampOf(latest) ? row.updated_at : latest),
       null,
     );
+    // 已流失名单：客户说「我不去了」后由 8090 标记（stage=gave_up →
+    // recruit_status=disqualified）。客户端命中就整轮不碰——不再发任何消息。
+    // 与接管名单分开下发：语义不同（接管可交还，流失要人工恢复）。
+    const abandonedRows = db.prepare(
+      "SELECT external_conversation_id,updated_at FROM agent_conversations WHERE device_code=? AND recruit_status='disqualified' AND external_conversation_id IS NOT NULL AND external_conversation_id<>''",
+    ).all(code) as Array<{ external_conversation_id: string; updated_at: string | null }>;
+    const abandonedSessions = abandonedRows.map((row) => row.external_conversation_id);
+    const abandonedUpdated = abandonedRows.reduce<string | null>(
+      (latest, row) => (stampOf(row.updated_at) > stampOf(latest) ? row.updated_at : latest),
+      null,
+    );
     const scriptUpdated = (db.prepare("SELECT MAX(updated_at) AS at FROM device_scripts WHERE device_code=?").get(code) as { at: string | null }).at;
-    const newer = [scriptUpdated, device.updated_at, takeoverUpdated]
+    const newer = [scriptUpdated, device.updated_at, takeoverUpdated, abandonedUpdated]
       .reduce<string | null>((latest, value) => (stampOf(value) > stampOf(latest) ? (value ?? null) : latest), null) ?? "";
     return {
       version: newer,
@@ -126,6 +137,8 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
       ...(BRAIN_MODES.has(String(params.brain_mode)) ? { brain_mode: String(params.brain_mode) } : {}),
       // 人工接管中的会话：客户端 drain 时跳过，避免人工和 AI 同时往一个客户发消息。
       takeover_sessions: takeoverSessions,
+      // 已流失的会话：客户说「我不去了」，客户端整轮不碰，不再发任何消息。
+      abandoned_sessions: abandonedSessions,
       // 设备绑定的工厂/城市（契约 docs/对齐-设备工厂绑定与资料导入.md §1）：
       // 8090 拿去做知识库过滤，data_json 没绑就回空串 = 通用/不限。
       factory_name: typeof params.factory_name === "string" ? params.factory_name : "",

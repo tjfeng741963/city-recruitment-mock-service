@@ -58,6 +58,7 @@ describe("device config distribution", () => {
       cooldown: 12,
       merge_delay_seconds: 0,
       takeover_sessions: [],
+      abandoned_sessions: [],
       factory_name: "",
       city: "",
       // 知识库 v3：品类/招工方 id，未绑定时回 0

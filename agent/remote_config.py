@@ -32,6 +32,9 @@ _device_scripts: list[dict] = []
 # 人工接管中的会话（企微会话 ID）。drain 每轮读这里，命中就跳过不自动回复。
 _takeover_sessions: set[str] = set()
 
+# 已流失的会话（客户说「我不去了」）。drain 命中就整轮不碰，不再发任何消息。
+_abandoned_sessions: set[str] = set()
+
 
 def device_scripts() -> list[dict]:
     """当前生效的设备话术（拉不到远端时为 config.remote.json 兜底值，可能为空）。"""
@@ -43,11 +46,24 @@ def takeover_sessions() -> set[str]:
     return set(_takeover_sessions)
 
 
-def _parse_takeover(value: object) -> set[str]:
-    """远端 takeover_sessions 只接受字符串数组；脏值一律当空，避免误把所有会话都停掉。"""
+def abandoned_sessions() -> set[str]:
+    """已流失的会话 ID 集合。命中后不再发送任何消息（人工可在网页上恢复）。
+
+    和接管名单分开：接管是「这次我来回」，可以交还；流失是「这个人不找了」，
+    需要人工显式恢复。混成一个集合会让「交还 AI」把流失的人也放回自动回复。
+    """
+    return set(_abandoned_sessions)
+
+
+def _parse_session_list(value: object) -> set[str]:
+    """远端名单只接受字符串数组；脏值一律当空，避免误把整个设备停掉。"""
     if not isinstance(value, list):
         return set()
     return {item.strip() for item in value if isinstance(item, str) and item.strip()}
+
+
+# 兼容旧名（接管名单一直用这个解析器）
+_parse_takeover = _parse_session_list
 
 
 def _valid_seconds(value: object) -> float | None:
@@ -116,6 +132,8 @@ class RemoteConfig:
         # 人工接管中的会话 ID；每次 version 变化时整体替换（不是增量合并，
         # 因为「交还 AI」是删除动作，增量合并没有办法表达删除）。
         self.takeover: set[str] = set()
+        # 已流失的会话 ID（同上，整体替换）。
+        self.abandoned: set[str] = set()
         # 最近一次 sync 里真正发生变化的本地键（含 "brain_mode"）。
         # 调用方据此决定要不要重建 Brain——Brain 在 main() 只构造一次，
         # 光改 cfg["brain"]["mode"] 不会切换行为。
@@ -129,11 +147,13 @@ class RemoteConfig:
                 for key, value in cached.items()
                 if key in REMOTE_PARAM_KEYS and _valid_seconds(value) is not None
             }
-            # 重启后先按缓存里的接管名单工作，避免拉到新配置前误回人工已接管的会话
+            # 重启后先按缓存里的名单工作，避免拉到新配置前误回不该回的会话
             self.takeover = _parse_takeover(cached.get("takeover_sessions"))
-            global _device_scripts, _takeover_sessions
+            self.abandoned = _parse_session_list(cached.get("abandoned_sessions"))
+            global _device_scripts, _takeover_sessions, _abandoned_sessions
             _device_scripts = list(self.scripts)
             _takeover_sessions = set(self.takeover)
+            _abandoned_sessions = set(self.abandoned)
         self._last_ok = True  # 有缓存可兜底就不算失败态，避免启动即报错
 
     def _fetch(self) -> dict | None:
@@ -164,18 +184,22 @@ class RemoteConfig:
                 for key, value in remote.items()
                 if key in REMOTE_PARAM_KEYS and _valid_seconds(value) is not None
             }
-            # 接管名单整体替换：远端没给这个键时保留上一次的值（老服务端不下发时
+            # 名单整体替换：远端没给这个键时保留上一次的值（老服务端不下发时
             # 不该把已接管的会话放回自动回复），给了才覆盖。
             if "takeover_sessions" in remote:
                 self.takeover = _parse_takeover(remote.get("takeover_sessions"))
+            if "abandoned_sessions" in remote:
+                self.abandoned = _parse_session_list(remote.get("abandoned_sessions"))
             self.version = version
-            global _device_scripts, _takeover_sessions
+            global _device_scripts, _takeover_sessions, _abandoned_sessions
             _device_scripts = list(self.scripts)
             _takeover_sessions = set(self.takeover)
+            _abandoned_sessions = set(self.abandoned)
             try:
                 save_remote_cache(
                     {"version": version, **self.params, "scripts": self.scripts,
-                     "takeover_sessions": sorted(self.takeover)},
+                     "takeover_sessions": sorted(self.takeover),
+                     "abandoned_sessions": sorted(self.abandoned)},
                     self.cache_path,
                 )
             except OSError as exc:
