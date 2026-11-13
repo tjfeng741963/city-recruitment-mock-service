@@ -180,6 +180,12 @@ _PLACEHOLDER_KEYS: dict[str, str] = {
     "medical": "medical_text",
     "tattoo_policy": "tattoo_policy",
     "relocate_policy": "relocate_policy",
+    # 地铁安检品类特有：月休、身高、线路、民族限制、面试带什么
+    "rest": "rest_text",
+    "height": "height_text",
+    "line": "line_text",
+    "ethnicity": "ethnicity_policy",
+    "cert": "cert_text",
 }
 
 
