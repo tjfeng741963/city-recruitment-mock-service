@@ -99,4 +99,52 @@ describe("agent jobs feed mapping", () => {
     const items = jobs.json().items as Array<Record<string, string>>;
     expect(items.map((j) => j.job_title)).toContain("未挂厂岗位");
   });
+
+  it("exposes city_links as neighbors and falls back to a neighbor when the city has no jobs", async () => {
+    const neighborCity = await app.inject({ method: "POST", url: "/api/v1/cities", headers: admin(), payload: { city_name: "测试邻城甲", province: "广东" } });
+    const emptyCity = await app.inject({ method: "POST", url: "/api/v1/cities", headers: admin(), payload: { city_name: "测试空城乙", province: "广东" } });
+    const neighborId = neighborCity.json().id;
+    const emptyId = emptyCity.json().id;
+
+    const factory = await app.inject({ method: "POST", url: "/api/v1/factories", headers: admin(), payload: { factory_name: "邻城厂", city_id: neighborId } });
+    await app.inject({
+      method: "POST",
+      url: "/api/v1/service-positions",
+      headers: admin(),
+      payload: { position_name: "邻城普工", city_id: neighborId, factory_id: factory.json().id, is_active: true, base_sections: { salary_detail: "22 元/小时" } },
+    });
+
+    // 后台「周边城市设置」：空城 → 邻城
+    const saved = await app.inject({
+      method: "POST",
+      url: "/api/v1/city-links/batch",
+      headers: admin(),
+      payload: { city_id: emptyId, linked_city_ids: [neighborId] },
+    });
+    expect(saved.statusCode).toBe(201);
+
+    const cities = await app.inject({ method: "GET", url: "/api/v1/agent/cities", headers: svc });
+    const emptyEntry = (cities.json().items as Array<{ city_name: string; neighbors: string[] }>).find((c) => c.city_name === "测试空城乙");
+    expect(emptyEntry?.neighbors).toEqual(["测试邻城甲"]);
+
+    // 本城 0 岗位 → 自动取邻城，并在返回里标明 cross_city
+    const jobs = await app.inject({ method: "GET", url: "/api/v1/agent/jobs?city=测试空城乙", headers: svc });
+    const body = jobs.json();
+    expect(body.cross_city).toBe("测试邻城甲");
+    expect((body.items as Array<Record<string, string>>).map((j) => j.job_title)).toEqual(["邻城普工"]);
+    expect(body.items[0].cross_city).toBe(true);
+    expect(body.items[0].city).toBe("测试邻城甲");
+  });
+
+  it("reports the real position count in city-links options", async () => {
+    // 岗位响应不带 city_id，直接用 /agent/jobs 按城市取条数作为基准
+    const jobs = await app.inject({ method: "GET", url: "/api/v1/agent/jobs?city=广州", headers: svc });
+    const enabled = (jobs.json().items as unknown[]).length;
+    expect(enabled).toBeGreaterThan(0);
+
+    const options = await app.inject({ method: "GET", url: "/api/v1/city-links/options", headers: admin() });
+    const entry = (options.json().options as Array<{ city: string; count: number }>).find((o) => o.city === "广州");
+    // 过去这列数的是 city_links 行数（重复行会把它放大），现在必须是真实在招岗位数
+    expect(entry?.count).toBe(enabled);
+  });
 });

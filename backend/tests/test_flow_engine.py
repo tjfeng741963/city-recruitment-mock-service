@@ -26,8 +26,10 @@ from app.services.flow_engine import (
     TZ,
     extract_name,
     extract_phone,
+    neighbors_of,
     new_state,
     next_interview,
+    set_remote_cities,
     set_remote_jobs,
     step,
 )
@@ -218,3 +220,32 @@ def test_projection_rebuilds_state() -> None:
     assert state["slots"]["city"] == "广州"
     assert state["turns"] == 1
     assert [h["role"] for h in state["history"]] == ["customer", "agent"]
+
+
+def test_neighbors_come_from_backoffice_city_links() -> None:
+    """后台「周边城市设置」配的关系要能传到引擎里，主城没单时才用得上。"""
+    set_remote_cities(
+        [
+            {"city_name": "广州", "districts": ["番禺区"], "neighbors": ["佛山", "东莞"]},
+            {"city_name": "佛山", "districts": [], "neighbors": []},
+        ]
+    )
+    assert neighbors_of("广州") == ["佛山", "东莞"]
+    # 自己配自己不算周边；没配过的城市返回空
+    assert neighbors_of("佛山") == []
+    assert neighbors_of("不存在") == []
+    set_remote_cities([])
+
+
+def test_cross_city_card_states_the_real_city() -> None:
+    """主城没单、按周边城市兜底取到岗时，第一段必须先说清岗位在哪个城市。"""
+    set_remote_cities([{"city_name": "东莞", "districts": [], "neighbors": ["广州"]}])
+    set_remote_jobs({"东莞": [dict(JOBS_BY_CITY["广州"][0], city="广州")]})
+    state = new_state()
+    state["slots"].update({"city": "东莞", "job_index": 0})
+    result = step(state, "东莞")
+    first = result.parts[0]
+    assert "东莞这边暂时没有合适的厂" in first
+    assert "广州有岗" in first
+    set_remote_jobs({})
+    set_remote_cities([])

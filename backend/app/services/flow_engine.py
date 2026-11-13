@@ -135,10 +135,17 @@ _REMOTE_PLACES: ContextVar[list[tuple[str, str]]] = ContextVar(
     "remote_places", default=[]
 )
 
+# 后台「周边城市设置」配的关系：{城市: [周边城市, ...]}。
+# 主城查不到岗位时按这份列表再查一次，解决「东莞没单 → 推广州」这种真实场景。
+_REMOTE_NEIGHBORS: ContextVar[dict[str, list[str]]] = ContextVar(
+    "remote_neighbors", default={}
+)
+
 
 def set_remote_cities(items: list[dict[str, Any]] | None) -> None:
     """注入后台维护的城市与区县。失败时传空列表，退回硬编码别名。"""
     places: list[tuple[str, str]] = []
+    neighbors: dict[str, list[str]] = {}
     for item in items or []:
         if not isinstance(item, dict):
             continue
@@ -152,8 +159,20 @@ def set_remote_cities(items: list[dict[str, Any]] | None) -> None:
                 alias = str(district or "").strip()
                 if alias:
                     places.append((alias, city))
+        raw_neighbors = item.get("neighbors")
+        if isinstance(raw_neighbors, list):
+            clean = [str(n or "").strip() for n in raw_neighbors]
+            clean = [n for n in clean if n and n != city]
+            if clean:
+                neighbors[city] = clean
     places.sort(key=lambda pair: len(pair[0]), reverse=True)
     _REMOTE_PLACES.set(places)
+    _REMOTE_NEIGHBORS.set(neighbors)
+
+
+def neighbors_of(city: str) -> list[str]:
+    """该城市配置的周边城市；没配返回空列表。"""
+    return list(_REMOTE_NEIGHBORS.get().get(str(city or "").strip(), []))
 
 
 def remote_city_names() -> list[str]:
@@ -364,6 +383,12 @@ def send_info_parts(
     part1 = "\n".join(_job_card_lines(job))
     part2 = f"面试地点：{job.get('place', '')}\n面试时间：{day} {interview_window_of(job)}"
     part3 = _interview_ask(slots)
+    # 主城没单、按后台「周边城市设置」取到隔壁城市的岗：必须先说清楚在哪，
+    # 否则客户以为是本地的，到面试地点才发现跨城。
+    asked = str(slots.get("city") or "")
+    job_city = str(job.get("city") or "")
+    if asked and job_city and asked != job_city:
+        part1 = f"{asked}这边暂时没有合适的厂，{job_city}有岗，过去方便的话可以安排。\n{part1}"
     return [part1, part2, part3]
 
 
