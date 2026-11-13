@@ -36,7 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..models_kb import DEFAULT_TENANT_ID, Employer, KbFaq, Location, Vertical
 
 # scope 从窄到宽的检索顺序
-SCOPE_ORDER = ("employer", "city", "vertical", "global")
+SCOPE_ORDER = ("position", "employer", "city", "vertical", "global")
 
 # 占位符：单花括号，与旧路径的双花括号 {{x}} 区分开。
 # 支持兜底写法 {name|兜底文案}：有值用值，没值用兜底，两者都没有才整句丢弃。
@@ -106,12 +106,14 @@ async def lookup(
     vertical_code: str = "factory",
     employer_id: int | None = None,
     location_id: int | None = None,
+    position_id: int | None = None,
     tenant_id: int = DEFAULT_TENANT_ID,
 ) -> FaqHit | None:
     """查一条场景问答。命中返回 FaqHit，未命中返回 None。
 
-    硬过滤顺序：employer → city → vertical → global。
-    任何一层命中就立刻返回，不再往宽了找——窄层赢就是"本厂优先"的语义。
+    硬过滤顺序：position → employer → city → vertical → global。
+    任何一层命中就立刻返回，不再往宽了找——窄层赢就是"本岗位/本厂优先"的语义。
+    岗位级存在的理由：同厂不同工种工价不同（普工 24-26、焊工 35-40）。
     """
     text = (question or "").strip()
     if not text:
@@ -125,6 +127,10 @@ async def lookup(
     ]
 
     tiers: list[tuple[str, list[Any]]] = []
+    if position_id:
+        tiers.append(
+            ("position", [KbFaq.scope_level == "position", KbFaq.scope_position_id == position_id])
+        )
     if employer_id:
         tiers.append(
             ("employer", [KbFaq.scope_level == "employer", KbFaq.scope_employer_id == employer_id])

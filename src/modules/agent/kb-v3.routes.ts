@@ -342,7 +342,7 @@ export async function registerKbV3Routes(app: FastifyInstance, db: DatabaseSync)
   });
 
   // ── 场景问答 ────────────────────────────────────────────────────
-  app.get<{ Querystring: { vertical_id?: string; scope_level?: string; scope_employer_id?: string } }>(
+  app.get<{ Querystring: { vertical_id?: string; scope_level?: string; scope_employer_id?: string; scope_position_id?: string } }>(
     "/api/v1/kb-faqs",
     async (request) => {
       const { pageSize, offset } = parsePagination(request.query as Record<string, unknown>);
@@ -359,6 +359,10 @@ export async function registerKbV3Routes(app: FastifyInstance, db: DatabaseSync)
       if (request.query.scope_employer_id) {
         conditions.push("scope_employer_id=?");
         params.push(int(request.query.scope_employer_id));
+      }
+      if (request.query.scope_position_id) {
+        conditions.push("scope_position_id=?");
+        params.push(int(request.query.scope_position_id));
       }
       const where = conditions.join(" AND ");
       const rows = db
@@ -386,8 +390,8 @@ export async function registerKbV3Routes(app: FastifyInstance, db: DatabaseSync)
     if (!question) return reply.code(422).send({ detail: "question is required" });
     if (!answer) return reply.code(422).send({ detail: "answer is required" });
     const scopeLevel = text(body.scope_level, "global");
-    if (!["global", "vertical", "city", "employer"].includes(scopeLevel)) {
-      return reply.code(422).send({ detail: "scope_level 只能是 global/vertical/city/employer" });
+    if (!["global", "vertical", "city", "employer", "position"].includes(scopeLevel)) {
+      return reply.code(422).send({ detail: "scope_level 只能是 global/vertical/city/employer/position" });
     }
     const scopeEmployerId =
       body.scope_employer_id === undefined || body.scope_employer_id === null
@@ -397,6 +401,12 @@ export async function registerKbV3Routes(app: FastifyInstance, db: DatabaseSync)
       body.scope_location_id === undefined || body.scope_location_id === null
         ? null
         : int(body.scope_location_id);
+    // 岗位级：同厂不同工种工价不同（华荻普工 24-26 / 焊工 35-40），
+    // 按厂存一条只能答一种，答错要赔钱。
+    const scopePositionId =
+      body.scope_position_id === undefined || body.scope_position_id === null
+        ? null
+        : int(body.scope_position_id);
     // scope 与 id 必须配套，否则检索时这一条永远命中不到
     if (scopeLevel === "employer" && !scopeEmployerId) {
       return reply.code(422).send({ detail: "employer 级问答必须指定 scope_employer_id" });
@@ -404,17 +414,21 @@ export async function registerKbV3Routes(app: FastifyInstance, db: DatabaseSync)
     if (scopeLevel === "city" && !scopeLocationId) {
       return reply.code(422).send({ detail: "city 级问答必须指定 scope_location_id" });
     }
+    if (scopeLevel === "position" && !scopePositionId) {
+      return reply.code(422).send({ detail: "position 级问答必须指定 scope_position_id" });
+    }
     const row = db
       .prepare(
         `INSERT INTO kb_faq(tenant_id,vertical_id,scope_level,scope_location_id,scope_employer_id,
-          question,keywords,answer,media,priority,status,template_item_id)
-         VALUES (1,?,?,?,?,?,?,?,?,?,?,?) RETURNING *`,
+          scope_position_id,question,keywords,answer,media,priority,status,template_item_id)
+         VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *`,
       )
       .get(
         body.vertical_id === undefined || body.vertical_id === null ? null : int(body.vertical_id),
         scopeLevel,
         scopeLocationId,
         scopeEmployerId,
+        scopePositionId,
         question,
         JSON.stringify(Array.isArray(body.keywords) ? body.keywords : []),
         answer,

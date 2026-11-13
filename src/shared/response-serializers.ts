@@ -186,6 +186,12 @@ export function serializeAgentDevice(row: Row): Row {
     // 设备绑定的工厂/城市（data_json 透传，供 admin 设备列表展示；空串 = 通用）
     factory_name: String(source.factory_name ?? ""),
     city: String(source.city ?? ""),
+    // 知识库 v3 绑定：品类 / 招工方 / 位置 / 岗位。0 = 未绑定（走通配）。
+    // 配置台「设备」页签要读回来回显下拉，缺这几个字段就只能盲改。
+    vertical_id: Number(source.vertical_id ?? 0) || 0,
+    employer_id: Number(source.employer_id ?? 0) || 0,
+    location_id: Number(source.location_id ?? 0) || 0,
+    position_id: Number(source.position_id ?? 0) || 0,
     status: Boolean(source.online ?? source.status === true),
     online: Boolean(source.online),
     mode: String(source.mode ?? ""),

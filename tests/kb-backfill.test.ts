@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { openDatabase } from "../src/db/connection.js";
 import { migrateDatabase } from "../src/db/migrate.js";
-import { backfillLegacyKb } from "../src/db/backfill.js";
+import { applyBackfillFile } from "../src/db/backfill.js";
+
+// 只跑 024：028 灌的是客户真实工厂数据，会污染这里的计数断言
+const backfill024 = (db: Parameters<typeof applyBackfillFile>[0]) =>
+  applyBackfillFile(db, "migrations/024_kb_backfill_legacy.sql");
 
 // P1-4 存量回填：cities / factories / service_positions → location / employer
 // 契约：docs/知识库方案-流程驱动-20261113.md §六「旧表不删、双读比对」
@@ -24,7 +28,7 @@ describe("kb legacy backfill (024)", () => {
     const db = fresh();
     db.exec(`INSERT INTO cities(id,city_name,province,recruitment_status)
              VALUES (1,'广州','广东','enabled'),(2,'深圳','广东','enabled'),(3,'东莞','广东','enabled'),(4,'无省城','','enabled')`);
-    backfillLegacyKb(db);
+    backfill024(db);
 
     const provinces = db.prepare("SELECT name FROM location WHERE level='province' ORDER BY name").all();
     // 广东只出现一次，不是三条
@@ -49,7 +53,7 @@ describe("kb legacy backfill (024)", () => {
     db.exec("INSERT INTO cities(id,city_name,province) VALUES (1,'广州','广东'),(2,'深圳','广东')");
     db.exec(`INSERT INTO factories(id,factory_name,city_id,status)
              VALUES (1,'本地示例工厂',1,'enabled'),(2,'示例电子厂',2,'disabled')`);
-    backfillLegacyKb(db);
+    backfill024(db);
 
     const rows = db.prepare(
       "SELECT employer_code,display_name,short_name,status,location_id FROM employer ORDER BY employer_code",
@@ -72,15 +76,15 @@ describe("kb legacy backfill (024)", () => {
     const db = fresh();
     db.exec("INSERT INTO cities(id,city_name,province) VALUES (1,'广州','广东')");
     db.exec("INSERT INTO factories(id,factory_name,city_id) VALUES (1,'本地示例工厂',1)");
-    backfillLegacyKb(db);
+    backfill024(db);
     const snapshot = () => ({
       locations: db.prepare("SELECT COUNT(*) c FROM location").get(),
       employers: db.prepare("SELECT COUNT(*) c FROM employer").get(),
       aliases: db.prepare("SELECT COUNT(*) c FROM employer_alias").get(),
     });
     const first = snapshot();
-    backfillLegacyKb(db);
-    backfillLegacyKb(db);
+    backfill024(db);
+    backfill024(db);
     expect(snapshot()).toEqual(first);
     expect(first).toEqual({ locations: { c: 2 }, employers: { c: 1 }, aliases: { c: 1 } });
     db.close();
@@ -91,7 +95,7 @@ describe("kb legacy backfill (024)", () => {
     db.exec("INSERT INTO cities(id,city_name,province) VALUES (1,'广州','广东')");
     db.exec("INSERT INTO factories(id,factory_name,city_id) VALUES (1,'本地示例工厂',1),(2,'无城市厂',NULL)");
     db.exec("INSERT INTO service_positions(id,position_name,factory_id) VALUES (1,'本地示例岗位',1),(2,'孤儿岗位',2)");
-    backfillLegacyKb(db);
+    backfill024(db);
 
     const gz = (db.prepare("SELECT id FROM location WHERE level='city' AND name='广州'").get() as { id: number }).id;
     // 有位置的岗位挂上；工厂没有城市的岗位不产生脏行

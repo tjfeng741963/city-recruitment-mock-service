@@ -27,7 +27,8 @@ describe("admin operations overview", () => {
       customers: 1,
       recruiters: 1,
       cities: 3,
-      positions: 2,
+      // 种子 2 条示例岗位 + 028 导入的 11 条客户真实岗位
+      positions: 13,
       devices: 1,
       conversations: 1,
       pending_activations: expect.any(Number),

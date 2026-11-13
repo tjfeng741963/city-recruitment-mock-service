@@ -32,9 +32,9 @@ describe("subway faq pack (025)", () => {
     const subwayId = (db.prepare("SELECT id FROM vertical WHERE code='subway'").get() as { id: number }).id;
     const factoryId = (db.prepare("SELECT id FROM vertical WHERE code='factory'").get() as { id: number }).id;
 
-    expect(db.prepare("SELECT COUNT(*) c FROM kb_faq WHERE vertical_id=?").get(subwayId)).toMatchObject({ c: 18 });
-    // 工厂包不受影响，仍是 15 条
-    expect(db.prepare("SELECT COUNT(*) c FROM kb_faq WHERE vertical_id=?").get(factoryId)).toMatchObject({ c: 15 });
+    expect(db.prepare("SELECT COUNT(*) c FROM kb_faq WHERE vertical_id=? AND scope_level='global'").get(subwayId)).toMatchObject({ c: 18 });
+    // 工厂包本身的通用问答仍是 15 条；028 导入的厂级/岗位级条目另算
+    expect(db.prepare("SELECT COUNT(*) c FROM kb_faq WHERE vertical_id=? AND scope_level='global'").get(factoryId)).toMatchObject({ c: 15 });
     expect(subwayId).not.toBe(factoryId);
     db.close();
   });

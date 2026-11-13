@@ -94,7 +94,7 @@ describe("kb v3 config routes", () => {
         method: "POST",
         url: "/api/v1/employers",
         headers: admin,
-        payload: { employer_code: "GZ-PY-901", display_name: "测试厂", vertical_id: factory.id },
+        payload: { employer_code: "TEST-EMP-901", display_name: "测试厂", vertical_id: factory.id },
       });
       const blocked = await app.inject({ method: "DELETE", url: `/api/v1/verticals/${factory.id}`, headers: admin });
       expect(blocked.statusCode).toBe(409);
@@ -178,7 +178,7 @@ describe("kb v3 config routes", () => {
         url: "/api/v1/employers",
         headers: admin,
         payload: {
-          employer_code: "GZ-PY-001",
+          employer_code: "TEST-EMP-001",
           display_name: "松下万宝(广州)压缩机有限公司",
           short_name: "松下",
           vertical_id: factoryId,
@@ -190,7 +190,7 @@ describe("kb v3 config routes", () => {
 
       const listed = await app.inject({ method: "GET", url: "/api/v1/employers?vertical_id=" + factoryId, headers: admin });
       const row = listed.json().items.find((item: { id: number }) => item.id === id);
-      expect(row).toMatchObject({ employer_code: "GZ-PY-001", short_name: "松下" });
+      expect(row).toMatchObject({ employer_code: "TEST-EMP-001", short_name: "松下" });
       expect(row.aliases.sort()).toEqual(["万宝", "松下", "狄原"].sort());
 
       // 别名全量替换：传了就按传入的来
@@ -221,7 +221,7 @@ describe("kb v3 config routes", () => {
         method: "POST",
         url: "/api/v1/employers",
         headers: admin,
-        payload: { employer_code: "GZ-PY-777", display_name: "有问答的厂", vertical_id: 1 },
+        payload: { employer_code: "TEST-EMP-777", display_name: "有问答的厂", vertical_id: 1 },
       })).json();
       await app.inject({
         method: "POST",

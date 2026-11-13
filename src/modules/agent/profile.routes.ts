@@ -278,7 +278,7 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
     if (!city) return reply.code(422).send({ detail: "city is required" });
 
     const rows = db.prepare(
-      `SELECT sp.position_name, sp.data_json AS sp_json, f.factory_name, f.data_json AS f_json,
+      `SELECT sp.id AS position_id, sp.position_name, sp.data_json AS sp_json, f.factory_name, f.data_json AS f_json,
               c.city_name, c.province
        FROM service_positions sp
        JOIN factories f ON sp.factory_id = f.id
@@ -286,7 +286,7 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
        WHERE sp.status='enabled' AND f.status='enabled' AND c.recruitment_status='enabled'
          AND (c.city_name = ? OR c.city_name LIKE '%' || ? || '%')`
     ).all(city, city) as Array<{
-      position_name: string; sp_json: string; factory_name: string;
+      position_id: number; position_name: string; sp_json: string; factory_name: string;
       f_json: string; city_name: string; province: string;
     }>;
 
@@ -310,6 +310,7 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
       const sp = pick(row.sp_json);
       const f = pick(row.f_json);
       return {
+        position_id: row.position_id,
         factory_name: row.factory_name,
         job_title: row.position_name,
         wage_text: String(sp.wage_text ?? ""),

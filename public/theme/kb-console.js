@@ -14,8 +14,9 @@
     { key: "vertical", label: "品类", hint: "工厂 / 地铁 / 白领…一个品类一套话术" },
     { key: "location", label: "区域", hint: "省 → 市 → 区 → 工业区 → 面试点，层级不设死" },
     { key: "employer", label: "招工方", hint: "一个工业区十几家厂，靠这里分清" },
-    { key: "faq", label: "场景问答", hint: "可以绑定到某个品类 / 城市 / 招工方" },
+    { key: "faq", label: "场景问答", hint: "可以绑定到某个品类 / 城市 / 招工方 / 岗位" },
     { key: "template", label: "模板包", hint: "通用问答一键导入，导入后可单独改" },
+    { key: "device", label: "设备绑定", hint: "一台设备认一个厂，客户问什么就答哪家的" },
   ];
 
   function log() {
@@ -201,7 +202,9 @@
       ? api("GET", "/api/v1/kb-templates")
       : key === "faq"
         ? api("GET", "/api/v1/kb-faqs?page_size=200")
-        : api("GET", "/api/v1/" + key + "s");
+        : key === "device"
+          ? api("GET", "/api/v1/agent/devices")
+          : api("GET", "/api/v1/" + key + "s");
 
     Promise.all([request, loadLookups()])
       .then(function (results) {
@@ -262,6 +265,12 @@
         imp.type = "button";
         imp.addEventListener("click", function () { importTemplate(row.code); });
         ops.appendChild(imp);
+      } else if (key === "device") {
+        // 设备不在本面板增删，只改绑定关系
+        var bind = el("button", "rk-kb-link", "绑定");
+        bind.type = "button";
+        bind.addEventListener("click", function () { openBinding(row); });
+        ops.appendChild(bind);
       } else {
         var edit = el("button", "rk-kb-link", "编辑");
         edit.type = "button";
@@ -335,14 +344,39 @@
         { label: "问题", field: "question" },
         { label: "答案", field: "answer" },
         { label: "作用域", field: "scope_level", render: function (row) {
-          var label = row.scope_level === "employer" ? "招工方"
-            : row.scope_level === "city" ? "城市"
-              : row.scope_level === "vertical" ? "品类" : "全局";
-          var target = row.scope_employer_id ? lookupName(state.lookups.employers, row.scope_employer_id)
+          var label = row.scope_level === "position" ? "岗位"
+            : row.scope_level === "employer" ? "招工方"
+              : row.scope_level === "city" ? "城市"
+                : row.scope_level === "vertical" ? "品类" : "全局";
+          var target = row.scope_position_id ? "岗位#" + row.scope_position_id
+            : row.scope_employer_id ? lookupName(state.lookups.employers, row.scope_employer_id)
             : row.scope_location_id ? lookupName(state.lookups.locations, row.scope_location_id) : "";
           return target ? label + "·" + target : label;
         } },
         { label: "优先级", field: "priority" },
+      ];
+    }
+    if (key === "device") {
+      return [
+        { label: "设备", field: "name" },
+        { label: "设备码", field: "device_code" },
+        { label: "品类", field: "vertical_id", render: function (row) {
+          return row.vertical_id ? lookupName(state.lookups.verticals, row.vertical_id, "name") : "未绑定";
+        } },
+        { label: "招工方", field: "employer_id", render: function (row) {
+          return row.employer_id ? lookupName(state.lookups.employers, row.employer_id) : "未绑定";
+        } },
+        { label: "位置", field: "location_id", render: function (row) {
+          return row.location_id ? lookupName(state.lookups.locations, row.location_id) : "—";
+        } },
+        { label: "岗位", field: "position_id", render: function (row) {
+          return row.position_id ? "岗位#" + row.position_id : "—";
+        } },
+        { label: "在线", field: "online", render: function (row) {
+          var chip = el("span", "rk-kb-chip", row.online ? "在线" : "离线");
+          chip.dataset.state = row.online ? "on" : "off";
+          return chip;
+        } },
       ];
     }
     return [
@@ -408,6 +442,73 @@
     if (firstInput) firstInput.focus();
   }
 
+  // 设备绑定：只改绑定关系，不碰设备本身（增删在原生设备页）
+  function openBinding(row) {
+    var node = ensurePanel();
+    state.lookups.positions = state.lookups.positions || [];
+    var fields = [
+      { name: "vertical_id", label: "品类", type: "select", source: "verticals", allowEmpty: "（未绑定）" },
+      { name: "employer_id", label: "招工方（决定答哪家厂的）", type: "select", source: "employers", allowEmpty: "（未绑定）" },
+      { name: "location_id", label: "位置（决定发哪个地址）", type: "select", source: "locations", allowEmpty: "（未绑定）" },
+      { name: "position_id", label: "岗位 id（同厂多工种时填）", type: "number" },
+    ];
+    var draft = {
+      vertical_id: row.vertical_id || "",
+      employer_id: row.employer_id || "",
+      location_id: row.location_id || "",
+      position_id: row.position_id || "",
+    };
+
+    var overlay = el("div", "rk-kb-modal");
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    var card = el("form", "rk-kb-card");
+    card.appendChild(el("h3", null, "绑定设备：" + text(row.name || row.device_code)));
+    card.appendChild(el("p", "rk-kb-sub", "设备绑定哪家厂，客户问到吃住、体检、纹身就答哪家的政策。留空 = 走通用话术。"));
+
+    fields.forEach(function (field) { card.appendChild(renderField(field, draft, card)); });
+
+    var error = el("p", "rk-kb-error");
+    error.hidden = true;
+    card.appendChild(error);
+
+    var actions = el("div", "rk-kb-actions");
+    var cancel = el("button", "rk-kb-ghost", "取消");
+    cancel.type = "button";
+    cancel.addEventListener("click", function () { overlay.remove(); });
+    actions.appendChild(cancel);
+    var save = el("button", "rk-kb-primary", "保存绑定");
+    save.type = "submit";
+    actions.appendChild(save);
+    card.appendChild(actions);
+
+    card.addEventListener("submit", function (event) {
+      event.preventDefault();
+      save.disabled = true;
+      var payload = collectFields(card, fields);
+      // 0 表示「不绑定」，data_json 里存 0 和缺字段等价，但存 null 会让 Number.isInteger 判假
+      Object.keys(payload).forEach(function (name) { if (payload[name] === null) payload[name] = 0; });
+      api("PUT", "/api/v1/agent/devices/" + row.id, payload)
+        .then(function () {
+          overlay.remove();
+          loadTab("device");
+        })
+        .catch(function (err) {
+          error.hidden = false;
+          error.textContent = err.message;
+          save.disabled = false;
+        });
+    });
+
+    overlay.appendChild(card);
+    overlay.addEventListener("click", function (event) {
+      if (event.target === overlay) overlay.remove();
+    });
+    node.appendChild(overlay);
+    var firstInput = card.querySelector("select,input");
+    if (firstInput) firstInput.focus();
+  }
+
   function fieldsOf(key, draft) {
     if (key === "vertical") {
       return [
@@ -447,9 +548,11 @@
         { value: "vertical", label: "品类" },
         { value: "city", label: "城市" },
         { value: "employer", label: "招工方" },
+        { value: "position", label: "岗位（同厂不同工种工价不同时用）" },
       ] },
       { name: "scope_location_id", label: "作用城市（city 级必填）", type: "select", source: "locations", allowEmpty: "（不限）" },
       { name: "scope_employer_id", label: "作用招工方（employer 级必填）", type: "select", source: "employers", allowEmpty: "（不限）" },
+      { name: "scope_position_id", label: "作用岗位 id（position 级必填）", type: "number" },
       { name: "priority", label: "优先级", type: "number" },
     ];
   }
@@ -497,8 +600,9 @@
 
     node.name = field.name;
     // 作用域联动：选了 employer 才需要 scope_employer_id，其余显灰提示
-    if (field.name === "scope_employer_id" || field.name === "scope_location_id") {
-      node.dataset.scopeField = field.name === "scope_employer_id" ? "employer" : "city";
+    if (field.name === "scope_employer_id" || field.name === "scope_location_id" || field.name === "scope_position_id") {
+      node.dataset.scopeField = field.name === "scope_employer_id" ? "employer"
+        : field.name === "scope_position_id" ? "position" : "city";
       node.classList.add("is-optional");
     }
     wrap.appendChild(node);

@@ -28,7 +28,11 @@ _cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 # {device_code: (过期时刻 monotonic, factory_name/city)}
 _meta_cache: dict[str, tuple[float, dict[str, str]]] = {}
 
-EMPTY_META: dict[str, str] = {"factory_name": "", "city": ""}
+EMPTY_META: dict[str, Any] = {
+    "factory_name": "", "city": "",
+    "vertical_id": 0, "employer_id": 0, "location_id": 0, "position_id": 0,
+    "vertical_code": "factory",
+}
 
 
 def clear_cache() -> None:
@@ -88,6 +92,10 @@ def _normalize_meta(data: Any) -> dict[str, Any]:
         "city": str(data.get("city") or ""),
         "vertical_id": as_int(data.get("vertical_id")),
         "employer_id": as_int(data.get("employer_id")),
+        "location_id": as_int(data.get("location_id")),
+        "position_id": as_int(data.get("position_id")),
+        # 品类 code：工厂设备查 faq-factory-v1，地铁设备查 faq-subway-v1
+        "vertical_code": str(data.get("vertical_code") or "factory"),
     }
 
 
