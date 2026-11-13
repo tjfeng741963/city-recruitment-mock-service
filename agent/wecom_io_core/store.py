@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from . import crypto
+from .identity import direction_of, resolve_self_id
 from .vendor.key_extract import extract_key as ref_extract_key
 
 BASE = Path(__file__).resolve().parent.parent
@@ -181,6 +182,8 @@ class Store:
         self.data_dir = data_dir or find_data_dir()
         self._keys: dict[str, bytes] | None = None
         self.last_refresh = 0.0
+        # (self_id, 来源)；refresh() 后失效，因为会话表可能变了
+        self._self_id: tuple[str, str] | None = None
 
     # ---------- 解密 ----------
     def _key_cache_path(self):
@@ -272,6 +275,7 @@ class Store:
             except Exception:
                 stats["failed"] += 1
         self.last_refresh = time.time()
+        self._self_id = None   # 会话表可能新增单聊，下次 self_id() 重新投票
         return stats
 
     def _conn(self, name: str) -> sqlite3.Connection | None:
@@ -284,10 +288,36 @@ class Store:
 
     # ---------- 查询 ----------
     def self_id(self) -> str:
+        """自己的会话成员 id。
+
+        过去只取数据目录名（`Documents/WXWork/<vid>/Data` 的 `<vid>`），
+        目录名一变（data_dir 显式配置成副本目录、多账号切换）整批方向就翻。
+        现在再用会话表交叉校验：单聊 `S:<A>_<B>` 里自己必然出现，且在每个单聊里
+        都出现一次，对方只出现一次 → 用出现次数最多者纠正目录名。
+        """
+        return self.self_id_detail()[0]
+
+    def self_id_detail(self) -> tuple[str, str]:
+        """(自己的 id, 判定来源)：data-dir / data-dir+session / session-majority。"""
+        if self._self_id is None:
+            try:
+                dir_id = self.data_dir.parent.name if self.data_dir else ""
+            except Exception:  # noqa: BLE001
+                dir_id = ""
+            self._self_id = resolve_self_id(self._single_chat_ids(), dir_id)
+        return self._self_id
+
+    def _single_chat_ids(self) -> list[str]:
+        con = self._conn("session.db")
+        if not con:
+            return []
         try:
-            return self.data_dir.parent.name
-        except Exception:
-            return ""
+            return [r["id"] or "" for r in con.execute(
+                "select id from conversation_table where id like 'S:%'")]
+        except sqlite3.Error:
+            return []
+        finally:
+            con.close()
 
     def sessions(self, limit: int = 200, with_names: bool = True) -> list[dict]:
         con = self._conn("session.db")
@@ -397,13 +427,15 @@ class Store:
             ctype = r["content_type"]
             text = _pb_text(r["content"]) if ctype in (2, 573) else ""
             sid = str(r["sender_id"])
+            direction = direction_of(sid, me, r["conversation_id"])
             out.append({
                 "id": r["message_id"],
                 "conv_id": r["conversation_id"],
                 "conv_name": name_map.get(r["conversation_id"], "") or r["conversation_id"],
                 "sender_id": sid,
-                "sender": "我" if sid == me else (contacts.get(sid) or "对方"),
-                "is_self": sid == me,
+                "sender": "我" if direction == "outbound" else (contacts.get(sid) or "对方"),
+                "is_self": direction == "outbound",
+                "direction": direction,
                 "time": r["send_time"] or 0,
                 "type": ctype,
                 "text": text,

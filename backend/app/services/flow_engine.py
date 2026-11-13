@@ -265,10 +265,24 @@ def _factory(job: dict[str, str]) -> str:
     return str(job.get("job_title", "")).split(" ")[0]
 
 
+def job_media_markers(job: dict[str, str], city: str) -> list[str]:
+    """该岗位随信息一起发的媒体标记（地铁岗：面试点图 + 工作视频）。
+
+    清单同时喂给模型（它只能引用清单里的名称）和 send_info_parts 兜底，
+    两处必须同源，否则模型会「看见」兜底却发不出的媒体。
+    """
+    factory = str(job.get("factory_name") or "")
+    title = str(job.get("job_title") or "")
+    if ("地铁" in factory or "安检" in title or "地铁" in title) and city:
+        return [f"【图片:{city}面试点】", f"【视频:安检工作】"]
+    return []
+
+
 def send_info_parts(slots: dict[str, Any], when: datetime | None = None) -> list[str]:
     """工作信息多段文本：段1 岗位事实，段2 面试地点+时间窗口，段3 邀约问句。
 
-    这三段必须**由代码拼**，不能交给模型——工价一改就是事故。
+    这是**素材原文**：模型组织话术时照抄它的事实，模型不可用时直接发它。
+    三段永远取自同一条岗位（slots.job_index），保证三段一致。
     """
     job = _job_of(slots)
     if not job:
@@ -290,12 +304,9 @@ def send_info_parts(slots: dict[str, Any], when: datetime | None = None) -> list
     parts = [part1, part2, part3]
     # 地铁岗：附城市面试点图 + 工作实拍视频（2026-11-12 按地铁话术节奏）。
     # 标记名按城市约定（广州面试点/深圳面试点…），客户端 media 缺文件自动跳过
-    _f = str(job.get("factory_name") or "")
-    _t = str(job.get("job_title") or "")
-    if "地铁" in _f or "安检" in _t or "地铁" in _t:
-        city = str(slots.get("city") or "").strip()
-        if city:
-            parts[1] = part2 + f"\n【图片:{city}面试点】【视频:安检工作】"
+    markers = job_media_markers(job, str(slots.get("city") or "").strip())
+    if markers:
+        parts[1] = part2 + "\n" + "".join(markers)
     return parts
 
 

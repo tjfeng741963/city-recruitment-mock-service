@@ -30,20 +30,23 @@ from .services.flow_engine import (
     STAGE_ASK_INTERVIEW,
     STAGE_COLLECT,
     STAGE_SEND_INFO,
-    FlowResult,
     absorb_profile,
     extract_city,
     jobs_for_city,
     set_remote_jobs,
 )
 from .services.job_lookup import lookup_jobs
-from .services.flow_llm import a_step
+from .services.flow_llm import a_step, build_material
 from .services.llm_provider import build_provider
 
 router = APIRouter(prefix="/api/v1/flow", tags=["flow"])
 
 # 只有这两步客户会插问（问体检 / 住宿 / 地点），别的阶段不查库，省一次查询
 _KB_STAGES = {STAGE_ASK_INTERVIEW, STAGE_COLLECT}
+# 纯问候语不查知识库（2026-11-13：客户只发「你好」被回「刚才回复过你」）
+_GREETING_RE = re.compile(
+    r"^(你好|您好|在吗|在么|嗨|哈喽|hi|hello|老板|师傅|帅哥|美女)[!！。~～,，\s]*$", re.I
+)
 
 
 class FlowAnswerIn(BaseModel):
@@ -99,19 +102,14 @@ async def flow_answer(
         "FLOW_PROFILE_DEVICE", profile_push.DEFAULT_DEVICE
     )
 
-    # 知识库只做占位命中（标题关键词包含匹配），没命中交给流程走兜底话术。
+    # 知识库命中只作为**素材**交给模型（标题关键词包含匹配，没命中不给素材）。
     # 城市/工厂线索来自设备绑定（fetch_device_meta 60s 缓存，拉不到回空 = 通配）；
     # 设备没绑城市时退回客户自己说的城市（老行为）。同城 +3、同厂 +5，异城/异厂排除。
-    kb_answer: str | None = None
+    kb_body: str = ""
     kb_entry_id: str | None = None
     kb_markers: list[str] = []
     kb_repeat = False
-    kb_entry_id: str | None = None
-    kb_markers: list[str] = []
-    kb_repeat = False
-    kb_entry_id: str | None = None
-    kb_markers: list[str] = []
-    if stage_before in _KB_STAGES:
+    if stage_before in _KB_STAGES and not _GREETING_RE.match((payload.text or "").strip()):
         try:
             meta = await fetch_device_meta(device_code)
         except Exception:  # noqa: BLE001  meta 拉不到按通配，流程不中断
@@ -132,70 +130,89 @@ async def flow_answer(
             kb_hit = None
         if kb_hit:
             kb_entry_id = kb_hit["id"]
-            kb_markers = re.findall(r"【(?:图片|视频):[^】]+】", kb_hit["body"])
-            already_sent = any(
+            kb_body = str(kb_hit.get("body") or "")
+            kb_markers = re.findall(r"【(?:图片|视频):[^】]+】", kb_body)
+            kb_repeat = any(
                 e.type == store.EVENT_KB
-                and f'"id": "{kb_entry_id}"' in (e.body or "")
-                or (e.type == store.EVENT_KB and f'"id":"{kb_entry_id}"' in (e.body or ""))
+                and (
+                    f'"id": "{kb_entry_id}"' in (e.body or "")
+                    or f'"id":"{kb_entry_id}"' in (e.body or "")
+                )
                 for e in events
             )
-            kb_repeat = False
-            if already_sent:
-                # 二次命中：不再重发整段（2026-11-12 青冥会话实测重复教训）。
-                # 模型只负责推进状态；最终回复在下方用确定性自然短句覆盖，
-                # 括号提示语这类内部元语言绝不下发给客户（2026-11-12 实测被复读）
-                kb_repeat = True
-                kb_answer = "\n".join(kb_markers) if kb_markers else ""
-            else:
-                kb_answer = kb_hit["body"]
 
     # 城市线索：先看客户这轮说的，再看已有槽位（别名归一在 4222 侧，这里只透传）
     city_hint = extract_city(payload.text) or str(slots.get("city") or "")
+    # 只在「问城市/发信息」阶段接受客户改城市；邀约/登记阶段客户顺口提个地名
+    # 不能把已发的岗位换掉（否则素材和客户看到的岗位会对不上）
+    if city_hint and (
+        stage_before in (STAGE_ASK_CITY, STAGE_SEND_INFO) or not slots.get("city")
+    ):
+        slots["city"] = city_hint
+        slots.setdefault("job_index", 0)
+    city_for_jobs = str(slots.get("city") or city_hint)
 
     # ① 按城市查真实岗位（60s 缓存，失败返回 []）并注入引擎：
-    #    本轮所有取岗位的地方（发信息/模型简报/工价护栏/档案推送）统一走
-    #    jobs_for_city：只认远端数据。无城市线索时清空注入；
-    #    城市查不到岗位时引擎走「已记下，帮你问问」话术并记未知问题。
-    if city_hint:
+    #    本轮所有取岗位的地方（素材包/护栏/档案推送）统一走 jobs_for_city。
+    #    城市查不到岗位时素材里明说「没有」，不编岗位。
+    if city_for_jobs:
         try:
-            remote_jobs = await lookup_jobs(city_hint)
+            remote_jobs = await lookup_jobs(city_for_jobs)
         except Exception:  # noqa: BLE001
             remote_jobs = []
-        set_remote_jobs({city_hint: remote_jobs})
+        set_remote_jobs({city_for_jobs: remote_jobs})
     else:
         set_remote_jobs({})
 
-    # ② 按设备拉 config 话术：send_info 轮命中就整段直发，不过模型（防改数字）
-    script: dict[str, Any] | None = None
-    if city_hint:
-        try:
-            script = pick_script(await fetch_scripts(device_code), STAGE_SEND_INFO, city_hint)
-        except Exception:  # noqa: BLE001  config 拉不到就走原逻辑
-            script = None
-
-    will_send_info = (
-        bool(city_hint)
-        and stage_before in (STAGE_ASK_CITY, STAGE_SEND_INFO)
-        and not slots.get("interview_offer_sent")
+    # 顺手把客户自报的姓名/手机/省区记下来（模型漏抽时档案也不丢）
+    absorb_profile(
+        slots, payload.text, strict_name=stage_before == STAGE_COLLECT
     )
 
-    if script and will_send_info and str(script.get("content") or "").strip():
-        # 全部交给智能体编排（2026-11-12 用户指令）：运营话术不再是整段直发，
-        # 而是作为素材交给模型组织（工价护栏保护数字）；话术里的媒体标记
-        # 【图片/视频:x】也由模型取舍。档案抽取照常做。
-        slots["city"] = city_hint
-        slots.setdefault("job_index", 0)
-        absorb_profile(slots, payload.text)
-        job = (jobs_for_city(city_hint) or [{}])[0]
-        script_material = render_script(str(script.get("content") or ""), job)
-        material = script_material if not kb_answer else kb_answer + "\n" + script_material
-        result = await a_step(state, payload.text, build_provider(), kb_answer=material)
-        # 语义保持：这轮按「已发岗位+邀约」推进，下一站 ask_interview
-        result.stage = STAGE_ASK_INTERVIEW
-        result.slots["interview_offer_sent"] = True
-    else:
-        # ③ 主路径交给模型；没配模型或调用失败时，a_step 内部退到确定性状态机
-        result = await a_step(state, payload.text, build_provider(), kb_answer=kb_answer)
+    # ② 运营话术只作为素材（不再是「命中就整段直发」的分支）。
+    #    只在还没看过岗位信息的轮次注入，避免邀约/登记阶段把介绍话术再抛一遍。
+    script_material = ""
+    if city_for_jobs and not slots.get("interview_offer_sent"):
+        try:
+            script = pick_script(
+                await fetch_scripts(device_code), STAGE_SEND_INFO, city_for_jobs
+            )
+        except Exception:  # noqa: BLE001  config 拉不到就没这段素材
+            script = None
+        if script and str(script.get("content") or "").strip():
+            job = (jobs_for_city(city_for_jobs) or [{}])[0]
+            script_material = render_script(str(script.get("content") or ""), job)
+
+    # ③ 已发摘要：让模型知道什么说过了，别重复倾倒
+    sent_bits: list[str] = []
+    if slots.get("interview_offer_sent"):
+        sent_bits.append("该城市主推岗位的岗位信息已经发过（客户看过工价/地点），不要再整段重发")
+    kb_sent = sum(1 for e in events if e.type == store.EVENT_KB)
+    if kb_sent:
+        sent_bits.append(f"知识库答复已发过 {kb_sent} 条")
+    if slots.get("booked"):
+        sent_bits.append("面试已经约好")
+    sent_summary = "；".join(sent_bits)
+
+    # ④ 单一决策点：这一轮的回复全部由模型决定，代码只给素材 + 事实护栏。
+    #    模型没配/超时/返回乱码时才在 a_step 内部退到确定性状态机。
+    material = build_material(
+        state,
+        payload.text,
+        kb_body=kb_body,
+        kb_repeat=kb_repeat,
+        script=script_material,
+        sent_summary=sent_summary,
+    )
+    # 没模型时不能用整段 KB 原文重发已答过的问题：兜底只给媒体标记
+    fallback_kb = kb_body if (kb_body and not kb_repeat) else "\n".join(kb_markers)
+    result = await a_step(
+        state,
+        payload.text,
+        build_provider(),
+        kb_answer=fallback_kb or None,
+        material=material,
+    )
     # 「沟通中」标记：一进 collect 就给 4222 发一次 stage=collect，让候选人页
     # 先出现「已答应面试，等联系方式」的一条。绕过 has_content 强推一次；
     # 槽位先记下保证整轮只推一次，推送本身尽力而为（失败不回滚不影响回复）。
@@ -218,14 +235,12 @@ async def flow_answer(
     records.extend(profile_records)
     if result.reply:
         # 回声防护：模型把客户原话当回复复读（2026-11-12 实测「能了解一下。广州
-        # 地铁的那个工作吗」被原样发出）→ 丢弃模型输出，回退到知识库正文/通用接话
+        # 地铁的那个工作吗」被原样发出）→ 丢弃模型输出，回退到知识库原文/通用接话
         inbound_text = (payload.text or "").strip()
-        if (
-            len(inbound_text) >= 6
-            and inbound_text in result.reply
-            and not kb_repeat
-        ):
-            fallback = (kb_answer or "").strip() or "我在的，你想了解哪方面？工作内容、工资待遇还是面试时间？"
+        if len(inbound_text) >= 6 and inbound_text in result.reply:
+            fallback = (kb_body if not kb_repeat else "").strip() or (
+                "我在的，你想了解哪方面？工作内容、工资待遇还是面试时间？"
+            )
             result.reply = fallback
             result.parts = [fallback]
         # 媒体兜底：命中的条目带【图片/视频:名称】而模型回复里弄丢了 → 补回，
@@ -234,18 +249,42 @@ async def flow_answer(
             result.reply = result.reply.rstrip() + "\n" + "\n".join(kb_markers)
             if result.parts:
                 result.parts = [p.rstrip() for p in result.parts] + [kb_markers[-1]]
-        # 二次命中：回复覆盖为自然短句（stage/slots 推进保留）。
-        # 括号元语言绝不下发——2026-11-12 被模型复读给客户的教训
-        if kb_repeat and kb_entry_id:
-            if kb_markers:
-                result.reply = "好的，这就再给你发一遍~\n" + "\n".join(kb_markers)
-            else:
-                result.reply = "这个问题刚才已经回复过你啦，有其他想了解的随时问我。"
-            result.parts = [result.reply]
+        # 完整性命中护栏（2026-11-13 用户要求「问完地点就是岗位信息和图片视频」）：
+        # 模型措辞由它决定，但该发卡的一轮必须发全三段（岗位/地点时间/邀约）。
+        # 判断依据：客户提到了城市、模型这轮回复里却没出现该城市岗位的关键事实
+        # （工价或面试地点）→ 用素材原文补全，三段同源自同一条岗位。
+        try:
+            _city = str(result.slots.get("city") or "").strip()
+            if (
+                _city
+                and not result.slots.get("booked")
+                and stage_before == "ask_city"
+                and result.stage in ("send_info", "ask_interview")
+            ):
+                _jobs = jobs_for_city(_city)
+                if _jobs:
+                    _job = _jobs[0]
+                    _wage = str(_job.get("wage_text") or "").strip()
+                    _place = str(_job.get("place") or "").strip()
+                    _has_fact = (
+                        (_wage and _wage in result.reply)
+                        or (_place and _place in result.reply)
+                        or "面试地点" in result.reply
+                    )
+                    if not _has_fact:
+                        from .services.flow_engine import send_info_parts
+
+                        _probe = {"city": _city, "job_index": 0}
+                        _card = send_info_parts(_probe)
+                        if _card:
+                            result.parts = list(_card)
+                            result.reply = "\n".join(_card)
+        except Exception:  # noqa: BLE001  补全失败不影响已生成的回复
+            pass
         # parts 一并落库：回放时能看出「那轮其实发了两条」
         records.append((store.EVENT_REPLY, {"text": result.reply, "parts": result.parts}))
         if kb_entry_id:
-            # 记住这条 KB 已对本会话发过：同条目再命中就走短版+补媒体，不重发整段
+            # 记住这条 KB 已对本会话发过：同条目再命中只提示模型别重发整段
             records.append((store.EVENT_KB, {"id": kb_entry_id}))
     if result.action:
         records.append(

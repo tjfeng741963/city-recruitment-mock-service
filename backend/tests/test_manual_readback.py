@@ -51,6 +51,20 @@ def database(tmp_path, monkeypatch):
 
     store = modules["store"].Store.__new__(modules["store"].Store)
     store.data_dir = tmp_path / "owner" / "Data"
+
+    def _messages(conv_id: str, limit: int = 100):
+        with closing(sqlite3.connect(path)) as con:
+            rows = con.execute(
+                "select message_id, sender_id, content from message_table "
+                "where conversation_id=? order by send_time desc limit ?",
+                (conv_id, limit),
+            ).fetchall()
+        return [{"id": r[0], "sender_id": r[1], "text": r[2]} for r in rows]
+
+    store.messages = _messages
+    # 假库没有真实企微会话表 → 显式给定自账号（与 insert 默认 sender="owner" 对应）
+    store.self_id = lambda: "owner"
+    store.self_id_detail = lambda: ("owner", "fixture")
     store.sessions = MagicMock(return_value=[{"id": COMMAND["contact_id"], "name": COMMAND["nickname"]}])
     store.refresh = MagicMock()
     yield types.SimpleNamespace(store=store, core=modules["send"], insert=insert, path=path)
@@ -73,9 +87,8 @@ def test_rowid_alias_failure_recovers_using_real_store_message_id(database, tmp_
 
     def sender(*args, **kwargs):
         database.insert(102)
-        with pytest.raises(IndexError):
-            database.core._find_new_sent(database.store, COMMAND["content"], {101})
-        return {"ok": True, "conversation_id": "", "detail": "sent but legacy readback failed: IndexError"}
+        # 新回读不再依赖 rowid 别名（走 store.messages），此处不再要求抛 IndexError
+        return {"ok": True, "conversation_id": "", "detail": "ok"}
 
     agent.core_send.send.side_effect = sender
     bridge = FakeBridge(dict(COMMAND))

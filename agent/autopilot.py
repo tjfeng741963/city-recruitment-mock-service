@@ -54,6 +54,7 @@ from wecom_io_core import win  # noqa: E402
 win.set_dpi_aware()
 
 import compat  # noqa: E402
+import echo_guard  # noqa: E402
 import login_watch  # noqa: E402
 import reply_store as rlog  # noqa: E402
 import client as agent_client  # noqa: E402
@@ -145,7 +146,14 @@ _user32 = ctypes.WinDLL("user32", use_last_error=True)
 
 
 def log(msg: str) -> None:
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+    text = f"[{time.strftime('%H:%M:%S')}] {msg}"
+    try:
+        print(text, flush=True)
+    except UnicodeEncodeError:
+        # 模型回复带 emoji 时 GBK 控制台写不进去——2026-11-13 实测整个 drain
+        # 循环被日志异常打断，机器静默半天。降级输出，日志绝不能中断业务
+        enc = sys.stdout.encoding or "gbk"
+        print(text.encode(enc, "replace").decode(enc, "replace"), flush=True)
 
 
 def wal_signature(data_dir: Path) -> tuple:
@@ -430,6 +438,17 @@ class Reporter:
         fresh = fresh[:REPORT_MAX_MESSAGES]
 
         convs: dict[str, dict] = {}
+        inbound_pool: list[dict] = []
+        for m in rows:
+            if m.get("is_self") or not (m.get("text") or "").strip():
+                continue
+            inbound_pool.append({
+                "external_conversation_id": m.get("conv_id") or "",
+                "external_msgid": str(m.get("id") or ""),
+                "direction": "inbound",
+                "content": m.get("text") or "",
+                "sent_at": _to_ts(m.get("time")),
+            })
         for m in fresh:
             cid = m["conv_id"]
             ts = _to_ts(m.get("time"))
@@ -447,14 +466,39 @@ class Reporter:
                 {
                     "external_conversation_id": cid,
                     "external_msgid": str(m.get("id") or ""),
-                    "direction": "outbound" if m.get("is_self") else "inbound",
+                    "direction": m.get("direction") or ("outbound" if m.get("is_self") else "inbound"),
                     "content": (m.get("text") or "")[:20000],
                     "content_type": "text" if m.get("is_text") else f"type{m.get('type') or 0}",
                     "sent_at": _iso(ts),
                 }
             )
+        # 防御层：方向判错时客户原话会以 outbound 上报（历史 bug），这里按内容兜一层。
+        kept, echoes = echo_guard.filter_echo_messages(batch["messages"], pool=inbound_pool)
+        if echoes:
+            self._drop_echoes(echoes)
+            batch["messages"] = kept
         batch["conversations"] = list(convs.values())
         return batch
+
+    def _drop_echoes(self, echoes: list[tuple[dict, dict, float]]) -> None:
+        """丢弃回声并把游标推过去，避免同一条消息每轮被反复挑出来刷日志。"""
+        with self._lock:
+            for item, matched, score in echoes:
+                try:
+                    mid = int(item.get("external_msgid") or 0)
+                except (TypeError, ValueError):
+                    mid = 0
+                cid = item.get("external_conversation_id") or ""
+                if mid > self._cursor.get(cid, 0):
+                    self._cursor[cid] = mid
+        for item, matched, score in echoes:
+            log(
+                f"[回声] 疑似方向错乱已纠正 msgid={item.get('external_msgid')} "
+                f"文本={(item.get('content') or '')[:20]!r} "
+                f"会话={item.get('external_conversation_id')} "
+                f"命中 inbound msgid={matched.get('external_msgid')} 相似度={score:.0%}（已丢弃 outbound）"
+            )
+        self._save()
 
     # ---------- 发送（后台线程） ----------
     def _run(self, heartbeat: dict, batch: dict) -> None:
@@ -552,12 +596,19 @@ class Reporter:
             event_id = f"{cid}:{msg_id}"
             key = json.dumps([*destination, event_id], ensure_ascii=False)
             with self._lock:
-                self._bridge_pending.setdefault(key, {
-                    "destination": destination,
-                    "direction": direction,
-                    "event": {"event_id": event_id, "contact_id": cid, "content": text, "nickname": name,
-                              "sent_at": m.get("sent_at") or ""},
-                })
+                staged = self._bridge_pending.get(key)
+                if staged is not None and staged.get("direction") != direction:
+                    # 同一条消息只有一个真实方向；队列里留着旧方向就会在原时间点
+                    # 多出一条反向气泡（4222 的唯一索引是 source_event_id+direction）
+                    log(f"[桥接] {event_id} 方向 {staged.get('direction')}→{direction}，以本次为准")
+                    staged = None
+                if staged is None:
+                    self._bridge_pending[key] = {
+                        "destination": destination,
+                        "direction": direction,
+                        "event": {"event_id": event_id, "contact_id": cid, "content": text, "nickname": name,
+                                  "sent_at": m.get("sent_at") or ""},
+                    }
         return self._save() if self._bridge_pending else True
 
     def _send_bridge_messages(self) -> None:
@@ -1439,6 +1490,10 @@ def acquire_single_instance() -> bool:
 
 
 def main() -> int:
+    try:  # 日志/控制台 GBK 容错：emoji 一律 replace，绝不因日志崩业务
+        sys.stdout.reconfigure(errors="replace")
+    except Exception:  # noqa: BLE001
+        pass
     ap = argparse.ArgumentParser(description="企业微信自动回复（队列 + 回复历史）")
     ap.add_argument("--target", default=argparse.SUPPRESS, help="all 或某个会话名")
     ap.add_argument("--data-dir", default=argparse.SUPPRESS, help="企微 Data 目录绝对路径，覆盖 config.json")
@@ -1532,6 +1587,14 @@ def main() -> int:
         f"冷却 {cfg['cooldown']}s" + (" / DRY-RUN" if cfg["dry_run"] else ""))
 
     store.refresh()
+    self_id, self_id_source = "", "未知"
+    try:
+        _detail = store.self_id_detail()
+        if isinstance(_detail, (tuple, list)) and len(_detail) == 2:
+            self_id, self_id_source = str(_detail[0] or ""), str(_detail[1] or "未知")
+    except Exception:  # noqa: BLE001  stub/旧版没有该方法：方向判定退化为默认
+        pass
+    log(f"[方向] 自己={self_id or '(未知)'}（依据 {self_id_source}），方向按 message_table.sender_id 判定")
 
     if args.reset:
         n = 0

@@ -36,10 +36,20 @@ DONGGUAN = {
     "place": "长安镇乌沙社区",
 }
 
+GUANGZHOU_2 = {
+    "factory_name": "白云物流园",
+    "job_title": "白云物流园 分拣员",
+    "wage_text": "22 元/小时",
+    "hours_text": "长白班，月休 4 天",
+    "age_text": "18-40 岁",
+    "welfare_text": "包吃",
+    "place": "白云区太和镇物流大道 9 号",
+}
+
 JOBS_BY_CITY: dict[str, list[dict[str, str]]] = {
-    "广州": [GUANGZHOU],
+    "广州": [GUANGZHOU, GUANGZHOU_2],
     "深圳": [SHENZHEN],
     "东莞": [DONGGUAN],
 }
 
-__all__ = ["GUANGZHOU", "SHENZHEN", "DONGGUAN", "JOBS_BY_CITY"]
+__all__ = ["GUANGZHOU", "GUANGZHOU_2", "SHENZHEN", "DONGGUAN", "JOBS_BY_CITY"]
