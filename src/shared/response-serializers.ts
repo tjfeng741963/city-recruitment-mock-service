@@ -230,9 +230,13 @@ export function serializeEvaluationOverview(value: unknown): Row {
 
 export function serializeMetrics(value: unknown): Row {
   const source = value && typeof value === "object" ? value as Row : {};
+  const totals = source.totals && typeof source.totals === "object" ? source.totals as Row : {};
   return {
     start_date: String(source.start_date ?? ""),
     end_date: String(source.end_date ?? ""),
+    device_code: String(source.device_code ?? ""),
+    // 「今日原始指标」那一排卡片读的是 totals
+    totals,
     items: Array.isArray(source.items) ? source.items : [],
   };
 }

@@ -280,12 +280,17 @@
   }
 
   // ── 隐藏侧栏入口 + 重定向 ──
+  // 侧栏要收掉的重复入口：
+  //   厂区管理   → 已并进城市页（每行的「厂区 N」抽屉）
+  //   郎职师运营 → 与「设备报表」里的运营汇总同一份数据，只是按账号拆开
+  const HIDDEN_MENU_LABELS = ["厂区管理", "郎职师运营"];
+
   function hideMenu() {
     // 用 CSS 隐藏而不是 remove()：这个节点归 Vue 管理，
     // 直接删掉它的 DOM 会让下一次 patch 找不到节点而报错。
     for (const item of document.querySelectorAll(".sidebar-menu .el-menu-item")) {
       const text = item.querySelector(":scope > span")?.textContent.trim();
-      if (text !== "厂区管理") continue;
+      if (!text || !HIDDEN_MENU_LABELS.includes(text)) continue;
       if (item.dataset.rkHidden === "1") continue;
       item.dataset.rkHidden = "1";
       item.style.display = "none";
