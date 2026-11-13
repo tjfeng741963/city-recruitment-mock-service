@@ -35,6 +35,7 @@ from .services.flow_engine import (
     absorb_profile,
     extract_city,
     jobs_for_city,
+    send_info_parts,
     set_remote_jobs,
 )
 from .services.job_lookup import lookup_jobs, vertical_hint_of
@@ -63,6 +64,22 @@ class FlowAnswerOut(BaseModel):
     action: str | None
     slots: dict[str, Any]
     profile: dict[str, Any] = Field(default_factory=dict)
+
+
+class GreetIn(BaseModel):
+    """新好友首句：不问方向，按设备绑定的板块直接发岗位卡（11-13 与 HR 对齐）。"""
+
+    session_key: str = Field(min_length=1, max_length=64)
+    device_code: str = Field(default="", max_length=64)
+
+
+class GreetOut(BaseModel):
+    reply: str
+    parts: list[str] = Field(default_factory=list)
+    attachments: list[Any] = Field(default_factory=list)
+    stage: str
+    skipped: bool = False
+    detail: str = ""
 
 
 class FlowStateOut(BaseModel):
@@ -340,6 +357,97 @@ async def flow_answer(
         action=result.action,
         slots=result.slots,
         profile=profile,
+    )
+
+
+@router.post("/greet", response_model=GreetOut)
+async def flow_greet(
+    payload: GreetIn, session: SessionDep, _: ServiceOrUser
+) -> GreetOut:
+    """新好友首句：直接发岗位卡，不先问「你想找怎样的工作」。
+
+    业务前提（11-13 HR 对齐）：一个微信号只做一个板块，品类是账号层面定死的。
+    所以进来的人不需要先被问方向——直接把该板块的岗位甩过去。
+
+    两种情况不发卡，只发问句：
+      * 设备没绑板块（老数据 / 运营没配）→ 无法判断发哪套卡
+      * 地铁号没绑城市 → 不知道发哪个城市的安检岗，得先问城市
+    这两种都 `skipped=True` 并给出 detail，客户端据此决定要不要发问句。
+    """
+    device_code = payload.device_code or os.getenv(
+        "FLOW_PROFILE_DEVICE", profile_push.DEFAULT_DEVICE
+    )
+    try:
+        meta = await fetch_device_meta(device_code)
+    except Exception:  # noqa: BLE001  meta 拉不到就当没绑，不发卡
+        meta = dict(device_scripts.EMPTY_META)
+
+    vertical_code = str(meta.get("vertical_code") or "").strip()
+    city = str(meta.get("city") or "").strip()
+    factory_name = str(meta.get("factory_name") or "").strip()
+    vertical_id = int(meta.get("vertical_id") or 0)
+
+    # 没绑板块：不知道该发哪套卡。不做「按城市兜底」——那等于自己猜品类，
+    # 而业务上不存在综合号（一个微信号只做一个板块）。交回上层发问句。
+    if not vertical_code:
+        return GreetOut(
+            reply="",
+            stage=STAGE_ASK_CITY,
+            skipped=True,
+            detail="设备未绑定板块",
+        )
+
+    # 地铁号没绑城市：先问城市（这一步沿用现有话术，不问方向）
+    if vertical_code == "subway" and not city:
+        return GreetOut(
+            reply="",
+            stage=STAGE_ASK_CITY,
+            skipped=True,
+            detail="地铁号未绑定城市，先问城市",
+        )
+
+    # 拉该板块的岗位：有城市按城市查，没绑城市就把整个板块的在招岗位拉回来
+    try:
+        jobs = await lookup_jobs(city, device_scope="subway" if vertical_code == "subway" else "all")
+    except Exception:  # noqa: BLE001
+        jobs = []
+    # 设备绑了具体工厂就只留这家；没绑就用板块全量
+    if factory_name:
+        scoped = [j for j in jobs if str(j.get("factory_name") or "") == factory_name]
+        if scoped:
+            jobs = scoped
+
+    if not jobs:
+        # 板块没岗位数据时不瞎编，交回上层走「帮你问问」
+        return GreetOut(
+            reply="",
+            stage=STAGE_ASK_CITY,
+            skipped=True,
+            detail=f"板块 {vertical_code or '(未绑定)'} 没有在招岗位",
+        )
+
+    set_remote_jobs({city: jobs})
+
+    # 用与 send_info 完全相同的那套渲染：工价/年龄/地点全部来自岗位数据，
+    # 不走模型——首句尤其不能错，客户第一眼看到的就是它。
+    slots = {"city": city, "job_index": 0, "vertical_id": vertical_id}
+    parts = send_info_parts(slots)
+
+    records: list[tuple[str, dict[str, Any]]] = [
+        (store.EVENT_STAGE, {"to": STAGE_SEND_INFO}),
+        (store.EVENT_SLOT, {"key": "city", "value": city}),
+        (store.EVENT_SLOT, {"key": "job_index", "value": 0}),
+    ]
+    if parts:
+        records.append((store.EVENT_REPLY, {"text": "\n".join(parts)}))
+    await store.append_events(session, payload.session_key, records)
+
+    return GreetOut(
+        reply="\n".join(parts),
+        parts=parts,
+        stage=STAGE_SEND_INFO,
+        skipped=False,
+        detail=f"{vertical_code} · {city or '不限城市'} · {len(jobs)} 个岗位",
     )
 
 
