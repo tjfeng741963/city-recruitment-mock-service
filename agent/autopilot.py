@@ -1466,26 +1466,65 @@ def configured_data_dir(cfg: dict) -> Path | None:
 
 # 单实例锁：两个进程同时跑会同时抢前台、同时发消息，客户收到重复回复。
 # 2026-11-07 实测出现过。用命名互斥体，进程退出时由系统释放。
+#
+# 2026-11-14 修正：原来只在 --watch 时加锁，但不带 --watch 的默认模式同样会
+# 调 drain() + pump_safely() 真正发消息，所以「开着一个常驻 + 误点一次快捷方式」
+# 就会出现两个进程同时回。现在改成「只要会发消息就必须过这把锁」，
+# 只排除 --list / --reset 这类完全不碰键鼠的一次性命令。
 MUTEX_NAME = "Global\\CityRecruitAutopilot"
 _mutex_handle = None
+_mutex_owner_pid = 0
 
 
 def acquire_single_instance() -> bool:
-    """拿到进程锁返回 True；已有实例在跑返回 False。"""
-    global _mutex_handle
+    """拿到进程锁返回 True；已有实例在跑返回 False。
+
+    注意失败关闭：拿不到句柄时返回 False（拒绝启动），而不是放行。
+    放行等于在系统异常时允许双开，而双开的代价是客户收到重复回复。
+
+    同一进程内重复调用直接返回 True。命名互斥体归「进程」所有，而模块可能被
+    重新加载（测试用 load_autopilot 反复 import、将来做重启逻辑也一样）：
+    重载会把模块级全局变量清空，但内核里的互斥体还握在本进程手上。所以归属
+    记录挂在 sys 上（进程内单例，不随模块重载丢失），而不是只放模块全局。
+    """
+    global _mutex_handle, _mutex_owner_pid
+    pid = os.getpid()
+    claim_key = f"_cityrecruit_mutex_owner::{MUTEX_NAME}"
+    if getattr(sys, claim_key, 0) == pid:
+        return True
+    if _mutex_handle and _mutex_owner_pid == pid:
+        return True
     try:
         kernel32 = ctypes.windll.kernel32
         ERROR_ALREADY_EXISTS = 183
         handle = kernel32.CreateMutexW(None, True, MUTEX_NAME)
         if not handle:
-            return True  # 拿不到锁就别拦住用户，当作可以启动
+            return False
         if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
             kernel32.CloseHandle(handle)
             return False
         _mutex_handle = handle
+        _mutex_owner_pid = pid
+        setattr(sys, claim_key, pid)
         return True
     except Exception:  # noqa: BLE001
-        return True
+        # 互斥体本身建不出来（极端环境）：宁可拦住，也不要冒双开的风险
+        return False
+
+
+def release_single_instance() -> None:
+    """释放进程锁（进程退出时系统也会释放，这里用于同进程内的显式收尾）。"""
+    global _mutex_handle, _mutex_owner_pid
+    if _mutex_handle:
+        try:
+            ctypes.windll.kernel32.CloseHandle(_mutex_handle)
+        except Exception:  # noqa: BLE001
+            pass
+    _mutex_handle = None
+    _mutex_owner_pid = 0
+    claim_key = f"_cityrecruit_mutex_owner::{MUTEX_NAME}"
+    if hasattr(sys, claim_key):
+        delattr(sys, claim_key)
 
 
 def main() -> int:
@@ -1507,8 +1546,13 @@ def main() -> int:
     ap.add_argument("--device-code", default=argparse.SUPPRESS, help="设备编号，覆盖 config.json（心跳路径参数）")
     args = ap.parse_args()
 
-    # 常驻模式才需要单实例锁；--list / --reset / --once 这类一次性命令允许并行。
-    if args.watch and not acquire_single_instance():
+    # 单实例：只要这次运行会碰企微（发消息 / 抢前台），就必须过同一把锁。
+    # 这些命令不发送、不按键鼠，允许并行：
+    #   --list / --reset            纯本地读/改回复历史
+    #   --retry-held                只把暂停记录重新入队，不发送
+    #   --flush-receipts            只补传人工回执，不操作企微
+    local_only = args.list or args.reset or args.retry_held or args.flush_receipts
+    if not local_only and not acquire_single_instance():
         log("已有客户端实例在运行，本进程退出（避免两个进程同时发消息）")
         return 0
 
