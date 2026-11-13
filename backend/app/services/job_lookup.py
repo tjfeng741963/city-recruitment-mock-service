@@ -41,13 +41,23 @@ async def _fetch_items(city: str, token: str, url: str) -> list[dict[str, Any]]:
     return [item for item in items if isinstance(item, dict)]
 
 
-async def lookup_jobs(city: str) -> list[dict[str, Any]]:
-    """按城市查岗位。任何失败都返回 []，由上层走「已记下，帮你问问」话术。"""
+async def lookup_jobs(city: str, only_subway: bool | None = None) -> list[dict[str, Any]]:
+    """按城市查岗位。任何失败都返回 []，由上层走「已记下，帮你问问」话术。
+
+    only_subway：是否只推地铁/安检岗。None 表示按环境变量 FLOW_ONLY_SUBWAY
+    的默认走（老调用方与测试不受影响）；网页可以按设备下发 job_scope 覆盖。
+    """
     city = str(city or "").strip()
     if not city:
         return []
+    subway_only = (
+        os.getenv("FLOW_ONLY_SUBWAY", "1").strip() == "1"
+        if only_subway is None else bool(only_subway)
+    )
     now = time.monotonic()
-    cached = _cache.get(city)
+    # 缓存键必须带开关：同一城市在两种口径下结果不同，混用会把工厂岗漏发给地铁号
+    cache_key = f"{city}|{int(subway_only)}"
+    cached = _cache.get(cache_key)
     if cached and now < cached[0]:
         return cached[1]
     token = os.getenv("FLOW_PROFILE_TOKEN", "").strip()
@@ -68,20 +78,10 @@ async def lookup_jobs(city: str) -> list[dict[str, Any]]:
         str(j.get(k) or "").strip() for k in ("wage_text", "hours_text", "welfare_text")
     )]
     # 阶段性主推开关（2026-11-12 运营指令「暂时按地铁的来」）：
-    # FLOW_ONLY_SUBWAY=1（默认）只推地铁/安检岗，工厂岗暂时下架；
-    # 过滤后为空则回退全量（防呆：关键词漏配时不至于无岗可推）。
-    if os.getenv("FLOW_ONLY_SUBWAY", "1").strip() == "1":
-        subway = [
-            j for j in filled
-            if any(k in (str(j.get("factory_name") or "") + str(j.get("job_title") or ""))
-                   for k in ("地铁", "安检"))
-        ]
-        if subway:
-            filled = subway
-    # 阶段性主推开关（2026-11-12 运营指令「暂时按地铁的来」）：
-    # FLOW_ONLY_SUBWAY=1（默认）只推地铁/安检岗，工厂岗暂时下架；
-    # 过滤后为空则回退全量（防呆：关键词漏配时不至于无岗可推）。
-    if os.getenv("FLOW_ONLY_SUBWAY", "1").strip() == "1":
+    # 只推地铁/安检岗时工厂岗暂时下架；过滤后为空则回退全量
+    # （防呆：关键词漏配时不至于无岗可推）。开关来源见 subway_only：
+    # 显式参数（网页按设备下发）优先，没给才看环境变量。
+    if subway_only:
         subway = [
             j for j in filled
             if any(k in (str(j.get("factory_name") or "") + str(j.get("job_title") or ""))
@@ -94,7 +94,7 @@ async def lookup_jobs(city: str) -> list[dict[str, Any]]:
     else:
         # 远端全是空壳岗位 → 返回空，上层走「帮你问问」话术
         items = []
-    _cache[city] = (time.monotonic() + CACHE_TTL, items)
+    _cache[cache_key] = (time.monotonic() + CACHE_TTL, items)
     return items
 
 

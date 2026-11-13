@@ -25,10 +25,10 @@ CACHE_TTL = 60.0
 
 # {device_code: (过期时刻 monotonic, scripts)}
 _cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
-# {device_code: (过期时刻 monotonic, factory_name/city)}
+# {device_code: (过期时刻 monotonic, factory_name/city/job_scope)}
 _meta_cache: dict[str, tuple[float, dict[str, str]]] = {}
 
-EMPTY_META: dict[str, str] = {"factory_name": "", "city": ""}
+EMPTY_META: dict[str, str] = {"factory_name": "", "city": "", "job_scope": ""}
 
 
 def clear_cache() -> None:
@@ -71,12 +71,18 @@ async def fetch_scripts(device_code: str) -> list[dict[str, Any]]:
 
 
 def _normalize_meta(data: Any) -> dict[str, str]:
-    """config 响应 → 只留 factory_name/city 两个键，缺失/类型不对回空串。"""
+    """config 响应 → 只留 factory_name/city/job_scope，缺失/类型不对回空串。
+
+    job_scope 只有 subway/all 两个有效值（空串 = 跟随环境变量默认），
+    脏值一律当空，避免一个错字把工厂岗全下架或全放出来。
+    """
     if not isinstance(data, dict):
         return dict(EMPTY_META)
+    scope = str(data.get("job_scope") or "").strip().lower()
     return {
         "factory_name": str(data.get("factory_name") or ""),
         "city": str(data.get("city") or ""),
+        "job_scope": scope if scope in ("subway", "all") else "",
     }
 
 

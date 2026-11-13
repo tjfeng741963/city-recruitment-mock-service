@@ -111,11 +111,15 @@ async def flow_answer(
     kb_repeat = False
     kb_entry_id: str | None = None
     kb_markers: list[str] = []
+    # 设备元信息（60s 缓存，拉不到回空 = 通配/不限，流程不中断）：
+    #   factory_name/city → 知识库同城同厂加权
+    #   job_scope → 岗位口径（subway 只推地铁/安检，all 不过滤，空串跟随环境变量）
+    # 之前只在知识库阶段拉，现在岗位口径也要用，提到外面统一拉一次。
+    try:
+        meta = await fetch_device_meta(device_code)
+    except Exception:  # noqa: BLE001  meta 拉不到按通配，流程不中断
+        meta = {"factory_name": "", "city": "", "job_scope": ""}
     if stage_before in _KB_STAGES:
-        try:
-            meta = await fetch_device_meta(device_code)
-        except Exception:  # noqa: BLE001  meta 拉不到按通配，流程不中断
-            meta = {"factory_name": "", "city": ""}
         try:
             city_hint_for_kb = (
                 str(meta.get("city") or "")
@@ -158,7 +162,11 @@ async def flow_answer(
     #    城市查不到岗位时引擎走「已记下，帮你问问」话术并记未知问题。
     if city_hint:
         try:
-            remote_jobs = await lookup_jobs(city_hint)
+            # job_scope 由网页按设备下发：subway 只推地铁/安检，all 不过滤；
+            # 空串 = 不传，交给 lookup_jobs 按环境变量默认（向后兼容）。
+            scope = str(meta.get("job_scope") or "")
+            only_subway = True if scope == "subway" else False if scope == "all" else None
+            remote_jobs = await lookup_jobs(city_hint, only_subway=only_subway)
         except Exception:  # noqa: BLE001
             remote_jobs = []
         set_remote_jobs({city_hint: remote_jobs})

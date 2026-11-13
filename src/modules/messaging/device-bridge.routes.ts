@@ -25,6 +25,10 @@ const DEVICE_CODE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 // 只在 data_json.brain_mode 命中枚举时下发，避免脏值覆盖客户端本地配置。
 const BRAIN_MODES = new Set(["kb", "flow", "fixed"]);
 
+// 岗位口径：subway 只推地铁/安检岗（2026-11-12 运营「暂时按地铁的来」），
+// all 不过滤。只在枚举内时下发，脏值不下发 → 客户端用空串跟随本地默认。
+const JOB_SCOPES = new Set(["subway", "all"]);
+
 function matchesRegisterKey(supplied: string, expected: string): boolean {
   const a = Buffer.from(supplied, "utf8");
   const b = Buffer.from(expected, "utf8");
@@ -126,6 +130,10 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
       // 8090 拿去做知识库过滤，data_json 没绑就回空串 = 通用/不限。
       factory_name: typeof params.factory_name === "string" ? params.factory_name : "",
       city: typeof params.city === "string" ? params.city : "",
+      // 岗位口径（2026-11-13）：subway = 只推地铁/安检岗，all = 不过滤，
+      // 空串 = 跟随 8090 的环境变量默认（FLOW_ONLY_SUBWAY，当前默认 1）。
+      // 放 data_json 里让运营在网页改，不必登服务器改环境变量重启。
+      ...(JOB_SCOPES.has(String(params.job_scope)) ? { job_scope: String(params.job_scope) } : {}),
       scripts,
     };
   });
