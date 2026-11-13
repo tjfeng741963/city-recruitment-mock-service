@@ -25,6 +25,7 @@ import { registerStreamRoutes } from "./modules/agent/stream.routes.js";
 import { registerProfileRoutes } from "./modules/agent/profile.routes.js";
 import { registerJobRoutes } from "./modules/agent/profile.routes.js";
 import { registerUnknownQuestionRoutes } from "./modules/agent/unknown-questions.routes.js";
+import { registerKbV3Routes } from "./modules/agent/kb-v3.routes.js";
 import { registerFollowupRoutes } from "./modules/agent/followup.js";
 import { EventBus, createStreamNotifier } from "./modules/messaging/stream-events.js";
 import { registerWeComRoutes } from "./modules/wecom/wecom.routes.js";
@@ -133,6 +134,8 @@ export function buildServer() {
   registerProfileRoutes(app, db);
   registerJobRoutes(app, db);
   registerUnknownQuestionRoutes(app, db);
+  // 知识库 v3 配置接口：品类 / 位置树 / 招工方 / 场景问答 / 模板包
+  registerKbV3Routes(app, db);
   registerFollowupRoutes(app, db);
   registerWeComRoutes(app, db);
   registerActivationRoutes(app, db);
