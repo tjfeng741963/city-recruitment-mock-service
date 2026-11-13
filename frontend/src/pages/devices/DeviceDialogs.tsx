@@ -88,9 +88,14 @@ export function LocationDialog({ device, onClose, onSaved }: { device: DeviceDet
   // 所以这里是必选——没有「综合号」，HR 明确说过大方向是定死的。
   useEffect(() => {
     let alive = true;
-    adminApi
+    devicesApi
       .verticals()
-      .then((res) => { if (alive) setVerticals((res.items ?? []).map((v) => ({ id: Number(v.id), code: String(v.code), name: String(v.name) }))); })
+      .then((res) => {
+        if (!alive) return;
+        setVerticals(
+          (res.items ?? []).map((v) => ({ id: Number(v.id), code: String(v.code), name: String(v.name) })),
+        );
+      })
       .catch(() => { /* 拉不到列表时不阻塞，运营仍可保存其它字段 */ });
     return () => { alive = false; };
   }, []);
