@@ -27,6 +27,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from .flow_graph import entry_node, node_body, pick_next
+
 # 固定 UTC+8：Windows 上常常没有 tzdata，依赖 zoneinfo 会在测试环境直接炸
 TZ = timezone(timedelta(hours=8), "CST")
 
@@ -124,6 +126,9 @@ def new_state() -> dict[str, Any]:
         "slots": {"city": "", "job_index": 0},
         "turns": 0,
         "profile": {},
+        # 节点化编排：当前所在的节点 key。空串 = 还没进节点图（老会话 / 没配节点），
+        # 此时 step() 继续按 stage 走原有 if/elif 分支，行为与改造前完全一致。
+        "node": "",
     }
 
 
@@ -546,11 +551,16 @@ def step(
     text: str,
     now: datetime | None = None,
     kb_answer: str | None = None,
+    graph: dict[str, Any] | None = None,
 ) -> FlowResult:
     """推进一轮对话。state 会被就地更新，返回值同时带上新 state。
 
     `kb_answer` 是调用方（api_flow）先查知识库拿到的答案：本模块不碰数据库，
     保证纯函数可单测。为 None 表示没命中。
+
+    `graph` 是节点图（flow_graph.load_graph 的返回值）。给了就按节点图的边决定
+    下一步；没给（老调用方 / 测试 / 设备没配节点）就继续走下面写死的 if/elif，
+    行为与改造前完全一致——这是「改造不改变行为」的保证。
     """
     text = (text or "").strip()
     stage = str(state.get("stage") or STAGE_ASK_CITY)
@@ -564,6 +574,18 @@ def step(
 
     if stage == STAGE_DONE:
         return FlowResult(reply="", stage=STAGE_DONE, slots=slots, finished=True)
+
+    # ── 节点化编排 ──────────────────────────────────────────────────────
+    # 有节点图且当前节点能走出去，就按图的边决定下一步；走不出去（没配边、
+    # 或节点图里根本没这个节点）就落到下面的写死分支兜底。
+    #
+    # 为什么放在 done 之后：done 是「结束」语义，节点图里也有 done 节点，
+    # 但「已经结束」的会话不该被任何边重新拉起，这是硬约束。
+    node = str(state.get("node") or "")
+    routed = _route_by_graph(graph, node, text, slots, state)
+    if routed is not None:
+        return routed
+    # ────────────────────────────────────────────────────────────────────
 
     # kb 只是插问的暂存标签，真进来就按"面试邀约"继续
     if stage == STAGE_KB:
@@ -628,6 +650,109 @@ def step(
     # 未知阶段：兜底回到问城市
     state["stage"] = STAGE_ASK_CITY
     return FlowResult(reply=_city_ask(slots), stage=STAGE_ASK_CITY, slots=slots)
+
+
+def _route_by_graph(
+    graph: dict[str, Any] | None,
+    node: str,
+    text: str,
+    slots: dict[str, Any],
+    state: dict[str, Any],
+) -> FlowResult | None:
+    """按节点图的边走一步；走不出去返回 None，由调用方回退到写死分支。
+
+    返回 None 的三种情况（都必须回退，不能卡住流程）：
+      * 没有节点图（老调用方 / 设备没配 / 没跑迁移）
+      * 当前 node 为空且图里没有入口节点
+      * 当前节点没有任何命中的出边
+
+    这一层只决定「去哪个节点 + 说什么」。至于「进去之后要不要真发消息」
+    （比如 send_info 要按城市查岗位），仍交给下面原有的函数：
+    enter_info_result / _agree_interview / _book —— 它们才持有业务规则。
+    """
+    if not graph:
+        return None
+    nodes = graph.get("nodes") or []
+    edges = graph.get("edges") or []
+    if not nodes:
+        return None
+
+    current = node or str(graph.get("entry") or "")
+    if not current:
+        return None
+
+    target = pick_next(edges, current, text, slots)
+    if not target:
+        return None
+
+    # 走边之后的状态：节点变、stage 跟着节点走（stage 仍用于档案推送等旧逻辑）
+    state["node"] = target
+    config_body = node_body(nodes, target)
+
+    # send_info / done 这些节点有硬业务规则（岗位数据、面试时间由代码算），
+    # 不能只照抄配置正文——交给原函数，正文只作为补充。
+    if target == STAGE_SEND_INFO:
+        result = enter_info_result(slots, next_interview(), None)
+        state["stage"] = result.stage
+        if config_body:
+            result.parts = [config_body, *result.parts]
+            result.reply = "\n".join(result.parts)
+        return result
+
+    if target == STAGE_DONE:
+        state["stage"] = STAGE_DONE
+        result = _book(slots, next_interview(), None)
+        state["node"] = STAGE_DONE
+        if config_body:
+            result.parts = [config_body, *result.parts]
+            result.reply = "\n".join(result.parts)
+        return result
+
+    if target == STAGE_COLLECT:
+        state["stage"] = STAGE_COLLECT
+        prompt = _collect_prompt(slots)
+        if not prompt:
+            result = _book(slots, next_interview(), None)
+            state["stage"] = result.stage
+            state["node"] = STAGE_DONE
+            return result
+        reply = config_body or prompt
+        return FlowResult(reply=reply, stage=STAGE_COLLECT, slots=slots)
+
+    if target == STAGE_ASK_INTERVIEW:
+        state["stage"] = STAGE_ASK_INTERVIEW
+        # 同意与否的判断规则在引擎里（拒绝优先），节点正文只替换「怎么问」
+        if is_disagree(text):
+            slots["recruit_status"] = "disqualified"
+            state["stage"] = STAGE_DONE
+            state["node"] = STAGE_DONE
+            return FlowResult(
+                reply=_gave_up_text(),
+                stage=STAGE_DONE,
+                slots=slots,
+                finished=True,
+                action=ACTION_GAVE_UP,
+            )
+        if is_agree(text) and not looks_like_question(text):
+            result = _agree_interview(state, slots, next_interview(), None)
+            state["node"] = STAGE_COLLECT if result.stage == STAGE_COLLECT else result.stage
+            return result
+        reply = config_body or _interview_ask(slots)
+        return FlowResult(reply=reply, stage=STAGE_ASK_INTERVIEW, slots=slots)
+
+    if target == STAGE_ASK_CITY:
+        state["stage"] = STAGE_ASK_CITY
+        city = extract_city(text) or str(slots.get("city") or "")
+        if city:
+            slots["city"] = city
+        reply = config_body or _city_ask(slots)
+        return FlowResult(reply=reply, stage=STAGE_ASK_CITY, slots=slots)
+
+    # 自定义节点（运营自己加的）：只发配置正文，stage 保持不前进
+    if config_body:
+        return FlowResult(reply=config_body, stage=str(state.get("stage") or ""), slots=slots)
+
+    return None
 
 
 def _collect_prompt(slots: dict[str, Any]) -> str:

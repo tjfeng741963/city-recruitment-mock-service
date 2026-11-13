@@ -415,8 +415,13 @@ async def a_step(
     provider: LLMProvider | None,
     now: datetime | None = None,
     kb_answer: str | None = None,
+    graph: dict[str, Any] | None = None,
 ) -> FlowResult:
-    """一个 turn：模型读懂 + 回话；失败就退到确定性状态机。"""
+    """一个 turn：模型读懂 + 回话；失败就退到确定性状态机。
+
+    `graph` 是节点图（flow_graph.load_graph 的返回值）。透传给确定性状态机后，
+    有图时按图的边走；没给则完全走原有分支——改造不改变既有行为。
+    """
     stage = str(state.get("stage") or STAGE_ASK_CITY)
 
     # 已约好（done/booked）不再叫模型：省一次调用，也避免它把状态改回去。
@@ -457,10 +462,10 @@ async def a_step(
     if stage in (STAGE_ASK_INTERVIEW, STAGE_COLLECT) and (
         kb_answer or looks_like_question(text)
     ):
-        return fallback_step(state, text, now=now, kb_answer=kb_answer)
+        return fallback_step(state, text, now=now, kb_answer=kb_answer, graph=graph)
 
     if provider is None:
-        return fallback_step(state, text, now=now, kb_answer=kb_answer)
+        return fallback_step(state, text, now=now, kb_answer=kb_answer, graph=graph)
 
     try:
         raw = await provider.complete(
@@ -468,7 +473,7 @@ async def a_step(
         )
         data = _parse_json(raw)
     except Exception:  # noqa: BLE001  模型超时/返回乱码，不能让客户收不到话
-        return fallback_step(state, text, now=now, kb_answer=kb_answer)
+        return fallback_step(state, text, now=now, kb_answer=kb_answer, graph=graph)
 
     return apply_result(state, data, text, now=now)
 

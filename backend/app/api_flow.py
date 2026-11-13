@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 from .deps import ServiceOrUser, SessionDep
 from .services import flow_session as store
 from .services import kb_faq, kb_placeholder, profile_push, unknown_questions
+from .services import flow_graph
 from .services import device_scripts
 from .services.device_scripts import fetch_device_meta, fetch_scripts, pick_script, render_script
 from .services.flow_engine import (
@@ -91,6 +92,22 @@ class FlowStateOut(BaseModel):
     turns: int
     history: list[dict[str, str]]
     actions: list[dict[str, Any]]
+
+
+async def _load_graph_for(session, device_code: str, meta: dict) -> dict:
+    """读当前设备在本板块下的节点图。
+
+    任何失败都回空图（`{"nodes": [], ...}`），让 flow_engine 走原有分支：
+    没跑迁移、表不存在、设备没绑板块，都不该让客户收不到回复。
+    """
+    try:
+        return await flow_graph.load_graph(
+            session,
+            device_code=str(device_code or ""),
+            vertical_code=str((meta or {}).get("vertical_code") or ""),
+        )
+    except Exception:  # noqa: BLE001
+        return {"nodes": [], "edges": [], "entry": None}
 
 
 @router.post("/answer", response_model=FlowAnswerOut)
@@ -262,13 +279,19 @@ async def flow_answer(
         job = (jobs_for_city(city_hint) or [{}])[0]
         script_material = render_script(str(script.get("content") or ""), job)
         material = script_material if not kb_answer else kb_answer + "\n" + script_material
-        result = await a_step(state, payload.text, build_provider(), kb_answer=material)
+        result = await a_step(
+            state, payload.text, build_provider(), kb_answer=material,
+            graph=await _load_graph_for(session, device_code, meta),
+        )
         # 语义保持：这轮按「已发岗位+邀约」推进，下一站 ask_interview
         result.stage = STAGE_ASK_INTERVIEW
         result.slots["interview_offer_sent"] = True
     else:
         # ③ 主路径交给模型；没配模型或调用失败时，a_step 内部退到确定性状态机
-        result = await a_step(state, payload.text, build_provider(), kb_answer=kb_answer)
+        result = await a_step(
+            state, payload.text, build_provider(), kb_answer=kb_answer,
+            graph=await _load_graph_for(session, device_code, meta),
+        )
     # 「沟通中」标记：一进 collect 就给 4222 发一次 stage=collect，让候选人页
     # 先出现「已答应面试，等联系方式」的一条。绕过 has_content 强推一次；
     # 槽位先记下保证整轮只推一次，推送本身尽力而为（失败不回滚不影响回复）。
