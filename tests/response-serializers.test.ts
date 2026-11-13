@@ -223,6 +223,8 @@ describe("public response serializers", () => {
     expect(serializeMetrics({ start_date: "2026-10-01", end_date: "2026-10-23", items: [] })).toEqual({
       start_date: "2026-10-01",
       end_date: "2026-10-23",
+      device_code: "",
+      totals: {},
       items: [],
     });
   });

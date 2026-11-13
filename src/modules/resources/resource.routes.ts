@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
 import { parsePagination } from "../../shared/pagination.js";
 import { serializeAccountSummary, serializeEvaluationOverview, serializeRecruiter } from "../../shared/response-serializers.js";
-import { canAccessCity, canAccessDevice, canAccessRecruiter, getUserScope, type UserScope } from "../../auth/user-scopes.js";
+import { canAccessCity, canAccessDevice, canAccessRecruiter, deviceConstraint, getUserScope, type UserScope } from "../../auth/user-scopes.js";
 import { rolePreHandler } from "../../auth/rbac.js";
 
 type Resource = { table: string; name: string; fields: string[]; scope: "city" | "recruiter" | "device" | "admin" };
@@ -418,7 +418,102 @@ export async function registerResourceRoutes(app: FastifyInstance, db: DatabaseS
     );
     return { success: true, device_code: onlyDevice, eval_date: evalDate, devices: results.length, ...sum, items: results };
   });
-  app.get<{ Querystring: Record<string, unknown> }>("/api/v1/agent/report/account-summary", async (request) => serializeAccountSummary({ prefix: request.query.prefix ?? "", date_range: { start: request.query.start_date ?? "", end: request.query.end_date ?? "" }, total: {}, accounts: [], daily_trend: [] }));
+  /**
+   * 账号（设备）运营汇总。过去固定返回空数组——「郎职师 · 运营汇总」页面
+   * 永远显示 0 行，和「设备报表」里的运营指标是同一件事的两半。
+   *
+   * 现在按设备聚合真实数据：
+   *   agent_devices         → 账号名、招聘员
+   *   candidate_events      → 新增 / 邀约 / 待邀约 / 不符合 / 签到
+   */
+  app.get<{ Querystring: Record<string, unknown> }>("/api/v1/agent/report/account-summary", async (request) => {
+    const iso = (d: Date) => d.toISOString().slice(0, 10);
+    const today = new Date();
+    const end = String(request.query.end_date ?? "") || iso(today);
+    const start = String(request.query.start_date ?? "") || iso(new Date(today.getTime() - 29 * 86_400_000));
+    const prefix = String(request.query.prefix ?? "");
+    const scope = getUserScope(db, request.auth!);
+    const scopeFilter = deviceConstraint(scope, "device_code");
+    const prefixSql = prefix ? " AND device_code LIKE ?" : "";
+    const prefixArgs = prefix ? [`${prefix}%`] : [];
+
+    const deviceRows = db.prepare(
+      "SELECT id, device_name, data_json FROM agent_devices ORDER BY id",
+    ).all() as Array<{ id: number; device_name: string; data_json: string }>;
+    const devices = deviceRows.map((row) => {
+      let data: Record<string, unknown> = {};
+      try { data = JSON.parse(row.data_json || "{}") as Record<string, unknown>; } catch { data = {}; }
+      return {
+        name: String(data.name ?? row.device_name ?? ""),
+        code: String(data.device_code ?? ""),
+        recruiter_id: String(data.recruiter_id ?? ""),
+      };
+    }).filter((device) => device.code !== "" && (scope.isAdmin || scope.deviceCodes.includes(device.code)));
+
+    const inRange = "date(event_at) >= date(?) AND date(event_at) <= date(?)";
+    const accounts = devices.map((device) => {
+      const events = db.prepare(
+        `SELECT event_type, status, COUNT(*) AS n FROM candidate_events
+          WHERE ${inRange} AND device_code=? GROUP BY event_type, status`,
+      ).all(start, end, device.code) as Array<{ event_type: string; status: string; n: number }>;
+      const sum = (types: string[]) => events.filter((e) => types.includes(e.event_type)).reduce((acc, e) => acc + e.n, 0);
+      const checkedIn = events.filter((e) => e.event_type === "checked_in" || e.status === "checked_in").reduce((acc, e) => acc + e.n, 0);
+      const invited = sum(["invited"]);
+      const disqualified = sum(["disqualified"]);
+      const pending = sum(["pending_invite"]);
+      const newTotal = events.reduce((acc, e) => acc + e.n, 0);
+      return {
+        name: device.name || device.code,
+        recruiter_id: device.recruiter_id,
+        device_count: 1,
+        new_total: newTotal,
+        invited,
+        pending_invite: pending,
+        disqualified,
+        checked_in: checkedIn,
+        invite_rate: newTotal ? Math.round((invited / newTotal) * 1000) / 10 : 0,
+      };
+    }).filter((row) => row.new_total > 0 || prefix !== "");
+
+    const total = accounts.reduce(
+      (acc, row) => ({
+        device_count: acc.device_count + row.device_count,
+        new_conversations: acc.new_conversations + row.new_total,
+        new_total: acc.new_total + row.new_total,
+        invited: acc.invited + row.invited,
+        pending_invite: acc.pending_invite + row.pending_invite,
+        disqualified: acc.disqualified + row.disqualified,
+        checked_in: acc.checked_in + row.checked_in,
+      }),
+      { device_count: 0, new_conversations: 0, new_total: 0, invited: 0, pending_invite: 0, disqualified: 0, checked_in: 0 },
+    );
+    const totalWithRate = { ...total, invite_rate: total.new_total ? Math.round((total.invited / total.new_total) * 1000) / 10 : 0 };
+
+    // 每日趋势：图表读 date / invited / rate
+    const trendRows = db.prepare(
+      `SELECT date(event_at) AS date,
+              SUM(CASE WHEN event_type='invited' THEN 1 ELSE 0 END) AS invited,
+              SUM(CASE WHEN event_type='checked_in' THEN 1 ELSE 0 END) AS checked_in,
+              COUNT(*) AS total
+         FROM candidate_events WHERE ${inRange}${scopeFilter.sql}${prefixSql}
+         GROUP BY date(event_at) ORDER BY date(event_at)`,
+    ).all(start, end, ...scopeFilter.values, ...prefixArgs) as Array<{ date: string; invited: number; checked_in: number; total: number }>;
+    const daily_trend = trendRows.map((row) => ({
+      date: row.date,
+      invited: Number(row.invited ?? 0),
+      checked_in: Number(row.checked_in ?? 0),
+      total: Number(row.total ?? 0),
+      rate: Number(row.total ?? 0) ? Math.round((Number(row.invited ?? 0) / Number(row.total)) * 1000) / 10 : 0,
+    }));
+
+    return serializeAccountSummary({
+      prefix,
+      date_range: { start, end },
+      total: totalWithRate,
+      accounts,
+      daily_trend,
+    });
+  });
   // knowledge 的两个批量接口已由 agent/knowledge-compat.routes.ts 接管
   // （读写 kb_faq）。这里按同一开关跳过，否则 Fastify 报 FST_ERR_DUPLICATED_ROUTE。
   if (!knowledgeCompatEnabled()) {

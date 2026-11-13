@@ -40,9 +40,15 @@ describe("remaining relation and batch workflows", () => {
     // local route rejects a JSON body on purpose; this asserts that contract.
     expect(saved.statusCode).toBe(422);
     expect(saved.json().detail[0].loc).toEqual(["body", "file"]);
-    // Target shape is a date window, not counters: {start_date, end_date, items}.
+    // 日期窗口 + 真实聚合：totals 是「今日原始指标」那排卡片的数据源
     const metrics = await app.inject({ method: "GET", url: "/api/v1/agent/report/metrics", headers: { authorization: `Bearer ${token}` } });
-    expect(metrics.json()).toEqual({ start_date: expect.any(String), end_date: expect.any(String), items: [] });
+    expect(metrics.json()).toMatchObject({
+      start_date: expect.any(String),
+      end_date: expect.any(String),
+      device_code: "",
+      totals: expect.objectContaining({ total_conversations: expect.any(Number), invited_count: expect.any(Number) }),
+    });
+    expect(Array.isArray(metrics.json().items)).toBe(true);
   });
 
   it("keeps city history, holidays and recruiter relations", async () => {

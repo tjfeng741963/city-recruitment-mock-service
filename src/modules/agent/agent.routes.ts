@@ -489,12 +489,121 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     const result = db.prepare("UPDATE agent_devices SET data_json='{}',updated_at=CURRENT_TIMESTAMP WHERE id=?").run(id);
     return result.changes ? { success: true } : reply.code(404).send({ detail: "Device not found" });
   });
-  // Target shape: {start_date, end_date, items} — a date window, not counters.
-  app.get("/api/v1/agent/report/metrics", async () => {
+  /**
+   * 设备报表的原始指标。过去固定返回 0 / 空数组——页面上「今日原始指标」
+   * 和日期明细永远显示 0，运营以为系统没在跑。
+   *
+   * 现在按真实表聚合：
+   *   agent_messages       总消息数 / 客户消息 / AI 消息 / 超时
+   *   agent_conversations  总对话数 / 转人工（takeover）
+   *   candidate_events     新增 / 邀约 / 待邀约 / 不符合 / 已签到
+   *
+   * 支持 ?device_code= 只看某台设备；?start_date=&end_date= 限定日期；
+   * ?days=N 取最近 N 天（默认 30）。
+   */
+  app.get<{ Querystring: Record<string, string | undefined> }>("/api/v1/agent/report/metrics", async (request) => {
+    const iso = (d: Date) => d.toISOString().slice(0, 10);
     const today = new Date();
-    const end = today.toISOString().slice(0, 10);
-    const start = new Date(today.getTime() - 29 * 86_400_000).toISOString().slice(0, 10);
-    return serializeMetrics({ start_date: start, end_date: end, items: [] });
+    const days = Math.min(365, Math.max(1, Number(request.query.days) || 30));
+    const end = request.query.end_date || iso(today);
+    const start = request.query.start_date || iso(new Date(today.getTime() - (days - 1) * 86_400_000));
+    const deviceCode = String(request.query.device_code ?? "").trim();
+    const scope = deviceConstraint(getUserScope(db, request.auth!), "device_code");
+    const deviceSql = deviceCode ? " AND device_code=?" : "";
+    const deviceArgs = deviceCode ? [deviceCode] : [];
+    const scopeArgs = deviceCode ? [] : scope.values;
+
+    // 日期比较用 date(created_at)，库里存的是 '2026-11-13 09:31:46'
+    const inRange = "date(created_at) >= date(?) AND date(created_at) <= date(?)";
+    const msgStats = db.prepare(
+      `SELECT
+         COUNT(*) AS total_messages,
+         SUM(CASE WHEN direction='inbound' THEN 1 ELSE 0 END) AS customer_message_count,
+         SUM(CASE WHEN direction='outbound' THEN 1 ELSE 0 END) AS ai_message_count,
+         SUM(CASE WHEN status IN ('failed','timeout') THEN 1 ELSE 0 END) AS timeout_count,
+         SUM(CASE WHEN direction='inbound' AND length(trim(content)) <= 3 THEN 1 ELSE 0 END) AS short_customer_count
+       FROM agent_messages WHERE ${inRange}${deviceSql}${scope.sql}`,
+    ).get(start, end, ...deviceArgs, ...scopeArgs) as Record<string, number | null>;
+
+    const convStats = db.prepare(
+      `SELECT
+         COUNT(*) AS total_conversations,
+         SUM(CASE WHEN takeover=1 THEN 1 ELSE 0 END) AS takeover_count
+       FROM agent_conversations WHERE ${inRange}${deviceSql}${scope.sql}`,
+    ).get(start, end, ...deviceArgs, ...scopeArgs) as Record<string, number | null>;
+
+    // 候选人事件按天分桶：新增 / 邀约 / 待邀约 / 不符合 / 已签到
+    const events = db.prepare(
+      `SELECT date(event_at) AS day, event_type, status, COUNT(*) AS n
+         FROM candidate_events
+        WHERE date(event_at) >= date(?) AND date(event_at) <= date(?)${deviceSql}${scope.sql}
+        GROUP BY day, event_type, status`,
+    ).all(start, end, ...deviceArgs, ...scopeArgs) as Array<{ day: string; event_type: string; status: string; n: number }>;
+
+    const byDay = new Map<string, Record<string, number>>();
+    let newTotal = 0, invited = 0, pending = 0, disqualified = 0, checkedIn = 0;
+    for (const row of events) {
+      const bucket = byDay.get(row.day) ?? {};
+      byDay.set(row.day, bucket);
+      newTotal += row.n;
+      if (row.event_type === "invited") { invited += row.n; bucket.invited = (bucket.invited ?? 0) + row.n; }
+      else if (row.event_type === "disqualified") { disqualified += row.n; bucket.disqualified = (bucket.disqualified ?? 0) + row.n; }
+      else if (row.event_type === "checked_in" || row.status === "checked_in") { checkedIn += row.n; bucket.checked_in = (bucket.checked_in ?? 0) + row.n; }
+      else if (row.event_type === "pending_invite") { pending += row.n; bucket.pending_invite = (bucket.pending_invite ?? 0) + row.n; }
+      bucket.new_total = (bucket.new_total ?? 0) + row.n;
+    }
+
+    // 日期明细：没数据的日期补零，保证表格连续
+    const items: Array<Record<string, unknown>> = [];
+    for (let t = Date.parse(`${start}T00:00:00Z`); t <= Date.parse(`${end}T00:00:00Z`); t += 86_400_000) {
+      const day = iso(new Date(t));
+      const bucket = byDay.get(day) ?? {};
+      const invitedDay = bucket.invited ?? 0;
+      const pendingDay = bucket.pending_invite ?? 0;
+      const disqualifiedDay = bucket.disqualified ?? 0;
+      const checkedInDay = bucket.checked_in ?? 0;
+      items.push({
+        date: day,
+        new_total: bucket.new_total ?? 0,
+        invited: invitedDay,
+        pending_invite: pendingDay,
+        disqualified: disqualifiedDay,
+        checked_in: checkedInDay,
+        // 「当日合计」= 当天实际发生的转化数之和
+        total: invitedDay + pendingDay + disqualifiedDay + checkedInDay,
+      });
+    }
+
+    const deepConversations = db.prepare(
+      `SELECT COUNT(*) AS n FROM (
+         SELECT device_code, customer_id FROM agent_messages
+          WHERE ${inRange}${deviceSql}${scope.sql}
+          GROUP BY device_code, customer_id HAVING COUNT(*) >= 6
+       )`,
+    ).get(start, end, ...deviceArgs, ...scopeArgs) as { n: number };
+
+    return serializeMetrics({
+      start_date: start,
+      end_date: end,
+      device_code: deviceCode,
+      totals: {
+        total_conversations: Number(convStats.total_conversations ?? 0),
+        total_messages: Number(msgStats.total_messages ?? 0),
+        customer_message_count: Number(msgStats.customer_message_count ?? 0),
+        ai_message_count: Number(msgStats.ai_message_count ?? 0),
+        invited_count: invited,
+        disqualified_count: disqualified,
+        checked_in_count: checkedIn,
+        pending_invite_count: pending,
+        new_total: newTotal,
+        takeover_count: Number(convStats.takeover_count ?? 0),
+        timeout_count: Number(msgStats.timeout_count ?? 0),
+        deep_conv_count: Number(deepConversations.n ?? 0),
+        customer_last_reply_count: Number(msgStats.customer_message_count ?? 0),
+        short_ai_msg_count: Number(msgStats.short_customer_count ?? 0),
+      },
+      items,
+    });
   });
 
   // 设备话术（契约 docs/对齐-配置分发与按设备话术.md §2）：管理端维护，
