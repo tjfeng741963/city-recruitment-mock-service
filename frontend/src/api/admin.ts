@@ -1,8 +1,19 @@
 import { request, type City, type ListResult } from "./client";
 
+export interface Factory {
+  id: number;
+  factory_name: string;
+  city_id: number;
+  address: string;
+  contact: string;
+  salary: string;
+  is_active: boolean;
+}
+
 export interface Position {
   id: number;
   position_name: string;
+  factory_id: number | null;
   city_name: string;
   district: string;
   gender: string;
@@ -87,11 +98,17 @@ export const positionsApi = {
   positionsInCity: (cityName: string) =>
     request<ListResult<Position>>(`/api/v1/service-positions?city_name=${enc(cityName)}&page_size=1000`),
   position: (id: number) => request<Position>(`/api/v1/service-positions/${id}`),
-  createPosition: (position_name: string, store_name: string, city: City) =>
+  createPosition: (position_name: string, store_name: string, city: City, factoryId: number) =>
     request<Position>("/api/v1/service-positions", {
       method: "POST",
-      ...json({ position_name, store_name, city_id: city.id, city_name: city.city_name, is_active: true }),
+      ...json({ position_name, store_name, factory_id: factoryId, city_id: city.id, city_name: city.city_name, is_active: true }),
     }),
+  // 厂区是岗位的挂载点：/agent/jobs 用 factory_id 做 JOIN，没挂厂区的岗位不会进 AI 的回答。
+  cityFactories: (cityId: number) =>
+    request<ListResult<Factory>>(`/api/v1/factories?city_id=${cityId}&page_size=1000`),
+  allFactories: () => request<ListResult<Factory>>("/api/v1/factories?page_size=1000"),
+  createFactory: (factory_name: string, cityId: number) =>
+    request<Factory>("/api/v1/factories", { method: "POST", ...json({ factory_name, city_id: cityId }) }),
   updatePosition: (id: number, body: Record<string, unknown>) =>
     request<Position>(`/api/v1/service-positions/${id}`, { method: "PUT", ...json(body) }),
   toggleFeatured: (id: number) => request<Position>(`/api/v1/service-positions/${id}/toggle-featured`, { method: "PUT" }),

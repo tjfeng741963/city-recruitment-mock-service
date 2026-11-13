@@ -1,14 +1,13 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { positionsApi, type Position } from "../../api/admin";
+import { positionsApi, type Factory, type Position } from "../../api/admin";
 import { ApiError } from "../../api/client";
-import { Alert, Button, EmptyState, Input, ListGroup, ListRow, Skeleton, Switch, Textarea } from "@ui";
+import { Alert, Button, EmptyState, Input, ListGroup, ListRow, Select, Skeleton, Switch, Textarea } from "@ui";
 import { EDITABLE_SECTIONS, localDate, positionPayload, upcomingHolidays } from "./model";
 import { useHolidays } from "./usePositions";
 
-type TextField = "store_name" | "district" | "gender" | "age_range" | "job_type" | "accommodation" | "interview_time" | "contact_phone";
+type TextField = "district" | "gender" | "age_range" | "job_type" | "accommodation" | "interview_time" | "contact_phone";
 
 const BASIC_FIELDS: Array<[TextField, string, string]> = [
-  ["store_name", "工厂", "富士康龙华"],
   ["district", "区县", "龙华区"],
   ["gender", "性别", "男女不限"],
   ["age_range", "年龄", "18-45 岁"],
@@ -89,6 +88,7 @@ function NotFound() {
 export function PositionEditPage({ positionId }: { positionId: number }) {
   const [position, setPosition] = useState<Position | null>(null);
   const [draft, setDraft] = useState<Position | null>(null);
+  const [factories, setFactories] = useState<Factory[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -102,6 +102,11 @@ export function PositionEditPage({ positionId }: { positionId: number }) {
         setDraft(p);
       })
       .catch((err) => setLoadError(err instanceof ApiError && err.status === 404 ? "not-found" : "加载失败，请刷新重试"));
+    // 厂区列表用来把岗位挂到厂区上；拉失败不影响编辑其它字段。
+    positionsApi
+      .allFactories()
+      .then((r) => setFactories(r.items))
+      .catch(() => setFactories([]));
   }, [positionId]);
 
   if (loadError === "not-found") return <NotFound />;
@@ -172,6 +177,29 @@ export function PositionEditPage({ positionId }: { positionId: number }) {
               required
               error={nameOk ? undefined : "岗位名称不能为空"}
             />
+            {factories.length > 0 ? (
+              <Select
+                id="ps-f-factory"
+                label="厂区"
+                helperText="AI 按厂区取岗位，没挂厂区的岗位不会被念出来"
+                placeholder="未挂厂区"
+                options={factories.map((f) => ({ value: String(f.id), label: f.factory_name }))}
+                value={current.factory_id === null ? "" : String(current.factory_id)}
+                onChange={(e) => {
+                  const next = factories.find((f) => String(f.id) === e.target.value);
+                  update({ factory_id: next ? next.id : null, store_name: next ? next.factory_name : current.store_name });
+                }}
+              />
+            ) : (
+              <Input
+                id="ps-f-store"
+                label="工厂"
+                placeholder="富士康龙华"
+                value={current.store_name}
+                onChange={(e) => update({ store_name: e.target.value })}
+                error="没有可选厂区，先在城市页建厂区"
+              />
+            )}
             {BASIC_FIELDS.map(([key, label, placeholder]) => (
               <Input key={key} id={`ps-f-${key}`} label={label} placeholder={placeholder} value={current[key]} onChange={(e) => update({ [key]: e.target.value })} />
             ))}
