@@ -19,11 +19,11 @@ describe("core CRUD modules", () => {
     expect(list.statusCode).toBe(200);
     expect(list.json().items).toEqual(expect.arrayContaining([expect.objectContaining({ city_name: "广州" })]));
     expect(list.json().items[0]).not.toHaveProperty("data_json");
-    // "深圳" and "东莞" are already seeded as mock fixtures, so this test uses a
-    // city name not present in seed.ts to avoid the UNIQUE(city_name) collision.
-    const created = await app.inject({ method: "POST", url: "/api/v1/cities", headers: { authorization: `Bearer ${token}` }, payload: { city_name: "佛山", province: "广东" } });
+    // "深圳"/"东莞" 是种子数据，"佛山"/"南昌"/"南宁" 由 029 回填写入，
+    // 用一个谁都不占的名字，避免 UNIQUE(city_name) 撞车。
+    const created = await app.inject({ method: "POST", url: "/api/v1/cities", headers: { authorization: `Bearer ${token}` }, payload: { city_name: "测试城市甲", province: "广东" } });
     expect(created.statusCode).toBe(200);
-    expect(created.json()).toMatchObject({ city_name: "佛山", province: "广东" });
+    expect(created.json()).toMatchObject({ city_name: "测试城市甲", province: "广东" });
   });
 
   it("lists factories and service positions with filter fields", async () => {

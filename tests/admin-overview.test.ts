@@ -26,9 +26,10 @@ describe("admin operations overview", () => {
       admins: 1,
       customers: 1,
       recruiters: 1,
-      cities: 3,
-      // 种子 2 条示例岗位 + 028 导入的 11 条客户真实岗位
-      positions: 13,
+      // 种子 3 城 + 029 回填写入的佛山/南昌/南宁
+      cities: 6,
+      // 种子 2 条示例岗位 + 028 的 11 条工厂岗位 + 029 的 6 条安检岗位
+      positions: 19,
       devices: 1,
       conversations: 1,
       pending_activations: expect.any(Number),

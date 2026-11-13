@@ -32,7 +32,8 @@ describe("business scope enforcement", () => {
     const adminCities = await app.inject({ method: "GET", url: "/api/v1/cities?page=1&page_size=100", headers: headers(adminToken) });
     const customerCities = await app.inject({ method: "GET", url: "/api/v1/cities?page=1&page_size=100", headers: headers(customerToken) });
     const recruiterCities = await app.inject({ method: "GET", url: "/api/v1/cities?page=1&page_size=100", headers: headers(recruiterToken) });
-    expect(adminCities.json().total).toBe(3);
+    // 种子 3 城 + 029 回填写入的佛山/南昌/南宁
+expect(adminCities.json().total).toBe(6);
     expect(customerCities.json().items).toEqual([expect.objectContaining({ id: 1, city_name: "广州" })]);
     expect(recruiterCities.json().items).toEqual([expect.objectContaining({ id: 1, city_name: "广州" })]);
 

@@ -132,8 +132,9 @@ describe("kb v3 config routes", () => {
       expect(point.statusCode).toBe(201);
       expect(point.json()).toMatchObject({ lat: 22.95, lng: 113.3, level: "point" });
 
+      // 029 已经用 point 级建了 6 个真实面试点，这里只断言自己新建的那个进去了
       const points = await app.inject({ method: "GET", url: "/api/v1/locations?level=point", headers: admin });
-      expect(points.json().items).toHaveLength(1);
+      expect(points.json().items.map((row: { name: string }) => row.name)).toContain("钟村面试点");
       const children = await app.inject({ method: "GET", url: `/api/v1/locations?parent_id=${cityId}`, headers: admin });
       expect(children.json().items.map((row: { name: string }) => row.name)).toEqual(["番禺区"]);
       // parent_id=-1 等价于“只取顶层”

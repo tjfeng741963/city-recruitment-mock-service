@@ -9,6 +9,8 @@ export const BACKFILL_FILES = [
   "migrations/024_kb_backfill_legacy.sql",
   // 客户真实工厂岗位（6 家厂 / 11 个岗位 / 厂级问答 / 岗位级工价）
   "backfill/028_kb_real_factories.sql",
+  // 客户真实地铁安检岗位（5 个城市 / 6 个面试点 / 面试点级问答）
+  "backfill/029_kb_real_subway.sql",
 ] as const;
 
 /** 执行单个回填文件。测试需要单独验证 024 / 028 时用这个。 */
