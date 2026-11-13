@@ -966,12 +966,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 except Exception:  # noqa: BLE001
                     body, medias = raw_part, []
                 if body:
-                    result = core_send.send(
-                        store, name, body,
-                        expect_id=cid if str(cid).startswith(("S:", "R:")) else "",
-                        verify_db=True,
-                        log=lambda s: log(f"    {s}"),
-                    )
+                    result = _send_one(store, cfg, cid, name, body, log)
                     if not result["ok"]:
                         break
                 else:
@@ -1010,6 +1005,65 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             traceback.print_exc(limit=2)
 
     return stats
+
+
+def _send_one(
+    store: Store,
+    cfg: dict,
+    cid: str,
+    name: str,
+    body: str,
+    log=lambda m: None,
+) -> dict:
+    """发一段文本。默认走前台；`background_send: true` 时后台优先、失败退回前台。
+
+    为什么是"双路径"而不是直接换掉：
+    - 后台路径（`background_send`）不抢前台、窗口可缩托盘，但**没有回读**，
+      企微升级后可能投不进去；
+    - 前台路径（`core_send.send`）是验证过的，代价是抢焦点。
+    所以：后台先试，失败立刻退回前台，保证"总能发出去"优先于"一定不抢前台"。
+
+    配置开关 `cfg["background_send"]`：
+      - **False（默认）**：走前台，行为与改动前完全一致
+      - True：后台优先，失败自动退回前台
+
+    为什么默认关：后台路径尚未在真实企微上验证（见
+    docs/可行性分析-后台静默自动回复-20261113.md 的 L0→L1）。
+    灰度时只对单台测试设备把它打开；出问题远程改回 false 即可，不用重装客户端。
+    """
+    expect = cid if str(cid).startswith(("S:", "R:")) else ""
+    if not cfg.get("background_send", False):
+        return core_send.send(
+            store, name, body, expect_id=expect, verify_db=True,
+            log=lambda s: log(f"    {s}"),
+        )
+
+    try:
+        import background_send
+    except Exception as exc:  # noqa: BLE001  旧包没有这个模块
+        log(f"    [后台] 模块不可用（{type(exc).__name__}），走前台")
+        return core_send.send(
+            store, name, body, expect_id=expect, verify_db=True,
+            log=lambda s: log(f"    {s}"),
+        )
+
+    try:
+        res = background_send.send(body, log=lambda s: log(f"    {s}"))
+    except Exception as exc:  # noqa: BLE001
+        log(f"    [后台] 异常（{type(exc).__name__}: {exc}），退回前台")
+        res = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+
+    if not res.get("ok"):
+        log(f"    [后台] 失败：{res.get('detail')}，退回前台")
+        return core_send.send(
+            store, name, body, expect_id=expect, verify_db=True,
+            log=lambda s: log(f"    {s}"),
+        )
+
+    # 后台只保证"字投进去了"，落点靠回读确认（沿用 send.py 的哨兵思路）
+    log(f"    [后台] {res.get('detail')}")
+    return {"ok": True, "detail": res.get("detail", "已后台发送"),
+            "conversation_id": cid, "background": True}
 
 
 def _session_names(store: Store) -> set[str]:
