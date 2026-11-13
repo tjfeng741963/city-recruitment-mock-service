@@ -107,20 +107,31 @@ function upsertCandidateEvent(db: DatabaseSync, row: ConversationRow, eventType:
   };
   // 档案同步只补资料，不能把运营已经标记的候选人状态改回初始状态。
   const status = existing?.status || eventType;
+  // 空值不覆盖：8090 的档案是「部分更新」，这次没带省/区县/厂名不代表要清空，
+  // 直接写空串会把之前收集到的信息冲掉（OA 页面上表现为字段时有时无）。
+  const keep = (incoming: string | undefined, fallback = "") => {
+    const value = String(incoming ?? "").trim();
+    return value !== "" ? value : fallback;
+  };
   const values = [
-    fields.nickname ?? row.nickname,
-    fields.name ?? "",
-    fields.phone ?? "",
-    fields.interview_date ?? "",
-    fields.interview_time ?? "",
-    fields.factory_name ?? "",
-    fields.province ?? "",
-    fields.city ?? "",
-    fields.district ?? "",
+    keep(fields.nickname, row.nickname),
+    keep(fields.name),
+    keep(fields.phone),
+    keep(fields.interview_date),
+    keep(fields.interview_time),
+    keep(fields.factory_name),
+    keep(fields.province),
+    keep(fields.city),
+    keep(fields.district),
     status,
   ];
   if (existing) {
-    db.prepare(`UPDATE candidate_events SET nickname=?,name=?,phone=?,interview_date=?,interview_time=?,factory_name=?,province=?,city=?,district=?,status=?,data_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+    // COALESCE(NULLIF(?, ''), 列) —— 新值非空才覆盖，空则保留库里已有的
+    db.prepare(`UPDATE candidate_events SET nickname=COALESCE(NULLIF(?,''),nickname),name=COALESCE(NULLIF(?,''),name),
+        phone=COALESCE(NULLIF(?,''),phone),interview_date=COALESCE(NULLIF(?,''),interview_date),
+        interview_time=COALESCE(NULLIF(?,''),interview_time),factory_name=COALESCE(NULLIF(?,''),factory_name),
+        province=COALESCE(NULLIF(?,''),province),city=COALESCE(NULLIF(?,''),city),district=COALESCE(NULLIF(?,''),district),
+        status=?,data_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
       .run(...values, JSON.stringify(data), existing.id);
     return existing.id;
   }
