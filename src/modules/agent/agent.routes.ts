@@ -74,7 +74,18 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     const scope = getUserScope(db, request.auth!);
     return { items: rows.map(serializeAgentDevice).filter((row) => canAccessDevice(scope, String(row.device_code ?? ""))) };
   });
-  app.post<{ Body: Record<string, unknown> }>("/api/v1/agent/devices", async (request, reply) => { if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin required to create devices" }); const deviceName = String(request.body?.device_name ?? request.body?.name ?? "").trim() || `device-${Date.now()}`; return db.prepare("INSERT INTO agent_devices(device_name,status,data_json) VALUES (?,?,?) RETURNING *").get(deviceName, String(request.body?.status ?? "enabled"), JSON.stringify(request.body ?? {})); });
+  app.post<{ Body: Record<string, unknown> }>("/api/v1/agent/devices", async (request, reply) => {
+    if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin required to create devices" });
+    const deviceName = String(request.body?.device_name ?? request.body?.name ?? "").trim() || `device-${Date.now()}`;
+    // observe_only 默认 true：服务端 automation 只负责「记录 + 可选生成指令」，
+    // 真正能把消息发出去的是客户端键鼠。两者同时开 = 客户收到两条回复
+    // （同一会话状态被推进两次，左边一句右边一句），11-13 实机踩过。
+    // 与 /bridge/devices/:code/register 的自注册路径保持一致：那里也写 true。
+    // 只有调用方明确传 observe_only:false 时（企微官方客服 API 通道）才放行。
+    const data = { observe_only: true, ...(request.body ?? {}) } as Record<string, unknown>;
+    return db.prepare("INSERT INTO agent_devices(device_name,status,data_json) VALUES (?,?,?) RETURNING *")
+      .get(deviceName, String(request.body?.status ?? "enabled"), JSON.stringify(data));
+  });
   app.put<{ Params: { id: string }; Body: Record<string, unknown> }>("/api/v1/agent/devices/:id", async (request, reply) => { const id = Number(request.params.id); const row = db.prepare("SELECT data_json FROM agent_devices WHERE id=?").get(id) as { data_json: string } | undefined; const data = row ? JSON.parse(row.data_json || "{}") as Record<string, unknown> : {}; if (!row || !canAccessDevice(getUserScope(db, request.auth!), String(data.device_code ?? ""))) return reply.code(404).send({ detail: "设备不存在" }); const result = db.prepare("UPDATE agent_devices SET device_name=COALESCE(?,device_name),status=COALESCE(?,status),data_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(typeof request.body?.device_name === "string" ? request.body.device_name : null, typeof request.body?.status === "string" ? request.body.status : null, JSON.stringify({ ...data, ...(request.body ?? {}) }), id); return result.changes ? db.prepare("SELECT * FROM agent_devices WHERE id=?").get(id) : reply.code(404).send({ detail: "设备不存在" }); });
   // The target 404s on a missing row; returning {success:false} with 200 is a
   // parity bug (verified: DELETE /agent/devices/999999 -> 404 "Device not found").
