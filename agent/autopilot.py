@@ -1494,6 +1494,13 @@ def acquire_single_instance() -> bool:
         return True
     if _mutex_handle and _mutex_owner_pid == pid:
         return True
+
+    # 这把锁保护的是「两个进程同时抢企微前台」，而抢前台只有 Windows 存在。
+    # 非 Windows 平台（CI 的 ubuntu 跑单测）本来就没有 ctypes.windll，
+    # 命中下面的 except 会被当成「已有实例在运行」而误拦，所以这里直接放行。
+    if sys.platform != "win32":
+        return True
+
     try:
         kernel32 = ctypes.windll.kernel32
         ERROR_ALREADY_EXISTS = 183
@@ -1508,7 +1515,7 @@ def acquire_single_instance() -> bool:
         setattr(sys, claim_key, pid)
         return True
     except Exception:  # noqa: BLE001
-        # 互斥体本身建不出来（极端环境）：宁可拦住，也不要冒双开的风险
+        # Windows 上互斥体建不出来（极端环境）：宁可拦住，也不要冒双开的风险
         return False
 
 
