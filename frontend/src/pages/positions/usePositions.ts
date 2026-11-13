@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import { positionsApi, type Holiday, type Position } from "../../api/admin";
+import { positionsApi, type Factory, type Holiday, type Position } from "../../api/admin";
 import { ApiError, type City } from "../../api/client";
 
 export interface PositionsData {
   cities: City[];
   positionsByCity: Map<number, Position[]>;
+  factoriesByCity: Map<number, Factory[]>;
 }
 
 export function usePositionsData() {
@@ -14,8 +15,15 @@ export function usePositionsData() {
   const refresh = useCallback(async () => {
     try {
       const { items: cities } = await positionsApi.cities();
-      const lists = await Promise.all(cities.map((c) => positionsApi.positionsInCity(c.city_name).then((r) => r.items)));
-      setData({ cities, positionsByCity: new Map(cities.map((c, i) => [c.id, lists[i]])) });
+      const [lists, factoryLists] = await Promise.all([
+        Promise.all(cities.map((c) => positionsApi.positionsInCity(c.city_name).then((r) => r.items))),
+        Promise.all(cities.map((c) => positionsApi.cityFactories(c.id).then((r) => r.items))),
+      ]);
+      setData({
+        cities,
+        positionsByCity: new Map(cities.map((c, i) => [c.id, lists[i]])),
+        factoriesByCity: new Map(cities.map((c, i) => [c.id, factoryLists[i]])),
+      });
       setError(null);
     } catch (err) {
       setError(err instanceof ApiError ? err.detail : "加载失败");

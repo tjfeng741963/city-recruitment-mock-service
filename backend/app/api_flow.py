@@ -35,9 +35,10 @@ from .services.flow_engine import (
     absorb_profile,
     extract_city,
     jobs_for_city,
+    set_remote_cities,
     set_remote_jobs,
 )
-from .services.job_lookup import lookup_jobs, vertical_hint_of
+from .services.job_lookup import lookup_cities, lookup_jobs, vertical_hint_of
 from .services.flow_llm import a_step
 from .services.llm_provider import build_provider
 
@@ -194,6 +195,11 @@ async def flow_answer(
                     kb_answer = kb_hit["body"]
 
     # 城市线索：先看客户这轮说的，再看已有槽位（别名归一在 4222 侧，这里只透传）
+    # 后台维护的城市/区县先注入进去，否则运营新建的城市（如北京）永远识别不出来。
+    try:
+        set_remote_cities(await lookup_cities())
+    except Exception:  # noqa: BLE001  城市清单拉不到就退回硬编码别名，不影响回复
+        set_remote_cities([])
     city_hint = extract_city(payload.text) or str(slots.get("city") or "")
 
     # ① 按城市查真实岗位（60s 缓存，失败返回 []）并注入引擎：
