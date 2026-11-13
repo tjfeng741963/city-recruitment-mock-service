@@ -86,7 +86,28 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     return db.prepare("INSERT INTO agent_devices(device_name,status,data_json) VALUES (?,?,?) RETURNING *")
       .get(deviceName, String(request.body?.status ?? "enabled"), JSON.stringify(data));
   });
-  app.put<{ Params: { id: string }; Body: Record<string, unknown> }>("/api/v1/agent/devices/:id", async (request, reply) => { const id = Number(request.params.id); const row = db.prepare("SELECT data_json FROM agent_devices WHERE id=?").get(id) as { data_json: string } | undefined; const data = row ? JSON.parse(row.data_json || "{}") as Record<string, unknown> : {}; if (!row || !canAccessDevice(getUserScope(db, request.auth!), String(data.device_code ?? ""))) return reply.code(404).send({ detail: "设备不存在" }); const result = db.prepare("UPDATE agent_devices SET device_name=COALESCE(?,device_name),status=COALESCE(?,status),data_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(typeof request.body?.device_name === "string" ? request.body.device_name : null, typeof request.body?.status === "string" ? request.body.status : null, JSON.stringify({ ...data, ...(request.body ?? {}) }), id); return result.changes ? db.prepare("SELECT * FROM agent_devices WHERE id=?").get(id) : reply.code(404).send({ detail: "设备不存在" }); });
+  app.put<{ Params: { id: string }; Body: Record<string, unknown> }>("/api/v1/agent/devices/:id", async (request, reply) => {
+    const id = Number(request.params.id);
+    const row = db.prepare("SELECT data_json FROM agent_devices WHERE id=?").get(id) as { data_json: string } | undefined;
+    const data = row ? (JSON.parse(row.data_json || "{}") as Record<string, unknown>) : {};
+    if (!row || !canAccessDevice(getUserScope(db, request.auth!), String(data.device_code ?? ""))) {
+      return reply.code(404).send({ detail: "设备不存在" });
+    }
+    const merged = { ...data, ...(request.body ?? {}) } as Record<string, unknown>;
+    // 品类必填（2026-11-13 与 HR 对齐）：一个微信号只做一个板块，没有综合号。
+    // 只在本次请求显式提交了 vertical_id 时校验，避免老客户端改别的字段被挡。
+    if ("vertical_id" in (request.body ?? {})) {
+      const verticalId = Number(merged.vertical_id);
+      if (!Number.isInteger(verticalId) || verticalId <= 0) {
+        return reply.code(422).send({ detail: "vertical_id is required: 一个微信号只能属于一个板块" });
+      }
+      const exists = db.prepare("SELECT 1 AS ok FROM vertical WHERE id=? AND status<>'deleted'").get(verticalId);
+      if (!exists) return reply.code(422).send({ detail: "Unknown vertical_id" });
+    }
+    const result = db.prepare("UPDATE agent_devices SET device_name=COALESCE(?,device_name),status=COALESCE(?,status),data_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?")
+      .run(typeof request.body?.device_name === "string" ? request.body.device_name : null, typeof request.body?.status === "string" ? request.body.status : null, JSON.stringify(merged), id);
+    return result.changes ? db.prepare("SELECT * FROM agent_devices WHERE id=?").get(id) : reply.code(404).send({ detail: "设备不存在" });
+  });
   // The target 404s on a missing row; returning {success:false} with 200 is a
   // parity bug (verified: DELETE /agent/devices/999999 -> 404 "Device not found").
   app.delete<{ Params: { id: string } }>("/api/v1/agent/devices/:id", async (request, reply) => {
