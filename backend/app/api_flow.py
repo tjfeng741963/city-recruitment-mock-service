@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 from .deps import ServiceOrUser, SessionDep
 from .services import flow_session as store
 from .services import kb_faq, kb_placeholder, profile_push, unknown_questions
+from .services import device_scripts
 from .services.device_scripts import fetch_device_meta, fetch_scripts, pick_script, render_script
 from .services.flow_engine import (
     STAGE_ASK_CITY,
@@ -108,11 +109,16 @@ async def flow_answer(
     kb_entry_id: str | None = None
     kb_markers: list[str] = []
     kb_repeat = False
+    # 设备元信息（60s 缓存，拉不到回空 = 通配/不限，流程不中断）：
+    #   factory_name/city/vertical_id/employer_id/location_id/position_id
+    #       → 知识库 v3 硬过滤（kb_faq）+ 旧路径 kb_placeholder 加权
+    #   job_scope → 设备级岗位口径（subway 只推地铁/安检，all 不过滤，空串跟随默认）
+    # 提到外层统一拉一次：知识库阶段和岗位查询都要用。
+    try:
+        meta = await fetch_device_meta(device_code)
+    except Exception:  # noqa: BLE001  meta 拉不到按通配，流程不中断
+        meta = dict(device_scripts.EMPTY_META)
     if stage_before in _KB_STAGES:
-        try:
-            meta = await fetch_device_meta(device_code)
-        except Exception:  # noqa: BLE001  meta 拉不到按通配，流程不中断
-            meta = {"factory_name": "", "city": ""}
         city_hint_for_kb = (
             str(meta.get("city") or "")
             or extract_city(payload.text)
@@ -196,8 +202,13 @@ async def flow_answer(
     #    城市查不到岗位时引擎走「已记下，帮你问问」话术并记未知问题。
     if city_hint:
         try:
-            # 客户这轮明确说了「工厂/普工」就不再按「只推地铁」过滤
-            remote_jobs = await lookup_jobs(city_hint, vertical_hint_of(payload.text))
+            # 口径优先级：设备绑定 > 客户这轮说的品类 > 环境变量默认。
+            # 地铁号的设备配置说 subway，就不该被客户随口一句「工厂」带偏。
+            remote_jobs = await lookup_jobs(
+                city_hint,
+                vertical_hint=vertical_hint_of(payload.text),
+                device_scope=str(meta.get("job_scope") or ""),
+            )
         except Exception:  # noqa: BLE001
             remote_jobs = []
         set_remote_jobs({city_hint: remote_jobs})

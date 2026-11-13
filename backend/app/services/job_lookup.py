@@ -41,18 +41,28 @@ async def _fetch_items(city: str, token: str, url: str) -> list[dict[str, Any]]:
     return [item for item in items if isinstance(item, dict)]
 
 
-async def lookup_jobs(city: str, vertical_hint: str = "") -> list[dict[str, Any]]:
+async def lookup_jobs(
+    city: str,
+    vertical_hint: str = "",
+    device_scope: str = "",
+) -> list[dict[str, Any]]:
     """按城市查岗位。任何失败都返回 []，由上层走「已记下，帮你问问」话术。
 
-    `vertical_hint` 是客户这轮明确说的品类（factory / subway）。2026-11-13 实测：
-    客户说「我是去工厂，不是去安检」，系统还在推地铁——因为下面的「只推地铁」
-    是全局开关，客户说什么都不影响。客户一开口说工厂，开关就不再生效。
+    品类口径优先级（2026-11-13 合并：设备绑定优先，客户用词兜底）：
+      1. device_scope —— 网页按设备下发的 job_scope（subway / all），最权威：
+         地铁号就是地铁号，不能因为客户随口说「工厂」就串味。
+      2. vertical_hint —— 客户这轮明确说的品类（factory / subway）。
+         2026-11-13 实测：客户说「我是去工厂，不是去安检」，系统还在推地铁。
+      3. 都没给 → 环境变量 FLOW_ONLY_SUBWAY 的阶段性默认。
     """
     city = str(city or "").strip()
     if not city:
         return []
     hint = vertical_hint if vertical_hint in ("factory", "subway") else ""
-    cache_key = f"{city}|{hint}"
+    scope = device_scope if device_scope in ("subway", "all") else ""
+    # 缓存键必须带口径：同城在设备级/客户级/默认三种口径下结果不同，
+    # 混用会把工厂岗漏发给地铁号（反之亦然）。
+    cache_key = f"{city}|{scope}|{hint}"
     now = time.monotonic()
     cached = _cache.get(cache_key)
     if cached and now < cached[0]:
@@ -74,14 +84,19 @@ async def lookup_jobs(city: str, vertical_hint: str = "") -> list[dict[str, Any]
     filled = [j for j in items if any(
         str(j.get(k) or "").strip() for k in ("wage_text", "hours_text", "welfare_text")
     )]
-    # 「只推地铁」是 2026-11-12 运营的阶段性指令。只在客户没表态时生效：
-    # 客户明确说去工厂就不过滤，明确说做地铁就强制过滤。
-    if hint == "subway":
+    # 口径判定：设备绑定 > 客户用词 > 环境变量默认。
+    # 设备级最先——地铁号就是地铁号，不能被客户随口一句「工厂」带跑偏。
+    if scope == "all":
+        pass                                    # 设备明确不限，谁都不过滤
+    elif scope == "subway":
+        filled = _only_subway(filled) or filled
+    elif hint == "subway":
         filled = _only_subway(filled) or filled
     elif hint == "factory":
         factory_only = [j for j in filled if not _is_subway(j)]
         filled = factory_only or filled
     elif _only_subway_enabled():
+        # 2026-11-12 运营阶段性指令「暂时按地铁的来」；客户没表态时才生效
         filled = _only_subway(filled) or filled
     if filled:
         items = filled

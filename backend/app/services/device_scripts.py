@@ -25,13 +25,15 @@ CACHE_TTL = 60.0
 
 # {device_code: (过期时刻 monotonic, scripts)}
 _cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
-# {device_code: (过期时刻 monotonic, factory_name/city)}
+# {device_code: (过期时刻 monotonic, factory_name/city/job_scope)}
 _meta_cache: dict[str, tuple[float, dict[str, str]]] = {}
 
 EMPTY_META: dict[str, Any] = {
     "factory_name": "", "city": "",
     "vertical_id": 0, "employer_id": 0, "location_id": 0, "position_id": 0,
     "vertical_code": "factory",
+    # 设备级岗位口径（subway / all / 空串=跟随环境变量默认）
+    "job_scope": "",
 }
 
 
@@ -75,10 +77,14 @@ async def fetch_scripts(device_code: str) -> list[dict[str, Any]]:
 
 
 def _normalize_meta(data: Any) -> dict[str, Any]:
-    """config 响应 → 工厂/城市/品类/招工方。缺失或类型不对回空值/0。
+    """config 响应 → 工厂/城市/品类/招工方/岗位口径。
 
-    知识库 v3 起多了 vertical_id / employer_id（docs/知识库方案-流程驱动-20261113.md §3.7）：
-    绑了 id 走 kb_faq 硬过滤，没绑（0）退回按 factory_name 匹配的旧路径。
+    知识库 v3 起多了 vertical_id / employer_id / location_id / position_id
+    （docs/知识库方案-流程驱动-20261113.md §3.7）：绑了 id 走 kb_faq 硬过滤，
+    没绑（0）退回按 factory_name 匹配的旧路径。
+
+    job_scope 是本轮新增的设备级口径：subway 只推地铁/安检，all 不过滤，
+    空串 = 跟随环境变量默认。脏值一律当空，避免一个错字把工厂岗全下架。
     """
     if not isinstance(data, dict):
         return dict(EMPTY_META)
@@ -87,6 +93,7 @@ def _normalize_meta(data: Any) -> dict[str, Any]:
         # bool 是 int 的子类，显式排除，免得 True 被当成 1 号品类
         return int(value) if isinstance(value, int) and not isinstance(value, bool) else 0
 
+    scope = str(data.get("job_scope") or "").strip().lower()
     return {
         "factory_name": str(data.get("factory_name") or ""),
         "city": str(data.get("city") or ""),
@@ -96,6 +103,7 @@ def _normalize_meta(data: Any) -> dict[str, Any]:
         "position_id": as_int(data.get("position_id")),
         # 品类 code：工厂设备查 faq-factory-v1，地铁设备查 faq-subway-v1
         "vertical_code": str(data.get("vertical_code") or "factory"),
+        "job_scope": scope if scope in ("subway", "all") else "",
     }
 
 

@@ -1,5 +1,6 @@
 import Fastify, { type FastifyError } from "fastify";
 import fastifyStatic from "@fastify/static";
+import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { DatabaseSync } from "node:sqlite";
@@ -120,6 +121,15 @@ export function buildServer() {
   });
 
   app.register(fastifyStatic, { root: config.frontendDir(), wildcard: false });
+  // 上传文件访问：/uploads/<文件>。与前端静态目录分开（前端在 frontendDir），
+  // 因为上传目录在可写卷上（线上 /data/uploads），且需要跨重启保留。
+  // @fastify/static 要求 root 必须已存在，否则启动即抛错，所以先建目录。
+  mkdirSync(config.uploadsDir(), { recursive: true });
+  app.register(fastifyStatic, {
+    root: config.uploadsDir(),
+    prefix: "/uploads/",
+    decorateReply: false,
+  });
   registerAuthRoutes(app, auth);
   registerCoreRoutes(app, db);
   registerResourceRoutes(app, db);

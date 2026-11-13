@@ -107,3 +107,27 @@ async def test_cache_expires(monkeypatch) -> None:  # noqa: ANN001
 
 async def test_empty_device_code_skips_request() -> None:
     assert await device_scripts.fetch_device_meta("") == dict(device_scripts.EMPTY_META)
+
+
+# ── job_scope：按设备的岗位口径（网页可远程切换）────────────────────────────
+
+def test_normalize_meta_passes_valid_job_scope() -> None:
+    assert device_scripts._normalize_meta({"job_scope": "all"})["job_scope"] == "all"
+    assert device_scripts._normalize_meta({"job_scope": "subway"})["job_scope"] == "subway"
+    # 大小写与首尾空白都容忍
+    assert device_scripts._normalize_meta({"job_scope": "  All  "})["job_scope"] == "all"
+
+
+def test_normalize_meta_dumps_dirty_job_scope_to_empty() -> None:
+    # 一个错字不能把工厂岗全下架或全放出来 → 脏值一律当空，跟随环境变量默认
+    for dirty in ("SUBWAY_ONLY", "1", "subway_only", None, 123, ["all"], ""):
+        assert device_scripts._normalize_meta({"job_scope": dirty})["job_scope"] == "", dirty
+
+
+def test_normalize_meta_keeps_other_fields() -> None:
+    meta = device_scripts._normalize_meta({"factory_name": "广州地铁", "city": "广州", "job_scope": "subway"})
+    assert meta["factory_name"] == "广州地铁"
+    assert meta["city"] == "广州"
+    assert meta["job_scope"] == "subway"
+    # 非 dict 输入整体回落空值
+    assert device_scripts._normalize_meta(None) == dict(device_scripts.EMPTY_META)

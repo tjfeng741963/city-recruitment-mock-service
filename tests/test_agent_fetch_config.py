@@ -168,3 +168,70 @@ def test_restart_reapplies_cached_params_when_version_unchanged(tmp_path):
     remote = rc.RemoteConfig(FakeClient([payload(version="v1")]), cache_path=cache)
     assert remote.sync(cfg) is True
     assert cfg == {"interval": 30, "cooldown": 9}
+
+
+# ── 人工接管名单（R4）：随 /config 下发，drain 命中就跳过 ──────────────────
+
+def test_takeover_sessions_come_from_remote(tmp_path):
+    remote_payload = payload(version="v-takeover", scripts=[])
+    remote_payload["takeover_sessions"] = ["S:alice", "R:group-1"]
+    remote = rc.RemoteConfig(FakeClient([remote_payload]), cache_path=tmp_path / "c.json")
+    assert remote.sync() is True
+    assert rc.takeover_sessions() == {"S:alice", "R:group-1"}
+
+
+def test_takeover_sessions_ignore_dirty_values(tmp_path):
+    # 脏值全部丢弃：非数组、非字符串元素、空白串。绝不能因为一个脏值把所有会话都停掉。
+    remote_payload = payload(version="v-dirty", scripts=[])
+    remote_payload["takeover_sessions"] = [1, None, "  ", "S:ok", {"id": "x"}]
+    remote = rc.RemoteConfig(FakeClient([remote_payload]), cache_path=tmp_path / "c.json")
+    assert remote.sync() is True
+    assert rc.takeover_sessions() == {"S:ok"}
+
+    not_a_list = payload(version="v-dirty2", scripts=[])
+    not_a_list["takeover_sessions"] = "S:alice"
+    remote2 = rc.RemoteConfig(FakeClient([not_a_list]), cache_path=tmp_path / "c2.json")
+    assert remote2.sync() is True
+    assert rc.takeover_sessions() == set()
+
+
+def test_takeover_sessions_survive_cached_restart(tmp_path):
+    cache = tmp_path / "config.remote.json"
+    cache.write_text(
+        json.dumps({"version": "v1", "interval_seconds": 20, "cooldown": 8, "scripts": [],
+                    "takeover_sessions": ["S:alice"]}),
+        encoding="utf-8",
+    )
+    # 重启且远端拉不到：仍按缓存里的接管名单工作，绝不擅自恢复自动回复
+    remote = rc.RemoteConfig(FakeClient([None]), cache_path=cache)
+    assert rc.takeover_sessions() == {"S:alice"}
+    assert remote.sync({"interval": 20, "cooldown": 8}) is False
+    assert rc.takeover_sessions() == {"S:alice"}
+
+
+def test_takeover_removed_when_server_says_so(tmp_path):
+    # 网页点「交还 AI」→ 名单里没有这个会话了 → 客户端恢复自动回复。
+    # 整体替换而非增量合并，删除动作才表达得出来。
+    cache = tmp_path / "config.remote.json"
+    first = payload(version="v1", scripts=[])
+    first["takeover_sessions"] = ["S:alice", "S:bob"]
+    second = payload(version="v2", scripts=[])
+    second["takeover_sessions"] = ["S:bob"]
+    remote = rc.RemoteConfig(FakeClient([first, second]), cache_path=cache)
+    remote.sync()
+    assert rc.takeover_sessions() == {"S:alice", "S:bob"}
+    remote.sync()
+    assert rc.takeover_sessions() == {"S:bob"}
+    assert json.loads(cache.read_text(encoding="utf-8"))["takeover_sessions"] == ["S:bob"]
+
+
+def test_takeover_kept_when_server_omits_the_key(tmp_path):
+    # 老服务端不下发这个键：不能理解成「没人被接管」而把已接管的会话放回自动回复。
+    cache = tmp_path / "config.remote.json"
+    first = payload(version="v1", scripts=[])
+    first["takeover_sessions"] = ["S:alice"]
+    second = payload(version="v2", scripts=[])
+    remote = rc.RemoteConfig(FakeClient([first, second]), cache_path=cache)
+    remote.sync()
+    remote.sync()
+    assert rc.takeover_sessions() == {"S:alice"}
