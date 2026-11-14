@@ -41,6 +41,7 @@ from .flow_engine import (
     _absorb,
     _book,
     _day_offset_of,
+    _decline_interview,
     _gave_up_text,
     _is_bare_greeting,
     _job_fact_answer,
@@ -832,6 +833,14 @@ async def a_step(
     # KB 命中就答 KB（问工资/带视频都正常答），没命中就回约面确认信息。
     if stage == STAGE_DONE or slots.get("booked"):
         slots_kept = state.get("slots") or {}
+        # done 也表示拒绝/交人工，只有 booked 才能声称已经预约。
+        # 拒绝后的普通确认不再借用材料 FAQ 或审核模型重启邀约。
+        if not slots_kept.get("booked") and (
+            not kb_answer or
+            (slots_kept.get("recruit_status") == "disqualified" and not looks_like_question(text))
+        ):
+            return FlowResult(reply="好的，有需要再联系我。", stage=STAGE_DONE,
+                              slots=slots_kept, finished=True, source="fact")
         if kb_answer:
             return FlowResult(
                 reply=kb_answer,
@@ -858,18 +867,12 @@ async def a_step(
 
     # 拒绝快速通道（护栏 5）：确定性处理，不经模型。
     # 问句形式先排除——「电话算了吗」里也有「算了」，那是问事不是拒绝。
-    if stage in (STAGE_ASK_INTERVIEW, STAGE_COLLECT) and is_disagree(
-        text
-    ) and not looks_like_question(text):
-        slots["recruit_status"] = "disqualified"
-        state["stage"] = STAGE_DONE
-        return FlowResult(
-            reply=_gave_up_text(),
-            stage=STAGE_DONE,
-            slots=slots,
-            finished=True,
-            action=ACTION_GAVE_UP,
-        )
+    if (
+        (stage in (STAGE_ASK_INTERVIEW, STAGE_COLLECT) or
+         (stage == STAGE_SEND_INFO and slots.get("interview_offer_sent")))
+        and is_disagree(text) and not looks_like_question(text)
+    ):
+        return _decline_interview(state, slots)
 
     # 明确报城市/招聘区域时直接按真实岗位发卡，模型不能把「广东城际」
     # 当成非城市而再次追问。带其他资料或设备话术素材时仍走原有解析路径。
