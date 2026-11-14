@@ -296,6 +296,12 @@ def render_script(content: str, job: dict[str, Any], window: str = INTERVIEW_WIN
     text = str(content or "")
     for key, value in mapping.items():
         text = text.replace(key, value)
+    # 单花括号兜底：后台编辑框里手打 {factory} 的概率不低（模板语法习惯不同），
+    # 只认双花括号会出现「客户收到 {factory} 在招 {job_title}」这种事故。
+    # 只替换 mapping 里已知的键名，不碰正文里其他花括号。
+    for key, value in mapping.items():
+        name = key.strip("{}")
+        text = text.replace("{%s}" % name, value)
     # 兜底：没匹配上的占位符一律清空，绝不把 {{x}} 发给客户
     text = re.sub(r"\{\{[a-zA-Z0-9_]+\}\}", "", text)
     return text
