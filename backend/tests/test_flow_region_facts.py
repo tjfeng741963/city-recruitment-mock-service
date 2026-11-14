@@ -56,6 +56,32 @@ async def test_region_and_city_recommend_both_bases_without_model(city, prefix):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("switch", [False, True])
+async def test_position_card_keeps_base_and_wage_after_review(monkeypatch, switch):
+    provider = MisleadingModel()
+    state = new_state()
+    first = await flow_llm.a_step(state, "广州", provider)
+    history = []
+    if switch:
+        history = [{"role": "assistant", "content": first.reply}]
+        draft = await flow_llm.a_step(state, "还有别的基地吗", provider)
+    else:
+        draft = first
+    assert draft.source == "card"
+
+    def unwanted_reviewer():
+        raise AssertionError("代码岗位卡不能被审核改成只邀约")
+
+    monkeypatch.setattr(flow_llm, "build_reviewer", unwanted_reviewer)
+    final = await flow_llm.review_loop(state, "还有别的基地吗" if switch else "广州", provider, draft, history)
+    job = JOBS[1 if switch else 0]
+    assert job["place"] in final.reply
+    assert job["wage_text"] in final.reply
+    assert final.slots["position_id"] == job["position_id"]
+    assert provider.calls == 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("text", ["我朋友在广东城际", "广东城际不考虑"])
 async def test_other_person_or_rejected_region_keeps_clarification_path(text):
     provider = MisleadingModel()
