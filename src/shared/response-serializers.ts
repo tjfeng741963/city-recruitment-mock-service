@@ -46,7 +46,7 @@ const POSITION_DEFAULTS: Record<string, unknown> = {
 const CANDIDATE_KEYS = [
   "id", "device_code", "customer_id", "nickname", "wechat_id", "event_type", "event_at", "name",
   "phone", "interview_date", "interview_time", "factory_name", "province", "city", "district", "status",
-  "remind_count", "disqualified_reason", "created_at",
+  "remind_count", "disqualified_reason", "created_at", "registration_text",
 ] as const;
 
 const DEVICE_KEYS = [

@@ -9,9 +9,9 @@ import { mediaAssetsByNames, parsePositionMedia, resolveMediaRefs, type Resolved
  * 候选人档案接口（4222 侧写入/读取）。
  *
  * 语义见 docs/候选人档案契约.md：
- * - 档案必须落到 4222 的 agent_conversations，前端（Vue 产物）不做任何改动；
+ * - 档案必须落到 4222 的 agent_conversations，编译后的 Vue 产物不做改动；
  * - POST 幂等 + 部分更新：profile 里出现的键才覆盖，没出现的保持原值；
- * - 有 interview_date -> recruit_status='invited' / state='pending_invite'，并 upsert 一条
+ * - 同意邀约且城市/工厂/姓名/有效手机齐全 -> invited，并 upsert 一条
  *   candidate_events(event_type='invited') 供 /agent/candidates 展示；
  * - stage='gave_up' -> recruit_status='disqualified'，candidate_events 记 'disqualified'。
  *
@@ -97,9 +97,13 @@ function findConversation(db: DatabaseSync, deviceCode: string, customerId: stri
  * 同一个人同一事件类型只保留一条，反复推送只更新时间/字段，不会在候选人页堆重复行。
  */
 function upsertCandidateEvent(db: DatabaseSync, row: ConversationRow, eventType: "invited" | "disqualified", fields: Record<string, string>) {
-  const existing = db.prepare("SELECT id FROM candidate_events WHERE device_code=? AND customer_id=? AND event_type=? ORDER BY id DESC LIMIT 1")
-    .get(row.device_code, String(row.customer_id), eventType) as { id: number } | undefined;
-  const status = eventType;
+  const existing = db.prepare("SELECT id,data_json,status FROM candidate_events WHERE device_code=? AND customer_id=? AND event_type=? ORDER BY id DESC LIMIT 1")
+    .get(row.device_code, String(row.customer_id), eventType) as { id: number; data_json: string; status: string } | undefined;
+  const data = { ...parseJson(existing?.data_json ?? "{}"), source: "profile", customer_id: row.customer_id,
+    ...(fields.registration_text ? { registration_text: fields.registration_text } : {}),
+  };
+  // 档案同步只补资料，不能把运营已经标记的候选人状态改回初始状态。
+  const status = existing?.status || eventType;
   const values = [
     fields.nickname ?? row.nickname,
     fields.name ?? "",
@@ -113,13 +117,13 @@ function upsertCandidateEvent(db: DatabaseSync, row: ConversationRow, eventType:
     status,
   ];
   if (existing) {
-    db.prepare(`UPDATE candidate_events SET nickname=?,name=?,phone=?,interview_date=?,interview_time=?,factory_name=?,province=?,city=?,district=?,status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-      .run(...values, existing.id);
+    db.prepare(`UPDATE candidate_events SET nickname=?,name=?,phone=?,interview_date=?,interview_time=?,factory_name=?,province=?,city=?,district=?,status=?,data_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+      .run(...values, JSON.stringify(data), existing.id);
     return existing.id;
   }
   const inserted = db.prepare(`INSERT INTO candidate_events(device_code,customer_id,nickname,event_type,event_at,name,phone,interview_date,interview_time,factory_name,province,city,district,status,data_json)
     VALUES (?,?,?,?,CURRENT_TIMESTAMP,?,?,?,?,?,?,?,?,?,?)`)
-    .run(row.device_code, String(row.customer_id), values[0], eventType, values[1], values[2], values[3], values[4], values[5], values[6], values[7], values[8], status, JSON.stringify({ source: "profile", customer_id: row.customer_id }));
+    .run(row.device_code, String(row.customer_id), values[0], eventType, values[1], values[2], values[3], values[4], values[5], values[6], values[7], values[8], status, JSON.stringify(data));
   return Number(inserted.lastInsertRowid);
 }
 
@@ -179,19 +183,36 @@ export async function registerProfileRoutes(app: FastifyInstance, db: DatabaseSy
       district: conversation.district ?? "",
     };
     for (const field of COLUMN_FIELDS) {
-      if (has(field)) merged[field] = asText(profile[field]);
+      if (has(field)) merged[field] = asText(profile[field]).trim();
     }
     // 备注：契约里 8090 送的是 notes，前端读的是 remark 列，这里映射一次。
     let remark = conversation.remark ?? "";
     if (has("remark")) remark = asText(profile.remark);
     else if (has("notes")) remark = asText(profile.notes);
 
-    const profileJson = { ...parseJson(conversation.profile_json ?? "{}"), ...profile };
+    const savedProfile = parseJson(conversation.profile_json ?? "{}");
+    const profileJson = { ...savedProfile, ...profile };
 
     const gaveUp = asText(profile.stage) === "gave_up";
-    // 只有本次推送真的带了面试日期才切 invited：否则一次「只改备注」的推送会把
-    // 已经 disqualified 的候选重新拉回面试队列。
-    const invited = !gaveUp && has("interview_date") && merged.interview_date.trim() !== "";
+    // 兼容旧客户端的 collect/booked；显式 false 优先，日期不作为同意凭据。
+    let agreed = profileJson.interview_agreed === true;
+    if (gaveUp) agreed = false;
+    else if (has("interview_agreed")) agreed = profile.interview_agreed === true;
+    else if (profile.stage === "collect" || profile.stage === "booked") agreed = true;
+    profileJson.interview_agreed = agreed;
+    const registration = [merged.city, merged.factory_name, merged.name, merged.phone];
+    const invited = !gaveUp && agreed && registration.every(value => value.trim() !== "") && /^1[3-9][0-9]{9}$/.test(merged.phone);
+    // 摘要由实际合并后的字段生成，不信任调用方传入的拼接文本；record 仍表示案底。
+    const registrationText = invited ? registration.map(value => value.trim()).join(" ") : "";
+    if (registrationText) profileJson.registration_text = registrationText;
+    else delete profileJson.registration_text;
+    // 自动登记摘要占独立一行，更新时只替换上一条摘要，保留人工备注。
+    const previousRegistration = asText(savedProfile.registration_text);
+    const manualRemark = remark.split(/\r?\n/).filter(line =>
+      !(previousRegistration && line.trim() === previousRegistration) &&
+      !(registrationText && line.trim() === registrationText)
+    ).join("\n").trim();
+    remark = [registrationText, manualRemark].filter(Boolean).join("\n");
     let recruitStatus = conversation.recruit_status;
     let state = conversation.state;
     if (gaveUp) recruitStatus = "disqualified";
@@ -199,9 +220,6 @@ export async function registerProfileRoutes(app: FastifyInstance, db: DatabaseSy
       recruitStatus = "invited";
       state = "pending_invite";
     }
-
-    db.prepare(`UPDATE agent_conversations SET name=?,phone=?,remark=?,factory_name=?,interview_date=?,interview_time=?,profile_json=?,province=?,city=?,district=?,recruit_status=?,state=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-      .run(merged.name, merged.phone, remark, merged.factory_name, merged.interview_date, merged.interview_time, JSON.stringify(profileJson), merged.province, merged.city, merged.district, recruitStatus, state, conversation.id);
 
     const row: ConversationRow = { ...conversation, ...merged, remark, recruit_status: recruitStatus, state };
     const eventFields = {
@@ -214,15 +232,23 @@ export async function registerProfileRoutes(app: FastifyInstance, db: DatabaseSy
       province: merged.province,
       city: merged.city,
       district: merged.district,
+      registration_text: registrationText,
     };
-    if (gaveUp) upsertCandidateEvent(db, row, "disqualified", eventFields);
-    else if (invited) {
-      upsertCandidateEvent(db, row, "invited", eventFields);
-      // 沟通中 → 已约面：invited 建好的同一推送里把 pending 的 communicating 收尾
-      convertCommunicatingEvents(db, row);
-    } else if (asText(profile.stage) === "collect") {
-      // collect 阶段只建「沟通中」；部分更新语义不受影响，profile 照常合并
-      ensureCommunicatingEvent(db, row);
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.prepare(`UPDATE agent_conversations SET name=?,phone=?,remark=?,factory_name=?,interview_date=?,interview_time=?,profile_json=?,province=?,city=?,district=?,recruit_status=?,state=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+        .run(merged.name, merged.phone, remark, merged.factory_name, merged.interview_date, merged.interview_time, JSON.stringify(profileJson), merged.province, merged.city, merged.district, recruitStatus, state, conversation.id);
+      if (gaveUp) upsertCandidateEvent(db, row, "disqualified", eventFields);
+      else if (invited) {
+        upsertCandidateEvent(db, row, "invited", eventFields);
+        convertCommunicatingEvents(db, row);
+      } else if (asText(profile.stage) === "collect") {
+        ensureCommunicatingEvent(db, row);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
     }
 
     return { ok: true, customer_id: String(conversation.customer_id), recruit_status: recruitStatus };
@@ -249,6 +275,7 @@ export async function registerProfileRoutes(app: FastifyInstance, db: DatabaseSy
       name: row.name ?? "",
       phone: row.phone ?? "",
       remark: row.remark ?? "",
+      registration_text: asText(profile.registration_text),
       factory_name: row.factory_name ?? "",
       interview_date: row.interview_date ?? "",
       interview_time: row.interview_time ?? "",

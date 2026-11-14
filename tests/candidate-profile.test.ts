@@ -74,7 +74,7 @@ describe("candidate profile api", () => {
     expect(read.json()).toMatchObject({ customer_id: "700001", factory_name: "利口福食品厂" });
   });
 
-  it("marks the conversation invited and records one candidate event when an interview date arrives", async () => {
+  it("marks the conversation invited and records one candidate event for a complete booked profile", async () => {
     const response = await app.inject({
       method: "POST",
       url: "/api/v1/agent/profile",
@@ -151,7 +151,7 @@ describe("candidate profile api", () => {
       method: "POST",
       url: "/api/v1/agent/profile",
       headers: headers(),
-      payload: { device_code: "local-device-001", customer_id: "700002", profile: { name: "王五", phone: "13700000000", interview_date: "2026-12-05", stage: "booked" } },
+      payload: { device_code: "local-device-001", customer_id: "700002", profile: { city: "广州", factory_name: "测试工厂", name: "王五", phone: "13700000000", interview_date: "2026-12-05", stage: "booked" } },
     });
     expect(invited.statusCode).toBe(200);
     expect(invited.json()).toMatchObject({ ok: true, recruit_status: "invited" });

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 from typing import Any
 
@@ -52,9 +53,17 @@ _STAGE_MAP = {
 
 
 def _job_of(slots: dict[str, Any]) -> dict[str, str]:
+    snapshot = slots.get("job_snapshot")
+    if isinstance(snapshot, dict) and snapshot:
+        return snapshot
     jobs = jobs_for_city(str(slots.get("city") or ""))
     if not jobs:
         return {}
+    position_id = slots.get("position_id")
+    if position_id:
+        return next(
+            (job for job in jobs if str(job.get("position_id")) == str(position_id)), {}
+        )
     try:
         index = int(slots.get("job_index") or 0)
     except (TypeError, ValueError):
@@ -75,10 +84,12 @@ def _date_time(interview_at: Any) -> tuple[str, str]:
 
 
 def _stage(slots: dict[str, Any], stage: str, action: str | None) -> str:
+    if action in (ACTION_GAVE_UP, ACTION_HANDOFF) or slots.get("recruit_status") in (
+        "gave_up", "disqualified"
+    ):
+        return "gave_up"
     if action == ACTION_BOOK:
         return "booked"
-    if action in (ACTION_GAVE_UP, ACTION_HANDOFF):
-        return "gave_up"
     return _STAGE_MAP.get(str(stage or ""), "asking")
 
 
@@ -94,16 +105,16 @@ def build_profile(
     job = _job_of(slots)
     # 岗位字段统一为 4222 jobs 契约名：job_title 岗位（含工种）、factory_name 厂名
     title = str(job.get("job_title") or "")
-    factory = str(job.get("factory_name") or "") or (title.split(" ")[0] if title else "")
+    factory = str(job.get("factory_name") or "").strip()
     interview_date, interview_time = _date_time(slots.get("interview_at"))
     # 默认窗口是「09:00-11:00」，比 interview_at 的整点更准，优先用它
     window = str(slots.get("interview_window") or "").strip() or interview_time
 
     fields = {
-        "name": str(slots.get("name") or ""),
-        "phone": str(slots.get("phone") or ""),
+        "name": str(slots.get("name") or "").strip(),
+        "phone": str(slots.get("phone") or "").strip(),
         "province": str(slots.get("province") or ""),
-        "city": str(slots.get("city") or ""),
+        "city": str(job.get("city") or slots.get("city") or "").strip(),
         "district": str(slots.get("district") or ""),
         "gender": str(slots.get("gender") or ""),
         "record": str(slots.get("record") or ""),
@@ -118,6 +129,15 @@ def build_profile(
         key: value for key, value in fields.items() if value not in ("", None)
     }
     profile["stage"] = _stage(slots, stage, action)
+    agreed = slots.get("interview_agreed") is True and profile["stage"] != "gave_up"
+    if isinstance(slots.get("interview_agreed"), bool) or profile["stage"] == "gave_up":
+        profile["interview_agreed"] = agreed
+    registration = [str(profile.get(key) or "").strip() for key in ("city", "factory_name", "name", "phone")]
+    if agreed and all(registration) and re.fullmatch(r"1[3-9][0-9]{9}", registration[-1]):
+        profile["registration_text"] = " ".join(registration)
+    elif profile["stage"] == "booked":
+        # done / book 动作不是资料与同意的替代，不能让旧状态触发提前建档。
+        profile["stage"] = "offered"
     return profile
 
 

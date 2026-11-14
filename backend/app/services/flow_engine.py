@@ -716,6 +716,8 @@ def _book(slots: dict[str, Any], when: datetime, now: datetime | None = None) ->
         slots=slots,
         finished=True,
         action=ACTION_BOOK,
+        # 运营预约话术由渲染层定稿，审核不得再改写地点或媒体标记。
+        source="script" if booked else "",
     )
 
 
