@@ -452,7 +452,7 @@ async def flow_answer(
     # 2 轮后仍打回 → 兜底强制发送（事实卡直答 → 确定性提问 → 确认一下）。
     # B 不可用仍执行媒体白名单校验；模型审核是增强，不阻塞正常回复。
     # 只从当前素材和已选岗位构造白名单，不能从模型草稿、客户原话或历史消息取。
-    if device_material_used or result.source in {"script", "card", "fact"} or result.action:
+    if device_material_used or result.source in {"script", "card", "fact", "collect"} or result.action:
         # 本轮没使用 KB，不能把命中但未采用的另一份素材补到运营回复后。
         kb_markers, kb_entry_id, kb_repeat = [], None, False
         if not device_material_used:

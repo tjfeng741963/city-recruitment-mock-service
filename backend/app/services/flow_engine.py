@@ -108,7 +108,8 @@ class FlowResult:
     attachments: list[Any] = field(default_factory=list)
     # 知识库没答上来的原话，由调用方落 unknown_questions（本模块不做 I/O）
     unknown_question: str = ""
-    # 本轮内容来源：script=运营话术 / card=代码拼卡 / fact=岗位事实 / 空串=其他。
+    # 本轮内容来源：script=运营话术 / card=代码拼卡 / fact=岗位事实 /
+    # collect=代码生成的必填资料提示 / 空串=其他。
     # 给审核循环（flow_llm.review_loop）区分「话术只能过或打回渲染层」用。
     source: str = ""
 
@@ -274,6 +275,21 @@ def _is_bare_greeting(text: str) -> bool:
 def is_agree(text: str) -> bool:
     if any(word in text for word in _DISAGREE):
         return False
+    if looks_like_question(text) or _is_bare_greeting(text):
+        return False
+    # 长句只认客户本人明确承诺来面试；不能去掉长度限制后仅凭「去/可以」
+    # 把朋友、条件句或尚未决定的计划都登记成同意。
+    if any(word in text for word in ("如果", "要是", "可能", "考虑", "不一定", "再看", "的话")):
+        return False
+    value = (text or "").strip().strip("，,。.！! ")
+    if re.fullmatch(
+        r"(?:(?:可以|好的|没问题)[，, ]*)?我(?:准备|打算|决定)?"
+        r"(?:大后天|后天|明天|今天|周[一二三四五六日天]|星期[一二三四五六日天])?"
+        r"(?:早上|上午|中午|下午|晚上)?(?:会|要|就|可以|准备|打算|决定|愿意|能)?"
+        r"(?:过去|过来|去|来|到)[^，,。.!！?？\n]{0,30}面试",
+        value,
+    ):
+        return True
     # 「好几号到？」这种长句里的「好」不算答应，短句才算
     return len(text) <= 12 and any(word in text for word in _AGREE)
 
@@ -784,6 +800,15 @@ def step(
     if changed is not None:
         return changed
 
+    # 明确同意优先于节点的材料 FAQ；greet 发完卡仍在 send_info 也须能接住。
+    if (
+        (stage == STAGE_ASK_INTERVIEW or
+         (stage == STAGE_SEND_INFO and slots.get("interview_offer_sent")))
+        and is_agree(text)
+    ):
+        _absorb(slots, text)
+        return _agree_interview(state, slots, when, now)
+
     # ── 节点化编排 ──────────────────────────────────────────────────────
     # 有节点图且当前节点能走出去，就按图的边决定下一步；走不出去（没配边、
     # 或节点图里根本没这个节点）就落到下面的写死分支兜底。
@@ -1081,7 +1106,7 @@ def _agree_interview(
     state["stage"] = STAGE_COLLECT
     prompt = _collect_prompt(slots)
     if prompt:
-        return FlowResult(reply=prompt, stage=STAGE_COLLECT, slots=slots)
+        return FlowResult(reply=prompt, stage=STAGE_COLLECT, slots=slots, source="collect")
     result = _book(slots, when, now)
     state["stage"] = result.stage
     return result

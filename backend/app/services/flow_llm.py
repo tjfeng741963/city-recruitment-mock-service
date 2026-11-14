@@ -872,11 +872,17 @@ async def a_step(
 
     # 答应面试：确定性推进（同状态机口径），不用模型判断同不同意
     if (
-        stage == STAGE_ASK_INTERVIEW
+        (stage == STAGE_ASK_INTERVIEW or
+         (stage == STAGE_SEND_INFO and slots.get("interview_offer_sent")))
         and is_agree(text)
         and not looks_like_question(text)
         and not _is_bare_greeting(text)
     ):
+        _absorb(slots, text)
+        day_offset = extract_day_offset(text)
+        if day_offset is not None:
+            slots["interview_day_offset"] = day_offset
+        when = next_interview(now, _day_offset_of(slots))
         result = _agree_interview(state, slots, when, now)
         state["node"] = result.stage
         return result
@@ -1063,9 +1069,10 @@ async def review_loop(
     draft = list(result.parts) or ([result.reply] if result.reply else [])
     if not draft:
         return result
-    if result.source in {"card", "fact"}:
+    if result.source in {"card", "fact", "collect"}:
         # 首次发卡、主动换岗、重问事实都必须展示当前岗位。模型判重/重写
-        # 会把新基地卡片或工资改成面试邀约；代码渲染的内容清理媒体后原样发送。
+        # 会把新基地卡片或工资改成面试邀约；必填资料提示也不能改成面试材料。
+        # 代码渲染的内容清理媒体后原样发送。
         return result
     reviewer = build_reviewer()
     if reviewer is None:
