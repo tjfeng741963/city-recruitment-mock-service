@@ -11,8 +11,12 @@ services:
       REA_HOST: 0.0.0.0
       REA_PORT: 4222
       REA_DATABASE_PATH: /data/app.sqlite
-      # React 管理台由同一个 Fastify 进程同源托管；旧 Vue 资源仍保留作回滚备用。
-      REA_FRONTEND_DIR: /app/frontend/dist
+      # 前端用 public/ 下的 Vue 版本（旧界面 + theme/ 注入层）。
+      # 2026-11-14 客户明确要求：要旧版布局样式，功能保持现状。
+      # src/config.ts 本来就以 public 为默认；这里显式写死，不依赖 env 覆盖。
+      # React 产物仍随镜像构建（frontend/dist），需要时把这一行改回
+      # /app/frontend/dist 即可切回，不用重新构建。
+      REA_FRONTEND_DIR: /app/public
       # 走知识库链路。534 条存量数据已经从易歪歪备份导进 PostgreSQL。
       REA_DIFY_PROVIDER: kb
       REA_KB_API_URL: http://city-recruitment-api:8090
