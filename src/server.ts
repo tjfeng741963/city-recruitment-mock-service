@@ -1,6 +1,5 @@
 import Fastify, { type FastifyError } from "fastify";
 import fastifyStatic from "@fastify/static";
-import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { DatabaseSync } from "node:sqlite";
@@ -58,6 +57,8 @@ const PUBLIC_ROUTES = new Set([
   "GET /api/v1/agent/jobs",
   // 8090 服务间取城市清单，用于识别客户说的地名（X-Profile-Token 自校验）。
   "GET /api/v1/agent/cities",
+  // 8090 服务间查后台知识库（网页「知识管理」里填的条目），X-Profile-Token 自校验。
+  "GET /api/v1/agent/kb-match",
   ...DEVICE_TOKEN_ROUTES,
   "GET /api/v1/channels/wecom-kf/callback",
   "POST /api/v1/channels/wecom-kf/callback",
@@ -123,15 +124,6 @@ export function buildServer() {
   });
 
   app.register(fastifyStatic, { root: config.frontendDir(), wildcard: false });
-  // 上传文件访问：/uploads/<文件>。与前端静态目录分开（前端在 frontendDir），
-  // 因为上传目录在可写卷上（线上 /data/uploads），且需要跨重启保留。
-  // @fastify/static 要求 root 必须已存在，否则启动即抛错，所以先建目录。
-  mkdirSync(config.uploadsDir(), { recursive: true });
-  app.register(fastifyStatic, {
-    root: config.uploadsDir(),
-    prefix: "/uploads/",
-    decorateReply: false,
-  });
   registerAuthRoutes(app, auth);
   registerCoreRoutes(app, db);
   registerResourceRoutes(app, db);

@@ -10,13 +10,15 @@ import { createMessageChannelProvider, type MessageChannelProvider } from "../me
  * 由通道实现自己决定是入队 bridge_commands 还是 HTTP 网关，这里不碰 bridge_commands。
  *
  * 默认关闭：agent_configs(kind='followup') 里 enabled !== true 时 runFollowupOnce 直接跳过。
- * 只有 runFollowupOnce 被显式调用（手动触发接口 / 外部调度）才会跑，本模块不起任何定时器。
+ * 开关打开后由本模块自带的定时器按「追问间隔」驱动，间隔取自同一份配置。
  */
 
 export interface FollowupConfig {
   enabled: boolean;
   maxCount: number;
   scripts: string[];
+  /** 「追问设置 → 追问间隔」，秒。页面一直能存这个值，但过去没有任何人读它。 */
+  intervalSeconds: number;
 }
 
 export interface FollowupDeps {
@@ -87,11 +89,13 @@ export function readFollowupConfig(db: DatabaseSync): FollowupConfig {
     raw = {};
   }
   const maxCount = Number(raw.max_count);
+  const intervalSeconds = Number(raw.interval_seconds);
   const scripts = Array.isArray(raw.scripts) ? raw.scripts.filter((item): item is string => typeof item === "string" && item.trim() !== "") : [];
   return {
     enabled: raw.enabled === true,
     maxCount: Number.isFinite(maxCount) && maxCount > 0 ? Math.floor(maxCount) : 3,
     scripts: scripts.length ? scripts : DEFAULT_SCRIPTS,
+    intervalSeconds: Number.isFinite(intervalSeconds) && intervalSeconds >= 30 ? Math.floor(intervalSeconds) : 300,
   };
 }
 
@@ -182,10 +186,103 @@ export async function runFollowupOnce(db: DatabaseSync, deps: FollowupDeps): Pro
   return result;
 }
 
+/** 面试提醒的配置（「回复规则 → 面试提醒」页写入的那一份）。 */
+export interface ReminderConfig {
+  enabled: boolean;
+  mode: string;
+  advanceHours: number;
+  fixedTime: string;
+  script: string;
+}
+
+export function readReminderConfig(db: DatabaseSync): ReminderConfig {
+  let raw: Record<string, unknown> = {};
+  try {
+    const row = db.prepare("SELECT value_json FROM agent_configs WHERE kind='reminder' AND recruiter_id='global'").get() as { value_json: string } | undefined;
+    if (row) {
+      const parsed: unknown = JSON.parse(row.value_json || "{}");
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) raw = parsed as Record<string, unknown>;
+    }
+  } catch {
+    raw = {};
+  }
+  return {
+    enabled: raw.enabled === true,
+    mode: String(raw.mode ?? "advance"),
+    advanceHours: Number(raw.advance_hours ?? 2) || 2,
+    fixedTime: String(raw.fixed_time ?? "09:00"),
+    script: String(raw.script ?? ""),
+  };
+}
+
 /** 手动触发入口（管理员），方便验收；不注册任何定时器。 */
 export async function registerFollowupRoutes(app: FastifyInstance, db: DatabaseSync, channel: MessageChannelProvider = createMessageChannelProvider(undefined, db)) {
   app.post("/api/v1/agent/followup/run", async (request, reply) => {
     if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin access required" });
     return runFollowupOnce(db, { channel });
   });
+
+  /**
+   * 候选人列表的「提醒到场」按钮。
+   *
+   * 过去页面上只有 remind_count 的展示，没有任何接口能点；
+   * 「回复规则 → 面试提醒」里配的提醒话术也没有任何读取方。这里把两者接上：
+   * 用 reminder-config 里的话术给这一位候选人发一条，并累加 remind_count。
+   */
+  app.post<{ Params: { id: string } }>("/api/v1/agent/candidates/:id/remind", async (request, reply) => {
+    const id = Number(request.params.id);
+    const candidate = db.prepare(
+      "SELECT id, device_code, customer_id, interview_date, remind_count FROM candidate_events WHERE id=?",
+    ).get(id) as { id: number; device_code: string; customer_id: string; interview_date: string; remind_count: number } | undefined;
+    if (!candidate) return reply.code(404).send({ detail: "候选人不存在" });
+
+    const config = readReminderConfig(db);
+    const content = config.script.trim() || "明天面试记得准时到哈，到了给我发个消息";
+    const remindCount = Number(candidate.remind_count ?? 0);
+    const customerId = Number(candidate.customer_id);
+    if (!Number.isSafeInteger(customerId)) return reply.code(422).send({ detail: "customer_id 无效" });
+
+    try {
+      const sent = await channel.sendMessage({
+        deviceCode: candidate.device_code,
+        customerId,
+        content,
+        idempotencyKey: `remind:${candidate.device_code}:${candidate.customer_id}:${remindCount + 1}`,
+      });
+      if (!sent.success) return reply.code(502).send({ detail: sent.error ?? "发送失败" });
+      db.prepare("UPDATE candidate_events SET remind_count=remind_count+1,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(id);
+      return { success: true, remind_count: remindCount + 1, content };
+    } catch (error) {
+      return reply.code(502).send({ detail: error instanceof Error ? error.message : "发送失败" });
+    }
+  });
+
+  /**
+   * 「追问设置」的自动执行。
+   *
+   * 过去这个页面的开关、间隔、追问次数全部只存在 agent_configs 里，
+   * 没有任何调度器调用 runFollowupOnce——等于运营打开了也什么都不会发生。
+   * 这里起一个自愈式定时器：每 30 秒看一次配置，到了配置的间隔就跑一轮。
+   * 进程内只允许一个定时器；没配置或已关闭时直接跳过，不产生任何开销。
+   */
+  const tickMs = 30_000;
+  let lastRun = 0;
+  let running = false;
+  const timer = setInterval(async () => {
+    if (running) return;
+    const config = readFollowupConfig(db);
+    if (!config.enabled) return;
+    if (Date.now() - lastRun < config.intervalSeconds * 1000) return;
+    running = true;
+    lastRun = Date.now();
+    try {
+      await runFollowupOnce(db, { channel });
+    } catch {
+      // 单轮失败不影响下一轮；runFollowupOnce 内部已按候选隔离并记录日志
+    } finally {
+      running = false;
+    }
+  }, tickMs);
+  timer.unref();
+  app.addHook("onClose", () => clearInterval(timer));
 }

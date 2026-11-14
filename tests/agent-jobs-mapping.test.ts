@@ -99,4 +99,25 @@ describe("agent jobs feed mapping", () => {
     const items = jobs.json().items as Array<Record<string, string>>;
     expect(items.map((j) => j.job_title)).toContain("未挂厂岗位");
   });
+
+  it("matches backoffice knowledge so what operators type is actually used", async () => {
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/knowledge",
+      headers: admin(),
+      payload: { question: "体检要自己出钱吗", answer: "体检费先自己垫，入职满一个月报销", keywords: ["体检"] },
+    });
+    expect(created.statusCode).toBe(200);
+
+    const anonymous = await app.inject({ method: "GET", url: "/api/v1/agent/kb-match?text=体检要钱吗" });
+    expect(anonymous.statusCode).toBe(403);
+
+    const hit = await app.inject({ method: "GET", url: "/api/v1/agent/kb-match?text=体检要钱吗", headers: svc });
+    expect(hit.statusCode).toBe(200);
+    expect(hit.json().hit).toMatchObject({ content: expect.stringContaining("体检费") });
+
+    // 匹配不上的问法必须返回 null，不能随便塞一条
+    const miss = await app.inject({ method: "GET", url: "/api/v1/agent/kb-match?text=今天天气怎么样", headers: svc });
+    expect(miss.json().hit).toBeNull();
+  });
 });

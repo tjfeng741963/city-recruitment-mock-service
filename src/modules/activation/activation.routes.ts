@@ -78,10 +78,74 @@ export async function registerActivationRoutes(app: FastifyInstance, db: Databas
     const sent = count("sent");
     return { today_pending: count("pending_review") + count("pending_send"), today_sent: sent, today_replied: replied, reply_rate: sent ? replied / sent * 100 : 0, frozen_total: count("frozen"), paused: Boolean((db.prepare("SELECT paused FROM activation_config WHERE id=1").get() as { paused: number } | undefined)?.paused) };
   });
-  app.get("/api/v1/activation/dashboard/trend", async (request) => { const scope = deviceConstraint(deviceScope(request.auth!), "device_code"); return { items: Array.from({ length: 14 }, (_, index) => { const date = new Date(Date.now() - (13 - index) * 86400000).toISOString().slice(0, 10); return { date, sent: Number((db.prepare(`SELECT COUNT(*) count FROM activation_records WHERE status='sent' AND date(updated_at)=date(?)${scope.sql}`).get(date, ...scope.values) as { count: number }).count), replied: 0 }; }) }; });
+  app.get("/api/v1/activation/dashboard/trend", async (request) => {
+    const scope = deviceConstraint(deviceScope(request.auth!), "device_code");
+    // replied 过去写死 0：客户回复率那一栏永远是平的。
+    // 真实口径：已发出的激活记录里，同一客户当天有 inbound 消息的算「已回复」。
+    const start = new Date(Date.now() - 13 * 86400000).toISOString().slice(0, 10);
+    const sentRows = db.prepare(
+      `SELECT date(updated_at) AS day, COUNT(*) AS n FROM activation_records
+        WHERE status='sent' AND date(updated_at) >= date(?)${scope.sql} GROUP BY day`,
+    ).all(start, ...scope.values) as Array<{ day: string; n: number }>;
+    const repliedRows = db.prepare(
+      `SELECT date(m.created_at) AS day,
+              COUNT(DISTINCT m.device_code || ':' || m.customer_id) AS n
+         FROM agent_messages m
+         JOIN activation_records r ON r.device_code = m.device_code AND r.customer_id = m.customer_id
+        WHERE m.direction='inbound' AND r.status='sent' AND date(m.created_at) >= date(?)${scope.sql.replace(/device_code/g, "r.device_code")}
+        GROUP BY day`,
+    ).all(start, ...scope.values) as Array<{ day: string; n: number }>;
+    const sentMap = new Map(sentRows.map((r) => [r.day, Number(r.n)]));
+    const repliedMap = new Map(repliedRows.map((r) => [r.day, Number(r.n)]));
+    const items = Array.from({ length: 14 }, (_, index) => {
+      const date = new Date(Date.now() - (13 - index) * 86400000).toISOString().slice(0, 10);
+      return { date, sent: sentMap.get(date) ?? 0, replied: repliedMap.get(date) ?? 0 };
+    });
+    return { items };
+  });
   app.get("/api/v1/activation/dashboard/population", async (request) => { const scope = deviceConstraint(deviceScope(request.auth!), "device_code"); return ["no_reply", "date_trigger", "misjudge", "paused"].map((code, index) => ({ name: ["A策略·无回复激活", "B策略·到期提醒", "C策略·误判捞回", "D策略·暂停求职"][index], value: Number((db.prepare(`SELECT COUNT(*) count FROM activation_records WHERE strategy=?${scope.sql}`).get(code, ...scope.values) as { count: number }).count) })); });
-  app.get("/api/v1/activation/dashboard/strategy-effect", async () => ["no_reply", "date_trigger", "misjudge", "paused"].map((code) => ({ code, sent: 0, replied: 0, rate: 0, good: false })));
-  app.get("/api/v1/activation/dashboard/feed", async () => ({ items: [] }));
+  app.get("/api/v1/activation/dashboard/strategy-effect", async (request) => {
+    const scope = deviceConstraint(deviceScope(request.auth!), "device_code");
+    // 过去整段返回 0：策略效果对比图永远是空的。按策略真实统计发送 / 回复。
+    const rows = db.prepare(
+      `SELECT strategy,
+              SUM(CASE WHEN status IN ('sent','replied') THEN 1 ELSE 0 END) AS sent,
+              SUM(CASE WHEN status='replied' THEN 1 ELSE 0 END) AS replied
+         FROM activation_records WHERE 1=1${scope.sql} GROUP BY strategy`,
+    ).all(...scope.values) as Array<{ strategy: string; sent: number; replied: number }>;
+    const byStrategy = new Map(rows.map((row) => [row.strategy, row]));
+    return ["no_reply", "date_trigger", "misjudge", "paused"].map((code) => {
+      const row = byStrategy.get(code);
+      const sent = Number(row?.sent ?? 0);
+      const replied = Number(row?.replied ?? 0);
+      const rate = sent ? Math.round((replied / sent) * 1000) / 10 : 0;
+      // 好评：回复率过半且至少发过 3 条，避免「发 1 条回 1 条」也算好
+      return { code, sent, replied, rate, good: sent >= 3 && rate >= 50 };
+    });
+  });
+  app.get("/api/v1/activation/dashboard/feed", async (request) => {
+    const scope = deviceConstraint(deviceScope(request.auth!), "device_code");
+    // 实时动态：取最近的激活记录，按状态映射成前端认识的 type
+    const rows = db.prepare(
+      `SELECT id, nickname, strategy, status, script, reason, updated_at
+         FROM activation_records WHERE 1=1${scope.sql} ORDER BY updated_at DESC LIMIT 12`,
+    ).all(...scope.values) as Array<{ id: number; nickname: string; strategy: string; status: string; script: string; reason: string; updated_at: string }>;
+    const typeOf = (status: string) => {
+      if (status === "sent") return "sent";
+      if (status === "replied") return "replied";
+      if (status === "failed" || status === "frozen") return "failed";
+      return "pending";
+    };
+    const items = rows.map((row) => ({
+      id: row.id,
+      type: typeOf(row.status),
+      nickname: row.nickname || `客户 ${row.id}`,
+      text: row.script || row.reason || "",
+      meta: `${row.strategy || "—"} · ${row.status}`,
+      time: row.updated_at,
+    }));
+    return { items };
+  });
   app.post<{ Body: Record<string, unknown> }>("/api/v1/webhooks/dify", async (request, reply) => {
     const rawBody = JSON.stringify(request.body ?? {});
     const signature = String(request.headers["x-dify-signature"] ?? "");

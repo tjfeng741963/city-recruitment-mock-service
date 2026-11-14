@@ -98,20 +98,31 @@ function upsertCandidateEvent(db: DatabaseSync, row: ConversationRow, eventType:
   const existing = db.prepare("SELECT id FROM candidate_events WHERE device_code=? AND customer_id=? AND event_type=? ORDER BY id DESC LIMIT 1")
     .get(row.device_code, String(row.customer_id), eventType) as { id: number } | undefined;
   const status = eventType;
+  // 空值不覆盖：8090 的档案是「部分更新」，这次没带省/区县/厂名不代表要清空，
+  // 直接写空串会把之前收集到的信息冲掉（OA 页面上表现为字段时有时无）。
+  const keep = (incoming: string | undefined, fallback = "") => {
+    const value = String(incoming ?? "").trim();
+    return value !== "" ? value : fallback;
+  };
   const values = [
-    fields.nickname ?? row.nickname,
-    fields.name ?? "",
-    fields.phone ?? "",
-    fields.interview_date ?? "",
-    fields.interview_time ?? "",
-    fields.factory_name ?? "",
-    fields.province ?? "",
-    fields.city ?? "",
-    fields.district ?? "",
+    keep(fields.nickname, row.nickname),
+    keep(fields.name),
+    keep(fields.phone),
+    keep(fields.interview_date),
+    keep(fields.interview_time),
+    keep(fields.factory_name),
+    keep(fields.province),
+    keep(fields.city),
+    keep(fields.district),
     status,
   ];
   if (existing) {
-    db.prepare(`UPDATE candidate_events SET nickname=?,name=?,phone=?,interview_date=?,interview_time=?,factory_name=?,province=?,city=?,district=?,status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+    // COALESCE(NULLIF(?, ''), 列) —— 新值非空才覆盖，空则保留库里已有的
+    db.prepare(`UPDATE candidate_events SET nickname=COALESCE(NULLIF(?,''),nickname),name=COALESCE(NULLIF(?,''),name),
+        phone=COALESCE(NULLIF(?,''),phone),interview_date=COALESCE(NULLIF(?,''),interview_date),
+        interview_time=COALESCE(NULLIF(?,''),interview_time),factory_name=COALESCE(NULLIF(?,''),factory_name),
+        province=COALESCE(NULLIF(?,''),province),city=COALESCE(NULLIF(?,''),city),district=COALESCE(NULLIF(?,''),district),
+        status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
       .run(...values, existing.id);
     return existing.id;
   }
@@ -278,6 +289,51 @@ function inferVertical(name: string): string {
  * 鉴权：X-Profile-Token（8090 服务间）或正常用户 token，二选一。
  */
 export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) {
+  /**
+   * 后台知识库的匹配接口（给 8090 用）。
+   *
+   * 为什么需要：后台「知识管理 → 知识库」写的是本库的 knowledge_items，
+   * 而回复链路读的是 Python 侧的 kb_entry / kb_faq，两张表之间没有任何同步。
+   * 运营在网页上填的知识，过去对 AI 回复完全无效。
+   *
+   * 匹配规则与 Python 侧 keywords_of 保持一致：整句命中或前 2 字片段命中；
+   * 关键词字段优先，没配关键词就用标题切词。
+   */
+  app.get<{ Querystring: { text?: string; city?: string } }>("/api/v1/agent/kb-match", async (request, reply) => {
+    if (!authorizeProfileRequest(request) && !request.auth) {
+      return reply.code(403).send({ detail: "Not authenticated" });
+    }
+    const text = String(request.query.text ?? "").trim();
+    if (!text) return reply.code(422).send({ detail: "text is required" });
+    const cityHint = String(request.query.city ?? "").trim();
+
+    const rows = db.prepare(
+      "SELECT id, title, content, data_json FROM knowledge_items WHERE status='enabled' ORDER BY id",
+    ).all() as Array<{ id: number; title: string; content: string; data_json: string }>;
+
+    let best: { id: number; title: string; content: string; score: number } | null = null;
+    for (const row of rows) {
+      let data: Record<string, unknown> = {};
+      try { data = JSON.parse(row.data_json || "{}") as Record<string, unknown>; } catch { data = {}; }
+      if (data.is_active === false) continue;
+      const rowCity = String(data.city ?? "").trim();
+      if (rowCity && cityHint && rowCity !== cityHint) continue;
+
+      const declared = Array.isArray(data.keywords)
+        ? (data.keywords as unknown[]).map((k) => String(k ?? "").trim()).filter(Boolean)
+        : [];
+      const title = String(data.question ?? row.title ?? "").trim();
+      const words = declared.length ? declared : [title, title.slice(0, 2)].filter((w) => w.length >= 2);
+      const hits = words.filter((word) => word.length >= 2 && text.includes(word));
+      if (!hits.length) continue;
+      const score = hits.reduce((sum, word) => sum + word.length, 0) + (rowCity ? 3 : 0);
+      if (!best || score > best.score) {
+        best = { id: row.id, title, content: String(row.content ?? ""), score };
+      }
+    }
+    return best ? { hit: best } : { hit: null };
+  });
+
   /**
    * 给 8090 用的城市清单：客户说「我要找北京的工作」时，Python 侧靠它识别城市。
    * 之前城市识别是 flow_engine 里硬编码的 3 个城市，后台新建任何城市都认不出来。
