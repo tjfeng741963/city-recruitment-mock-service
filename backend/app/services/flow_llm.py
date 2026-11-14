@@ -48,6 +48,7 @@ from .flow_engine import (
     _stage_script,
     extract_day_offset,
     enter_info_result,
+    extract_city,
     explicit_city_change,
     interview_window_of,
     is_agree,
@@ -856,6 +857,15 @@ async def a_step(
             action=ACTION_GAVE_UP,
         )
 
+    # 明确报城市/招聘区域时直接按真实岗位发卡，模型不能把「广东城际」
+    # 当成非城市而再次追问。带其他资料或设备话术素材时仍走原有解析路径。
+    city_answer = extract_city(text)
+    if stage == STAGE_ASK_CITY and not kb_answer and city_answer and re.fullmatch(
+        rf"(?:我在|我想去|我要去|我去|我想在|想去|去)?{re.escape(city_answer)}(?:市)?(?:找工作|找厂|上班|工作)?",
+        (text or "").strip().strip("，,。.！!？? "),
+    ):
+        return fallback_step(state, text, now=now, kb_answer=kb_answer, graph=graph)
+
     # 「还有别的厂吗 / 换一个」→ 代码列岗位。模型不知道岗位列表，让它答必然编造。
     if stage in (STAGE_SEND_INFO, STAGE_ASK_INTERVIEW) and _WANTS_MORE.search(text):
         return _list_other_jobs(state, now=now)
@@ -1052,6 +1062,10 @@ async def review_loop(
     result = finish(result)
     draft = list(result.parts) or ([result.reply] if result.reply else [])
     if not draft:
+        return result
+    if result.source == "fact":
+        # 客户主动重问时必须再次答本岗事实。模型判重/重写会把工资改成
+        # 面试邀约；事实由已选岗位渲染，清理媒体后原样发送。
         return result
     reviewer = build_reviewer()
     if reviewer is None:
