@@ -20,6 +20,8 @@ services:
       # 走知识库链路。534 条存量数据已经从易歪歪备份导进 PostgreSQL。
       REA_DIFY_PROVIDER: kb
       REA_KB_API_URL: http://city-recruitment-api:8090
+      # Windows 客户端实际连接 systemd 的 8090；配置发布不能投到内部的另一份库。
+      REA_BRAIN_URL: http://119.91.113.100:8090
       REA_KB_SERVICE_TOKEN_FILE: /run/kb/service-token
     ports:
       - "4222:4222"

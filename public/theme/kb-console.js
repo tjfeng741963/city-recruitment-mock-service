@@ -267,6 +267,7 @@
       bar.appendChild(add);
     }
     list.appendChild(bar);
+    if (key === "faq") renderPublication(list);
 
     if (!rows.length) {
       list.appendChild(el("p", "rk-kb-empty", "还没有数据。点上面的按钮新建，或先导入模板包。"));
@@ -335,6 +336,78 @@
       : key === "location" ? "新建区域"
         : key === "employer" ? "新建招工方"
           : "新建问答";
+  }
+
+  function renderPublication(list) {
+    var box = el("section", "rk-kb-empty");
+    box.setAttribute("aria-label", "回复服务发布");
+    box.appendChild(el("p", null, "保存后请预览并发布，实际回复才会更新。本批支持共享场景问答；专属问答需完成归属核对。"));
+    var actions = el("div", "rk-kb-bar");
+    var previewButton = el("button", "rk-kb-primary", "预览发布");
+    var historyButton = el("button", "rk-kb-ghost", "发布记录");
+    previewButton.type = historyButton.type = "button";
+    actions.appendChild(previewButton);
+    actions.appendChild(historyButton);
+    box.appendChild(actions);
+    var output = el("div");
+    output.setAttribute("role", "status");
+    box.appendChild(output);
+    list.appendChild(box);
+    function failed(error) {
+      var issues = error.payload && error.payload.issues;
+      output.textContent = "操作失败：" + error.message + (Array.isArray(issues) ? " " + issues.map(function (row) { return "#" + row.id + " " + row.detail; }).join("；") : "");
+    }
+    function preview(rollbackOf) {
+      output.textContent = "正在核对实际回复服务…";
+      previewButton.disabled = historyButton.disabled = true;
+      api("POST", "/api/v1/kb-publish/preview", rollbackOf ? { rollback_of: rollbackOf } : {}).then(function (result) {
+        output.textContent = "";
+        output.appendChild(el("p", null, (rollbackOf ? "回滚预览。" : "发布预览。") + "目标：" + result.target_url + "；实例：" + result.target_id));
+        output.appendChild(el("p", null, "共 " + result.items.length + " 条，变更 " + result.changes.length + " 条。" + result.note));
+        var detail = el("details");
+        detail.appendChild(el("summary", null, "查看逐条变更"));
+        result.changes.forEach(function (change) {
+          var before = change.before;
+          var after = change.after;
+          detail.appendChild(el("p", null, "#" + change.source_id + " " + (after || before).question + " · " + ({ create: "新增", update: "更新", disable: "停用" }[change.action] || change.action)
+            + "\n原内容：" + (before ? before.answer + "（" + before.status + "）" : "无")
+            + "\n发布后：" + (after ? after.answer + "（" + after.status + "）" : "保留原文并停用")));
+        });
+        output.appendChild(detail);
+        var apply = el("button", "rk-kb-primary", rollbackOf ? "确认回滚到此发布之前" : "确认发布到回复服务");
+        apply.type = "button";
+        apply.disabled = result.changes.length === 0;
+        var confirmation = el("p");
+        apply.addEventListener("click", function () {
+          apply.disabled = true;
+          confirmation.textContent = "正在提交并等待回复服务确认…";
+          api("POST", "/api/v1/kb-publish/apply", { preview_id: result.preview_id }).then(function (confirmed) {
+            confirmation.textContent = "回复服务已确认" + (rollbackOf ? "回滚" : "发布") + "。发布编号：" + confirmed.publication_id + "；已管理 " + confirmed.managed_count + " 条问答。";
+          }).catch(function (error) {
+            confirmation.textContent = "尚未取得成功确认：" + error.message;
+            apply.disabled = false;
+          });
+        });
+        output.appendChild(apply);
+        output.appendChild(confirmation);
+      }).catch(failed).finally(function () { previewButton.disabled = historyButton.disabled = false; });
+    }
+    previewButton.addEventListener("click", function () { preview(null); });
+    historyButton.addEventListener("click", function () {
+      output.textContent = "正在读取实际回复服务的发布记录…";
+      api("GET", "/api/v1/kb-publish/history").then(function (result) {
+        output.textContent = "目标：" + result.target_url + "；实例：" + result.target_id;
+        if (!result.items.length) output.appendChild(el("p", null, "还没有发布记录。"));
+        result.items.forEach(function (row) {
+          var line = el("p", null, row.created_at + " · " + row.id + " ");
+          var rollback = el("button", "rk-kb-link", "预览回滚 " + row.id);
+          rollback.type = "button";
+          rollback.addEventListener("click", function () { preview(row.id); });
+          line.appendChild(rollback);
+          output.appendChild(line);
+        });
+      }).catch(failed);
+    });
   }
 
   function lookupName(list, id, field) {
