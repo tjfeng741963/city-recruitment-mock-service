@@ -141,9 +141,15 @@ jobs:
           docker run --rm -v "$PWD/data:/data" -v "$PWD/scripts:/scripts:ro" \
             node:22.21.1-bookworm-slim \
             node /scripts/backup-sqlite.mjs /data/app.sqlite "/data/app.sqlite.pre-$revision-$stamp.bak"
-          # 把备份文件交给数据目录属主，避免留下 root 文件
+          # 用通配匹配刚生成的备份，不在 sh -c 里拼 $revision/$stamp——
+          # 单引号会阻止外层展开，内层又没有这两个变量，拼出来是 pre--.bak。
+          # 备份刚生成且文件名带 revision，通配只会命中它一个。
+          # 没有命中就显式失败：宁可部署报错，也不要留下 root 属主的备份文件。
           docker run --rm -v "$PWD/data:/data" node:22.21.1-bookworm-slim \
-            sh -c 'chown --reference=/data/app.sqlite "/data/app.sqlite.pre-$revision-$stamp.bak"'
+            sh -c 'set -- /data/app.sqlite.pre-'"$revision"'*.bak
+                   [ -e "$1" ] || { echo "backup file not found for $0" >&2; exit 1; }
+                   chown --reference=/data/app.sqlite "$1"
+                   echo "backup owner aligned: $(stat -c %U:%G "$1")"'
           docker compose -f docker-compose.production.yml build
           # 容器名固定（container_name），但历史上有人手工 docker run 起过同名容器、
           # 没有 compose 标签：compose 发现名字被占又不认作自己的，直接报
