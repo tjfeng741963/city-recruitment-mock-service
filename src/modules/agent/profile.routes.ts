@@ -362,6 +362,7 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
     const queryJobs = db.prepare(
       `SELECT sp.id AS position_id, sp.position_name, sp.data_json AS sp_json, f.factory_name, f.data_json AS f_json,
               c.city_name, c.province,
+              e.id AS employer_id,
               v.code AS vertical_code, v.config_json AS vertical_config
        FROM service_positions sp
        LEFT JOIN factories f ON sp.factory_id = f.id
@@ -490,6 +491,9 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
         // 运营在后台填的新字段也不该再改一次代码才能生效。
         ...sp,
         position_id: row.position_id,
+        // 雇主 id：知识库按招工方硬过滤要用它。设备没绑厂/没绑 employer 时
+        // 之前只能落到 global，于是「问工资」会答成别家厂的工价（实测串台）。
+        employer_id: Number((row as { employer_id?: number | null }).employer_id ?? 0) || 0,
         factory_name: row.factory_name,
         job_title: row.position_name,
         // 品类：没有匹配到 employer 时按名字猜（地铁/安检 → 地铁），再不行按工厂

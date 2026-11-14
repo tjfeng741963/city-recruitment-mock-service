@@ -236,7 +236,13 @@ async def flow_answer(
             or extract_city(payload.text)
             or str(slots.get("city") or "")
         )
-        employer_id_hint = int(meta.get("employer_id") or 0) or None
+        # 优先用「本会话已选岗位的雇主」：设备可能没绑厂（meta 里是 0），
+        # 但客户已经选了某个岗位，就该用那个岗位的雇主去硬过滤知识库。
+        employer_id_hint = (
+            int(slots.get("employer_id") or 0)
+            or int(meta.get("employer_id") or 0)
+            or None
+        )
         location_id_hint = int(meta.get("location_id") or 0) or None
         # 岗位口径：客户已选定岗位（发过卡）就按这个岗硬过滤，
         # 没有才退回设备绑定的岗位。position_id 恒为 0 时 kb_faq 不加岗位层。

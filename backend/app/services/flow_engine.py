@@ -381,6 +381,12 @@ def pin_position(slots: dict[str, Any], job: dict[str, Any]) -> int:
     pid = (job or {}).get("position_id")
     if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
         slots["position_id"] = pid
+    # 雇主也一起钉：知识库按招工方硬过滤靠它。只钉岗位不钉雇主时，
+    # 设备没绑厂（employer_id=0）就会落到 global，问「工资多少」答成别家厂的
+    # 工价——2026-11-14 多情景实测即此现象。
+    eid = (job or {}).get("employer_id")
+    if isinstance(eid, int) and not isinstance(eid, bool) and eid > 0:
+        slots["employer_id"] = eid
     try:
         return int(slots.get("position_id") or 0)
     except (TypeError, ValueError):
