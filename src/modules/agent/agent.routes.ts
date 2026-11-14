@@ -280,7 +280,7 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
       return reply.code(400).send({ detail: "device_code and customer_id are required" });
     }
     if (!canAccessDevice(getUserScope(db, request.auth!), String(body.device_code))) return reply.code(403).send({ detail: "Device scope required" });
-    const result = db.prepare("INSERT INTO old_friend_records(account,customer_id,nickname,device_code,status) VALUES (?,?,?,?,?)").run(String(body.account ?? ""), String(body.customer_id), String(body.nickname ?? ""), String(body.device_code), String(body.status ?? "released"));
+    const result = db.prepare("INSERT INTO old_friend_records(account,customer_id,nickname,device_code,status) VALUES (?,?,?,?,?)").run(String(body.account ?? ""), String(body.customer_id), String(body.nickname ?? ""), String(body.device_code), body.status === "released" ? "released" : "unreleased");
     return db.prepare("SELECT * FROM old_friend_records WHERE id=?").get(Number(result.lastInsertRowid));
   });
   app.put<{ Params: { id: string } }>("/api/v1/agent/old-friends/:id/release", async (request, reply) => {
@@ -292,7 +292,9 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
   app.put<{ Params: { id: string } }>("/api/v1/agent/old-friends/:id/unrelease", async (request, reply) => {
     const friend = db.prepare("SELECT device_code FROM old_friend_records WHERE id=?").get(Number(request.params.id)) as { device_code: string } | undefined;
     if (!friend || !canAccessDevice(getUserScope(db, request.auth!), friend.device_code)) return reply.code(404).send({ detail: "Old friend not found" });
-    const result = db.prepare("UPDATE old_friend_records SET status='active',updated_at=CURRENT_TIMESTAMP WHERE id=?").run(Number(request.params.id));
+    // 前端词表只有 released / unreleased（可聊 / 不可聊），写 'active' 会让行内
+    // 徽标与三个计数卡都对不上，所以这里必须用 unreleased。
+    const result = db.prepare("UPDATE old_friend_records SET status='unreleased',updated_at=CURRENT_TIMESTAMP WHERE id=?").run(Number(request.params.id));
     return result.changes ? { success: true } : reply.code(404).send({ detail: "Old friend not found" });
   });
   app.delete<{ Params: { id: string } }>("/api/v1/agent/old-friends/:id", async (request, reply) => {
