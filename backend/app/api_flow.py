@@ -334,14 +334,9 @@ async def flow_answer(
         if faq_hit:
             # 占位符用岗位事实渲染：工价/年龄/吃住都来自运营维护的岗位字段，
             # 模板里一个数字都没有，所以换工价不用改话术。
-            try:
-                location_ctx, employer_name = await kb_faq.resolve_context(
-                    session,
-                    employer_id=employer_id_hint,
-                    location_id=location_id_hint,
-                )
-            except Exception:  # noqa: BLE001
-                location_ctx, employer_name = {}, ""
+            # 岗位身份来自 Node，不能拿裸数字编号去另一份库查地址/厂名。
+            # 没有已确认岗位事实时保持空值，让缺字段规则走正常兜底。
+            location_ctx, employer_name = {}, factory_hint
             rendered = kb_faq.render(
                 faq_hit.answer,
                 job=job_for_faq,

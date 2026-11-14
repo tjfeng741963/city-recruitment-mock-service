@@ -1,0 +1,143 @@
+"""Exercise console → actual reply API over HTTP, with disposable databases and no agent."""
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import runpy
+import secrets
+import sqlite3
+import tempfile
+from datetime import datetime, timezone
+from urllib.error import HTTPError
+from urllib.request import Request
+
+support = runpy.run_path(str(Path(__file__).with_name("acceptance-smoke.py")))
+Services, require, HTTP = support["Services"], support["require"], support["HTTP"]
+
+
+def exercise(run_dir, checks, ready=None):
+    services = Services(run_dir)
+    token = secrets.token_hex(32)
+    services.env.update(REA_PROFILE_TOKEN=token, FLOW_PROFILE_TOKEN=token, REA_BRAIN_URL=services.python_url,
+                        REA_SEED_FIXTURES="0")
+    try:
+        services.start("node")
+        services.env.update(FLOW_PROFILE_URL=services.node_url + "/api/v1/agent/profile",
+                            FLOW_JOBS_URL=services.node_url + "/api/v1/agent/jobs",
+                            FLOW_CITIES_URL=services.node_url + "/api/v1/agent/cities",
+                            FLOW_CONFIG_URL=services.node_url + "/api/v1/bridge/devices/{device_code}/config")
+        services.start("python")
+        def req(base, path, data=None, auth=None, method=None, status=200):
+            require(base.startswith("http://127.0.0.1:"), "Only loopback permitted")
+            request = Request(base + path, data=None if data is None else json.dumps(data).encode(),
+                              method=method, headers={**({"Content-Type": "application/json"} if data is not None else {}), **(auth or {})})
+            try:
+                result = HTTP.open(request, timeout=25)
+            except HTTPError as error:
+                result = error
+            with result:
+                body = json.loads(result.read())
+                require(result.code == status, f"{request.get_method()} {path}: HTTP {result.code}, expected {status}; "
+                        + (json.dumps(body, ensure_ascii=False) if "/kb-publish/" in path else ""))
+            return body
+        n, p = services.node_url, services.python_url
+        credentials = {"username": "local-admin", "password": services.password}
+        na = {"Authorization": "Bearer " + req(n, "/api/v1/auth/login", credentials)["access_token"]}
+        pa = {"Authorization": "Bearer " + req(p, "/api/v1/auth/login", credentials)["access_token"]}
+        def passed(name):
+            checks.append({"name": name, "status": "passed"})
+            print("PASS " + name, flush=True)
+        # All rows are synthetic, in the temporary Node database created above.
+        for row in req(n, "/api/v1/kb-faqs?page_size=1000", auth=na)["items"]:
+            req(n, "/api/v1/kb-faqs/" + str(row["id"]), auth=na, method="DELETE")
+        category = next(v for v in req(n, "/api/v1/verticals", auth=na)["items"] if v["code"] == "subway")
+        wage = req(n, "/api/v1/kb-faqs", {"question": "工资多少", "keywords": ["工资"], "answer": "工资：{wage}",
+                   "scope_level": "global", "vertical_id": category["id"]}, na, status=201)
+        welfare = req(n, "/api/v1/kb-faqs", {"question": "包吃住吗", "keywords": ["包吃住"], "answer": "{welfare}",
+                      "scope_level": "global", "vertical_id": category["id"]}, na, status=201)
+        address = req(n, "/api/v1/kb-faqs", {"question": "在哪里面试", "keywords": ["面试地址"], "answer": "{address}",
+                      "scope_level": "global", "vertical_id": category["id"]}, na, status=201)
+        cert = req(n, "/api/v1/kb-faqs", {"question": "面试要带什么", "keywords": ["面试要带", "材料"], "answer": "{cert}",
+                   "scope_level": "global", "vertical_id": category["id"]}, na, status=201)
+        def preview():
+            return req(n, "/api/v1/kb-publish/preview", {}, na)
+        def apply(plan, status=200):
+            return req(n, "/api/v1/kb-publish/apply", {"preview_id": plan["preview_id"]}, na, status=status)
+        plan = preview()
+        require(plan["target_id"] == req(p, "/api/v1/instance")["install_id"], "Wrong target instance")
+        require(not req(p, "/api/v1/kb/governance/audit", auth=pa)["faq_inventory"], "Preview wrote target FAQ data")
+        first = apply(plan)
+        require(apply(plan)["replayed"], "Duplicate apply was not idempotent")
+        audit = req(p, "/api/v1/kb/governance/audit", auth=pa)
+        require(len(audit["faq_inventory"]) == len(plan["items"]), "Target read-back count differs")
+        passed("preview-identity-apply-and-idempotent-readback")
+        # Seed only disposable flow history to simulate clients' already-confirmed job snapshots.
+        # No contact, bridge command, agent process, or production endpoint is used.
+        def ask(key, text, factory, wage_text=None, place="本岗面试地址"):
+            job = {"position_id": 991, "employer_id": 9, "location_id": 31,
+                   "vertical_code": "subway", "factory_name": factory, "place": place, "cert_text": "本岗身份证与照片"}
+            if wage_text is not None:
+                job["wage_text"] = wage_text
+            slots = {"city": "验收城市", "position_id": 991, "employer_id": 9, "location_id": 31,
+                     "job_snapshot": job, "interview_offer_sent": True}
+            with sqlite3.connect(run_dir / "python.sqlite") as db:
+                events = [("stage_change", {"to": "ask_interview"}),
+                          *(("slot_set", {"key": k, "value": v}) for k, v in slots.items())]
+                db.executemany("INSERT INTO flow_events(session_key,seq,type,body,created_at) VALUES(?,?,?,?,?)",
+                               [(key, i + 1, typ, json.dumps(value), datetime.now(timezone.utc).isoformat())
+                                for i, (typ, value) in enumerate(events)])
+            return req(p, "/api/v1/flow/answer", {"session_key": key, "text": text, "device_code": "isolated-acceptance"}, pa)["reply"]
+        a = ask("kb-chen", "工资多少", "甲厂", "甲厂220/天")
+        b = ask("kb-zhu", "工资多少", "乙厂", "乙厂210/天")
+        require("甲厂220/天" in a and "乙厂" not in a, "First job borrowed another job's facts")
+        require("乙厂210/天" in b and "甲厂" not in b, "Second job borrowed another job's facts")
+        passed("published-template-renders-each-selected-job")
+        missing = ask("kb-empty", "包吃住吗", "缺字段工厂")
+        require("{" not in missing and "住宿免费" not in missing and "包吃包住" not in missing, "Missing facts invented a promise")
+        require("本岗面试地址" in ask("kb-address", "面试地址在哪里", "本岗工厂"), "Address did not use selected job")
+        passed("missing-field-and-selected-job-address")
+        stale = preview()
+        req(n, f"/api/v1/kb-faqs/{cert['id']}", {"answer": "证件要求：{cert_text}"}, na, "PUT")
+        apply(stale, 409)
+        updated = apply(preview())
+        require("证件要求：本岗身份证与照片" in ask("kb-update", "面试要带什么", "甲厂"), "Edited template did not reach runtime")
+        passed("source-conflict-and-edited-template-runtime")
+        req(n, f"/api/v1/kb-faqs/{cert['id']}", {"status": "disabled"}, na, "PUT")
+        stopped = apply(preview())
+        target = req(p, "/api/v1/kb/governance/audit", auth=pa)["faq_inventory"]
+        require(next(row for row in target if row["answer"] == "证件要求：{cert_text}")["status"] == "disabled", "Disabled FAQ remained active")
+        require("证件要求：本岗身份证与照片" not in ask("kb-disabled", "面试要带什么", "甲厂"), "Disabled template still answered")
+        rollback = req(n, "/api/v1/kb-publish/preview", {"rollback_of": stopped["publication_id"]}, na)
+        apply(rollback)
+        require("证件要求：本岗身份证与照片" in ask("kb-rollback", "面试要带什么", "甲厂"), "Rollback did not restore runtime template")
+        passed("disable-and-audited-rollback-runtime")
+        history = req(n, "/api/v1/kb-publish/history", auth=na)
+        require(len(history["items"]) == 4, "Unexpected publication history")
+        if ready:
+            ready({"node_url": n, "python_url": p, "username": "local-admin", "password": services.password})
+    finally:
+        services.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--report", type=Path)
+    args = parser.parse_args()
+    result = {"mode": "isolated-http-no-agent", "checks": [], "status": "failed"}
+    try:
+        with tempfile.TemporaryDirectory(prefix="kb-publication-", ignore_cleanup_errors=True) as directory:
+            exercise(Path(directory), result["checks"])
+        result["status"] = "passed"
+    except Exception as error:
+        result["error"] = str(error) if isinstance(error, RuntimeError) else type(error).__name__
+        print("FAIL " + result["error"], flush=True)
+    if args.report:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    print(f"KB publication {result['status']}: {len(result['checks'])} scenarios; no agent")
+    return result["status"] != "passed"
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

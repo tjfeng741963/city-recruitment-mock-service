@@ -29,6 +29,7 @@ import { registerProfileRoutes } from "./modules/agent/profile.routes.js";
 import { registerJobRoutes } from "./modules/agent/profile.routes.js";
 import { registerUnknownQuestionRoutes } from "./modules/agent/unknown-questions.routes.js";
 import { registerKbV3Routes } from "./modules/agent/kb-v3.routes.js";
+import { registerKbPublishRoutes } from "./modules/agent/kb-publish.routes.js";
 import { registerPositionScriptRoutes } from "./modules/agent/position-scripts.routes.js";
 import { registerFollowupRoutes } from "./modules/agent/followup.js";
 import { EventBus, createStreamNotifier } from "./modules/messaging/stream-events.js";
@@ -159,6 +160,7 @@ export function buildServer() {
   registerUnknownQuestionRoutes(app, db);
   // 知识库 v3 配置接口：品类 / 位置树 / 招工方 / 场景问答 / 模板包
   registerKbV3Routes(app, db);
+  registerKbPublishRoutes(app, db);
   // 岗位话术 + 媒体资源库（迁移 030/031）：后台配置 + 设备端媒体下载
   registerPositionScriptRoutes(app, db);
   registerPositionFactoryRoutes(app, db);

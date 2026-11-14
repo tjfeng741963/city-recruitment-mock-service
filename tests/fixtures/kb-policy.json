@@ -20,5 +20,7 @@
   {"question":"借支","answer":"每周能借钱","allowed":false},
   {"question":"一般问候","answer":"{wage|按城市算}","allowed":false},
   {"question":"有纹身能进吗","answer":"{tattoo_policy}","allowed":true},
-  {"question":"包吃住吗","answer":"{welfare_text}","allowed":true}
+  {"question":"包吃住吗","answer":"{welfare_text}","allowed":true},
+  {"question":"面试要带什么","answer":"带身份证原件就行，别穿拖鞋短裤，到了联系我。","allowed":false},
+  {"question":"面试要带什么","answer":"{cert}","allowed":true}
 ]
