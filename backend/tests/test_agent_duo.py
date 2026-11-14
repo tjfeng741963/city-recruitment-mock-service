@@ -387,6 +387,77 @@ async def test_rewrite_with_fake_wage_rejected_falls_back(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("position_id", [3, 0], ids=["position", "generic"])
+@pytest.mark.parametrize("review_kind", ["model", "duplicate"])
+async def test_booked_script_survives_review_without_rewrite(
+    monkeypatch, position_id: int, review_kind: str
+) -> None:
+    """预约话术命中后，即使审核打回，也不能重写或丢掉原地点与媒体。"""
+    set_position_scripts([
+        {
+            "position_id": position_id,
+            "stage": "booked",
+            "content": "约好了：{{factory}}，{{place}}见。【图片:面试地点.jpg】",
+        }
+    ])
+    state = _carded_state()
+    engine_step(state, "可以", now=NOW)
+    result = engine_step(state, "张三 13800138000", now=NOW)
+    expected = ["约好了：观澜精密厂，观澜大道 88 号见。【图片:面试地点.jpg】"]
+    assert result.parts == expected
+    reviewer_provider = ScriptedProvider(
+        _verdict("revise", reason="文案呆板", suggestion="换个说法"),
+        _verdict("pass"),
+    )
+    monkeypatch.setattr(reviewer_mod, "build_provider", lambda: reviewer_provider)
+    provider = ScriptedProvider("我这边已经帮你安排好了。")
+    transcript = (
+        [{"role": "assistant", "content": result.reply}]
+        if review_kind == "duplicate" else []
+    )
+
+    final = await review_loop(state, "张三 13800138000", provider, result, transcript)
+
+    assert final.parts == expected
+    assert final.source == "script"
+    assert final.stage == "done"
+    assert final.action == "book_interview"
+    assert final.slots["scripted_sent"]["booked"] is True
+    assert provider.calls == []
+    assert reviewer_provider.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("script_case", ["missing", "other-position", "empty", "sent"])
+async def test_default_booking_confirmation_still_uses_model_review(
+    monkeypatch, script_case: str
+) -> None:
+    """没命中可用的一次性话术时，默认确认语仍走普通审核。"""
+    if script_case != "missing":
+        set_position_scripts([
+            {
+                "position_id": 9 if script_case == "other-position" else 3,
+                "stage": "booked",
+                "content": "{{unknown}}" if script_case == "empty" else "运营预约话术",
+            }
+        ])
+    state = _carded_state()
+    if script_case == "sent":
+        state["slots"].setdefault("scripted_sent", {})["booked"] = True
+    engine_step(state, "可以", now=NOW)
+    result = engine_step(state, "张三 13800138000", now=NOW)
+    reviewer_provider = ScriptedProvider(_verdict("pass"))
+    monkeypatch.setattr(reviewer_mod, "build_provider", lambda: reviewer_provider)
+
+    final = await review_loop(state, "张三 13800138000", None, result, [])
+
+    assert final.reply == result.reply
+    assert "运营预约话术" not in final.reply
+    assert "观澜大道 88 号" in final.reply
+    assert len(reviewer_provider.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_script_reviewed_but_never_rewritten(monkeypatch) -> None:
     """话术草稿也送 B，但 B 只能查残留/重复（代码级）；LLM 意见不参与，原文直发。"""
     reviewer_provider = ScriptedProvider(

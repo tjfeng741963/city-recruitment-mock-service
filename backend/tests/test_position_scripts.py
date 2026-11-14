@@ -16,7 +16,7 @@ import uuid
 import pytest
 from httpx import AsyncClient
 
-from app.services import device_scripts, job_lookup, kb_faq
+from app.services import agent_session, device_scripts, job_lookup, kb_faq, reviewer
 from app.services.flow_engine import set_position_scripts, set_remote_jobs
 
 JOBS = [
@@ -248,11 +248,28 @@ async def test_booked_script_used_after_booking(
     await _say(admin_client, key, "你好")
     await _say(admin_client, key, "深圳")
     await _say(admin_client, key, "可以")
+    reviewer_probe = ProviderProbe()
+    monkeypatch.setattr(reviewer, "build_provider", lambda: reviewer_probe)
     done = await _say(admin_client, key, "张三 13800138000")
 
     assert done["stage"] == "done"
     assert done["action"] == "book_interview"
     assert done["reply"].strip() == "约好了：观澜精密厂，观澜大道 88 号见。"
+    assert reviewer_probe.calls == 0
+    assert done["slots"]["scripted_sent"]["booked"] is True
+
+    # HTTP 后续轮次与事件回放都只能包含一次预约话术。
+    monkeypatch.setattr(reviewer, "build_provider", lambda: None)
+    followup = await _say(admin_client, key, "谢谢")
+    assert "约好了：" not in followup["reply"]
+    from app.db import SessionLocal
+
+    async with SessionLocal() as db:
+        transcript = await agent_session.load_transcript(db, key)
+    assert sum(
+        item["role"] == "assistant" and item["content"] == done["reply"]
+        for item in transcript
+    ) == 1
 
 
 # ── greet：加好友首句 ────────────────────────────────────────────

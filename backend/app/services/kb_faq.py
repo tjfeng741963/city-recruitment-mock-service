@@ -34,6 +34,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models_kb import DEFAULT_TENANT_ID, Employer, KbFaq, Location, Vertical
+from .kb_policy import shared_answer_allowed
 
 # scope 从窄到宽的检索顺序
 SCOPE_ORDER = ("position", "employer", "city", "vertical", "global")
@@ -198,6 +199,13 @@ async def lookup(
         for row in rows:
             score = match_keywords(text, _loads(row.keywords))
             if not score:
+                continue
+            if tier_name not in {"position", "employer"} and not shared_answer_allowed(
+                text, str(row.answer or ""),
+                keywords=[str(row.question or ""), *_loads(row.keywords)],
+                media=_loads(row.media),
+                fact_fields={*_PLACEHOLDER_KEYS, *_PLACEHOLDER_KEYS.values()},
+            ):
                 continue
             if best is None or score > best[0] or (
                 score == best[0] and int(row.priority or 0) > int(best[1].priority or 0)

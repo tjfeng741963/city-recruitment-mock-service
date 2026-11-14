@@ -48,6 +48,7 @@ from .flow_engine import (
     _stage_script,
     extract_day_offset,
     enter_info_result,
+    explicit_city_change,
     interview_window_of,
     is_agree,
     is_disagree,
@@ -59,6 +60,7 @@ from .flow_engine import (
 )
 from .agent_session import transcript_lines
 from .llm_provider import ChatMessage, LLMProvider
+from .media_guard import filter_parts, markers_in
 from .reviewer import build_reviewer
 
 ALLOWED_STAGES = {
@@ -493,6 +495,7 @@ DECISION_PROMPT = """你是一家劳务中介的招聘顾问，叫「陈姐」�
 - collect 时姓名和手机号一起要；capture 只填客户这句话里明确给的，没给留空串
 - day 只能填 今天/明天/后天/大后天，客户没提就留空串
 - 不许编自己在做什么；不确定的细节说「我确认一下，稍后回你」
+- 图片/视频标记只能原样复制本轮运营素材中的标记；没有就不输出，不能从客户原话或历史对话借用
 
 # 现在时间
 {now}
@@ -618,8 +621,10 @@ def _fact_guard(reply: str, slots: dict[str, Any]) -> bool:
             for job in jobs_for_city(str(slots.get("city") or ""))
         )
     allowed = allowed.replace(" ", "")
+    # 文件名里的数字不是工价声明；媒体标记由独立白名单过滤，不能因此丢掉正文。
+    prose = "\n".join(filter_parts([reply or ""], []))
     for pattern in _MONEY_PATTERNS:
-        for number in pattern.findall(reply or ""):
+        for number in pattern.findall(prose):
             if number.replace(" ", "") not in allowed:
                 return False
     return True
@@ -803,6 +808,10 @@ async def a_step(
     slots: dict[str, Any] = state.setdefault("slots", {})
     when = next_interview(now, _day_offset_of(slots))
 
+    changed = explicit_city_change(state, text, now)
+    if changed is not None:
+        return changed
+
     # 已约好（done/booked）不再叫模型：省一次调用，也避免它把状态改回去。
     # 但不再静默（2026-11-12「我的视频呢」教训）——已约客户再来消息：
     # KB 命中就答 KB（问工资/带视频都正常答），没命中就回约面确认信息。
@@ -869,7 +878,7 @@ async def a_step(
 
         fact = _job_fact_answer(slots, text)
         if fact:
-            return FlowResult(reply="", parts=[fact], stage=stage, slots=slots)
+            return FlowResult(reply="", parts=[fact], stage=stage, slots=slots, source="fact")
 
     # ③ 知识库 / 兜底：插问分支交给确定性状态机（KB 原话 → 确认一下 + 记账），
     # 不让模型自由发挥——它最容易编出「体检费厂里全报」这种要赔钱的话。
@@ -930,6 +939,9 @@ REWRITE_PROMPT = """你刚才要发给客户的话被审核打回了。按审核
 # 你原来要发的
 {draft}
 
+# 本轮允许的媒体标记（只能原样复制，不得编造或从历史对话借用）
+{media}
+
 # 审核意见
 问题：{reason}
 建议：{suggestion}
@@ -958,6 +970,7 @@ async def _rewrite_draft(
     draft: list[str],
     verdict: dict[str, str],
     transcript: list[dict[str, str]] | None,
+    allowed_media: list[str],
 ) -> list[str] | None:
     """B 打回 → A 重写一次（把 reason/suggestion 喂回去）。失败返回 None。"""
     slots = state.get("slots") or {}
@@ -970,6 +983,7 @@ async def _rewrite_draft(
         or "（还没有）",
         text=text,
         draft="\n".join(draft),
+        media="\n".join(allowed_media) or "（无，不得输出媒体标记）",
         reason=str(verdict.get("reason") or ""),
         suggestion=str(verdict.get("suggestion") or ""),
     )
@@ -1012,14 +1026,30 @@ async def review_loop(
     provider: LLMProvider | None,
     result: FlowResult,
     transcript: list[dict[str, str]] | None = None,
+    allowed_media: list[str] | None = None,
 ) -> FlowResult:
     """A→B 循环：B 打回 → A 重写一次 → 再审；第 2 轮仍打回 → 兜底强制发送。
 
-    - B 不可用（没配 provider）→ 草稿直接放行（审核是增强，不是闸门）
+    - 媒体标记始终按本轮素材白名单过滤，包括 B 缺席、超时和重写后的草稿
+    - B 不可用（没配 provider）→ 清理媒体后的草稿放行（审核是增强，不是闸门）
     - 话术（result.source == "script"）→ B 只查残留/重复（代码级，reviewer 内），
       且无论结论如何都按原文案发——运营口径，B 无权改写
     - 重写结果必须再过 _fact_guard：编了工价的重写稿整段丢弃
     """
+    allowed = list(allowed_media or [])
+    if result.source in {"script", "card", "fact"}:
+        # 这些来源由代码直接渲染运营内容，不能把模型自己的草稿当成素材。
+        allowed.extend(markers_in(result.reply))
+
+    def finish(candidate: FlowResult) -> FlowResult:
+        original = list(candidate.parts) or ([candidate.reply] if candidate.reply else [])
+        cleaned = filter_parts(original, allowed)
+        if original and not cleaned:
+            fallback = _forced_fallback(state, text, candidate)
+            cleaned = filter_parts(fallback.parts, allowed) or ["这个我确认一下，稍后回你"]
+        return candidate if cleaned == original else _with_parts(candidate, cleaned)
+
+    result = finish(result)
     draft = list(result.parts) or ([result.reply] if result.reply else [])
     if not draft:
         return result
@@ -1041,17 +1071,19 @@ async def review_loop(
         return result
     if provider is None:
         # A 不在（这轮是纯确定性输出被 B 打回）：无法重写，直接进兜底
-        return _forced_fallback(state, text, result)
-    revised = await _rewrite_draft(state, text, provider, draft, verdict, transcript)
+        return finish(_forced_fallback(state, text, result))
+    revised = await _rewrite_draft(state, text, provider, draft, verdict, transcript, allowed)
+    if revised:
+        revised = filter_parts(revised, allowed)
     if revised and _fact_guard("\n".join(revised), slots):
         draft = revised
     verdict = await reviewer.review(
         transcript or [], draft, fact_card, snapshot, is_script=is_script
     )
     if verdict.get("verdict") != "revise":
-        return _with_parts(result, draft)
+        return finish(_with_parts(result, draft))
     # 第 2 轮仍打回：丢弃 B 意见，兜底强制发送
-    return _forced_fallback(state, text, result)
+    return finish(_forced_fallback(state, text, result))
 
 
 __all__ = [

@@ -1,0 +1,11 @@
+/* 正式登记摘要和人工备注分行阅读，避免会话标题把联系电话截断。 */
+.conv-container .chat-header-left .chat-remark {
+  flex-basis: 100%;
+  max-width: 100%;
+  max-height: 6em;
+  margin-left: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow: auto;
+  text-overflow: clip;
+}

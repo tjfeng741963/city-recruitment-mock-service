@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models_kb import DEFAULT_TENANT_ID, KbEntry
+from .kb_policy import shared_answer_allowed
 
 # 一条话术标题最多能带出多少条：库里会有几百条，全量扫也能接受，但留个上限防跑飞
 MAX_ENTRIES = 500
@@ -73,6 +74,8 @@ async def lookup_entry(
     question: str,
     city: str | None = None,
     factory: str | None = None,
+    *,
+    require_factory: bool = False,
 ) -> dict[str, str] | None:
     """查一条话术。命中返回 {id,title,body}，未命中返回 None。
 
@@ -87,6 +90,9 @@ async def lookup_entry(
     - 双方都非空且互不包含 → 直接排除（别家的厂规发给本厂客户是事故）
     - 任一方为空 → 通配，无加权
     - city/factory 都为空 → 全部通配（原行为）
+
+    flow 接口传 require_factory=True：未知工厂时排除具名工厂条目，
+    不能把缺少上下文当成允许读取任意厂规。旧调用保持原签名语义。
     """
     text = (question or "").strip()
     if not text:
@@ -116,6 +122,12 @@ async def lookup_entry(
         if entry_city and entry_city != city_hint:
             continue
         entry_factory = str(getattr(entry, "factory_name", None) or "").strip()
+        if require_factory and entry_factory and not factory_hint:
+            continue
+        if require_factory and not entry_factory and not shared_answer_allowed(
+            text, str(entry.body or ""), keywords=[str(entry.title or "")],
+        ):
+            continue
         if (
             entry_factory
             and factory_hint
