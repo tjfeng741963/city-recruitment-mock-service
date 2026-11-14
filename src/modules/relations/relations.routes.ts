@@ -27,7 +27,14 @@ export async function registerRelationRoutes(app: FastifyInstance, db: DatabaseS
     const visible = scope.isAdmin ? null : scope.cityIds;
     const constraint = visible ? visible.length ? ` WHERE c.id IN (${visible.map(() => "?").join(",")})` : " WHERE 1=0" : "";
     const values = visible ?? [];
-    const counts = db.prepare(`SELECT c.city_name AS city, COUNT(l.linked_city_id) AS count FROM cities c LEFT JOIN city_links l ON l.city_id = c.id${constraint} GROUP BY c.id ORDER BY c.city_name`).all(...values) as Array<{ city: string; count: number }>;
+    // 「岗位数」列显示该城在招岗位数。过去这里数的是 city_links 的行数，
+    // 列名写着「岗位数」却显示周边城市数量，而且重复行会把它放大。
+    const counts = db.prepare(
+      `SELECT c.city_name AS city,
+              (SELECT COUNT(*) FROM service_positions sp
+                WHERE sp.city_id = c.id AND sp.status='enabled') AS count
+         FROM cities c${constraint} ORDER BY c.city_name`,
+    ).all(...values) as Array<{ city: string; count: number }>;
     const cityRows = db.prepare(`SELECT city_name,data_json,id FROM cities${visible ? visible.length ? ` WHERE id IN (${visible.map(() => "?").join(",")})` : " WHERE 1=0" : ""}`).all(...values) as Array<{ id: number; city_name: string; data_json: string }>;
     const default_districts: Record<string, string[]> = {};
     for (const row of cityRows) {

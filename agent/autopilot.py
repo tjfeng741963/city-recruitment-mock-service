@@ -1494,6 +1494,10 @@ def acquire_single_instance() -> bool:
         return True
     if _mutex_handle and _mutex_owner_pid == pid:
         return True
+    # 命名互斥体是 Windows 机制。非 Windows（CI / Linux 服务端）没有可争用的客户端，
+    # 直接放行；「失败关闭」只在 Windows 上生效，生产行为不变。
+    if sys.platform != "win32":
+        return True
     try:
         kernel32 = ctypes.windll.kernel32
         ERROR_ALREADY_EXISTS = 183
