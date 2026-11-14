@@ -74,16 +74,21 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     const rows = db.prepare("SELECT * FROM agent_devices ORDER BY id DESC").all() as Array<Record<string, unknown>>;
     const scope = getUserScope(db, request.auth!);
     return {
-      // 先按原始行过滤再映射：serializeAgentDevice() 的返回类型不含 device_code，
-      // 映射之后再 filter 会触发 TS2339（CI typecheck 实测）。
+      // 过滤必须放在 serializeAgentDevice() 之后：表里没有 device_code 列，
+      // 它是 serialize 时从 data_json 里提出来的。直接过滤原始 row 会拿到
+      // undefined，把受限用户的设备列表整片滤空（CI 实测 expected [] 即此因）。
+      // serialize 的声明类型不含 device_code，故显式放宽为字典以通过 typecheck。
       items: rows
-        .filter((row) => canAccessDevice(scope, String(row.device_code ?? "")))
         .map((row) => {
           // 设备 → 工厂多选绑定：每行带上 factory_ids 与厂名/城市，
           // 后台设备列表直接回显多选结果，不用前端再逐台去拉 /factories。
           const factoryIds = readDeviceFactoryIds(db, parseDeviceData(row.data_json).factory_ids);
-          return { ...serializeAgentDevice(row), factory_ids: factoryIds, factories: loadFactories(db, factoryIds) };
-        }),
+          const serialized = serializeAgentDevice(row) as Record<string, unknown>;
+          return { ...serialized, factory_ids: factoryIds, factories: loadFactories(db, factoryIds) };
+        })
+        // 过滤参数用显式断言：展开后的对象类型不带索引签名，
+        // 直接取 device_code 会报 TS2339（与运行时无关，纯粹是类型推断的坑）。
+        .filter((row) => canAccessDevice(scope, String((row as Record<string, unknown>).device_code ?? ""))),
     };
   });
   app.post<{ Body: Record<string, unknown> }>("/api/v1/agent/devices", async (request, reply) => {
