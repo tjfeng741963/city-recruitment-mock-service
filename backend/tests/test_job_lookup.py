@@ -33,7 +33,7 @@ def _reset(monkeypatch) -> None:  # noqa: ANN001
 async def test_lookup_returns_remote_items(monkeypatch) -> None:  # noqa: ANN001
     calls: list[str] = []
 
-    async def fake_fetch(city: str, token: str, url: str) -> list[dict]:
+    async def fake_fetch(city: str, token: str, url: str, device_code: str = "") -> list[dict]:
         calls.append(city)
         assert token == TOKEN
         return JOBS
@@ -64,7 +64,7 @@ async def test_lookup_failure_returns_empty(monkeypatch) -> None:  # noqa: ANN00
 async def test_cache_hits_within_ttl(monkeypatch) -> None:  # noqa: ANN001
     calls: list[str] = []
 
-    async def fake_fetch(city: str, token: str, url: str) -> list[dict]:
+    async def fake_fetch(city: str, token: str, url: str, device_code: str = "") -> list[dict]:
         calls.append(city)
         return JOBS
 
@@ -134,7 +134,7 @@ MIXED_JOBS = [
 
 
 def _patch_items(monkeypatch, items):  # noqa: ANN001
-    async def fake_fetch(city: str, token: str, url: str) -> list[dict]:
+    async def fake_fetch(city: str, token: str, url: str, device_code: str = "") -> list[dict]:
         return list(items)
 
     monkeypatch.setattr(job_lookup, "_fetch_items", fake_fetch)
@@ -173,3 +173,55 @@ async def test_cache_is_keyed_by_scope(monkeypatch) -> None:  # noqa: ANN001
     _patch_items(monkeypatch, MIXED_JOBS)
     assert len(await job_lookup.lookup_jobs("广州", device_scope="subway")) == 1
     assert len(await job_lookup.lookup_jobs("广州", device_scope="all")) == 2
+
+
+# ── device_code：按设备绑定的工厂过滤（4222 侧执行，这里只透传）──────────────
+
+
+async def test_request_carries_device_code(monkeypatch) -> None:  # noqa: ANN001
+    """device_code 必须进查询参数：不然 4222 不知道按哪台设备的工厂过滤。"""
+    seen: dict = {}
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["params"] = dict(request.url.params)
+        return httpx.Response(200, json={"items": JOBS})
+
+    real_client = job_lookup.httpx.AsyncClient
+
+    def client_factory(**kwargs):  # noqa: ANN003
+        kwargs.pop("transport", None)
+        return real_client(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(job_lookup.httpx, "AsyncClient", client_factory)
+    items = await job_lookup.lookup_jobs("深圳", device_code="pc-win-01")
+    assert items == JOBS
+    assert seen["params"]["city"] == "深圳"
+    assert seen["params"]["device_code"] == "pc-win-01"
+
+    # 不传设备：查询参数里不该出现空串 device_code（老调用方向后兼容）
+    job_lookup.clear_cache()
+    await job_lookup.lookup_jobs("深圳")
+    assert "device_code" not in seen["params"]
+
+
+async def test_cache_is_keyed_by_device_code(monkeypatch) -> None:  # noqa: ANN001
+    """同城不同设备不能共用缓存：A 厂的岗不能缓存给 B 厂号。"""
+    per_device = {
+        "dev-a": [JOBS[0]],
+        "dev-b": [],
+    }
+    calls: list[tuple[str, str]] = []
+
+    async def fake_fetch(city: str, token: str, url: str, device_code: str = "") -> list[dict]:
+        calls.append((city, device_code))
+        return list(per_device.get(device_code, JOBS))
+
+    monkeypatch.setattr(job_lookup, "_fetch_items", fake_fetch)
+    assert await job_lookup.lookup_jobs("深圳", device_code="dev-a") == [JOBS[0]]
+    assert await job_lookup.lookup_jobs("深圳", device_code="dev-b") == []
+    # 再查一遍 dev-a：命中自己的缓存，不会拿到 dev-b 的空结果
+    assert await job_lookup.lookup_jobs("深圳", device_code="dev-a") == [JOBS[0]]
+    assert calls == [("深圳", "dev-a"), ("深圳", "dev-b")]
+

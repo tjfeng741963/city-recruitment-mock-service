@@ -141,7 +141,7 @@ class TestVerticalHint:
             {"factory_name": "华智汽车部件", "job_title": "普工", "wage_text": "24-26"},
         ]
 
-        async def fake(city: str, token: str, url: str):  # noqa: ANN001
+        async def fake(city: str, token: str, url: str, device_code: str = ""):  # noqa: ANN001
             return items
 
         monkeypatch.setattr(job_lookup, "_fetch_items", fake)

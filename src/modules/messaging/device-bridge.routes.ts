@@ -9,6 +9,7 @@ import { MessageEventService } from "./message-events.js";
 import { createMessageChannelProvider } from "./message-channel-provider.js";
 import { NOOP_NOTIFIER, type StreamNotifier } from "./stream-events.js";
 import { createDifyProvider } from "../dify/create-provider.js";
+import { loadFactories, readDeviceFactoryIds } from "../../shared/device-factories.js";
 
 type DeviceRequest = { Params: { code: string }; Body: Record<string, unknown> };
 const field = (body: Record<string, unknown>, key: string, max = 1000) => typeof body[key] === "string" && String(body[key]).length <= max ? String(body[key]) : "";
@@ -152,6 +153,25 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
       ).get(name, name) as { id: number } | undefined;
       return byName ? Number(byName.id) : 0;
     };
+    /**
+     * 设备 → 工厂「多选」绑定（契约 §6）：一个号可以同时接几个厂的单。
+     * 下发 id 列表给 8090 做 `sp.factory_id IN (...)` 过滤，厂名给客户端展示。
+     * 脏数据（非整数 / 重复 / 库里没有）在 readDeviceFactoryIds 里已经过滤干净。
+     */
+    const boundFactoryIds = readDeviceFactoryIds(db, params.factory_ids);
+    const boundFactories = loadFactories(db, boundFactoryIds).map((factory) => ({ id: factory.id, name: factory.name }));
+    /**
+     * employer_id 多厂口径：显式配了就以它为准；没配且绑了多个厂就回 0。
+     *
+     * 为什么要回 0：纹身/健康证/体检这类口径全挂在 employer 作用域，多厂设备如果
+     * 拿第一个厂的 employer_id 去查 KB，第二个厂的客户会被按第一个厂的规矩回答——
+     * 答错比不答更糟。回 0 让 8090 退回 global，至少不会串厂。
+     */
+    const employerIdForConfig = (): number => {
+      if (Number.isInteger(params.employer_id)) return Number(params.employer_id);
+      if (boundFactoryIds.length > 1) return 0;
+      return resolveEmployerId();
+    };
     return {
       version: newer,
       interval_seconds: positive(params.interval_seconds, 20),
@@ -167,13 +187,17 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
       // 设备绑定的工厂/城市（契约 docs/对齐-设备工厂绑定与资料导入.md §1）：
       // 8090 拿去做知识库过滤，data_json 没绑就回空串 = 通用/不限。
       factory_name: factoryName,
+      // 多厂绑定：factory_ids 供 8090 做岗位/知识库过滤，factories 供客户端展示。
+      // 没绑 = 两个都空，消费方按「不限」处理（与老字段 factory_name 空串同义）。
+      factory_ids: boundFactoryIds,
+      factories: boundFactories,
       city: typeof params.city === "string" ? params.city : "",
       // 知识库 v3：品类与招工方 id（docs/知识库方案-流程驱动-20261113.md §3.7）。
       // 绑了 id 就走 kb_faq 硬过滤（别家厂的问答不进候选集）；
       // 没绑回 0，8090 退回按 factory_name 匹配的旧路径。
       vertical_id: Number.isInteger(params.vertical_id) ? Number(params.vertical_id) : 0,
-      // 显式值优先；只绑了厂名时按厂名/别名反查（见上方 resolveEmployerId）
-      employer_id: resolveEmployerId(),
+      // 显式值优先；单厂且只绑了厂名时按厂名/别名反查；多厂未显式配置回 0（见上）
+      employer_id: employerIdForConfig(),
       // 岗位口径（2026-11-13）：subway = 只推地铁/安检岗，all = 不过滤，
       // 空串 = 跟随 8090 的环境变量默认（FLOW_ONLY_SUBWAY，当前默认 1）。
       // 放 data_json 里让运营在网页改，不必登服务器改环境变量重启。

@@ -60,6 +60,9 @@ describe("device config distribution", () => {
       takeover_sessions: [],
       abandoned_sessions: [],
       factory_name: "",
+      // 多厂绑定：未绑定时回空数组（消费方按「不限」处理）
+      factory_ids: [],
+      factories: [],
       city: "",
       // 知识库 v3：品类/招工方 id，未绑定时回 0
       vertical_id: 0,

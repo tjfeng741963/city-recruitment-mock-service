@@ -34,7 +34,19 @@ EMPTY_META: dict[str, Any] = {
     "vertical_code": "factory",
     # 设备级岗位口径（subway / all / 空串=跟随环境变量默认）
     "job_scope": "",
+    # 设备绑定的工厂（4222 config 下发）：只用于展示/调试与透传，
+    # 真正的岗位过滤由 4222 按 device_code 做，这里不做二次裁切。
+    "factory_ids": [],
+    "factories": [],
 }
+
+
+def _empty_meta() -> dict[str, Any]:
+    """空 meta 的独立副本：列表字段不能共用同一个对象，否则一处 append 污染全局。"""
+    meta = dict(EMPTY_META)
+    meta["factory_ids"] = []
+    meta["factories"] = []
+    return meta
 
 
 def clear_cache() -> None:
@@ -85,13 +97,31 @@ def _normalize_meta(data: Any) -> dict[str, Any]:
 
     job_scope 是本轮新增的设备级口径：subway 只推地铁/安检，all 不过滤，
     空串 = 跟随环境变量默认。脏值一律当空，避免一个错字把工厂岗全下架。
+
+    factory_ids / factories 是设备绑定的工厂清单（4222 新增下发）。
+    只做宽松清洗：非 list → []，元素非 int / 非 dict 的丢掉，绝不抛异常——
+    这两个字段一旦解析失败挡住整条 meta，知识库过滤和岗位口径会一起失效。
     """
     if not isinstance(data, dict):
-        return dict(EMPTY_META)
+        return _empty_meta()
 
     def as_int(value: Any) -> int:
         # bool 是 int 的子类，显式排除，免得 True 被当成 1 号品类
         return int(value) if isinstance(value, int) and not isinstance(value, bool) else 0
+
+    def as_ids(value: Any) -> list[int]:
+        if not isinstance(value, list):
+            return []
+        return [item for item in value if isinstance(item, int) and not isinstance(item, bool)]
+
+    def as_factories(value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        return [
+            {"id": item.get("id"), "name": str(item.get("name") or "")}
+            for item in value
+            if isinstance(item, dict)
+        ]
 
     scope = str(data.get("job_scope") or "").strip().lower()
     return {
@@ -104,6 +134,8 @@ def _normalize_meta(data: Any) -> dict[str, Any]:
         # 品类 code：工厂设备查 faq-factory-v1，地铁设备查 faq-subway-v1
         "vertical_code": str(data.get("vertical_code") or "factory"),
         "job_scope": scope if scope in ("subway", "all") else "",
+        "factory_ids": as_ids(data.get("factory_ids")),
+        "factories": as_factories(data.get("factories")),
     }
 
 
@@ -124,19 +156,19 @@ async def fetch_device_meta(device_code: str) -> dict[str, Any]:
     """
     device_code = str(device_code or "").strip()
     if not device_code:
-        return dict(EMPTY_META)
+        return _empty_meta()
     now = time.monotonic()
     cached = _meta_cache.get(device_code)
     if cached and now < cached[0]:
         return cached[1]
     token = os.getenv("FLOW_PROFILE_TOKEN", "").strip()
     if not token:
-        return dict(EMPTY_META)
+        return _empty_meta()
     url = os.getenv("FLOW_CONFIG_URL", DEFAULT_CONFIG_URL).format(device_code=device_code)
     try:
         meta = await _fetch_meta(device_code, token, url)
     except Exception:  # noqa: BLE001  超时/4222 挂了：按通配走原逻辑
-        meta = dict(EMPTY_META)
+        meta = _empty_meta()
     _meta_cache[device_code] = (time.monotonic() + CACHE_TTL, meta)
     return meta
 

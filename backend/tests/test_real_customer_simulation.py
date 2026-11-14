@@ -212,7 +212,7 @@ async def test_customer_can_finish_flow_over_http(admin_client: AsyncClient) -> 
         })
         return meta
 
-    async def fake_jobs(city: str, token: str, url: str) -> list[dict]:
+    async def fake_jobs(city: str, token: str, url: str, device_code: str = "") -> list[dict]:
         return [{
             "factory_name": "广州华荻科技有限公司", "job_title": "普工",
             "wage_text": "24-26 元/小时", "age_text": "18-40岁",

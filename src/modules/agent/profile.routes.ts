@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
 import { timingSafeEqual } from "node:crypto";
 import { canAccessDevice, getUserScope } from "../../auth/user-scopes.js";
+import { deviceFactoryIds, loadFactories } from "../../shared/device-factories.js";
 
 /**
  * 候选人档案接口（4222 侧写入/读取）。
@@ -283,7 +284,7 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
    * 之前城市识别是 flow_engine 里硬编码的 3 个城市，后台新建任何城市都认不出来。
    * 只返回招聘中的城市，带上区县别名（「番禺」「龙华」这类客户常说的小地名）。
    */
-  app.get("/api/v1/agent/cities", async (request, reply) => {
+  app.get<{ Querystring: { device_code?: string } }>("/api/v1/agent/cities", async (request, reply) => {
     if (!authorizeProfileRequest(request) && !request.auth) {
       return reply.code(403).send({ detail: "Not authenticated" });
     }
@@ -320,10 +321,22 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
         neighbors: neighborsByCity.get(row.city_name) ?? [],
       };
     });
+    // 设备 → 工厂多选绑定（契约 §5）：绑了厂就只返回这些厂所在城市，
+    // 让 8090 的城市识别不会把设备根本接不了的城市的岗拿出来问。
+    // 没传 device_code / 设备不存在 / 没绑厂 → 原逻辑（全量城市）不变。
+    const citiesDeviceCode = String(request.query.device_code ?? "").trim();
+    if (citiesDeviceCode) {
+      const boundFactoryIds = deviceFactoryIds(db, citiesDeviceCode);
+      if (boundFactoryIds.length) {
+        const boundCities = new Set(loadFactories(db, boundFactoryIds).map((factory) => factory.city_name).filter((name) => name !== ""));
+        const filtered = items.filter((item) => boundCities.has(item.city_name));
+        return { items: filtered, total: filtered.length };
+      }
+    }
     return { items, total: items.length };
   });
 
-  app.get<{ Querystring: { city?: string } }>("/api/v1/agent/jobs", async (request, reply) => {
+  app.get<{ Querystring: { city?: string; device_code?: string } }>("/api/v1/agent/jobs", async (request, reply) => {
     if (!authorizeProfileRequest(request) && !request.auth) {
       return reply.code(403).send({ detail: "Not authenticated" });
     }
@@ -335,6 +348,16 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
     // 只认 'enabled' 会让存量城市全部查不到岗位 → Python 侧每轮都走
     // 「已记下，我帮你问问」，自动回复形同停摆（2026-11-14 实测复现）。
     // 招聘链路必须两种都认；上面 /agent/cities 与下面周边城市兜底同理。
+    //
+    // 设备 → 工厂多选绑定（契约 §4）：设备绑了厂就只出这些厂的岗，避免拿 A 厂
+    // 的号去说 B 厂的待遇。没传 device_code / 设备不存在 / 没绑厂 → 原逻辑不变，
+    // 客户端绝不能因为没绑厂就收不到岗位。
+    const deviceCode = String(request.query.device_code ?? "").trim();
+    const boundFactoryIds = deviceCode ? deviceFactoryIds(db, deviceCode) : [];
+    // id 列表只拼占位符，值全部走参数绑定。
+    const factoryClause = boundFactoryIds.length
+      ? `\n         AND sp.factory_id IN (${boundFactoryIds.map(() => "?").join(",")})`
+      : "";
     const queryJobs = db.prepare(
       `SELECT sp.id AS position_id, sp.position_name, sp.data_json AS sp_json, f.factory_name, f.data_json AS f_json,
               c.city_name, c.province,
@@ -346,14 +369,16 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
        LEFT JOIN vertical v ON v.id = e.vertical_id
        WHERE sp.status='enabled' AND (f.status IS NULL OR f.status='enabled')
          AND c.recruitment_status IN ('enabled','active')
-         AND (c.city_name = ? OR c.city_name LIKE '%' || ? || '%')`
+         AND (c.city_name = ? OR c.city_name LIKE '%' || ? || '%')${factoryClause}`
     );
+    const queryArgs = (cityName: string): Array<string | number> =>
+      boundFactoryIds.length ? [cityName, cityName, ...boundFactoryIds] : [cityName, cityName];
     type JobRow = {
       position_id: number; position_name: string; sp_json: string; factory_name: string;
       f_json: string; city_name: string; province: string;
       vertical_code: string | null; vertical_config: string | null;
     };
-    const rows = queryJobs.all(city, city) as JobRow[];
+    const rows = queryJobs.all(...queryArgs(city)) as JobRow[];
 
     /**
      * 主城查不到岗位时，按后台「周边城市设置」再查一次（东莞没单 → 推广州）。
@@ -372,7 +397,7 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
           ORDER BY t.city_name`,
       ).all(city, city) as Array<{ neighbor: string }>;
       for (const { neighbor } of neighborRows) {
-        const neighborJobs = queryJobs.all(neighbor, neighbor) as JobRow[];
+        const neighborJobs = queryJobs.all(...queryArgs(neighbor)) as JobRow[];
         if (neighborJobs.length) {
           rows.push(...neighborJobs);
           crossCity = neighbor;

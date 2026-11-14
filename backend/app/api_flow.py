@@ -300,10 +300,12 @@ async def flow_answer(
         try:
             # 口径优先级：设备绑定 > 客户这轮说的品类 > 环境变量默认。
             # 地铁号的设备配置说 subway，就不该被客户随口一句「工厂」带偏。
+            # device_code 一并透传：4222 按设备绑定的工厂过滤岗位。
             remote_jobs = await lookup_jobs(
                 city_hint,
                 vertical_hint=vertical_hint_of(payload.text),
                 device_scope=str(meta.get("job_scope") or ""),
+                device_code=device_code,
             )
         except Exception:  # noqa: BLE001
             remote_jobs = []
@@ -498,8 +500,13 @@ async def flow_greet(
         )
 
     # 拉该板块的岗位：有城市按城市查，没绑城市就把整个板块的在招岗位拉回来
+    # device_code 透传：4222 只回该设备绑定工厂的岗位。
     try:
-        jobs = await lookup_jobs(city, device_scope="subway" if vertical_code == "subway" else "all")
+        jobs = await lookup_jobs(
+            city,
+            device_scope="subway" if vertical_code == "subway" else "all",
+            device_code=device_code,
+        )
     except Exception:  # noqa: BLE001
         jobs = []
     # 设备绑了具体工厂就只留这家；没绑就用板块全量
