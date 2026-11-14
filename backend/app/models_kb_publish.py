@@ -1,11 +1,17 @@
 """Isolated ownership and audit trail for the console's shared FAQ publications."""
-from datetime import datetime
+from datetime import datetime, timezone
 
-from sqlalchemy import Integer, String, Text
+from sqlalchemy import DateTime, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from .models import Base, utcnow
+from .models import Base
 from .models_kb import BigIntPK
+
+
+def publication_now() -> datetime:
+    # 首次部署已建成 timestamp without time zone。保持列兼容，以 UTC 无偏移值写入；
+    # asyncpg 不接受向该列绑定带时区 datetime，SQLite 测试则不会报错。
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class KbPublishedFaq(Base):
@@ -28,4 +34,4 @@ class KbPublication(Base):
     after_json: Mapped[str] = mapped_column(Text)
     result_json: Mapped[str] = mapped_column(Text)
     actor: Mapped[str] = mapped_column(String(100))
-    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=publication_now)
