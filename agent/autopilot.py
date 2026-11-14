@@ -775,9 +775,15 @@ def build_brain(cfg: dict, log_fn=print):
             timeout=float(bcfg.get("timeout") or 20),
             history_limit=int(bcfg.get("history_limit") or 6),
             mode=str(bcfg.get("mode")),
+            # 设备身份随请求带给服务端：少了它，服务端只能按 FLOW_PROFILE_DEVICE
+            # 取设备口径，多设备部署会静默串用别台设备的城市/板块/话术。
+            device_code=str(cfg.get("device_code") or ""),
         )
         label = "知识库" if bcfg.get("mode") == "kb" else "流程编排"
-        log_fn(f"回复来源：{label} {bcfg['base_url']}（失败暂停，待人工处理）")
+        log_fn(
+            f"回复来源：{label} {bcfg['base_url']}"
+            f"（device_code={cfg.get('device_code') or '未配置'}，失败暂停，待人工处理）"
+        )
         return instance
     log_fn(f"回复来源：固定文本（brain.mode={bcfg.get('mode')!r}）")
     return None

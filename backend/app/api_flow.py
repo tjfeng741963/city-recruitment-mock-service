@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import re
+import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
@@ -43,6 +44,30 @@ from .services.flow_engine import (
 from .services.job_lookup import lookup_cities, lookup_jobs, vertical_hint_of
 from .services.flow_llm import a_step
 from .services.llm_provider import build_provider
+
+_warned_no_device = False
+
+
+def _resolve_device_code(explicit: str) -> str:
+    """本轮该用哪台设备：显式传入 > FLOW_PROFILE_DEVICE > 空（通配）。
+
+    空态是「不知道是哪台」，此时按通配处理（不拿别台设备的城市/板块/话术去套），
+    并只告警一次——每轮刷日志会把 run.log 冲爆。
+    2026-11-14 之前这里兜底到硬编码的 pc-office-01（已停用的办公机），
+    导致线上 pc-win-01 的整段对话都按那台机器的口径取数，实测串台。
+    """
+    global _warned_no_device
+    code = (explicit or "").strip() or os.getenv(
+        "FLOW_PROFILE_DEVICE", profile_push.DEFAULT_DEVICE
+    ).strip()
+    if not code and not _warned_no_device:
+        _warned_no_device = True
+        logging.getLogger(__name__).warning(
+            "/flow/answer 与 /flow/greet 未收到 device_code，且未配置 "
+            "FLOW_PROFILE_DEVICE：设备元信息与话术按通配处理，可能串用其他设备配置"
+        )
+    return code
+
 
 router = APIRouter(prefix="/api/v1/flow", tags=["flow"])
 
@@ -164,9 +189,7 @@ async def flow_answer(
             profile=dict(state.get("profile") or {}),
         )
 
-    device_code = payload.device_code or os.getenv(
-        "FLOW_PROFILE_DEVICE", profile_push.DEFAULT_DEVICE
-    )
+    device_code = _resolve_device_code(payload.device_code)
 
     # 知识库两段式：
     #   ① 新路径 kb_faq —— 按品类 + 招工方硬过滤，命中就用岗位事实渲染占位符。
@@ -444,9 +467,7 @@ async def flow_greet(
       * 地铁号没绑城市 → 不知道发哪个城市的安检岗，得先问城市
     这两种都 `skipped=True` 并给出 detail，客户端据此决定要不要发问句。
     """
-    device_code = payload.device_code or os.getenv(
-        "FLOW_PROFILE_DEVICE", profile_push.DEFAULT_DEVICE
-    )
+    device_code = _resolve_device_code(payload.device_code)
     try:
         meta = await fetch_device_meta(device_code)
     except Exception:  # noqa: BLE001  meta 拉不到就当没绑，不发卡

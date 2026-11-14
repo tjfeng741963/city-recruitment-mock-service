@@ -44,6 +44,7 @@ class Brain:
         timeout: float = 20.0,
         history_limit: int = 6,
         mode: str = "kb",
+        device_code: str = "",
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.username = username
@@ -51,6 +52,10 @@ class Brain:
         self.timeout = timeout
         self.history_limit = history_limit
         self.mode = mode
+        # 设备身份：服务端按这个取设备元信息（城市/板块/厂名/岗位口径）与话术。
+        # 不传的话服务端只能回退到 FLOW_PROFILE_DEVICE，多设备场景会串用别台设备的口径
+        # （2026-11-14 实测：线上 pc-win-01 的对话全按已停用的 pc-office-01 取值）。
+        self.device_code = device_code
         self._token: str = ""
         self._token_at: float = 0.0
         # trust_env=False：不读 HTTP_PROXY/HTTPS_PROXY，本机回环直连
@@ -86,6 +91,10 @@ class Brain:
         """调 /api/v1/flow/answer。session_key 用企微会话 ID，状态存在服务端。"""
         key = (session_key or "unknown")[:64]
         payload = {"session_key": key, "text": text[:2000]}
+        if self.device_code:
+            # 必须带：服务端据此取设备元信息（城市/板块/厂名/岗位口径）与设备话术，
+            # 不带就回退到 FLOW_PROFILE_DEVICE，多设备部署会静默串用别台设备的配置。
+            payload["device_code"] = self.device_code
         try:
             r = self._client.post(
                 f"{self.base_url}/api/v1/flow/answer", json=payload, headers=self._headers()

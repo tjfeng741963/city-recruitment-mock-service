@@ -31,7 +31,12 @@ from .flow_engine import (
 )
 
 DEFAULT_URL = "http://127.0.0.1:4222/api/v1/agent/profile"
-DEFAULT_DEVICE = "pc-office-01"
+# 兜底设备：不写死具体机器名。
+# 原来硬编码 "pc-office-01"（一台已停用的办公机），线上 pc-win-01 的对话
+# 因此全部按那台机器的城市/板块/话术取数，2026-11-14 实测串台。
+# 现在默认空：未知设备就不猜——取不到元信息时按"通配"处理，
+# 宁可不过滤，也不要静默套用另一台设备的配置。
+DEFAULT_DEVICE = os.getenv("FLOW_PROFILE_DEVICE", "").strip()
 TIMEOUT = 3.0
 
 # 8090 的流程阶段 → 4222 的档案例 stage
