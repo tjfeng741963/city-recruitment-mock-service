@@ -43,6 +43,7 @@ from .flow_engine import (
     _day_offset_of,
     _gave_up_text,
     _is_bare_greeting,
+    _job_fact_answer,
     _script_sent,
     _stage_script,
     extract_day_offset,
@@ -56,7 +57,9 @@ from .flow_engine import (
     remote_job_cities,
     step as fallback_step,
 )
+from .agent_session import transcript_lines
 from .llm_provider import ChatMessage, LLMProvider
+from .reviewer import build_reviewer
 
 ALLOWED_STAGES = {
     STAGE_ASK_CITY,
@@ -195,33 +198,61 @@ def _parse_json(raw: str) -> dict[str, Any]:
 _WANTS_MORE = re.compile(r"别的|其他|其它|换一|换家|还有|多几个|几个厂|哪些厂")
 
 
-def _list_other_jobs(state: dict[str, Any], now: datetime | None = None) -> FlowResult:
-    """客户要换岗位：代码列出该城市其他岗位（排除已发过的），不调模型。"""
-    slots: dict[str, Any] = state.setdefault("slots", {})
-    stage = str(state.get("stage") or STAGE_ASK_INTERVIEW)
+def _candidate_jobs(slots: dict[str, Any]) -> list[tuple[int, dict[str, str]]]:
+    """当前岗位之外、同城在招的候选岗位 [(job_index, job)]。"""
     city = str(slots.get("city") or "")
     current = int(slots.get("job_index") or 0)
-    jobs = [j for i, j in enumerate(jobs_for_city(city)) if i != current]
-    if not jobs:
-        return FlowResult(
-            reply=f"{city}这边暂时就这一个岗位在招，有了新岗位我第一时间告诉你。",
-            stage=stage,
-            slots=slots,
-        )
-    lines = []
-    for job in jobs:
-        title = str(job.get("job_title") or "")
-        factory = str(job.get("factory_name") or "")
-        kind = title[len(factory):].strip() if factory and title.startswith(factory) else title
-        lines.append(
-            f"{factory}（{kind}）：{job.get('wage_text', '')}，"
-            f"{job.get('hours_text', '')}，{job.get('age_text', '')}，{job.get('welfare_text', '')}，"
-            f"地点{job.get('place', '')}"
-        )
-    body = "这边还有这几个：\n" + "\n".join(f"{i}. {line}" for i, line in enumerate(lines, start=1))
-    parts = [body, "想看哪个跟我说，或者说下你的要求我帮你挑。"]
-    slots["interview_offer_sent"] = True
-    return FlowResult(reply="\n".join(parts), parts=parts, stage=stage, slots=slots)
+    return [
+        (i, job) for i, job in enumerate(jobs_for_city(city)) if i != current
+    ]
+
+
+def _candidate_jobs_text(slots: dict[str, Any]) -> str:
+    """给决策 Prompt 的候选岗位简报：名称+工价，最多列 5 个。"""
+    candidates = _candidate_jobs(slots)[:5]
+    if not candidates:
+        return "（本城市暂无其他候选岗位）"
+    return "\n".join(
+        f"- {job.get('factory_name', '')}（{job.get('job_title', '')}）：{job.get('wage_text', '')}"
+        for _, job in candidates
+    )
+
+
+def _switch_to_candidate(slots: dict[str, Any], state: dict[str, Any], now: datetime | None) -> FlowResult | None:
+    """岗位切换的落地：job_index 切到第一个候选岗位并走发卡流程。
+
+    send_info:<新 position_id> 一次性键没发过 → 新岗位卡照发；enter_info_result
+    内部 pin_position 会同步换 position_id / employer_id / job_snapshot。
+    没有候选岗位返回 None（调用方按普通轮次继续）。
+    """
+    candidates = _candidate_jobs(slots)
+    if not candidates:
+        return None
+    slots["job_index"] = candidates[0][0]
+    slots["interview_offer_sent"] = False
+    when = next_interview(now, _day_offset_of(slots))
+    result = enter_info_result(slots, when, now)
+    state["stage"] = result.stage
+    return result
+
+
+def _list_other_jobs(state: dict[str, Any], now: datetime | None = None) -> FlowResult:
+    """客户要换岗位（确定性通道）：job_index 切到同城下一个候选岗位并发新岗位卡。
+
+    原来只列文字清单，2026-11-14 双智能体改造后与智能体的 switch 输出同一条
+    落地路径（_switch_to_candidate）：发新卡 + 钉新岗位，不再让客户自己挑编号。
+    没有候选岗位时如实告知。
+    """
+    slots: dict[str, Any] = state.setdefault("slots", {})
+    city = str(slots.get("city") or "")
+    switched = _switch_to_candidate(slots, state, now)
+    if switched is not None:
+        return switched
+    return FlowResult(
+        reply=f"{city}这边暂时就这一个岗位在招，有了新岗位我第一时间告诉你。",
+        stage=str(state.get("stage") or STAGE_ASK_INTERVIEW),
+        slots=slots,
+    )
 
 
 def _job_of(slots: dict[str, Any]) -> dict[str, str]:
@@ -443,6 +474,9 @@ DECISION_PROMPT = """你是一家劳务中介的招聘顾问，叫「陈姐」�
 # 岗位事实卡（数字唯一合法来源；为空 = 还没有选定岗位，先问城市）
 {fact_card}
 
+# 候选岗位（当前岗位之外、同城在招的其他岗位；客户想换时从这里挑，一个数字都不许编）
+{candidates}
+
 # 缺失清单（按顺序，一次只推进第一项缺失）
 {missing}
 
@@ -450,7 +484,10 @@ DECISION_PROMPT = """你是一家劳务中介的招聘顾问，叫「陈姐」�
 {transcript}
 {material}
 # 硬规则
-- 工价/工资/钱数只能来自事实卡，事实卡里没有的数字一个都不许出现
+- 工价/工资/钱数只能来自事实卡或候选岗位，别处出现的数字一个都不许说
+- 客户说不想干当前岗位 / 问有没有别的岗位 → reply 简短接一句
+  （比如「好嘞，给你换个厂看看」），switch=true；新岗位的卡片系统会自动发，
+  你不要复述卡片里的数字
 - 不许编线下动作（打印面试表、叫主管去门口、登记工号），不许编电话、宿舍号、班车时间
 - 客户拒绝（来不了/不去了）→ reply 客气收尾一句，别再追问
 - collect 时姓名和手机号一起要；capture 只填客户这句话里明确给的，没给留空串
@@ -461,7 +498,7 @@ DECISION_PROMPT = """你是一家劳务中介的招聘顾问，叫「陈姐」�
 {now}
 
 # 输出格式（必须是 JSON，不要代码块，不要多余文字）
-{{"reply": "发给客户的一句话", "capture": {{"name": "", "phone": "", "city": "", "day": ""}}, "unknown_question": ""}}
+{{"reply": "发给客户的一句话", "capture": {{"name": "", "phone": "", "city": "", "day": ""}}, "unknown_question": "", "switch": false}}
 """
 
 _FACT_LABELS = {
@@ -515,25 +552,38 @@ def _missing_checklist(slots: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _history_lines(state: dict[str, Any], limit: int = 8) -> str:
+    """旧投影的最近对话（state.history）；没接 AgentSession 时的兼容读法。"""
+    recent = (state.get("history") or [])[-limit:]
+    return "\n".join(
+        f"{'客户' if item['role'] == 'customer' else '你'}：{item['text']}"
+        for item in recent
+    )
+
+
 def build_decision_messages(
     state: dict[str, Any],
     text: str,
     now: datetime | None = None,
     material: str = "",
+    transcript: list[dict[str, str]] | None = None,
 ) -> list[ChatMessage]:
-    """决策上下文：事实卡 + 缺失清单 + 最近对话历史（复用 build_messages 的投影）。"""
+    """决策上下文：事实卡 + 候选岗位 + 缺失清单 + 最近对话。
+
+    `transcript` 是 AgentSession 投影（[{role, content}]，我方/对方逐轮累积）；
+    不传时退回 state.history 的旧投影（老调用方/测试兼容）。
+    """
     when = now or datetime.now().astimezone()
     slots = state.get("slots") or {}
-    recent = (state.get("history") or [])[-8:]
-    transcript = "\n".join(
-        f"{'客户' if item['role'] == 'customer' else '你'}：{item['text']}"
-        for item in recent
+    recent = (
+        transcript_lines(transcript) if transcript is not None else _history_lines(state)
     )
     extra = f"\n# 运营素材（口径已核实，优先原样使用）\n{material}\n" if material else ""
     system = DECISION_PROMPT.format(
         fact_card=_fact_card_text(slots),
+        candidates=_candidate_jobs_text(slots),
         missing=_missing_checklist(slots),
-        transcript=transcript or "（还没有）",
+        transcript=recent or "（还没有）",
         material=extra,
         now=when.strftime("%Y-%m-%d %H:%M"),
     )
@@ -668,6 +718,13 @@ def apply_decision(
             action=ACTION_HANDOFF,
         )
 
+    # 岗位切换（A 的 switch 输出）：客户不想干当前岗位/问有没有别的 → 切到
+    # 同城第一个候选岗位并走发卡流程。没有候选岗位时当普通轮次继续。
+    if bool(data.get("switch")):
+        switched = _switch_to_candidate(slots, state, now)
+        if switched is not None:
+            return switched
+
     # 一拿到城市：工作信息由代码发（话术/卡片），模型的措辞在这轮不采用——
     # 工价/班次一个字都不能错，让模型复述等于把事故概率交给运气。
     if slots.get("city") and not slots.get("interview_offer_sent"):
@@ -721,6 +778,7 @@ async def a_step(
     now: datetime | None = None,
     kb_answer: str | None = None,
     graph: dict[str, Any] | None = None,
+    transcript: list[dict[str, str]] | None = None,
 ) -> FlowResult:
     """一个 turn：单轮单源决策。
 
@@ -737,6 +795,9 @@ async def a_step(
 
     `graph` 是节点图（flow_graph.load_graph 的返回值）。透传给确定性状态机后，
     有图时按图的边走；没给则完全走原有分支。
+
+    `transcript` 是 AgentSession 的轮次投影（每客户持久上下文）；不传退回
+    state.history 的旧投影。
     """
     stage = str(state.get("stage") or STAGE_ASK_CITY)
     slots: dict[str, Any] = state.setdefault("slots", {})
@@ -835,7 +896,7 @@ async def a_step(
 
     try:
         raw = await provider.complete(
-            build_decision_messages(state, text, now, material=kb_answer or ""),
+            build_decision_messages(state, text, now, material=kb_answer or "", transcript=transcript),
             temperature=0.7,
             max_tokens=700,
         )
@@ -846,12 +907,161 @@ async def a_step(
     return apply_decision(state, data, text, now=now, kb_answer=kb_answer, graph=graph)
 
 
+# ── B 审核循环（A 生成 → B 把关 → 有限修改 → 最终必发）─────────────────
+# 时序：A 草稿 → B 审① → 打回则 A 重写一次（喂 reason/suggestion）→ B 审②
+#       → 仍打回 → 丢弃 B 意见，兜底强制发送（事实卡直答 → 确定性提问 → 确认一下）。
+# B 最多审 2 轮、A 最多改 1 次，绝不无限循环；B 不可用（没配/超时/乱码）直接放行。
+MAX_REVIEW_ROUNDS = 2
+
+REWRITE_PROMPT = """你刚才要发给客户的话被审核打回了。按审核意见重写，只输出重写后的话本身（不要 JSON、不要解释）。
+
+# 岗位事实卡（数字唯一合法来源）
+{fact_card}
+
+# 候选岗位（同城其他在招岗位）
+{candidates}
+
+# 最近对话（说过的不要重复）
+{transcript}
+
+# 客户刚说
+{text}
+
+# 你原来要发的
+{draft}
+
+# 审核意见
+问题：{reason}
+建议：{suggestion}
+"""
+
+
+def _with_parts(result: FlowResult, parts: list[str]) -> FlowResult:
+    """只换文本，不动状态（stage/slots/action 都是这一轮定好的）。"""
+    return FlowResult(
+        reply="",
+        parts=parts,
+        stage=result.stage,
+        slots=result.slots,
+        finished=result.finished,
+        action=result.action,
+        attachments=result.attachments,
+        unknown_question=result.unknown_question,
+        source=result.source,
+    )
+
+
+async def _rewrite_draft(
+    state: dict[str, Any],
+    text: str,
+    provider: LLMProvider,
+    draft: list[str],
+    verdict: dict[str, str],
+    transcript: list[dict[str, str]] | None,
+) -> list[str] | None:
+    """B 打回 → A 重写一次（把 reason/suggestion 喂回去）。失败返回 None。"""
+    slots = state.get("slots") or {}
+    prompt = REWRITE_PROMPT.format(
+        fact_card=_fact_card_text(slots),
+        candidates=_candidate_jobs_text(slots),
+        transcript=(
+            transcript_lines(transcript) if transcript is not None else _history_lines(state)
+        )
+        or "（还没有）",
+        text=text,
+        draft="\n".join(draft),
+        reason=str(verdict.get("reason") or ""),
+        suggestion=str(verdict.get("suggestion") or ""),
+    )
+    try:
+        raw = await provider.complete(
+            [ChatMessage(role="user", content=prompt)],
+            temperature=0.4,
+            max_tokens=400,
+        )
+    except Exception:  # noqa: BLE001  重写失败不算致命，进兜底强制发送
+        return None
+    reply = (raw or "").strip()
+    if reply.startswith("```"):
+        reply = re.sub(r"^```[a-zA-Z]*\n?", "", reply)
+        reply = re.sub(r"\n?```$", "", reply).strip()
+    return _split_parts(reply) or None
+
+
+def _forced_fallback(
+    state: dict[str, Any], text: str, result: FlowResult
+) -> FlowResult:
+    """审核循环用尽后的兜底强制发送（绝不静默不发）。
+
+    顺序：事实卡直答（客户问了岗位事实就照实答）→ 确定性提问（缺失清单第一项）
+    → 「这个我确认一下，稍后回你」。状态沿用 result（stage/slots 不被审核改动）。
+    """
+    slots = state.get("slots") or {}
+    fact = _job_fact_answer(slots, text)
+    if fact:
+        return _with_parts(result, [fact])
+    question = _QUESTION.get(_max_stage(slots), "")
+    if question:
+        return _with_parts(result, [question])
+    return _with_parts(result, ["这个我确认一下，稍后回你"])
+
+
+async def review_loop(
+    state: dict[str, Any],
+    text: str,
+    provider: LLMProvider | None,
+    result: FlowResult,
+    transcript: list[dict[str, str]] | None = None,
+) -> FlowResult:
+    """A→B 循环：B 打回 → A 重写一次 → 再审；第 2 轮仍打回 → 兜底强制发送。
+
+    - B 不可用（没配 provider）→ 草稿直接放行（审核是增强，不是闸门）
+    - 话术（result.source == "script"）→ B 只查残留/重复（代码级，reviewer 内），
+      且无论结论如何都按原文案发——运营口径，B 无权改写
+    - 重写结果必须再过 _fact_guard：编了工价的重写稿整段丢弃
+    """
+    draft = list(result.parts) or ([result.reply] if result.reply else [])
+    if not draft:
+        return result
+    reviewer = build_reviewer()
+    if reviewer is None:
+        return result
+    slots = state.get("slots") or {}
+    fact_card = _fact_card_text(slots)
+    snapshot = dict(slots.get("job_snapshot") or {})
+    is_script = getattr(result, "source", "") == "script"
+    verdict = await reviewer.review(
+        transcript or [], draft, fact_card, snapshot, is_script=is_script
+    )
+    if verdict.get("verdict") != "revise":
+        return result
+    if is_script:
+        # 话术被打回（残留/重复）：B 无权改写文案，渲染层 render_script 已保证
+        # 数字与已知占位符 → 按原文案强制发送，绝不静默不发
+        return result
+    if provider is None:
+        # A 不在（这轮是纯确定性输出被 B 打回）：无法重写，直接进兜底
+        return _forced_fallback(state, text, result)
+    revised = await _rewrite_draft(state, text, provider, draft, verdict, transcript)
+    if revised and _fact_guard("\n".join(revised), slots):
+        draft = revised
+    verdict = await reviewer.review(
+        transcript or [], draft, fact_card, snapshot, is_script=is_script
+    )
+    if verdict.get("verdict") != "revise":
+        return _with_parts(result, draft)
+    # 第 2 轮仍打回：丢弃 B 意见，兜底强制发送
+    return _forced_fallback(state, text, result)
+
+
 __all__ = [
     "a_step",
     "apply_result",
     "apply_decision",
     "build_messages",
     "build_decision_messages",
+    "review_loop",
+    "MAX_REVIEW_ROUNDS",
     "SYSTEM_PROMPT",
     "DECISION_PROMPT",
 ]

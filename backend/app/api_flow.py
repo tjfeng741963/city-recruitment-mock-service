@@ -23,6 +23,7 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
 from .deps import ServiceOrUser, SessionDep
+from .services import agent_session
 from .services import flow_session as store
 from .services import kb_faq, kb_placeholder, profile_push, unknown_questions
 from .services import flow_graph
@@ -55,7 +56,7 @@ from .services.flow_engine import (
     set_remote_jobs,
 )
 from .services.job_lookup import lookup_cities, lookup_jobs, vertical_hint_of
-from .services.flow_llm import a_step
+from .services.flow_llm import a_step, review_loop
 from .services.llm_provider import build_provider
 
 _warned_no_device = False
@@ -190,7 +191,11 @@ async def flow_answer(
         await store.append_events(
             session,
             payload.session_key,
-            [(store.EVENT_INBOUND, {"text": payload.text})],
+            [
+                (store.EVENT_INBOUND, {"text": payload.text}),
+                # 关闭语也是实际发出的内容：落 reply 事件，AgentSession 才能读到
+                (store.EVENT_REPLY, {"text": closing, "parts": [closing]}),
+            ],
         )
         return FlowAnswerOut(
             reply=closing,
@@ -374,6 +379,11 @@ async def flow_answer(
         else None
     )
 
+    # 每客户一个标准智能体上下文（AgentSession）：从事件日志投影最近轮次
+    # （客户/我方逐轮累积，含话术与卡片），传给 A（决策 Prompt）与 B（审核查重）
+    transcript = agent_session.surface(agent_session.build_transcript(events))
+    provider = build_provider()
+
     if position_script and str(position_script.get("content") or "").strip():
         # 岗位话术命中：整段按运营台词直发（占位符由代码替换、媒体标记原样保留），
         # 这轮一次模型都不调——工价/年龄/地点一个字都不许被改写。
@@ -392,8 +402,9 @@ async def flow_answer(
         job = card_job
         script_material = render_script(str(script.get("content") or ""), job)
         result = await a_step(
-            state, payload.text, build_provider(), kb_answer=script_material,
+            state, payload.text, provider, kb_answer=script_material,
             graph=await _load_graph_for(session, device_code, meta),
+            transcript=transcript,
         )
         # 语义保持：这轮按「已发岗位+邀约」推进，下一站 ask_interview
         result.stage = STAGE_ASK_INTERVIEW
@@ -401,9 +412,14 @@ async def flow_answer(
     else:
         # ③ 主路径交给模型；没配模型或调用失败时，a_step 内部退到确定性状态机
         result = await a_step(
-            state, payload.text, build_provider(), kb_answer=kb_answer,
+            state, payload.text, provider, kb_answer=kb_answer,
             graph=await _load_graph_for(session, device_code, meta),
+            transcript=transcript,
         )
+    # B 审核循环：逐条把关要发的内容。打回 → A 重写一次 → 再审；
+    # 2 轮后仍打回 → 兜底强制发送（事实卡直答 → 确定性提问 → 确认一下）。
+    # B 不可用（没配 LLM）直接放行草稿，审核是增强不是闸门。
+    result = await review_loop(state, payload.text, provider, result, transcript)
     # 「沟通中」标记：一进 collect 就给 4222 发一次 stage=collect，让候选人页
     # 先出现「已答应面试，等联系方式」的一条。绕过 has_content 强推一次；
     # 槽位先记下保证整轮只推一次，推送本身尽力而为（失败不回滚不影响回复）。

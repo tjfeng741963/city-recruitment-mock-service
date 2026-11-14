@@ -108,6 +108,9 @@ class FlowResult:
     attachments: list[Any] = field(default_factory=list)
     # 知识库没答上来的原话，由调用方落 unknown_questions（本模块不做 I/O）
     unknown_question: str = ""
+    # 本轮内容来源：script=运营话术（B 无权改写）/ card=代码拼卡 / 空串=其他。
+    # 给审核循环（flow_llm.review_loop）区分「话术只能过或打回渲染层」用。
+    source: str = ""
 
     def __post_init__(self) -> None:
         self.parts = [part for part in (self.parts or []) if part]
@@ -679,11 +682,17 @@ def enter_info_result(
             unknown_question=f"{city}有哪些厂在招" if city else "客户没说清想找哪个城市的厂",
         )
     slots["interview_offer_sent"] = True
+    # 来源标记：send_info_parts 即将命中一次性话术时这轮是「运营话术」，
+    # 审核循环据此放行原文案（B 无权改写）。判断要赶在 _one_shot_script 记账之前。
+    scripted_now = bool(_stage_script(slots, SCRIPT_STAGE_SEND_INFO)) and not _script_sent(
+        slots, SCRIPT_STAGE_SEND_INFO
+    )
     return FlowResult(
         reply="",
         parts=send_info_parts(slots, when, now),
         stage=STAGE_ASK_INTERVIEW,
         slots=slots,
+        source="script" if scripted_now else "card",
     )
 
 
