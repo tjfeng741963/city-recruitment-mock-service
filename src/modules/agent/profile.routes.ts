@@ -288,7 +288,7 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
       return reply.code(403).send({ detail: "Not authenticated" });
     }
     const rows = db.prepare(
-      "SELECT id, city_name, province, data_json FROM cities WHERE recruitment_status='enabled' ORDER BY id",
+      "SELECT id, city_name, province, data_json FROM cities WHERE recruitment_status IN ('enabled','active') ORDER BY id",
     ).all() as Array<{ id: number; city_name: string; province: string; data_json: string }>;
     // 周边城市：后台「周边城市设置」配的关系。主城查不到岗位时 Python 侧按这个列表兜底，
     // 过去这张表只有管理页自己读写，招聘链路里没有任何消费方。
@@ -330,6 +330,11 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
     const city = String((request.query as { city?: string }).city ?? "").trim();
     if (!city) return reply.code(422).send({ detail: "city is required" });
 
+    // 城市「在招」状态的取值不统一：历史数据是 'active'
+    // （response-serializers 的默认值），而 POST /cities 新建时默认写 'enabled'。
+    // 只认 'enabled' 会让存量城市全部查不到岗位 → Python 侧每轮都走
+    // 「已记下，我帮你问问」，自动回复形同停摆（2026-11-14 实测复现）。
+    // 招聘链路必须两种都认；上面 /agent/cities 与下面周边城市兜底同理。
     const queryJobs = db.prepare(
       `SELECT sp.id AS position_id, sp.position_name, sp.data_json AS sp_json, f.factory_name, f.data_json AS f_json,
               c.city_name, c.province,
@@ -339,7 +344,8 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
        JOIN cities c ON sp.city_id = c.id
        LEFT JOIN employer e ON e.tenant_id = 1 AND e.display_name = f.factory_name
        LEFT JOIN vertical v ON v.id = e.vertical_id
-       WHERE sp.status='enabled' AND (f.status IS NULL OR f.status='enabled') AND c.recruitment_status='enabled'
+       WHERE sp.status='enabled' AND (f.status IS NULL OR f.status='enabled')
+         AND c.recruitment_status IN ('enabled','active')
          AND (c.city_name = ? OR c.city_name LIKE '%' || ? || '%')`
     );
     type JobRow = {
@@ -362,7 +368,7 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
            JOIN cities s ON s.id = l.city_id
            JOIN cities t ON t.id = l.linked_city_id
           WHERE (s.city_name = ? OR s.city_name LIKE '%' || ? || '%')
-            AND t.recruitment_status='enabled'
+            AND t.recruitment_status IN ('enabled','active')
           ORDER BY t.city_name`,
       ).all(city, city) as Array<{ neighbor: string }>;
       for (const { neighbor } of neighborRows) {
