@@ -231,6 +231,16 @@ def extract_age(text: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+# 纯打招呼/确认收到的话：不是「答应面试」，只是礼貌开场。
+# 默认边里含「好」，不排掉的话客户回一句「你好」会被当成同意，直接跳到要姓名电话。
+_BARE_GREETING = ("你好", "您好", "在吗", "在不在", "在么", "收到", "谢谢")
+
+
+def _is_bare_greeting(text: str) -> bool:
+    value = (text or "").strip().strip("，,。.！!~～ ")
+    return value in _BARE_GREETING
+
+
 def is_agree(text: str) -> bool:
     if any(word in text for word in _DISAGREE):
         return False
@@ -581,8 +591,13 @@ def step(
     #
     # 为什么放在 done 之后：done 是「结束」语义，节点图里也有 done 节点，
     # 但「已经结束」的会话不该被任何边重新拉起，这是硬约束。
-    node = str(state.get("node") or "")
-    routed = _route_by_graph(graph, node, text, slots, state)
+    # 当前节点：优先用显式记录的 node，没有就用当前 stage。
+    # 为什么必须兜到 stage：node 没有对应的事件类型，project() 回放后永远是空串，
+    # 拿空串去查图会每轮都退回 entry 节点——地铁号（入口 ask_city）永远走不出
+    # 问城市，工厂号（入口 send_info）永远在重发岗位卡。
+    # 默认节点的 node_key 与 stage 常量同名（见 029_flow_nodes.sql），所以 stage 可直接当 node。
+    node = str(state.get("node") or "") or stage
+    routed = _route_by_graph(graph, node, text, slots, state, when, kb_answer)
     if routed is not None:
         return routed
     # ────────────────────────────────────────────────────────────────────
@@ -605,6 +620,15 @@ def step(
 
     if stage == STAGE_SEND_INFO:
         _absorb(slots, text)
+        # 岗位卡已经发过（首句 greet 直接发过 / 上一轮已发）：不能再整段重发一遍。
+        # 2026-11-14 实测：新好友收到岗位卡后问「多少钱」，系统把整张卡又发了一次，
+        # 客户连收两遍同样的岗位信息，真正问的问题一个字没答。
+        # 这时的正确动作是：先答客户问的（KB），没命中就推进到面试邀约。
+        if slots.get("interview_offer_sent"):
+            state["stage"] = STAGE_ASK_INTERVIEW
+            return _answer_side_question(
+                state, STAGE_ASK_INTERVIEW, slots, text, kb_answer
+            )
         result = enter_info_result(slots, when, now)
         state["stage"] = result.stage
         return result
@@ -658,6 +682,8 @@ def _route_by_graph(
     text: str,
     slots: dict[str, Any],
     state: dict[str, Any],
+    when: datetime | None = None,
+    kb_answer: str | None = None,
 ) -> FlowResult | None:
     """按节点图的边走一步；走不出去返回 None，由调用方回退到写死分支。
 
@@ -681,6 +707,34 @@ def _route_by_graph(
     if not current:
         return None
 
+    # 拒绝优先，必须早于选边。
+    # 默认边里的「可以,行,好,去」太宽，客户回「不行」也会命中「行」被当成答应，
+    # 直接跳去要姓名电话（与 stage 分支的「拒绝优先」规则冲突）。这里提前拦。
+    if current == STAGE_ASK_INTERVIEW and is_disagree(text) and not slots.get("booked"):
+        slots["recruit_status"] = "disqualified"
+        state["stage"] = STAGE_DONE
+        state["node"] = STAGE_DONE
+        return FlowResult(
+            reply=_gave_up_text(),
+            stage=STAGE_DONE,
+            slots=slots,
+            finished=True,
+            action=ACTION_GAVE_UP,
+        )
+
+    # 侧问优先于路由：客户问事（问工价/面试几点/带什么）时先答，不推进节点。
+    #
+    # 为什么必须在 pick_next 之前：默认边的关键词很宽（ask_interview → collect
+    # 那条含「几点」），客户问「几点面试」会被当成答应面试，直接跳到要姓名电话，
+    # 刚查到的面试时间一个字都没说（2026-11-14 实测）。
+    # ask_city 不拦截：「深圳有厂吗」这类必须先抽城市，答完再问就丢了城市线索。
+    if current != STAGE_ASK_CITY and (kb_answer or looks_like_question(text)):
+        # 报名字/报号码不算问事：「我叫张三」「13800138000」里没有问句意图
+        if not extract_phone(text) and not extract_name(text):
+            answered = _answer_side_question(state, current, slots, text, kb_answer)
+            if answered.parts:
+                return answered
+
     target = pick_next(edges, current, text, slots)
     if not target:
         return None
@@ -688,11 +742,28 @@ def _route_by_graph(
     # 走边之后的状态：节点变、stage 跟着节点走（stage 仍用于档案推送等旧逻辑）
     state["node"] = target
     config_body = node_body(nodes, target)
+    when = when or next_interview(None, _day_offset_of(slots))
 
     # send_info / done 这些节点有硬业务规则（岗位数据、面试时间由代码算），
     # 不能只照抄配置正文——交给原函数，正文只作为补充。
     if target == STAGE_SEND_INFO:
-        result = enter_info_result(slots, next_interview(), None)
+        # 城市必须在这里抽一次：地铁号入口是 ask_city，客户答「深圳」正好走这条边，
+        # 如果只交给 enter_info_result，slots.city 还是空 → 查不到岗位 → 回
+        # 「已记下，你找的厂」，下一轮还是空城市，永远走不出去（2026-11-14 实测）。
+        city = extract_city(text) or str(slots.get("city") or "")
+        if not city:
+            # 还不知道城市就发不了岗位卡（也不知道发哪个城市的）。
+            # 这里的 always 边只代表「该进发信息这一步了」，不代表「城市已经问到」——
+            # 客户第一句是「你好」时必须先问城市，不能回「已记下，你找的厂」。
+            # node 也要跟着回拨：上面已经把 node 设成 send_info 了，不回拨的话
+            # 下一轮会带着「已经发过卡」的假状态继续走。
+            state["node"] = STAGE_ASK_CITY
+            state["stage"] = STAGE_ASK_CITY
+            return FlowResult(reply=_city_ask(slots), stage=STAGE_ASK_CITY, slots=slots)
+        slots["city"] = city
+        slots.setdefault("job_index", 0)
+        _absorb(slots, text)
+        result = enter_info_result(slots, when, None)
         state["stage"] = result.stage
         if config_body:
             result.parts = [config_body, *result.parts]
@@ -700,8 +771,29 @@ def _route_by_graph(
         return result
 
     if target == STAGE_DONE:
+        # 拒绝优先：走 done 的原因可能是「答应」，也可能是「不去了/算了」。
+        # 后者绝不能被 _book 登记成已约（2026-11-14 实测：回「不去」被回了
+        # 「好嘞，登记好了」并推了 book_interview）。与 stage 分支的规则保持一致。
+        if is_disagree(text) and not slots.get("booked"):
+            slots["recruit_status"] = "disqualified"
+            state["stage"] = STAGE_DONE
+            return FlowResult(
+                reply=_gave_up_text(),
+                stage=STAGE_DONE,
+                slots=slots,
+                finished=True,
+                action=ACTION_GAVE_UP,
+            )
+        _absorb(slots, text)
+        # 姓名手机没齐就约不成：collected 边只看 phone，客户只报号码不报姓名时
+        # 会被直接登记成已约。缺字段就退回 collect 继续要。
+        missing = _collect_prompt(slots)
+        if missing:
+            state["stage"] = STAGE_COLLECT
+            state["node"] = STAGE_COLLECT
+            return FlowResult(reply=missing, stage=STAGE_COLLECT, slots=slots)
         state["stage"] = STAGE_DONE
-        result = _book(slots, next_interview(), None)
+        result = _book(slots, when, None)
         state["node"] = STAGE_DONE
         if config_body:
             result.parts = [config_body, *result.parts]
@@ -709,10 +801,13 @@ def _route_by_graph(
         return result
 
     if target == STAGE_COLLECT:
+        # 客户在这一轮常常顺手报了姓名/手机（「行，张三 13800138000」）。
+        # 不抽就进 collect，会再问一遍刚给过的字段（2026-11-14 实测）。
+        _absorb(slots, text, strict_name=True)
         state["stage"] = STAGE_COLLECT
         prompt = _collect_prompt(slots)
         if not prompt:
-            result = _book(slots, next_interview(), None)
+            result = _book(slots, when, None)
             state["stage"] = result.stage
             state["node"] = STAGE_DONE
             return result
@@ -721,6 +816,7 @@ def _route_by_graph(
 
     if target == STAGE_ASK_INTERVIEW:
         state["stage"] = STAGE_ASK_INTERVIEW
+        _absorb(slots, text)
         # 同意与否的判断规则在引擎里（拒绝优先），节点正文只替换「怎么问」
         if is_disagree(text):
             slots["recruit_status"] = "disqualified"
@@ -733,10 +829,17 @@ def _route_by_graph(
                 finished=True,
                 action=ACTION_GAVE_UP,
             )
-        if is_agree(text) and not looks_like_question(text):
-            result = _agree_interview(state, slots, next_interview(), None)
+        # 纯打招呼（「你好」「收到」）不是同意：默认边关键词里有「好」，
+        # 不排掉会被当成答应，直接跳过面试邀约去要姓名电话（2026-11-14 实测）。
+        if _is_bare_greeting(text) or looks_like_question(text):
+            reply = config_body or _interview_ask(slots)
+            return FlowResult(reply=reply, stage=STAGE_ASK_INTERVIEW, slots=slots)
+        if is_agree(text):
+            result = _agree_interview(state, slots, when, None)
             state["node"] = STAGE_COLLECT if result.stage == STAGE_COLLECT else result.stage
             return result
+        # 答非所问：换说法重问，不把同一句连发三遍（与 stage 分支同规则）
+        slots["ask_retries"] = int(slots.get("ask_retries") or 0) + 1
         reply = config_body or _interview_ask(slots)
         return FlowResult(reply=reply, stage=STAGE_ASK_INTERVIEW, slots=slots)
 

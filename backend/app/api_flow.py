@@ -46,8 +46,11 @@ from .services.llm_provider import build_provider
 
 router = APIRouter(prefix="/api/v1/flow", tags=["flow"])
 
-# 只有这两步客户会插问（问体检 / 住宿 / 地点），别的阶段不查库，省一次查询
-_KB_STAGES = {STAGE_ASK_INTERVIEW, STAGE_COLLECT}
+# 这三步客户会插问（问体检 / 住宿 / 地点 / 工钱），别的阶段不查库，省一次查询。
+# send_info 必须含在内：新好友首句就收到岗位卡（POST /flow/greet），
+# 紧接着问的「多少钱」「包吃住吗」正落在 send_info 阶段——不含进来就查不到
+# kb_answer，只能把岗位卡再发一遍（2026-11-14 模拟实测）。
+_KB_STAGES = {STAGE_SEND_INFO, STAGE_ASK_INTERVIEW, STAGE_COLLECT}
 
 
 class FlowAnswerIn(BaseModel):
@@ -466,6 +469,8 @@ async def flow_greet(
         (store.EVENT_STAGE, {"to": STAGE_SEND_INFO}),
         (store.EVENT_SLOT, {"key": "city", "value": city}),
         (store.EVENT_SLOT, {"key": "job_index", "value": 0}),
+        # 首句已经把岗位卡发出去了：不记这一位，下一轮进 send_info 会再发一遍整张卡
+        (store.EVENT_SLOT, {"key": "interview_offer_sent", "value": True}),
     ]
     if parts:
         records.append((store.EVENT_REPLY, {"text": "\n".join(parts)}))
