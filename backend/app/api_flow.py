@@ -608,10 +608,30 @@ async def flow_greet(
         else ""
     )
     if greet_text:
+        # 配了「加好友首句」话术 → 只发话术（通常是先问城市），**不发岗位卡**。
+        # 2026-11-14 实测：刚加好友就收到一张卡，客户说「我想去南昌」时卡和城市
+        # 对不上。业务口径：加好友 → 问地点 → 拿到地点 → 发该厂硬编码岗位。
+        # 下一轮客户说了城市，走 ask_city 分支正常发卡（interview_offer_sent 不置位）。
+        # 占位符仍用该板块第一个岗位的数据渲染（{{factory}}/{{wage}} 不落空）。
         parts = [greet_text]
-    else:
-        # 工价/年龄/地点全部来自岗位数据，不走模型——首句尤其不能错
-        parts = send_info_parts(slots)
+        await store.append_events(
+            session,
+            payload.session_key,
+            [
+                (store.EVENT_STAGE, {"to": STAGE_ASK_CITY}),
+                (store.EVENT_REPLY, {"text": "\n".join(parts)}),
+            ],
+        )
+        return GreetOut(
+            reply="\n".join(parts),
+            parts=parts,
+            stage=STAGE_ASK_CITY,
+            skipped=False,
+            detail=f"greet 话术 · {vertical_code} · {len(jobs)} 个岗位",
+        )
+
+    # 没配首句话术：保持老行为（直接发岗位卡），工价/年龄/地点全部来自岗位数据
+    parts = send_info_parts(slots)
 
     records: list[tuple[str, dict[str, Any]]] = [
         (store.EVENT_STAGE, {"to": STAGE_SEND_INFO}),

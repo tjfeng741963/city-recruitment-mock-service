@@ -282,7 +282,10 @@ async def test_greet_uses_greet_script(
     ).json()
 
     assert body["skipped"] is False
+    # 新契约：配了 greet 话术就走「先问地点」，不发岗位卡、不置 interview_offer_sent
+    assert body["stage"] == "ask_city"
     assert body["reply"] == "哈喽，观澜精密厂在招人，工价23 元/小时【图片:厂区大门.jpg】"
+    assert "面试地点" not in body["reply"]
 
 
 # ── 知识库硬过滤：position_id 生效 ────────────────────────────────
