@@ -102,7 +102,22 @@ jobs:
           case "$revision" in ''|*[!0-9a-f]*) exit 2;; esac
           cd /srv/apps/city-recruitment-mock-service/source
           git fetch origin main
+          # 服务器是测试环境、代码只应来自 git，所以这里直接丢弃本地改动。
+          # 2026-11-14 之前用 git checkout --detach，一旦服务器上有人手工改过
+          # 跟踪文件或留下未跟踪文件，checkout 会以 "would be overwritten" 中止，
+          # 导致部署连续失败、线上一直跑旧镜像。
+          # 注意 -e 排除项：.env.production 存生产配置、data 存 SQLite 与备份、
+          # node_modules 是构建缓存，三者都不属于 git，必须保留。
+          git reset --hard HEAD >/dev/null 2>&1 || true
+          git clean -fdx -e .env.production -e data -e node_modules >/dev/null 2>&1 || true
           git checkout --detach "$revision"
+          # 核对：清理后工作区必须干净，否则宁可报错也不要带脏代码去 build
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "working tree still dirty after reset/clean:" >&2
+            git status --porcelain >&2
+            exit 1
+          fi
+          echo "deploying revision: $(git rev-parse --short HEAD) $(git log -1 --format=%s)"
           stamp=$(date +%Y%m%d-%H%M%S)
           cp -p .env.production ".env.production.pre-$revision-$stamp"
           # 备份用 VACUUM INTO 并校验表数：之前用 node:sqlite 的 backup() 产出过
