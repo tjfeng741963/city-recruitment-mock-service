@@ -120,9 +120,11 @@ async def test_kb_miss_is_recorded_as_unknown_question(
 
     monkeypatch.setattr("app.api_flow.unknown_questions.record", fake_record)
 
-    missed = await _say(admin_client, key, "宿舍有没有空调", device_code="pc-office-05")
+    # 「宿舍有没有空调」这类吃住插问已由岗位事实卡直答（单轮单源原则②），
+    # unknown 兜底路径用事实卡覆盖不了的问题锁死
+    missed = await _say(admin_client, key, "那边要交服装费吗", device_code="pc-office-05")
     assert "这个我确认一下，稍后回你" in missed["reply"]
     assert missed["stage"] == "ask_interview"
     assert sent == [
-        {"text": "宿舍有没有空调", "device_code": "pc-office-05", "session_key": key}
+        {"text": "那边要交服装费吗", "device_code": "pc-office-05", "session_key": key}
     ]

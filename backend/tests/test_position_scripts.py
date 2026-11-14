@@ -206,9 +206,14 @@ async def test_send_info_without_position_script_falls_back(
     assert info["slots"]["position_id"] == 3
 
 
-async def test_ask_interview_script_used_on_retry(
+async def test_ask_interview_script_used_once_then_rephrased(
     admin_client: AsyncClient, monkeypatch, remote_jobs  # noqa: ANN001
 ) -> None:
+    """ask_interview 话术一次性：首次用话术，答非所问后换说法追问。
+
+    契约更新（话术一次性语义）：话术发过即在 scripted_sent 记账，此后由
+    轮换说法/智能体接管，绝不重复原句原话术。
+    """
     scripts = [
         {"position_id": 3, "stage": "ask_interview", "content": "明天上午能过来看看吗？"}
     ]
@@ -216,11 +221,15 @@ async def test_ask_interview_script_used_on_retry(
 
     key = f"pos-{uuid.uuid4().hex[:8]}"
     await _say(admin_client, key, "你好")
-    await _say(admin_client, key, "深圳")
+    card = await _say(admin_client, key, "深圳")
+    # 首次邀约（卡片第三段）用话术
+    assert "明天上午能过来看看吗？" in card["reply"]
     asked = await _say(admin_client, key, "我在忙")
 
-    assert "明天上午能过来看看吗？" in asked["reply"]
     assert asked["stage"] == "ask_interview"
+    # 答非所问 → 换说法，不重复原话术全文
+    assert "明天上午能过来看看吗？" not in asked["reply"]
+    assert "过来" in asked["reply"]
 
 
 async def test_booked_script_used_after_booking(

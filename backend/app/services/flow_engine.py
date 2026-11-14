@@ -371,6 +371,41 @@ def _stage_script(slots: dict[str, Any], stage: str) -> str:
     ).strip()
 
 
+# ── 话术一次性（scripted_sent）───────────────────────────────────────
+# greet / send_info / booked：整个会话只发一次；ask_interview：首次用话术，
+# 之后由智能体/轮换说法接管。发过即记账在 slots["scripted_sent"]，该时点
+# 此后永不命中，由后续来源（事实卡 → 知识库 → 智能体）接管。
+# send_info 用 "send_info:<position_id>" 记账：客户换城市/换岗位允许重发
+# 新岗位的卡，同一岗位只发一次。
+
+
+def _script_sent_key(stage: str, slots: dict[str, Any]) -> str:
+    if stage == SCRIPT_STAGE_SEND_INFO:
+        return f"send_info:{int(slots.get('position_id') or 0)}"
+    return stage
+
+
+def _script_sent(slots: dict[str, Any], stage: str) -> bool:
+    """该时点的话术是否已经发过（只读，不记账）。"""
+    sent = slots.get("scripted_sent")
+    return isinstance(sent, dict) and bool(sent.get(_script_sent_key(stage, slots)))
+
+
+def _one_shot_script(slots: dict[str, Any], stage: str) -> str:
+    """一次性话术：未发过 → 渲染并记账；发过 → 返回空串（由后续来源接管）。"""
+    sent = slots.get("scripted_sent")
+    if not isinstance(sent, dict):
+        sent = {}
+        slots["scripted_sent"] = sent
+    key = _script_sent_key(stage, slots)
+    if sent.get(key):
+        return ""
+    text = _stage_script(slots, stage)
+    if text:
+        sent[key] = True
+    return text
+
+
 def pin_position(slots: dict[str, Any], job: dict[str, Any]) -> int:
     """发卡这一刻把岗位 id 钉进 slots（来源：4222 岗位项的 position_id）。
 
@@ -387,6 +422,16 @@ def pin_position(slots: dict[str, Any], job: dict[str, Any]) -> int:
     eid = (job or {}).get("employer_id")
     if isinstance(eid, int) and not isinstance(eid, bool) and eid > 0:
         slots["employer_id"] = eid
+    # 岗位事实快照：客户后续插问「工资/年龄/班次/吃住/地点」时，答案就在这份
+    # 快照里——直接用它答，绝不进知识库（global 层条目没有厂归属，会答成
+    # 别家厂的工价，2026-11-14 多情景实测即此）。
+    snapshot = {
+        key: str((job or {}).get(key) or "").strip()
+        for key in ("factory_name", "job_title", "wage_text", "hours_text", "age_text", "welfare_text", "place")
+    }
+    snapshot = {k: v for k, v in snapshot.items() if v}
+    if snapshot:
+        slots["job_snapshot"] = snapshot
     try:
         return int(slots.get("position_id") or 0)
     except (TypeError, ValueError):
@@ -458,12 +503,13 @@ def send_info_parts(
         return [_city_ask(slots)]
     # 发卡：这一刻客户「选定」了岗位，把岗位 id 钉进 slots（后续话术/KB 都用它）
     pin_position(slots, job)
-    scripted = _stage_script(slots, SCRIPT_STAGE_SEND_INFO)
+    scripted = _one_shot_script(slots, SCRIPT_STAGE_SEND_INFO)
     if scripted:
         # 岗位话术命中：整段直发，模型不参与（工价一个字都不能被改写）。
         # 媒体标记【图片:x】原样留在正文里，客户端据此发图。
-        # 邀约那一段仍走 ask_interview（有该时点话术就一起命中，没有就用默认问法）。
-        return [scripted, _interview_ask(slots)]
+        # 单轮单源：只发话术这一段，不再拼一句邀约——邀约属于 ask_interview
+        # 时点，由下一轮的追问（话术一次/智能体换说法）接管。
+        return [scripted]
     when = when or next_interview(now, _day_offset_of(slots))
     day = day_label(when, now)
     part1 = "\n".join(_job_card_lines(job))
@@ -527,16 +573,15 @@ def _day_offset_of(slots: dict[str, Any]) -> int:
 
 
 def _interview_ask(slots: dict[str, Any] | None = None) -> str:
-    """邀约问句。连续追问时换说法，不把同一句连发三遍。
+    """邀约问句。话术一次性：首次用设备配置的 ask_interview 话术，之后由
+    轮换说法接管，不重复原句原话术（答非所问由智能体/变体换说法追问）。
 
+    连续追问时换说法，不把同一句连发三遍。
     2026-11-13 实测：客户答非所问，系统把同一句「这两天能不能过来面试」
     连发了 3 次。这里按重问次数轮换，第 3 次之后再回到第一句。
-
-    命中设备配置的 ask_interview 岗位话术时以话术为准（运营台词优先，
-    此时不再轮换说法——话术是运营定的口径）。
     """
     slots = slots or {}
-    scripted = _stage_script(slots, SCRIPT_STAGE_ASK_INTERVIEW)
+    scripted = _one_shot_script(slots, SCRIPT_STAGE_ASK_INTERVIEW)
     if scripted:
         return scripted
     retries = int(slots.get("ask_retries") or 0)
@@ -651,8 +696,9 @@ def _book(slots: dict[str, Any], when: datetime, now: datetime | None = None) ->
     slots["interview_agreed"] = True
     slots["booked"] = True
     # 约好后的确认话术（面试地点在这里）：命中设备配置的 booked 话术就用它，
-    # 否则用代码拼的默认确认语。两种情况都不经过模型。
-    booked = _stage_script(slots, SCRIPT_STAGE_BOOKED)
+    # 一次性记账（整个会话只发一次；发过或没配都用代码拼的默认确认语）。
+    # 两种情况都不经过模型。
+    booked = _one_shot_script(slots, SCRIPT_STAGE_BOOKED)
     parts = [booked] if booked else _done_parts(slots, when, now)
     return FlowResult(
         reply="",
@@ -996,6 +1042,46 @@ def _agree_interview(
     return result
 
 
+_JOB_FACT_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # (快照字段, 触发词)。顺序即优先级：一句话问多个字段时取先命中的。
+    ("wage_text", ("工资", "工价", "多少钱", "薪资", "待遇", "多少钱一天", "多少钱一个月", "多少钱一小时", "一小时多少", "一天多少")),
+    ("hours_text", ("几个小时", "班次", "上班时间", "几点", "长白班", "两班倒", "工时", "休息")),
+    ("age_text", ("年龄", "几岁", "多大", "岁数", "限制吗")),
+    ("welfare_text", ("吃住", "住宿", "包吃", "包住", "宿舍", "福利", "吃怎么")),
+    ("place", ("在哪", "地址", "地点", "哪里面试", "哪儿")),
+    ("job_title", ("做什么", "什么工作", "干什么的", "什么岗位", "招什么")),
+)
+
+
+def _job_fact_answer(slots: dict[str, Any], text: str) -> str:
+    """客户插问岗位事实时，直接用「已钉住岗位」的数据回答。
+
+    为什么不走知识库：客户刚看完这家厂的岗位卡，问「工资多少」问的就是这家厂。
+    global 层的 FAQ 条目没有厂归属，按关键词命中谁就用谁的答案——实测把别家厂
+    的「转正175/班」发给了地铁安检的客户。岗位数据答不了的（纹身/体检这类）
+    才落到知识库，而那类条目本来就该按雇主作用域配置。
+    """
+    snapshot = slots.get("job_snapshot") if isinstance(slots.get("job_snapshot"), dict) else {}
+    if not snapshot:
+        return ""
+    lowered = str(text or "")
+    for field, patterns in _JOB_FACT_PATTERNS:
+        if any(p in lowered for p in patterns):
+            value = str(snapshot.get(field) or "").strip()
+            if value:
+                label = {
+                    "wage_text": "工价",
+                    "hours_text": "班次",
+                    "age_text": "年龄要求",
+                    "welfare_text": "吃住",
+                    "place": "地点",
+                    "job_title": "岗位",
+                    "factory_name": "工厂",
+                }.get(field, field)
+                return f"{label}：{value}"
+    return ""
+
+
 def _answer_side_question(
     state: dict[str, Any],
     stage: str,
@@ -1003,7 +1089,16 @@ def _answer_side_question(
     text: str,
     kb_answer: str | None,
 ) -> FlowResult:
-    """插问分支：命中知识库就答，没命中就兜底并交回原话给上层记账。"""
+    """插问分支：先看已钉岗位的事实（上下文优先），再落知识库，都没答上就兜底记账。"""
+    job_fact = _job_fact_answer(slots, text)
+    if job_fact:
+        # 上下文能答的绝不过 KB：既不会串厂，也不用「确认一下」吊着客户。
+        return FlowResult(
+            reply="",
+            parts=[job_fact],
+            stage=stage,
+            slots=slots,
+        )
     if kb_answer:
         # 答上了就只答，不再追加「能不能过来面试」。
         # 2026-11-14 实测：客户连问 5 个问题，每条答复后面都挂着一句邀约，

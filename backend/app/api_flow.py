@@ -384,15 +384,15 @@ async def flow_answer(
         result = enter_info_result(slots)
     elif script and will_send_info and str(script.get("content") or "").strip():
         # 设备级城市话术：仍作为素材交给模型组织（工价护栏保护数字）；
-        # 话术里的媒体标记【图片/视频:x】也由模型取舍。档案抽取照常做。
+        # 单轮单源：素材只给话术本身，不再拼接 kb_answer——KB 是另一个来源，
+        # 命中就该单独答（2026-11-14 话术一次性语义）。
         slots["city"] = city_hint
         slots.setdefault("job_index", 0)
         absorb_profile(slots, payload.text)
         job = card_job
         script_material = render_script(str(script.get("content") or ""), job)
-        material = script_material if not kb_answer else kb_answer + "\n" + script_material
         result = await a_step(
-            state, payload.text, build_provider(), kb_answer=material,
+            state, payload.text, build_provider(), kb_answer=script_material,
             graph=await _load_graph_for(session, device_code, meta),
         )
         # 语义保持：这轮按「已发岗位+邀约」推进，下一站 ask_interview
@@ -588,7 +588,25 @@ async def flow_greet(
         position_scripts = []
     set_position_scripts(position_scripts)
 
-    slots: dict[str, Any] = {"city": city, "job_index": 0, "vertical_id": vertical_id}
+    # 话术一次性（scripted_sent）：greet 整个会话只发一次。会话已有事件时
+    # 投影出旧 slots，greet 发过就不再命中（换回老行为发岗位卡）。
+    existing_slots: dict[str, Any] = {}
+    try:
+        existing_slots = dict((store.project(await store.load_events(session, payload.session_key)).get("slots") or {}))
+    except Exception:  # noqa: BLE001  投影失败按全新会话处理
+        existing_slots = {}
+    if isinstance(existing_slots.get("scripted_sent"), dict):
+        scripted_sent: dict[str, Any] = dict(existing_slots["scripted_sent"])
+    else:
+        scripted_sent = {}
+
+    slots: dict[str, Any] = {
+        **existing_slots,
+        "city": city,
+        "job_index": 0,
+        "vertical_id": vertical_id,
+        "scripted_sent": scripted_sent,
+    }
     # 发卡这一刻钉岗位 id：能取到卡片岗位的 id 就用它，取不到才退到设备绑定的岗位
     card_job = jobs[0]
     slots["position_id"] = (
@@ -597,9 +615,11 @@ async def flow_greet(
 
     # 首句话术：有岗位话术就用（有 position 匹配 position，没有用设备默认），
     # 一条都没有则保持现有默认——用与 send_info 同一套渲染发岗位卡。
-    greet = pick_position_script(
-        position_scripts, int(slots.get("position_id") or 0), SCRIPT_STAGE_GREET
-    )
+    greet = None
+    if not scripted_sent.get("greet"):
+        greet = pick_position_script(
+            position_scripts, int(slots.get("position_id") or 0), SCRIPT_STAGE_GREET
+        )
     greet_text = (
         render_script(
             str(greet.get("content") or ""), card_job, interview_window_of(card_job)
@@ -613,12 +633,16 @@ async def flow_greet(
         # 对不上。业务口径：加好友 → 问地点 → 拿到地点 → 发该厂硬编码岗位。
         # 下一轮客户说了城市，走 ask_city 分支正常发卡（interview_offer_sent 不置位）。
         # 占位符仍用该板块第一个岗位的数据渲染（{{factory}}/{{wage}} 不落空）。
+        # 话术一次性：greet 发过即记账，重复触发 greet 不再发同一句。
+        scripted_sent["greet"] = True
+        slots["scripted_sent"] = scripted_sent
         parts = [greet_text]
         await store.append_events(
             session,
             payload.session_key,
             [
                 (store.EVENT_STAGE, {"to": STAGE_ASK_CITY}),
+                (store.EVENT_SLOT, {"key": "scripted_sent", "value": scripted_sent}),
                 (store.EVENT_REPLY, {"text": "\n".join(parts)}),
             ],
         )
@@ -640,6 +664,11 @@ async def flow_greet(
         # 首句已经把岗位卡发出去了：不记这一位，下一轮进 send_info 会再发一遍整张卡
         (store.EVENT_SLOT, {"key": "interview_offer_sent", "value": True}),
     ]
+    if slots.get("scripted_sent"):
+        # 首句若消费了 send_info 岗位话术（一次性语义），把记账落库
+        records.append(
+            (store.EVENT_SLOT, {"key": "scripted_sent", "value": slots["scripted_sent"]})
+        )
     if slots["position_id"]:
         records.append(
             (store.EVENT_SLOT, {"key": "position_id", "value": slots["position_id"]})
