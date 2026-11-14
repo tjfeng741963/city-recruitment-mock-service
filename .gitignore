@@ -16,3 +16,4 @@ agent/.report_state.json.tmp
 agent/*.db-journal
 dist-showcase/
 *.egg-info/
+logs/
