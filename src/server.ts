@@ -14,6 +14,7 @@ import { registerAuthRoutes } from "./auth/auth.routes.js";
 import { AUTH_INVALID, AUTH_MISSING } from "./auth/rbac.js";
 import { collectValidationErrors, matchContract } from "./shared/request-contracts.js";
 import { registerCoreRoutes } from "./modules/core/core.routes.js";
+import { registerPositionFactoryRoutes } from "./modules/core/position-factory.routes.js";
 import { registerGenericRoutes } from "./modules/generic/generic.routes.js";
 import { registerResourceRoutes } from "./modules/resources/resource.routes.js";
 import { registerFileRoutes } from "./modules/files/file.routes.js";
@@ -160,6 +161,7 @@ export function buildServer() {
   registerKbV3Routes(app, db);
   // 岗位话术 + 媒体资源库（迁移 030/031）：后台配置 + 设备端媒体下载
   registerPositionScriptRoutes(app, db);
+  registerPositionFactoryRoutes(app, db);
   registerFollowupRoutes(app, db);
   registerWeComRoutes(app, db);
   registerActivationRoutes(app, db);
