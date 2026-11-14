@@ -320,3 +320,29 @@ async def test_lookup_city_and_factory_both_empty_all_wildcard(session: AsyncSes
     finally:
         await session.execute(delete(KbEntry).where(KbEntry.id == entry.id))
         await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_strict_lookup_without_factory_excludes_named_factory(session: AsyncSession) -> None:
+    marker = uuid.uuid4().hex[:6]
+    entry = await _entry(session, f"体检报销{marker}", "甲厂体检规则", factory_name="甲厂")
+    try:
+        assert await kb_placeholder.lookup_entry(session, f"体检报销{marker}吗", require_factory=True) is None
+        own = await kb_placeholder.lookup_entry(session, f"体检报销{marker}吗", factory="甲厂", require_factory=True)
+        assert own and own["body"] == "甲厂体检规则"
+        assert await kb_placeholder.lookup_entry(session, f"体检报销{marker}吗", factory="乙厂", require_factory=True) is None
+    finally:
+        await session.execute(delete(KbEntry).where(KbEntry.id == entry.id))
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_strict_lookup_keeps_unscoped_entry(session: AsyncSession) -> None:
+    marker = uuid.uuid4().hex[:6]
+    entry = await _entry(session, f"资料咨询{marker}", "你想了解哪方面？")
+    try:
+        hit = await kb_placeholder.lookup_entry(session, f"资料咨询{marker}", require_factory=True)
+        assert hit and hit["body"] == "你想了解哪方面？"
+    finally:
+        await session.execute(delete(KbEntry).where(KbEntry.id == entry.id))
+        await session.commit()

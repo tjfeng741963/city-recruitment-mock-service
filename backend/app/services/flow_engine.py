@@ -108,7 +108,7 @@ class FlowResult:
     attachments: list[Any] = field(default_factory=list)
     # 知识库没答上来的原话，由调用方落 unknown_questions（本模块不做 I/O）
     unknown_question: str = ""
-    # 本轮内容来源：script=运营话术（B 无权改写）/ card=代码拼卡 / 空串=其他。
+    # 本轮内容来源：script=运营话术 / card=代码拼卡 / fact=岗位事实 / 空串=其他。
     # 给审核循环（flow_llm.review_loop）区分「话术只能过或打回渲染层」用。
     source: str = ""
 
@@ -414,27 +414,30 @@ def pin_position(slots: dict[str, Any], job: dict[str, Any]) -> int:
 
     不从 job_index 事后推算：岗位列表会重排/换城，index 指向的可能已经不是
     客户看到的那一个；钉住 id，后续话术和知识库硬过滤才对得准同一个岗。
-    返回钉住后的 position_id（没钉住就是原值/0）。
+    返回钉住后的 position_id（缺失或无效时为 0）。
     """
-    pid = (job or {}).get("position_id")
-    if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
-        slots["position_id"] = pid
-    # 雇主也一起钉：知识库按招工方硬过滤靠它。只钉岗位不钉雇主时，
-    # 设备没绑厂（employer_id=0）就会落到 global，问「工资多少」答成别家厂的
-    # 工价——2026-11-14 多情景实测即此现象。
-    eid = (job or {}).get("employer_id")
-    if isinstance(eid, int) and not isinstance(eid, bool) and eid > 0:
-        slots["employer_id"] = eid
+    # 换岗必须替换整套身份；新岗位缺字段时不能沿用上家工厂的 id。
+    for key in ("position_id", "employer_id", "location_id"):
+        value = (job or {}).get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            slots[key] = value
+        else:
+            # slot_set 事件只记录仍在字典里的键，写 0 才能在下轮回放时清掉旧值。
+            slots[key] = 0
     # 岗位事实快照：客户后续插问「工资/年龄/班次/吃住/地点」时，答案就在这份
     # 快照里——直接用它答，绝不进知识库（global 层条目没有厂归属，会答成
     # 别家厂的工价，2026-11-14 多情景实测即此）。
+    # 体检/纹身等动态字段也属于本岗事实；仅保存可渲染的标量字段。
     snapshot = {
-        key: str((job or {}).get(key) or "").strip()
-        for key in ("factory_name", "job_title", "wage_text", "hours_text", "age_text", "welfare_text", "place")
+        key: str(value).strip()
+        for key, value in (job or {}).items()
+        if (
+            isinstance(value, (str, int, float)) and not isinstance(value, bool)
+            and key not in ("position_id", "employer_id", "location_id")
+        )
     }
     snapshot = {k: v for k, v in snapshot.items() if v}
-    if snapshot:
-        slots["job_snapshot"] = snapshot
+    slots["job_snapshot"] = snapshot
     try:
         return int(slots.get("position_id") or 0)
     except (TypeError, ValueError):
@@ -721,6 +724,33 @@ def _book(slots: dict[str, Any], when: datetime, now: datetime | None = None) ->
     )
 
 
+def explicit_city_change(
+    state: dict[str, Any], text: str, now: datetime | None = None,
+) -> FlowResult | None:
+    """未预约客户明确换城：重选岗位并重新问意向，不继承旧岗的同意。"""
+    slots = state.setdefault("slots", {})
+    if state.get("stage") not in {STAGE_SEND_INFO, STAGE_ASK_INTERVIEW, STAGE_COLLECT} or slots.get("booked"):
+        return None
+    city = extract_city(text)
+    if not city or not slots.get("city") or city == slots.get("city"):
+        return None
+    value = (text or "").strip().strip("，,。.！!？? ")
+    # 只接明确的自报/改去城市；朋友所在城市、否定句不作为客户的新选择。
+    if not re.fullmatch(
+        rf"(?:我在|我想去|我要去|我去|我想在|换到|改去|想去|去)?{re.escape(city)}(?:市)?(?:找工作|找厂|上班|工作)?",
+        value,
+    ):
+        return None
+    slots.update({"city": city, "job_index": 0, "interview_offer_sent": False,
+                  "interview_agreed": False, "booked": False,
+                  "interview_at": "", "interview_place": "", "interview_window": ""})
+    pin_position(slots, {})
+    result = enter_info_result(slots, next_interview(now, _day_offset_of(slots)), now)
+    state["stage"] = result.stage
+    state["node"] = result.stage
+    return result
+
+
 def step(
     state: dict[str, Any],
     text: str,
@@ -749,6 +779,10 @@ def step(
 
     if stage == STAGE_DONE:
         return FlowResult(reply="", stage=STAGE_DONE, slots=slots, finished=True)
+
+    changed = explicit_city_change(state, text, now)
+    if changed is not None:
+        return changed
 
     # ── 节点化编排 ──────────────────────────────────────────────────────
     # 有节点图且当前节点能走出去，就按图的边决定下一步；走不出去（没配边、
@@ -1109,6 +1143,7 @@ def _answer_side_question(
             parts=[job_fact],
             stage=stage,
             slots=slots,
+            source="fact",
         )
     if kb_answer:
         # 答上了就只答，不再追加「能不能过来面试」。
