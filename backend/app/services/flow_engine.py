@@ -109,7 +109,7 @@ class FlowResult:
     # 知识库没答上来的原话，由调用方落 unknown_questions（本模块不做 I/O）
     unknown_question: str = ""
     # 本轮内容来源：script=运营话术 / card=代码拼卡 / fact=岗位事实 /
-    # collect=代码生成的必填资料提示 / 空串=其他。
+    # collect=代码生成的必填资料提示 / kb=知识库原文直答 / 空串=其他。
     # 给审核循环（flow_llm.review_loop）区分「话术只能过或打回渲染层」用。
     source: str = ""
 
@@ -1296,6 +1296,7 @@ def _answer_side_question(
             parts=[kb_answer],
             stage=stage,
             slots=slots,
+            source="kb",
         )
     if looks_like_question(text):
         return FlowResult(

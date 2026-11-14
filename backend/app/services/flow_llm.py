@@ -830,7 +830,7 @@ async def a_step(
 
     # 已约好（done/booked）不再叫模型：省一次调用，也避免它把状态改回去。
     # 但不再静默（2026-11-12「我的视频呢」教训）——已约客户再来消息：
-    # KB 命中就答 KB（问工资/带视频都正常答），没命中就回约面确认信息。
+    # 已选岗位事实优先；知识库原文也不能再被审核模型改成面试提醒。
     if stage == STAGE_DONE or slots.get("booked"):
         slots_kept = state.get("slots") or {}
         # done 也表示拒绝/交人工，只有 booked 才能声称已经预约。
@@ -841,6 +841,11 @@ async def a_step(
         ):
             return FlowResult(reply="好的，有需要再联系我。", stage=STAGE_DONE,
                               slots=slots_kept, finished=True, source="fact")
+        if looks_like_question(text):
+            fact = _job_fact_answer(slots_kept, text)
+            if fact:
+                return FlowResult(reply=fact, stage=STAGE_DONE, slots=slots_kept,
+                                  finished=True, source="fact")
         if kb_answer:
             return FlowResult(
                 reply=kb_answer,
@@ -848,7 +853,11 @@ async def a_step(
                 stage=STAGE_DONE,
                 slots=slots_kept,
                 finished=True,
+                source="kb",
             )
+        if looks_like_question(text):
+            return FlowResult(reply="这个我确认一下，稍后回你", stage=STAGE_DONE,
+                              slots=slots_kept, finished=True, unknown_question=text, source="fact")
         _when_txt = "，".join(
             x for x in (str(slots_kept.get("interview_window", "")), str(slots_kept.get("interview_place", ""))) if x
         )
@@ -908,8 +917,6 @@ async def a_step(
     # ② 岗位事实卡直答：客户问的事实能用已钉岗位快照答的，绝不进模型/知识库
     # （global 层条目没有厂归属，会答成别家厂的工价——串厂回归）
     if looks_like_question(text):
-        from .flow_engine import _job_fact_answer
-
         fact = _job_fact_answer(slots, text)
         if fact:
             return FlowResult(reply="", parts=[fact], stage=stage, slots=slots, source="fact")
@@ -1087,9 +1094,10 @@ async def review_loop(
     draft = list(result.parts) or ([result.reply] if result.reply else [])
     if not draft:
         return result
-    if result.source in {"card", "fact", "collect"}:
+    if result.source in {"card", "fact", "collect", "kb"}:
         # 首次发卡、主动换岗、重问事实都必须展示当前岗位。模型判重/重写
         # 会把新基地卡片或工资改成面试邀约；必填资料提示也不能改成面试材料。
+        # 知识库直答也只做媒体白名单清理；不能因历史重复而改成无关邀约。
         # 代码渲染的内容清理媒体后原样发送。
         return result
     reviewer = build_reviewer()
