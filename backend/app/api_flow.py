@@ -264,6 +264,21 @@ async def flow_answer(
         except Exception:  # noqa: BLE001
             remote_jobs = []
         set_remote_jobs({city_hint: remote_jobs})
+        # 旧 greet 只存了岗位编号，漏存事实快照。按当前设备可见岗位的精确 id
+        # 补齐，不能用 job_index/首岗猜；已有快照或本轮换城时均保持原状态。
+        if (
+            city_hint == str(slots.get("city") or "")
+            and slots.get("interview_offer_sent")
+            and slots.get("position_id")
+            and not slots.get("job_snapshot")
+        ):
+            pinned_job = next(
+                (job for job in remote_jobs
+                 if str(job.get("position_id") or "") == str(slots["position_id"])),
+                None,
+            )
+            if pinned_job:
+                pin_position(slots, pinned_job)
     else:
         set_remote_jobs({})
 
@@ -710,23 +725,14 @@ async def flow_greet(
 
     # 没配首句话术：保持老行为（直接发岗位卡），工价/年龄/地点全部来自岗位数据
     parts = send_info_parts(slots)
+    slots["interview_offer_sent"] = True
 
     records: list[tuple[str, dict[str, Any]]] = [
         (store.EVENT_STAGE, {"to": STAGE_SEND_INFO}),
-        (store.EVENT_SLOT, {"key": "city", "value": city}),
-        (store.EVENT_SLOT, {"key": "job_index", "value": 0}),
-        # 首句已经把岗位卡发出去了：不记这一位，下一轮进 send_info 会再发一遍整张卡
-        (store.EVENT_SLOT, {"key": "interview_offer_sent", "value": True}),
+        # 发卡过程会钉岗位身份、事实快照和话术记账；整套保存，后续 answer
+        # 从事件回放才能拿到同一岗位的工资，不能只手工挑部分字段落库。
+        *store.diff_slots(existing_slots, slots),
     ]
-    if slots.get("scripted_sent"):
-        # 首句若消费了 send_info 岗位话术（一次性语义），把记账落库
-        records.append(
-            (store.EVENT_SLOT, {"key": "scripted_sent", "value": slots["scripted_sent"]})
-        )
-    if slots["position_id"]:
-        records.append(
-            (store.EVENT_SLOT, {"key": "position_id", "value": slots["position_id"]})
-        )
     if parts:
         records.append((store.EVENT_REPLY, {"text": "\n".join(parts)}))
     await store.append_events(session, payload.session_key, records)
