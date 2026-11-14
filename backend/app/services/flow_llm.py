@@ -1063,9 +1063,9 @@ async def review_loop(
     draft = list(result.parts) or ([result.reply] if result.reply else [])
     if not draft:
         return result
-    if result.source == "fact":
-        # 客户主动重问时必须再次答本岗事实。模型判重/重写会把工资改成
-        # 面试邀约；事实由已选岗位渲染，清理媒体后原样发送。
+    if result.source in {"card", "fact"}:
+        # 首次发卡、主动换岗、重问事实都必须展示当前岗位。模型判重/重写
+        # 会把新基地卡片或工资改成面试邀约；代码渲染的内容清理媒体后原样发送。
         return result
     reviewer = build_reviewer()
     if reviewer is None:
