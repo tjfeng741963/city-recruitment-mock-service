@@ -20,6 +20,13 @@ import pytest
 AGENT_DIR = Path(__file__).resolve().parents[2] / "agent"
 SOURCE = AGENT_DIR / "background_send.py"
 
+# 被测模块在模块级就调用 ctypes.WinDLL / ctypes.WINFUNCTYPE，这两个符号只在
+# Windows 的 ctypes 里存在。ubuntu 的 CI 跑单测时连 import 都过不去，
+# 而这套契约本身描述的是 win32 窗口行为，非 Windows 上无从验证。
+pytestmark = pytest.mark.skipif(
+    sys.platform != "win32", reason="background_send 是 win32 模块，非 Windows 平台无法加载"
+)
+
 
 def _load_background_send():
     """加载 background_send，把 user32/gdi32 换成 mock。"""

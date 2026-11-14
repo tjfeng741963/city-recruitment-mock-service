@@ -147,11 +147,16 @@ async def flow_answer(
     kb_entry_id: str | None = None
     kb_markers: list[str] = []
     kb_repeat = False
+    # 设备元信息（60s 缓存，拉不到回空 = 通配/不限，流程不中断）：
+    #   factory_name/city/vertical_id/employer_id/location_id/position_id
+    #       → 知识库 v3 硬过滤（kb_faq）+ 旧路径 kb_placeholder 加权
+    #   job_scope → 设备级岗位口径（subway 只推地铁/安检，all 不过滤，空串跟随默认）
+    # 提到外层统一拉一次：知识库阶段、岗位查询、节点图加载都要用。
+    try:
+        meta = await fetch_device_meta(device_code)
+    except Exception:  # noqa: BLE001  meta 拉不到按通配，流程不中断
+        meta = dict(device_scripts.EMPTY_META)
     if stage_before in _KB_STAGES:
-        try:
-            meta = await fetch_device_meta(device_code)
-        except Exception:  # noqa: BLE001  meta 拉不到按通配，流程不中断
-            meta = {"factory_name": "", "city": ""}
         city_hint_for_kb = (
             str(meta.get("city") or "")
             or extract_city(payload.text)
