@@ -108,6 +108,15 @@ jobs:
           # 导致部署连续失败、线上一直跑旧镜像。
           # 注意 -e 排除项：.env.production 存生产配置、data 存 SQLite 与备份、
           # node_modules 是构建缓存，三者都不属于 git，必须保留。
+          # 先修属主：历史上容器以 root 身份往 bind mount 写过 public/ 等目录，
+          # deploy 用户对它们没有写权限，git reset 会以
+          # "unable to unlink old 'public/index.html': Permission denied" 失败。
+          # deploy 在 docker 组里，借一个 root 容器把属主改回 deploy 自己。
+          # data/ 与 node_modules 跳过：前者是容器内应用用户的 SQLite 与备份，
+          # 改成 deploy 属主会让应用失去写权限；后者是构建缓存。
+          docker run --rm --user root --entrypoint sh -v "$PWD:/src" \
+            -e OWNER="$(id -u):$(id -g)" node:22.21.1-bookworm-slim \
+          -c 'cd /src && for f in * .[!.]*; do case "$f" in data|node_modules|.|..) continue;; esac; chown -R "$OWNER" "$f" 2>/dev/null || true; done'
           git reset --hard HEAD >/dev/null 2>&1 || true
           git clean -fdx -e .env.production -e data -e node_modules >/dev/null 2>&1 || true
           git checkout --detach "$revision"
@@ -115,6 +124,7 @@ jobs:
           if [ -n "$(git status --porcelain)" ]; then
             echo "working tree still dirty after reset/clean:" >&2
             git status --porcelain >&2
+            echo "hint: 上面列出的文件多半仍是 root 属主，手工 chown 后再部署" >&2
             exit 1
           fi
           echo "deploying revision: $(git rev-parse --short HEAD) $(git log -1 --format=%s)"
