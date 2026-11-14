@@ -214,6 +214,8 @@ async def test_customer_can_finish_flow_over_http(admin_client: AsyncClient) -> 
 
     async def fake_jobs(city: str, token: str, url: str, device_code: str = "") -> list[dict]:
         return [{
+            # 与真实 jobs 接口一致：岗位自身携带雇主归属，不借设备默认值补齐。
+            "employer_id": emp_ids["GZ-PY-004"],
             "factory_name": "广州华荻科技有限公司", "job_title": "普工",
             "wage_text": "24-26 元/小时", "age_text": "18-40岁",
             "place": "番禺区石楼", "interview_time": "每天12:00-12:30",
@@ -237,6 +239,7 @@ async def test_customer_can_finish_flow_over_http(admin_client: AsyncClient) -> 
         print("[客服]", body["reply"].replace("\n", " / "))
         assert "24-26" in body["reply"], "岗位卡必须带真实工价"
         assert body["stage"] == "ask_interview"
+        assert body["slots"]["employer_id"] == emp_ids["GZ-PY-004"]
 
         r2 = await admin_client.post(
             "/api/v1/flow/answer",
@@ -246,6 +249,7 @@ async def test_customer_can_finish_flow_over_http(admin_client: AsyncClient) -> 
         print("[客户] 有纹身能进吗")
         print("[客服]", body2["reply"].replace("\n", " / "))
         assert "华荻" in body2["reply"], "纹身问题必须答本厂政策，不能空也不能串厂"
+        assert "查纹身" in body2["reply"]
 
         r3 = await admin_client.post(
             "/api/v1/flow/answer",
