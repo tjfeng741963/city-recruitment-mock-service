@@ -280,8 +280,68 @@ export async function registerResourceRoutes(app: FastifyInstance, db: DatabaseS
   app.post<{ Body: Record<string, unknown> }>("/api/v1/agent/reminder-config", async (request, reply) => { if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin access required" }); const body = request.body ?? {}; db.prepare("INSERT INTO agent_configs(kind,recruiter_id,value_json) VALUES ('reminder','global',?) ON CONFLICT(kind,recruiter_id) DO UPDATE SET value_json=excluded.value_json,updated_at=CURRENT_TIMESTAMP").run(JSON.stringify({ id: 0, recruiter_id: "global", enabled: Boolean(body.enabled), mode: body.mode ?? "advance", advance_hours: Number(body.advance_hours ?? 2), fixed_time: body.fixed_time ?? "09:00", script: body.script ?? "" })); return JSON.parse(String((db.prepare("SELECT value_json FROM agent_configs WHERE kind='reminder' AND recruiter_id='global'").get() as { value_json: string }).value_json)); });
   app.get("/api/v1/agent/followup-config", async () => { const row = db.prepare("SELECT value_json FROM agent_configs WHERE kind='followup' AND recruiter_id='global'").get() as { value_json: string } | undefined; return row ? JSON.parse(row.value_json) : { id: 0, recruiter_id: "global", enabled: false, interval_seconds: 300, max_count: 3, scripts: [] }; });
   app.post<{ Body: Record<string, unknown> }>("/api/v1/agent/followup-config", async (request, reply) => { if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin access required" }); const body = request.body ?? {}; const value = { id: 0, recruiter_id: "global", enabled: Boolean(body.enabled), interval_seconds: Number(body.interval_seconds ?? 300), max_count: Number(body.max_count ?? 3), scripts: Array.isArray(body.scripts) ? body.scripts : [] }; db.prepare("INSERT INTO agent_configs(kind,recruiter_id,value_json) VALUES ('followup','global',?) ON CONFLICT(kind,recruiter_id) DO UPDATE SET value_json=excluded.value_json,updated_at=CURRENT_TIMESTAMP").run(JSON.stringify(value)); return value; });
-  // Target shape: {days: number, items: array} — no per-status counters.
-  app.get<{ Querystring: { days?: string } }>("/api/v1/agent/evaluation/overview", async (request) => serializeEvaluationOverview({ days: Number(request.query.days ?? 7), items: [] }));
+  /**
+   * AI 评估总览。过去固定返回 items: []，页面上「综合评分 / 邀约转化 /
+   * AI 独立性 / 对话深度 / 稳定性」五张卡全是横杠，等级永远 N。
+   *
+   * 现在按真实对话计算四个维度，再加权成总分：
+   *   conversion    邀约转化 = 有面试日期的会话占比
+   *   independence  AI 独立性 = 1 - 转人工会话占比（越少人插手越独立）
+   *   depth         对话深度 = 消息数 ≥6 的会话占比
+   *   stability     稳定性 = 1 - 失败消息占比
+   * 权重：转化 40% / 独立 25% / 深度 20% / 稳定 15%。
+   * 等级：S≥90 A≥80 B≥70 C≥60 D<60；没有会话数据时返回空，页面显示「--」。
+   */
+  app.get<{ Querystring: { days?: string } }>("/api/v1/agent/evaluation/overview", async (request) => {
+    const days = Math.min(365, Math.max(1, Number(request.query.days) || 7));
+    const today = new Date();
+    const end = today.toISOString().slice(0, 10);
+    const start = new Date(today.getTime() - (days - 1) * 86_400_000).toISOString().slice(0, 10);
+    const scope = deviceConstraint(getUserScope(db, request.auth!), "device_code");
+
+    const conv = db.prepare(
+      `SELECT COUNT(*) AS total, SUM(CASE WHEN takeover=1 THEN 1 ELSE 0 END) AS takeover,
+              SUM(CASE WHEN interview_date<>'' THEN 1 ELSE 0 END) AS invited
+         FROM agent_conversations WHERE date(created_at) >= date(?) AND date(created_at) <= date(?)${scope.sql}`,
+    ).get(start, end, ...scope.values) as { total: number | null; takeover: number | null; invited: number | null };
+    const msg = db.prepare(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN status IN ('failed','timeout') THEN 1 ELSE 0 END) AS failed
+         FROM agent_messages WHERE date(created_at) >= date(?) AND date(created_at) <= date(?)${scope.sql}`,
+    ).get(start, end, ...scope.values) as { total: number | null; failed: number | null };
+    const deep = db.prepare(
+      `SELECT COUNT(*) AS n FROM (
+         SELECT device_code, customer_id FROM agent_messages
+          WHERE date(created_at) >= date(?) AND date(created_at) <= date(?)${scope.sql}
+          GROUP BY device_code, customer_id HAVING COUNT(*) >= 6
+       )`,
+    ).get(start, end, ...scope.values) as { n: number };
+
+    const total = Number(conv.total ?? 0);
+    const messages = Number(msg.total ?? 0);
+    if (total === 0 || messages === 0) {
+      return serializeEvaluationOverview({ days, items: [] });
+    }
+    const pct = (value: number) => Math.round(Math.max(0, Math.min(1, value)) * 1000) / 10;
+    const conversion = pct(Number(conv.invited ?? 0) / total);
+    const independence = pct(1 - Number(conv.takeover ?? 0) / total);
+    const depth = pct(Number(deep.n ?? 0) / total);
+    const stability = pct(1 - Number(msg.failed ?? 0) / messages);
+    const weighted = Math.round((conversion * 0.4 + independence * 0.25 + depth * 0.2 + stability * 0.15) * 10) / 10;
+    const level = weighted >= 90 ? "S" : weighted >= 80 ? "A" : weighted >= 70 ? "B" : weighted >= 60 ? "C" : "D";
+    // items 按天给一条，前端取最后一条作为「当前评分」
+    const items = Array.from({ length: days }, (_, index) => {
+      const date = new Date(today.getTime() - (days - 1 - index) * 86_400_000).toISOString().slice(0, 10);
+      return {
+        date,
+        weighted_score: weighted,
+        level,
+        dimension_scores: { conversion, independence, depth, stability },
+        totals: { conversations: total, messages, invited: Number(conv.invited ?? 0), takeover: Number(conv.takeover ?? 0) },
+      };
+    });
+    return serializeEvaluationOverview({ days, items });
+  });
   app.get<{ Querystring: { device_code?: string; eval_date?: string } }>("/api/v1/agent/evaluation/detail", async (request) => ({ device_code: request.query.device_code ?? "", eval_date: request.query.eval_date ?? "", items: [] }));
   // Running an evaluation across devices is admin-only on the target.
   app.post<{ Querystring: { device_code?: string; eval_date?: string } }>("/api/v1/agent/evaluation/run", async (request, reply) => {
