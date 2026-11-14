@@ -342,11 +342,81 @@ export async function registerResourceRoutes(app: FastifyInstance, db: DatabaseS
     });
     return serializeEvaluationOverview({ days, items });
   });
-  app.get<{ Querystring: { device_code?: string; eval_date?: string } }>("/api/v1/agent/evaluation/detail", async (request) => ({ device_code: request.query.device_code ?? "", eval_date: request.query.eval_date ?? "", items: [] }));
-  // Running an evaluation across devices is admin-only on the target.
+  /**
+   * 评估明细：读 evaluation_runs 里那天的结果，按设备拆开。
+   * 过去固定返回 items: []，点开任何一天都是空表。
+   */
+  app.get<{ Querystring: { device_code?: string; eval_date?: string } }>("/api/v1/agent/evaluation/detail", async (request) => {
+    const deviceCode = String(request.query.device_code ?? "").trim();
+    const evalDate = String(request.query.eval_date ?? "").trim() || new Date().toISOString().slice(0, 10);
+    const scope = deviceConstraint(getUserScope(db, request.auth!), "device_code");
+    const deviceSql = deviceCode ? " AND device_code=?" : "";
+    const rows = db.prepare(
+      `SELECT device_code, eval_date, total, invited, failed, created_at
+         FROM evaluation_runs WHERE eval_date=?${deviceSql}${scope.sql} ORDER BY device_code`,
+    ).all(evalDate, ...(deviceCode ? [deviceCode] : []), ...(deviceCode ? [] : scope.values)) as Array<{
+      device_code: string; eval_date: string; total: number; invited: number; failed: number; created_at: string;
+    }>;
+    return {
+      device_code: deviceCode,
+      eval_date: evalDate,
+      items: rows.map((row) => ({
+        device_code: row.device_code,
+        eval_date: row.eval_date,
+        total: Number(row.total ?? 0),
+        invited: Number(row.invited ?? 0),
+        failed: Number(row.failed ?? 0),
+        // 同一次评审里邀约成功的比例，页面「邀约转化」列用
+        invite_rate: Number(row.total ?? 0) ? Math.round((Number(row.invited ?? 0) / Number(row.total)) * 1000) / 10 : 0,
+        created_at: row.created_at,
+      })),
+    };
+  });
+  /**
+   * 运行评审（管理员）：按设备统计当天的真实数据并落库。
+   * 过去固定返回 total/invited/failed = 0，点「运行评审」什么也不会发生。
+   *
+   * 统计口径：该设备当天有 inbound 的会话数 = total；其中有面试日期的 = invited；
+   * 发失败的 AI 消息 = failed。同一天同一设备重复运行按 upsert 覆盖。
+   */
   app.post<{ Querystring: { device_code?: string; eval_date?: string } }>("/api/v1/agent/evaluation/run", async (request, reply) => {
     if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin required to evaluate all devices" });
-    return { success: true, device_code: request.query.device_code ?? "", eval_date: request.query.eval_date ?? new Date().toISOString().slice(0, 10), total: 0, invited: 0, failed: 0 };
+    const evalDate = String(request.query.eval_date ?? "").trim() || new Date().toISOString().slice(0, 10);
+    const onlyDevice = String(request.query.device_code ?? "").trim();
+    const deviceRows = db.prepare("SELECT device_name, data_json FROM agent_devices ORDER BY id").all() as Array<{ device_name: string; data_json: string }>;
+    const codes = deviceRows.map((row) => {
+      try { return String((JSON.parse(row.data_json || "{}") as Record<string, unknown>).device_code ?? ""); } catch { return ""; }
+    }).filter((code) => code !== "" && (onlyDevice === "" || code === onlyDevice));
+
+    const day = "date(?)";
+    const results: Array<{ device_code: string; eval_date: string; total: number; invited: number; failed: number }> = [];
+    for (const code of codes) {
+      const conv = db.prepare(
+        `SELECT COUNT(DISTINCT customer_id) AS total,
+                SUM(CASE WHEN interview_date<>'' THEN 1 ELSE 0 END) AS invited
+           FROM agent_conversations WHERE device_code=? AND ${day}`,
+      ).get(code, evalDate) as { total: number | null; invited: number | null };
+      const failed = db.prepare(
+        `SELECT COUNT(*) AS n FROM agent_messages WHERE device_code=? AND ${day} AND status IN ('failed','timeout')`,
+      ).get(code, evalDate) as { n: number | null };
+      const total = Number(conv.total ?? 0);
+      const invited = Number(conv.invited ?? 0);
+      const failedCount = Number(failed.n ?? 0);
+      db.prepare(
+        `INSERT INTO evaluation_runs(device_code, eval_date, total, invited, failed)
+         VALUES (?,?,?,?,?)
+         ON CONFLICT DO NOTHING`,
+      ).run(code, evalDate, total, invited, failedCount);
+      // 没有唯一约束时用「先删后插」保证同一天同一设备只留一条
+      db.prepare("DELETE FROM evaluation_runs WHERE device_code=? AND eval_date=? AND id NOT IN (SELECT MAX(id) FROM evaluation_runs WHERE device_code=? AND eval_date=?)")
+        .run(code, evalDate, code, evalDate);
+      results.push({ device_code: code, eval_date: evalDate, total, invited, failed: failedCount });
+    }
+    const sum = results.reduce(
+      (acc, row) => ({ total: acc.total + row.total, invited: acc.invited + row.invited, failed: acc.failed + row.failed }),
+      { total: 0, invited: 0, failed: 0 },
+    );
+    return { success: true, device_code: onlyDevice, eval_date: evalDate, devices: results.length, ...sum, items: results };
   });
   app.get<{ Querystring: Record<string, unknown> }>("/api/v1/agent/report/account-summary", async (request) => serializeAccountSummary({ prefix: request.query.prefix ?? "", date_range: { start: request.query.start_date ?? "", end: request.query.end_date ?? "" }, total: {}, accounts: [], daily_trend: [] }));
   // knowledge 的两个批量接口已由 agent/knowledge-compat.routes.ts 接管
