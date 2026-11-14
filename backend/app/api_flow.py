@@ -27,17 +27,30 @@ from .services import flow_session as store
 from .services import kb_faq, kb_placeholder, profile_push, unknown_questions
 from .services import flow_graph
 from .services import device_scripts
-from .services.device_scripts import fetch_device_meta, fetch_scripts, pick_script, render_script
+from .services.device_scripts import (
+    fetch_device_meta,
+    fetch_position_scripts,
+    fetch_scripts,
+    pick_position_script,
+    pick_script,
+    render_script,
+)
 from .services.flow_engine import (
+    SCRIPT_STAGE_GREET,
+    SCRIPT_STAGE_SEND_INFO,
     STAGE_ASK_CITY,
     STAGE_ASK_INTERVIEW,
     STAGE_COLLECT,
     STAGE_SEND_INFO,
     FlowResult,
     absorb_profile,
+    enter_info_result,
     extract_city,
+    interview_window_of,
     jobs_for_city,
+    pin_position,
     send_info_parts,
+    set_position_scripts,
     set_remote_cities,
     set_remote_jobs,
 )
@@ -209,6 +222,14 @@ async def flow_answer(
         meta = await fetch_device_meta(device_code)
     except Exception:  # noqa: BLE001  meta 拉不到按通配，流程不中断
         meta = dict(device_scripts.EMPTY_META)
+    # 岗位级硬编码话术（与 meta 同一份 config 缓存，不额外打网络）：
+    # 注入引擎后，send_info / ask_interview / booked 命中即整段直发，不调模型。
+    position_scripts: list[dict[str, Any]] = []
+    try:
+        position_scripts = await fetch_position_scripts(device_code)
+    except Exception:  # noqa: BLE001  话术拉不到就走知识库/模型，不影响回复
+        position_scripts = []
+    set_position_scripts(position_scripts)
     if stage_before in _KB_STAGES:
         city_hint_for_kb = (
             str(meta.get("city") or "")
@@ -217,7 +238,11 @@ async def flow_answer(
         )
         employer_id_hint = int(meta.get("employer_id") or 0) or None
         location_id_hint = int(meta.get("location_id") or 0) or None
-        position_id_hint = int(meta.get("position_id") or 0) or None
+        # 岗位口径：客户已选定岗位（发过卡）就按这个岗硬过滤，
+        # 没有才退回设备绑定的岗位。position_id 恒为 0 时 kb_faq 不加岗位层。
+        position_id_hint = int(slots.get("position_id") or 0) or int(
+            meta.get("position_id") or 0
+        ) or None
 
         # ① 新路径：kb_faq 硬过滤（position → employer → city → global）
         # vertical_code 必须跟设备绑定走：写死 factory 会让地铁设备永远查不到自己的包。
@@ -235,7 +260,13 @@ async def flow_answer(
         if faq_hit:
             # 占位符用岗位事实渲染：工价/年龄/吃住都来自运营维护的岗位字段，
             # 模板里一个数字都没有，所以换工价不用改话术。
-            job_for_faq = (jobs_for_city(city_hint_for_kb) or [{}])[0]
+            # 已钉住岗位就渲染那个岗的事实，不能拿列表第一个凑（同城不同岗工价不同）
+            jobs_for_kb = jobs_for_city(city_hint_for_kb) or []
+            pinned = int(slots.get("position_id") or 0)
+            job_for_faq = next(
+                (j for j in jobs_for_kb if int(j.get("position_id") or 0) == pinned),
+                jobs_for_kb[0] if jobs_for_kb else {},
+            )
             try:
                 location_ctx, employer_name = await kb_faq.resolve_context(
                     session,
@@ -327,14 +358,31 @@ async def flow_answer(
         and not slots.get("interview_offer_sent")
     )
 
-    if script and will_send_info and str(script.get("content") or "").strip():
-        # 全部交给智能体编排（2026-11-12 用户指令）：运营话术不再是整段直发，
-        # 而是作为素材交给模型组织（工价护栏保护数字）；话术里的媒体标记
-        # 【图片/视频:x】也由模型取舍。档案抽取照常做。
+    # 这一轮要发的那张卡是哪个岗：岗位 id 从岗位项本身取（不从 job_index 推算）
+    card_job: dict[str, Any] = (jobs_for_city(city_hint) or [{}])[0] if city_hint else {}
+    position_script = (
+        pick_position_script(
+            position_scripts, int(card_job.get("position_id") or 0), SCRIPT_STAGE_SEND_INFO
+        )
+        if will_send_info and card_job
+        else None
+    )
+
+    if position_script and str(position_script.get("content") or "").strip():
+        # 岗位话术命中：整段按运营台词直发（占位符由代码替换、媒体标记原样保留），
+        # 这轮一次模型都不调——工价/年龄/地点一个字都不许被改写。
+        # 状态推进仍走确定性规则：发过卡 + 进 ask_interview。
         slots["city"] = city_hint
         slots.setdefault("job_index", 0)
         absorb_profile(slots, payload.text)
-        job = (jobs_for_city(city_hint) or [{}])[0]
+        result = enter_info_result(slots)
+    elif script and will_send_info and str(script.get("content") or "").strip():
+        # 设备级城市话术：仍作为素材交给模型组织（工价护栏保护数字）；
+        # 话术里的媒体标记【图片/视频:x】也由模型取舍。档案抽取照常做。
+        slots["city"] = city_hint
+        slots.setdefault("job_index", 0)
+        absorb_profile(slots, payload.text)
+        job = card_job
         script_material = render_script(str(script.get("content") or ""), job)
         material = script_material if not kb_answer else kb_answer + "\n" + script_material
         result = await a_step(
@@ -526,10 +574,38 @@ async def flow_greet(
 
     set_remote_jobs({city: jobs})
 
-    # 用与 send_info 完全相同的那套渲染：工价/年龄/地点全部来自岗位数据，
-    # 不走模型——首句尤其不能错，客户第一眼看到的就是它。
-    slots = {"city": city, "job_index": 0, "vertical_id": vertical_id}
-    parts = send_info_parts(slots)
+    # 岗位级话术：greet（加好友首句）/ send_info 等时点命中即整段直发，不调模型
+    position_scripts: list[dict[str, Any]] = []
+    try:
+        position_scripts = await fetch_position_scripts(device_code)
+    except Exception:  # noqa: BLE001  话术拉不到就走默认岗位卡
+        position_scripts = []
+    set_position_scripts(position_scripts)
+
+    slots: dict[str, Any] = {"city": city, "job_index": 0, "vertical_id": vertical_id}
+    # 发卡这一刻钉岗位 id：能取到卡片岗位的 id 就用它，取不到才退到设备绑定的岗位
+    card_job = jobs[0]
+    slots["position_id"] = (
+        pin_position(slots, card_job) or int(meta.get("position_id") or 0)
+    )
+
+    # 首句话术：有岗位话术就用（有 position 匹配 position，没有用设备默认），
+    # 一条都没有则保持现有默认——用与 send_info 同一套渲染发岗位卡。
+    greet = pick_position_script(
+        position_scripts, int(slots.get("position_id") or 0), SCRIPT_STAGE_GREET
+    )
+    greet_text = (
+        render_script(
+            str(greet.get("content") or ""), card_job, interview_window_of(card_job)
+        ).strip()
+        if greet
+        else ""
+    )
+    if greet_text:
+        parts = [greet_text]
+    else:
+        # 工价/年龄/地点全部来自岗位数据，不走模型——首句尤其不能错
+        parts = send_info_parts(slots)
 
     records: list[tuple[str, dict[str, Any]]] = [
         (store.EVENT_STAGE, {"to": STAGE_SEND_INFO}),
@@ -538,6 +614,10 @@ async def flow_greet(
         # 首句已经把岗位卡发出去了：不记这一位，下一轮进 send_info 会再发一遍整张卡
         (store.EVENT_SLOT, {"key": "interview_offer_sent", "value": True}),
     ]
+    if slots["position_id"]:
+        records.append(
+            (store.EVENT_SLOT, {"key": "position_id", "value": slots["position_id"]})
+        )
     if parts:
         records.append((store.EVENT_REPLY, {"text": "\n".join(parts)}))
     await store.append_events(session, payload.session_key, records)

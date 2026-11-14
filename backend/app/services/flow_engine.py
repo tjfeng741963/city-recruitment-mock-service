@@ -44,6 +44,14 @@ ACTION_BOOK = "book_interview"
 ACTION_GAVE_UP = "gave_up"
 ACTION_HANDOFF = "handoff"
 
+# 岗位话术的 stage 取值（4222 config.position_scripts 的冻结契约）。
+# 与流程 stage 同名是巧合：这些是「话术挂在哪个时点」，不是会话阶段。
+SCRIPT_STAGE_GREET = "greet"
+SCRIPT_STAGE_SEND_INFO = "send_info"
+SCRIPT_STAGE_ASK_INTERVIEW = "ask_interview"
+SCRIPT_STAGE_BOOKED = "booked"
+SCRIPT_STAGE_UNANSWERED = "unanswered"
+
 # 面试时间窗口：工厂账号可改成别的窗口，地铁账号固定早场
 INTERVIEW_WINDOW = "09:00-11:00"
 
@@ -330,6 +338,55 @@ def set_remote_jobs(jobs_by_city: dict[str, list[dict[str, str]]]) -> None:
     _REMOTE_JOBS.set(jobs_by_city or {})
 
 
+# 本轮设备的岗位级硬编码话术（api_flow 每轮注入 set_position_scripts）。
+# 放 ContextVar 而不是函数参数：send_info_parts / _interview_ask / _book 这些
+# 函数在状态机深处被调用，层层加参数会把签名污染到所有测试。
+_POSITION_SCRIPTS: ContextVar[list[dict[str, Any]]] = ContextVar(
+    "position_scripts", default=[]
+)
+
+
+def set_position_scripts(scripts: list[dict[str, Any]] | None) -> None:
+    """注入本轮设备的岗位话术，失败（拉不到）传空列表即回退原逻辑。"""
+    _POSITION_SCRIPTS.set(list(scripts or []))
+
+
+def _stage_script(slots: dict[str, Any], stage: str) -> str:
+    """取某个时点的岗位话术并渲染；没命中返回空串。
+
+    延迟导入 device_scripts：它反向依赖本模块的 INTERVIEW_WINDOW，
+    模块级互相 import 会成环。
+    """
+    scripts = _POSITION_SCRIPTS.get()
+    if not scripts:
+        return ""
+    from .device_scripts import pick_position_script, render_script
+
+    script = pick_position_script(scripts, int(slots.get("position_id") or 0), stage)
+    if not script:
+        return ""
+    job = _job_of(slots)
+    return render_script(
+        str(script.get("content") or ""), job, interview_window_of(job)
+    ).strip()
+
+
+def pin_position(slots: dict[str, Any], job: dict[str, Any]) -> int:
+    """发卡这一刻把岗位 id 钉进 slots（来源：4222 岗位项的 position_id）。
+
+    不从 job_index 事后推算：岗位列表会重排/换城，index 指向的可能已经不是
+    客户看到的那一个；钉住 id，后续话术和知识库硬过滤才对得准同一个岗。
+    返回钉住后的 position_id（没钉住就是原值/0）。
+    """
+    pid = (job or {}).get("position_id")
+    if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+        slots["position_id"] = pid
+    try:
+        return int(slots.get("position_id") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def jobs_for_city(city: str) -> list[dict[str, str]]:
     """统一取岗位入口：只认本轮注入的远端岗位，查不到返回空列表。"""
     city = str(city or "")
@@ -393,6 +450,14 @@ def send_info_parts(
     job = _job_of(slots)
     if not job:
         return [_city_ask(slots)]
+    # 发卡：这一刻客户「选定」了岗位，把岗位 id 钉进 slots（后续话术/KB 都用它）
+    pin_position(slots, job)
+    scripted = _stage_script(slots, SCRIPT_STAGE_SEND_INFO)
+    if scripted:
+        # 岗位话术命中：整段直发，模型不参与（工价一个字都不能被改写）。
+        # 媒体标记【图片:x】原样留在正文里，客户端据此发图。
+        # 邀约那一段仍走 ask_interview（有该时点话术就一起命中，没有就用默认问法）。
+        return [scripted, _interview_ask(slots)]
     when = when or next_interview(now, _day_offset_of(slots))
     day = day_label(when, now)
     part1 = "\n".join(_job_card_lines(job))
@@ -460,8 +525,15 @@ def _interview_ask(slots: dict[str, Any] | None = None) -> str:
 
     2026-11-13 实测：客户答非所问，系统把同一句「这两天能不能过来面试」
     连发了 3 次。这里按重问次数轮换，第 3 次之后再回到第一句。
+
+    命中设备配置的 ask_interview 岗位话术时以话术为准（运营台词优先，
+    此时不再轮换说法——话术是运营定的口径）。
     """
-    retries = int((slots or {}).get("ask_retries") or 0)
+    slots = slots or {}
+    scripted = _stage_script(slots, SCRIPT_STAGE_ASK_INTERVIEW)
+    if scripted:
+        return scripted
+    retries = int(slots.get("ask_retries") or 0)
     variants = (
         "这两天能不能过来面试？能来的话我把名额给你留着。",
         "你看是明天还是后天方便过来？我好提前给你登记。",
@@ -566,14 +638,19 @@ def enter_info_result(
 
 def _book(slots: dict[str, Any], when: datetime, now: datetime | None = None) -> FlowResult:
     job = _job_of(slots)
+    pin_position(slots, job)
     slots["interview_at"] = when.isoformat()
     slots["interview_window"] = interview_window_of(job)
     slots["interview_place"] = job.get("place", "")
     slots["interview_agreed"] = True
     slots["booked"] = True
+    # 约好后的确认话术（面试地点在这里）：命中设备配置的 booked 话术就用它，
+    # 否则用代码拼的默认确认语。两种情况都不经过模型。
+    booked = _stage_script(slots, SCRIPT_STAGE_BOOKED)
+    parts = [booked] if booked else _done_parts(slots, when, now)
     return FlowResult(
         reply="",
-        parts=_done_parts(slots, when, now),
+        parts=parts,
         stage=STAGE_DONE,
         slots=slots,
         finished=True,

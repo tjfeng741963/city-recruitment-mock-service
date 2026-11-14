@@ -3,6 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { timingSafeEqual } from "node:crypto";
 import { canAccessDevice, getUserScope } from "../../auth/user-scopes.js";
 import { deviceFactoryIds, loadFactories } from "../../shared/device-factories.js";
+import { mediaAssetsByNames, parsePositionMedia, resolveMediaRefs, type ResolvedMedia } from "../../shared/media-assets.js";
 
 /**
  * 候选人档案接口（4222 侧写入/读取）。
@@ -443,6 +444,27 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
         return out;
       } catch { return {}; }
     };
+    /**
+     * 岗位媒体（契约 §4）：来源是 service_positions.data_json.media（[{name,kind}]），
+     * 这里按 media_assets 补 sha256；查不到的资源直接丢弃，否则会把必然 404 的
+     * 名字交给客户端，回复层念了图却没有文件。
+     *
+     * pick() 只透标量、数组会被它丢掉，所以媒体不能走 pick，单独解析。
+     */
+    const mediaByPosition = new Map<number, ResolvedMedia[]>();
+    {
+      const refsByPosition = new Map<number, ReturnType<typeof parsePositionMedia>>();
+      const names: string[] = [];
+      for (const row of rows) {
+        const refs = parsePositionMedia(row.sp_json);
+        refsByPosition.set(row.position_id, refs);
+        for (const ref of refs) names.push(ref.name);
+      }
+      const assets = mediaAssetsByNames(db, names);
+      for (const [positionId, refs] of refsByPosition) {
+        mediaByPosition.set(positionId, resolveMediaRefs(refs, assets));
+      }
+    }
     const items = rows.map((row) => {
       const sp = pick(row.sp_json);
       const f = pick(row.f_json);
@@ -492,6 +514,8 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
         city: row.city_name,
         // 主城没单、按后台周边城市兜底取到的岗：回复层要说清「这是隔壁城市的」
         cross_city: crossCity !== "",
+        // 岗位配图/视频：与话术里的【图片:xxx】对应，客户端按 name 下载本地缓存
+        media: mediaByPosition.get(row.position_id) ?? [],
       };
     });
     return { items, cross_city: crossCity, asked_city: city };

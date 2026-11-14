@@ -154,6 +154,69 @@ class Brain:
                 "detail": f"{type(exc).__name__}: {exc}",
             }
 
+    def greet(self, session_key: str) -> dict[str, Any]:
+        """调 /api/v1/flow/greet 取「加好友首句」。
+
+        为什么要单独一个接口：首句不是对客户某句话的应答，而是流程的起点——
+        服务端在没有入参文本的情况下把 stage 推进一步并下发素材
+        （岗位图/视频以【图片:x】/【视频:x】标记放在 parts 里）。
+        返回结构与 /flow/answer 一致，调用方可以复用同一条发送链路。
+
+        失败一律 ok=False，由调用方退回 /flow/answer（见 autopilot.drain），
+        绝不在这里抛异常：首句是增强，不能让它卡住整条消息。
+        """
+        key = (session_key or "unknown")[:64]
+        payload: dict[str, Any] = {"session_key": key}
+        if self.device_code:
+            # 与 /flow/answer 同理：服务端按 device_code 取设备口径与话术
+            payload["device_code"] = self.device_code
+        url = f"{self.base_url}/api/v1/flow/greet"
+        try:
+            r = self._client.post(url, json=payload, headers=self._headers())
+            if r.status_code == 401:  # token 过期，重登一次（同 _reply_flow）
+                self._token = ""
+                r = self._client.post(url, json=payload, headers=self._headers())
+            if r.status_code != 200:
+                return {
+                    "ok": False,
+                    "reply": "",
+                    "source": "http",
+                    "detail": f"HTTP {r.status_code}: {r.text[:120]}",
+                }
+            data = r.json()
+            parts = [str(p).strip() for p in (data.get("parts") or []) if str(p).strip()]
+            reply = (data.get("reply") or "").strip()
+            if not reply and parts:
+                # 服务端可能只给 parts（首句全是素材+分段文案），拼一份兜底文本，
+                # 保证调用方"text 非空"的判断不被误伤
+                reply = "\n".join(parts)
+            if not reply:
+                return {
+                    "ok": False,
+                    "reply": "",
+                    "source": "empty",
+                    "detail": f"首句为空（stage={data.get('stage') or '-'}）",
+                }
+            return {
+                "ok": True,
+                "reply": reply,
+                "parts": parts,
+                "source": "greet",
+                "scene": "首句",
+                "stage": str(data.get("stage") or ""),
+                "finished": bool(data.get("finished")),
+                "detail": f"首句 stage={data.get('stage') or '-'}",
+            }
+        except httpx.TimeoutException:
+            return {"ok": False, "reply": "", "source": "timeout", "detail": f"首句超过 {self.timeout}s"}
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "ok": False,
+                "reply": "",
+                "source": "error",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }
+
     # ── 主入口 ────────────────────────────────────────────
     def reply(
         self,

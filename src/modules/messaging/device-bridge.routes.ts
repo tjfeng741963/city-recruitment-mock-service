@@ -10,6 +10,7 @@ import { createMessageChannelProvider } from "./message-channel-provider.js";
 import { NOOP_NOTIFIER, type StreamNotifier } from "./stream-events.js";
 import { createDifyProvider } from "../dify/create-provider.js";
 import { loadFactories, readDeviceFactoryIds } from "../../shared/device-factories.js";
+import { latestPositionScriptStamp, loadPositionScripts } from "../../shared/media-assets.js";
 
 type DeviceRequest = { Params: { code: string }; Body: Record<string, unknown> };
 const field = (body: Record<string, unknown>, key: string, max = 1000) => typeof body[key] === "string" && String(body[key]).length <= max ? String(body[key]) : "";
@@ -126,7 +127,9 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
       null,
     );
     const scriptUpdated = (db.prepare("SELECT MAX(updated_at) AS at FROM device_scripts WHERE device_code=?").get(code) as { at: string | null }).at;
-    const newer = [scriptUpdated, device.updated_at, takeoverUpdated, abandonedUpdated]
+    // 岗位话术也参与版本号：运营改了岗位话术，客户端必须重新拉配置才会换词。
+    const positionScriptUpdated = latestPositionScriptStamp(db);
+    const newer = [scriptUpdated, positionScriptUpdated, device.updated_at, takeoverUpdated, abandonedUpdated]
       .reduce<string | null>((latest, value) => (stampOf(value) > stampOf(latest) ? (value ?? null) : latest), null) ?? "";
     /**
      * 招工方 id 兜底解析：设备只绑了厂名、没绑 employer_id 时，按厂名/别名反查。
@@ -160,6 +163,12 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
      */
     const boundFactoryIds = readDeviceFactoryIds(db, params.factory_ids);
     const boundFactories = loadFactories(db, boundFactoryIds).map((factory) => ({ id: factory.id, name: factory.name }));
+    /**
+     * 岗位话术（契约 §5）：只下发本设备已绑定工厂的岗位话术；没绑厂 = 通用设备，
+     * 下发全部 enabled 话术（否则新设备刚上线会一条话术都没有）。
+     * 每条 media 已按 media_assets 补齐 sha256，查不到的资源被丢弃。
+     */
+    const positionScripts = loadPositionScripts(db, boundFactoryIds);
     /**
      * employer_id 多厂口径：显式配了就以它为准；没配且绑了多个厂就回 0。
      *
@@ -203,6 +212,9 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
       // 放 data_json 里让运营在网页改，不必登服务器改环境变量重启。
       ...(JOB_SCOPES.has(String(params.job_scope)) ? { job_scope: String(params.job_scope) } : {}),
       scripts,
+      // 岗位话术：按岗位配置一次、所有接这个岗位的设备共用（迁移 030）。
+      // 与 scripts（按设备+stage+城市）并存，客户端优先用岗位话术。
+      position_scripts: positionScripts,
     };
   });
   app.get<{ Params: { code: string } }>("/api/v1/bridge/devices/:code", async (req, reply) => {

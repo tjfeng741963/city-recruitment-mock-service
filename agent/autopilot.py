@@ -56,6 +56,7 @@ win.set_dpi_aware()
 import compat  # noqa: E402
 import echo_guard  # noqa: E402
 import login_watch  # noqa: E402
+import media_fetch  # noqa: E402
 import reply_store as rlog  # noqa: E402
 import client as agent_client  # noqa: E402
 import register as agent_register  # noqa: E402
@@ -115,6 +116,10 @@ RECEIPT_RETRY_INTERVAL = 10.0
 # ── 上报与心跳 ───────────────────────────────────────────────────────────────
 # 只做 HTTP，不产生任何键鼠事件。失败一律忽略，下一轮自然补。
 REPORT_STATE = ROOT / ".report_state.json"   # 游标 + 上次成功的 device_code
+# 已发过「加好友首句」的会话集合。放本地文件而不是只放内存：重启客户端很常见，
+# 只放内存会在重启后把老客户当新好友重新打招呼（对方看到两条首句）。
+GREET_STATE = ROOT / ".greeted.json"
+GREET_STATE_LIMIT = 2000                     # 只留最近 N 个会话，文件不会无限长
 REPORT_INTERVAL = 30.0                       # 心跳/上报间隔（按时间戳判断，不 sleep）
 REPORT_MAX_MESSAGES = 50                     # 单次上报最多条数
 REPORT_FIRST_WINDOW = 24 * 3600              # 首次没有游标时只补最近 24 小时
@@ -789,6 +794,73 @@ def build_brain(cfg: dict, log_fn=print):
     return None
 
 
+def _load_greeted() -> set[str]:
+    """读本地「已打过首句」的会话集合。文件不存在/损坏都当成空集合。"""
+    try:
+        data = json.loads(GREET_STATE.read_text(encoding="utf-8"))
+        return {str(x) for x in (data.get("sessions") or []) if str(x).strip()}
+    except (OSError, ValueError):
+        return set()
+
+
+def _save_greeted(seen: set[str]) -> None:
+    """原子写回（.part → rename），写失败只记日志——首句状态丢了顶多重复打招呼。"""
+    try:
+        tmp = GREET_STATE.with_name(GREET_STATE.name + ".part")
+        items = sorted(seen)[-GREET_STATE_LIMIT:]
+        tmp.write_text(json.dumps({"sessions": items}, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, GREET_STATE)
+    except OSError as exc:
+        log(f"[首句] 写 {GREET_STATE.name} 失败（忽略）：{exc}")
+
+
+def _is_first_contact(cid: str, seen: set[str]) -> bool:
+    """该会话是否第一次出现。
+
+    判定依据（按可靠性排序）：
+    1. `.greeted.json` 里已有 → 不是首次（跨重启有效）；
+    2. `reply_log` 里已有 status='sent' 记录 → 不是首次。这一条是为了兼容
+       "升级前就在聊"的老会话：它们从没进过 greeted 集合，但明显已经打过招呼，
+       不能当新好友再发一遍首句；命中时顺手补登记，后面不再反复查库。
+    """
+    if cid in seen:
+        return False
+    try:
+        if rlog.sent_count(cid) > 0:
+            seen.add(cid)
+            _save_greeted(seen)
+            return False
+    except Exception:  # noqa: BLE001 查库失败就当首次，最坏是多打一次招呼
+        pass
+    return True
+
+
+def _prefetch_media(parts: list[str], cfg: dict) -> None:
+    """发送前把 parts 里引用的素材补到本地（缺什么下什么）。
+
+    只下载，不改 parts——发送链路仍按原样解析标记，改一行都会碰到已验证的实现。
+    失败的媒体只记日志，文字部分照发。
+    """
+    server = (cfg.get("server") or "").strip()
+    token = (cfg.get("device_token") or "").strip()
+    medias: list[tuple[str, str]] = []
+    for raw in parts:
+        try:
+            _, found = core_send.split_media_marks(raw)
+        except Exception:  # noqa: BLE001
+            continue
+        medias.extend(found)
+    if not medias:
+        return
+    if not server or not token:
+        log("    [媒体] 未配置 server/device_token，跳过预取（只发文字）")
+        return
+    try:
+        media_fetch.prefetch(medias, base_url=server, token=token, log=log)
+    except Exception as exc:  # noqa: BLE001
+        log(f"    [媒体] 预取异常（忽略，只发文字）：{type(exc).__name__}: {exc}")
+
+
 def build_history(store: Store, conv_id: str, limit: int = 6) -> list[str]:
     """取该会话最近几条「对方说的」纯文本，作为知识库的上下文。"""
     try:
@@ -874,6 +946,8 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
     """
     global _last_reply_at, _last_error, _last_block_log
     stats = {"sent": 0, "failed": 0, "skipped": 0, "merged": 0, "blocked": 0}
+    # 每轮读一次首句记录；drain 是单线程的，一轮内新增的会话就地写回
+    greeted = _load_greeted()
 
     if wecom_state != "online" and not dry:
         left = len(rlog.pending(include_failed=True))
@@ -958,7 +1032,35 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             hint = (it["in_text"] or "").strip()
             res = {"ok": False, "detail": "知识库未初始化"}
             try:
-                if not hint:
+                # ── 加好友首句 ────────────────────────────────────────
+                # 只在「该会话第一次出现消息」时走 /flow/greet。为什么不靠
+                # hint 判断首次：加好友会插入 type=1011 的空文本记录，首句恰恰
+                # 常常没有可回复的文本；所以"是否首次"必须用会话维度判断。
+                # DRY-RUN 不发请求：greet 会在服务端推进 stage，干跑不该改状态。
+                greeted_now = False
+                if (
+                    not dry
+                    and _brain is not None
+                    and str(getattr(_brain, "mode", "")) == "flow"
+                    and _is_first_contact(cid, greeted)
+                ):
+                    gres: dict = {}
+                    try:
+                        gres = _brain.greet(cid)
+                    except Exception as exc:  # noqa: BLE001
+                        gres = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+                    if gres.get("ok"):
+                        # 只有成功才落盘：失败说明服务端没走到阶段，下条消息重试首句，
+                        # 而不是永久退化成一个不带招呼的普通回复。
+                        greeted.add(cid)
+                        _save_greeted(greeted)
+                        res = gres
+                        greeted_now = True
+                    else:
+                        log(f"    [首句] 失败（{gres.get('detail')}），退回 /flow/answer")
+                if greeted_now:
+                    pass
+                elif not hint:
                     res = {"ok": False, "detail": f"消息没有文本（type={it['in_type']}）"}
                 elif _brain is not None:
                     res = _brain.reply(hint, build_history(store, cid), session_key=cid)
@@ -1010,6 +1112,10 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             log("    DRY-RUN，未发送")
             stats["sent"] += 1
             continue
+
+        # 真正按键之前先把素材补到本地：send.paste_media 只认本地文件，
+        # 缺文件它只会打一行"未找到"。这里失败也不阻断，文字照发。
+        _prefetch_media(parts, cfg)
 
         # 按键之前先确认剪贴板可写，避免 Ctrl+F 打开搜索框后才卡住
         if not compat.wait_clipboard_writable(timeout=15):

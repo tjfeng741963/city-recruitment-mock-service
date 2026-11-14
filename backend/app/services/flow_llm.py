@@ -28,6 +28,8 @@ from .flow_engine import (
     ACTION_HANDOFF,
     INTERVIEW_WINDOW,
     PROFILE_KEYS,
+    SCRIPT_STAGE_BOOKED,
+    SCRIPT_STAGE_ASK_INTERVIEW,
     STAGE_ASK_CITY,
     STAGE_ASK_INTERVIEW,
     STAGE_COLLECT,
@@ -36,6 +38,7 @@ from .flow_engine import (
     STAGE_SEND_INFO,
     FlowResult,
     _day_offset_of,
+    _stage_script,
     enter_info_result,
     extract_day_offset,
     interview_window_of,
@@ -398,6 +401,13 @@ def apply_result(
         if not any(word in reply for word in asked):
             parts.append(need)
 
+    # 约好的确认话术（面试地点在这里）命中 booked 岗位话术：模型这轮说的话整段作废
+    # ——它常常把地点/时间说得跟岗位数据不一致。状态（booked/interview_at）照旧。
+    if action == ACTION_BOOK and slots.get("booked"):
+        booked = _stage_script(slots, SCRIPT_STAGE_BOOKED)
+        if booked:
+            parts = [booked]
+
     state["stage"] = stage
     return FlowResult(
         reply="",
@@ -461,6 +471,14 @@ async def a_step(
     # 这类问题让模型自由发挥，最容易编出「体检费厂里全报」这种要赔钱的话。
     if stage in (STAGE_ASK_INTERVIEW, STAGE_COLLECT) and (
         kb_answer or looks_like_question(text)
+    ):
+        return fallback_step(state, text, now=now, kb_answer=kb_answer, graph=graph)
+
+    # 设备配了 ask_interview 岗位话术：问法已经写死，一个字都不让模型改。
+    # 状态推进（答应→collect、拒绝→gave_up、答非所问→重问）仍由确定性状态机
+    # 按同一套规则算，只是「怎么说」不再交给模型。
+    if stage == STAGE_ASK_INTERVIEW and _stage_script(
+        state.get("slots") or {}, SCRIPT_STAGE_ASK_INTERVIEW
     ):
         return fallback_step(state, text, now=now, kb_answer=kb_answer, graph=graph)
 
