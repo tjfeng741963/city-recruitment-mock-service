@@ -74,12 +74,16 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     const rows = db.prepare("SELECT * FROM agent_devices ORDER BY id DESC").all() as Array<Record<string, unknown>>;
     const scope = getUserScope(db, request.auth!);
     return {
-      items: rows.map((row) => {
-        // 设备 → 工厂多选绑定：每行带上 factory_ids 与厂名/城市，
-        // 后台设备列表直接回显多选结果，不用前端再逐台去拉 /factories。
-        const factoryIds = readDeviceFactoryIds(db, parseDeviceData(row.data_json).factory_ids);
-        return { ...serializeAgentDevice(row), factory_ids: factoryIds, factories: loadFactories(db, factoryIds) };
-      }).filter((row) => canAccessDevice(scope, String(row.device_code ?? ""))),
+      // 先按原始行过滤再映射：serializeAgentDevice() 的返回类型不含 device_code，
+      // 映射之后再 filter 会触发 TS2339（CI typecheck 实测）。
+      items: rows
+        .filter((row) => canAccessDevice(scope, String(row.device_code ?? "")))
+        .map((row) => {
+          // 设备 → 工厂多选绑定：每行带上 factory_ids 与厂名/城市，
+          // 后台设备列表直接回显多选结果，不用前端再逐台去拉 /factories。
+          const factoryIds = readDeviceFactoryIds(db, parseDeviceData(row.data_json).factory_ids);
+          return { ...serializeAgentDevice(row), factory_ids: factoryIds, factories: loadFactories(db, factoryIds) };
+        }),
     };
   });
   app.post<{ Body: Record<string, unknown> }>("/api/v1/agent/devices", async (request, reply) => {
