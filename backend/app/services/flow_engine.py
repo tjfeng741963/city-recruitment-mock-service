@@ -898,6 +898,14 @@ def step(
     if changed is not None:
         return changed
 
+    # 首轮 greet 已发卡时仍是 send_info；拒绝也必须先于材料 FAQ 和节点路由。
+    if (
+        (stage in (STAGE_ASK_INTERVIEW, STAGE_COLLECT) or
+         (stage == STAGE_SEND_INFO and slots.get("interview_offer_sent")))
+        and not slots.get("booked") and is_disagree(text) and not looks_like_question(text)
+    ):
+        return _decline_interview(state, slots)
+
     # 明确同意优先于节点的材料 FAQ；greet 发完卡仍在 send_info 也须能接住。
     if (
         (stage == STAGE_ASK_INTERVIEW or
@@ -1193,6 +1201,14 @@ def _collect_prompt(slots: dict[str, Any]) -> str:
     if has_phone:
         return _collect_ask("name")
     return _collect_ask()
+
+
+def _decline_interview(state: dict[str, Any], slots: dict[str, Any]) -> FlowResult:
+    slots.update({"recruit_status": "disqualified", "interview_agreed": False, "booked": False})
+    state["stage"] = STAGE_DONE
+    state["node"] = STAGE_DONE
+    return FlowResult(reply=_gave_up_text(), stage=STAGE_DONE, slots=slots,
+                      finished=True, action=ACTION_GAVE_UP, source="fact")
 
 
 def _agree_interview(
