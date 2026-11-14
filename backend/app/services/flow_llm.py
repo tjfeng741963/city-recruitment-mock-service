@@ -56,6 +56,8 @@ from .flow_engine import (
     jobs_for_city,
     looks_like_question,
     next_interview,
+    remember_interview_period,
+    reschedule_interview,
     remote_job_cities,
     step as fallback_step,
 )
@@ -352,6 +354,8 @@ def apply_result(
     slots.update(_clean_slots(data.get("slots")))
     # 档案沿用同一份槽位，只是来源不同（模型单独给的 profile 对象）
     slots.update(_clean_profile(data.get("profile")))
+    if str(state.get("stage") or "") == STAGE_COLLECT or is_agree(text):
+        remember_interview_period(slots, text)
     # 客户说了「后天」就按他的来；模型给的时间不作数
     day_offset = extract_day_offset(text)
     if day_offset is not None:
@@ -400,6 +404,10 @@ def apply_result(
             action = None
             stage, finished = STAGE_COLLECT, False
         else:
+            if slots.get("interview_period"):
+                result = _book(slots, when, now)
+                state["stage"] = result.stage
+                return result
             slots["interview_at"] = when.isoformat()
             slots["interview_window"] = interview_window_of(_job_of(slots))
             slots["interview_place"] = _job_of(slots).get("place", "")
@@ -684,7 +692,9 @@ def apply_decision(
     """
     slots: dict[str, Any] = state.setdefault("slots", {})
     # 客户原话先用现有抽取器过一遍（capture 漏了的字段从这里兜底）
-    _absorb(slots, text, strict_name=str(state.get("stage") or "") == STAGE_COLLECT)
+    collecting = str(state.get("stage") or "") == STAGE_COLLECT
+    period_answer = remember_interview_period(slots, text) if collecting else False
+    _absorb(slots, text, strict_name=collecting and not period_answer)
     # 旧契约字段：slots/profile 透传（老 mock、老提示词兼容）
     slots.update(_clean_slots(data.get("slots")))
     slots.update(_clean_profile(data.get("profile")))
@@ -813,6 +823,10 @@ async def a_step(
     if changed is not None:
         return changed
 
+    rescheduled = reschedule_interview(state, text, now)
+    if rescheduled is not None:
+        return rescheduled
+
     # 已约好（done/booked）不再叫模型：省一次调用，也避免它把状态改回去。
     # 但不再静默（2026-11-12「我的视频呢」教训）——已约客户再来消息：
     # KB 命中就答 KB（问工资/带视频都正常答），没命中就回约面确认信息。
@@ -878,6 +892,7 @@ async def a_step(
         and not looks_like_question(text)
         and not _is_bare_greeting(text)
     ):
+        remember_interview_period(slots, text)
         _absorb(slots, text)
         day_offset = extract_day_offset(text)
         if day_offset is not None:
