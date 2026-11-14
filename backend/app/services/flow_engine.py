@@ -999,9 +999,13 @@ def _answer_side_question(
 ) -> FlowResult:
     """插问分支：命中知识库就答，没命中就兜底并交回原话给上层记账。"""
     if kb_answer:
+        # 答上了就只答，不再追加「能不能过来面试」。
+        # 2026-11-14 实测：客户连问 5 个问题，每条答复后面都挂着一句邀约，
+        # 客户看到的是「你答了，但一直在催我去面试」。配置了 ask_interview
+        # 话术之后这句更显眼（固定台词反复出现），必须去掉。
         return FlowResult(
             reply="",
-            parts=[kb_answer, _faq_retry(stage, slots)],
+            parts=[kb_answer],
             stage=stage,
             slots=slots,
         )

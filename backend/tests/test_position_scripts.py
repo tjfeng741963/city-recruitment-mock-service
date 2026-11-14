@@ -112,16 +112,26 @@ def test_pick_position_script_exact_position() -> None:
     assert hit is not None and hit["content"] == "四号岗"
 
 
-def test_pick_position_script_falls_back_to_first_of_stage() -> None:
+def test_pick_position_script_never_borrows_other_positions() -> None:
+    """没有精确匹配时只能落到通用条目（position_id=0），绝不借别的岗位。
+
+    2026-11-14 实测事故：南昌岗位的话术被套给了广州客户，渲染时还用广州的
+    岗位数据填占位符，客户收到「广州地铁安检在招安检员」+ 南昌的面试地点。
+    """
     scripts = [
-        {"position_id": 9, "stage": "send_info", "content": "设备默认"},
-        {"position_id": 3, "stage": "send_info", "content": "三号岗"},
+        {"position_id": 9, "stage": "send_info", "content": "九号岗"},
+        {"position_id": 0, "stage": "send_info", "content": "通用"},
     ]
-    # 话术里没有 8 号岗就退到该 stage 的第一个（设备默认）
-    hit = device_scripts.pick_position_script(scripts, 8, "send_info")
-    assert hit is not None and hit["content"] == "设备默认"
-    # 还不知道岗位（0）同理
-    assert device_scripts.pick_position_script(scripts, 0, "send_info")["content"] == "设备默认"
+    # 精确命中
+    assert device_scripts.pick_position_script(scripts, 9, "send_info")["content"] == "九号岗"
+    # 没配的岗位 → 只用通用条目
+    assert device_scripts.pick_position_script(scripts, 8, "send_info")["content"] == "通用"
+    # 还不知道岗位（0）→ 只用通用条目
+    assert device_scripts.pick_position_script(scripts, 0, "send_info")["content"] == "通用"
+    # 没有通用条目时宁可返回 None（走 KB/模型），也不借别家岗位的文案
+    only_other = [{"position_id": 9, "stage": "send_info", "content": "九号岗"}]
+    assert device_scripts.pick_position_script(only_other, 8, "send_info") is None
+    assert device_scripts.pick_position_script(only_other, 0, "send_info") is None
 
 
 def test_pick_position_script_miss_returns_none() -> None:

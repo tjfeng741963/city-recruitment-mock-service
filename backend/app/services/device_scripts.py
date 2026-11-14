@@ -234,25 +234,43 @@ async def fetch_position_scripts(device_code: str) -> list[dict[str, Any]]:
 def pick_position_script(
     scripts: list[dict[str, Any]], position_id: int | None, stage: str
 ) -> dict[str, Any] | None:
-    """按 position_id + stage 精确匹配；没有就回退到「任意岗位的该 stage」。
+    """按 position_id + stage 精确匹配；只允许回退到「通用条目」(position_id=0)。
 
-    两级匹配（对齐 docs 冻结契约）：
-      1. position_id 一致且 stage 一致 → 就是这个岗位的话术
-      2. 该 stage 下没有这个岗位的 → 用第一个（设备默认话术，position_id=0 的通用条目）
-      3. 该 stage 一条都没有 → None（调用方走原逻辑，不得空回复）
+    三级匹配：
+      1. position_id 一致且 stage 一致 → 这个岗位的话术
+      2. 否则用通用条目（position_id=0，适用于所有岗位）
+      3. 都没有 → None（调用方走原逻辑，不得空回复）
 
-    position_id 为 0/None 时直接落到第 2 级：客户还没选定岗位，只能用设备默认。
+    **绝不回退到「别家岗位」的话术**：2026-11-14 实测，一条挂在南昌岗位上的
+    话术被套给了广州客户（渲染时还用广州的数据填充占位符），客户会收到
+    「广州地铁安检在招安检员 / 南昌的面试地点」这种事实错配。
+    没有精确匹配就该走知识库或模型，而不是借别人的文案。
+
+    position_id 为 0/None 时（客户还没选定岗位，如加好友首句）只走第 2 级。
     """
     stage_name = str(stage or "")
     candidates = [s for s in (scripts or []) if str(s.get("stage") or "") == stage_name]
     if not candidates:
         return None
-    pid = int(position_id or 0) if not isinstance(position_id, bool) else 0
+
+    def pid_of(script: dict[str, Any]) -> int:
+        value = script.get("position_id")
+        if isinstance(value, bool):
+            return 0
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    pid = pid_of({"position_id": position_id}) if position_id is not None else 0
     if pid:
         for script in candidates:
-            if script.get("position_id") == pid:
+            if pid_of(script) == pid:
                 return script
-    return candidates[0]
+    for script in candidates:
+        if pid_of(script) == 0:
+            return script
+    return None
 
 
 def pick_script(scripts: list[dict[str, Any]], stage: str, city: str) -> dict[str, Any] | None:

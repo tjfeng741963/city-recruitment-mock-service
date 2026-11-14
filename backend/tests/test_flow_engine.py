@@ -152,7 +152,10 @@ def test_kb_hit_answers_and_keeps_stage() -> None:
 
     assert answered.stage == STAGE_ASK_INTERVIEW
     assert answered.parts[0] == "体检费自己先出，满一个月厂里报销。"
-    assert "能不能过来面试" in answered.parts[-1]
+    # 答上了就只答：不再追加「能不能过来面试」（2026-11-14 实测连问 5 句都被塞一句邀约，
+    # 客户体感是「你答了但一直在催我去面试」）
+    assert len(answered.parts) == 1
+    assert "能不能过来面试" not in answered.parts[-1]
     assert answered.unknown_question == ""
     # 答完还在邀约，客户接着答应就行
     assert step(state, "那可以", now=NOW).stage == STAGE_COLLECT
