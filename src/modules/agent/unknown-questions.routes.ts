@@ -151,6 +151,10 @@ export async function registerUnknownQuestionRoutes(app: FastifyInstance, db: Da
           body: JSON.stringify({ kind: "script", title, body: answer, status: "enabled" }),
           signal: AbortSignal.timeout(BRAIN_TIMEOUT_MS),
         });
+        if (response.status === 422) {
+          const reason = await response.json().catch(() => ({})) as { detail?: unknown };
+          return reply.code(422).send({ detail: typeof reason.detail === "string" ? reason.detail : "知识库内容未通过校验，请在知识库配置中明确工厂或岗位归属。" });
+        }
         if (response.status !== 201) {
           return reply.code(502).send({ detail: `知识库服务返回 ${response.status}，条目未创建` });
         }
