@@ -299,7 +299,10 @@ class Store:
 
     def self_id_detail(self) -> tuple[str, str]:
         """(自己的 id, 判定来源)：data-dir / data-dir+session / session-majority。"""
-        if self._self_id is None:
+        # 用 getattr 读缓存：测试与部分调用方用 Store.__new__ 直接构造对象
+        # （不跑 __init__），此时 _self_id 属性根本不存在。按属性报 AttributeError
+        # 会把「方向判定」这种纯读操作变成崩溃，且失败点离原因很远。
+        if getattr(self, "_self_id", None) is None:
             try:
                 dir_id = self.data_dir.parent.name if self.data_dir else ""
             except Exception:  # noqa: BLE001
