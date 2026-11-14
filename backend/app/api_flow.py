@@ -318,10 +318,18 @@ async def flow_answer(
     if result.reply:
         # 回声防护：模型把客户原话当回复复读（2026-11-12 实测「能了解一下。广州
         # 地铁的那个工作吗」被原样发出）→ 丢弃模型输出，回退到知识库正文/通用接话
+        #
+        # 判据是「整条回复就是客户原话」，不是「回复里包含客户原话」。
+        # 后者会误杀正常业务回复：约面试成功的确认语本来就会引用客户的姓名手机
+        # （「登记好了：张三 13800138000，明天…」），包含即拦截会让客户约上了
+        # 却收不到确认（2026-11-14 模拟实测）。去标点后比较，才只拦真复读。
         inbound_text = (payload.text or "").strip()
+        incoming_key = re.sub(r"[\s\W_]+", "", inbound_text)
+        reply_key = re.sub(r"[\s\W_]+", "", result.reply)
         if (
             len(inbound_text) >= 6
-            and inbound_text in result.reply
+            and incoming_key
+            and reply_key == incoming_key
             and not kb_repeat
         ):
             fallback = (kb_answer or "").strip() or "我在的，你想了解哪方面？工作内容、工资待遇还是面试时间？"
