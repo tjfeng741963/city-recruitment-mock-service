@@ -127,6 +127,31 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
     const scriptUpdated = (db.prepare("SELECT MAX(updated_at) AS at FROM device_scripts WHERE device_code=?").get(code) as { at: string | null }).at;
     const newer = [scriptUpdated, device.updated_at, takeoverUpdated, abandonedUpdated]
       .reduce<string | null>((latest, value) => (stampOf(value) > stampOf(latest) ? (value ?? null) : latest), null) ?? "";
+    /**
+     * 招工方 id 兜底解析：设备只绑了厂名、没绑 employer_id 时，按厂名/别名反查。
+     *
+     * 为什么要兜底：客户真实资料里最有价值的问答（华荻要查纹身、利口福要健康证、
+     * 松下不查纹身）全部挂在 employer 作用域。设备没绑 employer_id，8090 的
+     * kb_faq.lookup 就直接跳过这一层落到 global，只能拿到 {welfare} 这类占位符——
+     * 而岗位数据里没有这些字段，渲染出来是空串，客户问了等于没答。
+     *
+     * 只读、只补值：data_json 里显式写了 employer_id 就以它为准，绝不覆盖。
+     */
+    const factoryName = typeof params.factory_name === "string" ? params.factory_name : "";
+    const resolveEmployerId = (): number => {
+      if (Number.isInteger(params.employer_id)) return Number(params.employer_id);
+      const name = factoryName.trim();
+      if (!name) return 0;
+      const byAlias = db.prepare(
+        `SELECT e.id AS id FROM employer_alias a JOIN employer e ON e.id = a.employer_id
+         WHERE a.alias = ? ORDER BY a.weight DESC, e.id LIMIT 1`,
+      ).get(name) as { id: number } | undefined;
+      if (byAlias) return Number(byAlias.id);
+      const byName = db.prepare(
+        "SELECT id FROM employer WHERE display_name = ? OR short_name = ? ORDER BY id LIMIT 1",
+      ).get(name, name) as { id: number } | undefined;
+      return byName ? Number(byName.id) : 0;
+    };
     return {
       version: newer,
       interval_seconds: positive(params.interval_seconds, 20),
@@ -141,13 +166,14 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
       abandoned_sessions: abandonedSessions,
       // 设备绑定的工厂/城市（契约 docs/对齐-设备工厂绑定与资料导入.md §1）：
       // 8090 拿去做知识库过滤，data_json 没绑就回空串 = 通用/不限。
-      factory_name: typeof params.factory_name === "string" ? params.factory_name : "",
+      factory_name: factoryName,
       city: typeof params.city === "string" ? params.city : "",
       // 知识库 v3：品类与招工方 id（docs/知识库方案-流程驱动-20261113.md §3.7）。
       // 绑了 id 就走 kb_faq 硬过滤（别家厂的问答不进候选集）；
       // 没绑回 0，8090 退回按 factory_name 匹配的旧路径。
       vertical_id: Number.isInteger(params.vertical_id) ? Number(params.vertical_id) : 0,
-      employer_id: Number.isInteger(params.employer_id) ? Number(params.employer_id) : 0,
+      // 显式值优先；只绑了厂名时按厂名/别名反查（见上方 resolveEmployerId）
+      employer_id: resolveEmployerId(),
       // 岗位口径（2026-11-13）：subway = 只推地铁/安检岗，all = 不过滤，
       // 空串 = 跟随 8090 的环境变量默认（FLOW_ONLY_SUBWAY，当前默认 1）。
       // 放 data_json 里让运营在网页改，不必登服务器改环境变量重启。

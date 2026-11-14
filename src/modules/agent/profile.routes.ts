@@ -435,6 +435,14 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
             .map((field) => ({ key: String(field.key), label: String(field.label) }))
         : [];
       return {
+        // 岗位 data_json 里的所有字段原样透出，再被下面规范化过的同名字段覆盖。
+        //
+        // 为什么要全透：知识库模板用了 {medical} {tattoo_policy} {dorm}
+        // {insurance} {regular} {advance} {relocate_policy} 等占位符，
+        // 而这里过去只挑 12 个字段，其余一律丢掉 → render() 填不上值 →
+        // 整句被丢弃 → 客户问「要不要体检」得到空回复。
+        // 运营在后台填的新字段也不该再改一次代码才能生效。
+        ...sp,
         position_id: row.position_id,
         factory_name: row.factory_name,
         job_title: row.position_name,
