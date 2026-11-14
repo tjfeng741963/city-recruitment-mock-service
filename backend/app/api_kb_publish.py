@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from datetime import timezone
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -207,14 +208,17 @@ async def apply(payload: ApplyIn, session: SessionDep, user: Publisher):
         return result
     except (IntegrityError, OperationalError):
         await session.rollback()
-        raise HTTPException(409, "发布竞争或数据库忙，未提交；请重新预览") from None
-    except Exception:
+        raise HTTPException(409, "发布竞争或数据库未返回确认；请用原发布编号核对重试或查看记录") from None
+    except HTTPException:
         await session.rollback()
         raise
+    except Exception as error:
+        await session.rollback()
+        raise HTTPException(500, f"发布未取得持久化确认（{type(error).__name__}）；请用原发布编号核对重试") from None
 
 
 @router.get("/history")
 async def history(session: SessionDep, _user: Publisher):
     rows = (await session.execute(select(KbPublication).order_by(KbPublication.created_at.desc()).limit(30))).scalars().all()
-    return {"items": [{"id": row.id, "created_at": row.created_at.isoformat(), "actor": row.actor,
+    return {"items": [{"id": row.id, "created_at": row.created_at.replace(tzinfo=timezone.utc).isoformat(), "actor": row.actor,
                        "result": json.loads(row.result_json)} for row in rows]}
