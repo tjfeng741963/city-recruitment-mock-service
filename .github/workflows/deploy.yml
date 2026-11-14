@@ -106,8 +106,13 @@ jobs:
           # 2026-11-14 之前用 git checkout --detach，一旦服务器上有人手工改过
           # 跟踪文件或留下未跟踪文件，checkout 会以 "would be overwritten" 中止，
           # 导致部署连续失败、线上一直跑旧镜像。
-          # 注意 -e 排除项：.env.production 存生产配置、data 存 SQLite 与备份、
-          # node_modules 是构建缓存，三者都不属于 git，必须保留。
+          #
+          # clean 的 -e 必须列全所有不进 git 的运行数据（.gitignore 里是 .env*）：
+          #   .env.production / .env.api  服务配置，删了容器起不来
+          #   data / node_modules         数据与构建缓存
+          # 2026-11-14 曾漏掉 .env.api，-x 直接把它删了，部署挂在
+          # "env file .../.env.api not found"。现在用 .env* 通配兜住全部。
+          #
           # 先修属主：历史上 root 身份在宿主机上操作过（sudo git / root 容器写过
           # bind mount），public/ 等路径归 root，deploy 用户无写权限，
           # git reset 会以 "unable to unlink old 'public/index.html':
@@ -118,7 +123,9 @@ jobs:
             -e OWNER="$(id -u):$(id -g)" node:22.21.1-bookworm-slim \
             -c 'cd /src && for f in * .[!.]*; do case "$f" in data|node_modules|.|..) continue;; esac; chown -R "$OWNER" "$f" 2>/dev/null || true; done'
           git reset --hard HEAD >/dev/null 2>&1 || true
-          git clean -fdx -e .env.production -e data -e node_modules >/dev/null 2>&1 || true
+          # -e 用 .env* 通配：.gitignore 里就是这一条，`.env.production`、`.env.api`
+          # 都是服务启动必需（漏一个 compose 就报 "env file not found"）。
+          git clean -fdx -e '.env*' -e data -e node_modules >/dev/null 2>&1 || true
           git checkout --detach "$revision"
           # 核对：清理后工作区必须干净，否则宁可报错也不要带脏代码去 build
           if [ -n "$(git status --porcelain)" ]; then
@@ -128,6 +135,30 @@ jobs:
             exit 1
           fi
           echo "deploying revision: $(git rev-parse --short HEAD) $(git log -1 --format=%s)"
+          # .env* 被误删时的自愈：2026-11-14 曾因 clean -x 删掉 .env.api，
+          # compose 直接报 "env file ... not found" 让整个部署失败。
+          # 旧容器还活着，它的 Config.Env 就是当时读进去的 APP_* 变量，
+          # 直接读回来重建成文件即可。读不到就明确失败，不猜数据库密码。
+          for envf in .env.production .env.api; do
+            if [ ! -f "$envf" ]; then
+              echo "WARN: $envf missing, trying to rebuild from running container" >&2
+              case "$envf" in
+                .env.api) cname=city-recruitment-api; prefix=APP_ ;;
+                *)        cname=city-recruitment-app; prefix=REA_ ;;
+              esac
+              docker inspect "$cname" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+                | grep -E "^${prefix}" > "$envf.tmp" || true
+              if [ -s "$envf.tmp" ]; then
+                mv "$envf.tmp" "$envf"
+                chmod 600 "$envf"
+                echo "rebuilt $envf ($(wc -l < "$envf") vars) from $cname" >&2
+              else
+                rm -f "$envf.tmp"
+                echo "FATAL: $envf missing and no running $cname to rebuild from; restore it manually" >&2
+                exit 1
+              fi
+            fi
+          done
           stamp=$(date +%Y%m%d-%H%M%S)
           cp -p .env.production ".env.production.pre-$revision-$stamp"
           # 备份用 VACUUM INTO 并校验表数：之前用 node:sqlite 的 backup() 产出过
