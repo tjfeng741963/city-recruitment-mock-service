@@ -124,7 +124,17 @@ async def flow_answer(
     stage_before = str(state.get("stage") or "")
     # done 重激活：流程结束后客户再来消息（问工资/换岗位…），AI 要继续服务
     # 而不是永远沉默——重置流程从问城市重新开始，老客户档案抽取照常
-    flow_reset = stage_before == "done"
+    slots = state.setdefault("slots", {})
+    # 流失/不合适是终态，不是「聊完了」。
+    # 原来只要 stage==done 就一律重激活到 ask_interview，导致客户明确说
+    # 「我不去了」之后，下一条随便发个「在吗」又被问一次
+    # 「这两天能不能过来面试？能来的话我把名额给你留着」——
+    # 2026-11-14 三路模拟实测各 4 次，属骚扰级业务红线。
+    abandoned = str(slots.get("recruit_status") or "").strip() in {
+        "disqualified",
+        "gave_up",
+    }
+    flow_reset = stage_before == "done" and not abandoned
     if flow_reset:
         # 只重置阶段、保留 slots/profile——老客户的档案和城市不能丢。
         # 回到 ask_interview（老客户已看过岗位）：插问 KB 分支继续可用
@@ -132,7 +142,27 @@ async def flow_answer(
         before["stage"] = "ask_interview"
         before_profile = dict(state.get("profile") or {})
         stage_before = "ask_interview"
-    slots = state.setdefault("slots", {})
+
+    if abandoned and stage_before == "done":
+        # 客户已明确放弃（流程已结束 + 标记流失/不合适）：不再推进、不再邀约。
+        # 只回一句终止语并记一条入站事件，保留 slots 供人工在看板恢复。
+        # 之前这里会重激活到 ask_interview，于是「在吗」这种随口一句
+        # 又会收到「这两天能不能过来面试」，实测 4 次，属骚扰级红线。
+        closing = "好的，那就不打扰你了。后面想了解哪个城市的岗位，随时跟我说哈。"
+        await store.append_events(
+            session,
+            payload.session_key,
+            [(store.EVENT_INBOUND, {"text": payload.text})],
+        )
+        return FlowAnswerOut(
+            reply=closing,
+            parts=[closing],
+            stage="done",
+            finished=True,
+            action=None,
+            slots=dict(slots),
+            profile=dict(state.get("profile") or {}),
+        )
 
     device_code = payload.device_code or os.getenv(
         "FLOW_PROFILE_DEVICE", profile_push.DEFAULT_DEVICE
