@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 
 from .deps import ServiceOrUser, SessionDep
 from .services import flow_session as store
-from .services import kb_faq, kb_placeholder, profile_push, unknown_questions
+from .services import kb_backoffice, kb_faq, kb_placeholder, profile_push, unknown_questions
 from .services.device_scripts import fetch_device_meta, fetch_scripts, pick_script, render_script
 from .services.flow_engine import (
     STAGE_ASK_CITY,
@@ -187,6 +187,27 @@ async def flow_answer(
                     kb_answer = "\n".join(kb_markers) if kb_markers else ""
                 else:
                     kb_answer = kb_hit["body"]
+
+        # ③ 兜底：网页「知识管理 → 知识库」里填的条目。
+        #    这些条目写的是 4222 的 knowledge_items，本地 kb_entry / kb_faq 里没有，
+        #    过去运营填了等于白填。本地两级都没命中时，再问一次 4222。
+        if not kb_answer:
+            backoffice_hit = await kb_backoffice.lookup_backoffice(
+                payload.text, city=city_hint_for_kb
+            )
+            if backoffice_hit and str(backoffice_hit.get("content") or "").strip():
+                kb_entry_id = f"bo:{backoffice_hit.get('id')}"
+                kb_markers = re.findall(
+                    r"【(?:图片|视频):[^】]+】", str(backoffice_hit.get("content") or "")
+                )
+                already_sent = any(
+                    e.type == store.EVENT_KB and str(backoffice_hit.get("id")) in (e.body or "")
+                    for e in events
+                )
+                kb_answer = (
+                    "\n".join(kb_markers) if already_sent and kb_markers
+                    else str(backoffice_hit.get("content"))
+                )
 
     # 城市线索：先看客户这轮说的，再看已有槽位（别名归一在 4222 侧，这里只透传）
     # 后台维护的城市/区县先注入进去，否则运营新建的城市（如北京）永远识别不出来。
