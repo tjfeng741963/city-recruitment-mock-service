@@ -108,6 +108,15 @@ jobs:
           # 导致部署连续失败、线上一直跑旧镜像。
           # 注意 -e 排除项：.env.production 存生产配置、data 存 SQLite 与备份、
           # node_modules 是构建缓存，三者都不属于 git，必须保留。
+          # 先修属主：历史上 root 身份在宿主机上操作过（sudo git / root 容器写过
+          # bind mount），public/ 等路径归 root，deploy 用户无写权限，
+          # git reset 会以 "unable to unlink old 'public/index.html':
+          # Permission denied" 失败。deploy 在 docker 组里，借 root 容器改回来。
+          # data/ 与 node_modules 跳过：前者是应用用户的 SQLite 与备份，
+          # 改成 deploy 属主会让应用失去写权限；后者是构建缓存。
+          docker run --rm --user root --entrypoint sh -v "$PWD:/src" \
+            -e OWNER="$(id -u):$(id -g)" node:22.21.1-bookworm-slim \
+            -c 'cd /src && for f in * .[!.]*; do case "$f" in data|node_modules|.|..) continue;; esac; chown -R "$OWNER" "$f" 2>/dev/null || true; done'
           git reset --hard HEAD >/dev/null 2>&1 || true
           git clean -fdx -e .env.production -e data -e node_modules >/dev/null 2>&1 || true
           git checkout --detach "$revision"
@@ -115,6 +124,7 @@ jobs:
           if [ -n "$(git status --porcelain)" ]; then
             echo "working tree still dirty after reset/clean:" >&2
             git status --porcelain >&2
+            echo "hint: 上面列出的文件多半仍是 root 属主，手工 chown 后再部署" >&2
             exit 1
           fi
           echo "deploying revision: $(git rev-parse --short HEAD) $(git log -1 --format=%s)"
@@ -124,7 +134,11 @@ jobs:
           # 只有文件头、0 页的空壳，而 PRAGMA integrity_check 对空库仍返回 ok，
           # 部署脚本据此以为备份成功。现在用独立脚本，校验不过直接让部署失败。
           bak="data/app.sqlite.pre-$revision-$stamp.bak"
-          docker run --rm -v "$PWD/data:/data" -v "$PWD/scripts:/scripts:ro" \
+          # --user 必须加：不加时容器以 root 跑，VACUUM INTO 产出的备份文件
+          # 会变成 root 属主，下次部署 git clean / 备份轮转都可能因权限失败。
+          # 用宿主 deploy 的 uid:gid，写出来的文件天然归 deploy 所有。
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -v "$PWD/data:/data" -v "$PWD/scripts:/scripts:ro" \
             node:22.21.1-bookworm-slim \
             node /scripts/backup-sqlite.mjs /data/app.sqlite "/data/app.sqlite.pre-$revision-$stamp.bak"
           docker compose -f docker-compose.production.yml build
