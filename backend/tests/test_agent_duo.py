@@ -156,9 +156,8 @@ async def test_transcript_over_http_user_and_ai_both_recorded(
     admin_client, monkeypatch
 ) -> None:
     """走真实 DB：客户消息与 AI 实发内容（含岗位卡）都能从事件日志投影出来。"""
-    # 第 1 轮（发卡）模型措辞不采用，但决策调用仍会消费一条预设
+    # 城市已识别时由代码发卡，第 2 轮才调用模型组织措辞。
     provider = ScriptedProvider(
-        json.dumps({"reply": "占位", "capture": {"city": "深圳"}}, ensure_ascii=False),
         _decision("好的，想好了随时跟我说"),
     )
     monkeypatch.setattr("app.api_flow.build_provider", lambda: provider)
