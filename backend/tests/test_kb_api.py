@@ -191,7 +191,7 @@ class TestServiceToken:
         monkeypatch.setenv("FLOW_PROFILE_TOKEN", "svc-profile-tok")
         resp = await client.post(
             "/api/v1/kb/entries",
-            json={"kind": "script", "title": "体检报销吗", "body": "先自付后报销。", "status": "enabled"},
+            json={"kind": "script", "title": "体检报销吗", "factory_name": "验收甲厂", "body": "先自付后报销。", "status": "enabled"},
             headers={"X-Profile-Token": "svc-profile-tok"},
         )
         assert resp.status_code == 201, resp.text
