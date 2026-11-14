@@ -538,7 +538,9 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
         height_text: String(sp.height_text ?? ""),
         line_text: String(sp.line_text ?? ""),
         ethnicity_policy: String(sp.ethnicity_policy ?? ""),
-        cert_text: String(sp.cert_text ?? ""),
+        // 网页「岗位模板」新增的语义字段保存在 base_sections；材料也必须
+        // 从本岗位读取，不能用整段面试通知或别的基地的通用材料代替。
+        cert_text: String(sp.cert_text || sec.cert_text || ""),
         place: String(sp.place ?? f.place ?? row.factory_name),
         interview_time: String(sp.interview_time ?? f.interview_time ?? ""),
         province: row.province ?? "",
