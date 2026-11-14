@@ -385,8 +385,11 @@ def _stage_script(slots: dict[str, Any], stage: str) -> str:
     if not script:
         return ""
     job = _job_of(slots)
+    window = ""
+    if stage == SCRIPT_STAGE_BOOKED and slots.get("interview_period"):
+        window = str(slots.get("interview_window") or "")
     return render_script(
-        str(script.get("content") or ""), job, interview_window_of(job)
+        str(script.get("content") or ""), job, window or interview_window_of(job)
     ).strip()
 
 
@@ -508,6 +511,47 @@ def interview_window_of(job: dict[str, Any]) -> str:
     return value or INTERVIEW_WINDOW
 
 
+_INTERVIEW_PERIODS = {"早上": "上午", "上午": "上午", "下午": "下午", "晚上": "晚上"}
+
+
+def remember_interview_period(slots: dict[str, Any], text: str) -> bool:
+    """只从本人确认或收集阶段的时段短答取偏好，不从班次问题取。"""
+    value = (text or "").strip().strip("，,。.！! ")
+    if not is_agree(value) and not re.fullmatch(
+        r"(?:我)?(?:大后天|后天|明天|今天)?(?:早上|上午|下午|晚上)(?:去|来|过去)?(?:面试)?(?:可以|方便)?", value
+    ):
+        return False
+    found = re.findall(r"早上|上午|下午|晚上", value)
+    if len(set(_INTERVIEW_PERIODS[word] for word in found)) == 1:
+        slots["interview_period"] = _INTERVIEW_PERIODS[found[0]]
+        return True
+    return False
+
+
+def _preferred_interview_window(job: dict[str, Any], period: str) -> tuple[str, int, int] | None:
+    """从岗位配置的数字时间段选场次；无法确认就不编一个默认时间。"""
+    for match in re.finditer(
+        r"(?P<label>上午|早上|下午|晚上)?\s*(?P<h>\d{1,2})(?:[:：](?P<m>\d{2}))?点?\s*"
+        r"(?:-|~|～|—|至|到)\s*(?P<end_label>上午|下午|晚上)?\s*"
+        r"(?P<eh>\d{1,2})(?:[:：](?P<em>\d{2}))?点?", interview_window_of(job)
+    ):
+        hour, minute = int(match['h']), int(match['m'] or 0)
+        end_hour, end_minute = int(match['eh']), int(match['em'] or 0)
+        label = _INTERVIEW_PERIODS.get(match['label'] or "", "")
+        end_label = match['end_label'] or label
+        if label in {"下午", "晚上"} and 1 <= hour < 12:
+            hour += 12
+        if end_label in {"下午", "晚上"} and 1 <= end_hour < 12:
+            end_hour += 12
+        if not (0 <= hour < 24 and 0 <= end_hour < 24 and 0 <= minute < 60 and 0 <= end_minute < 60):
+            continue
+        actual = "上午" if hour < 12 else "下午" if hour < 18 else "晚上"
+        if actual != period or (end_hour, end_minute) <= (hour, minute):
+            continue
+        return f"{period}{hour:02d}:{minute:02d}-{end_hour:02d}:{end_minute:02d}", hour, minute
+    return None
+
+
 def send_info_parts(
     slots: dict[str, Any], when: datetime | None = None, now: datetime | None = None
 ) -> list[str]:
@@ -589,7 +633,8 @@ def _looks_subway(job: dict[str, Any]) -> bool:
 def _day_offset_of(slots: dict[str, Any]) -> int:
     """客户说的「后天」记在 slots 里；没说就是默认的明天。"""
     try:
-        return int(slots.get("interview_day_offset") or 1)
+        value = slots.get("interview_day_offset")
+        return int(value) if value is not None else 1
     except (TypeError, ValueError):
         return 1
 
@@ -638,7 +683,8 @@ def _done_parts(
     who = " ".join(
         part for part in (str(slots.get("name") or ""), str(slots.get("phone") or "")) if part
     )
-    detail = f"{day} {interview_window_of(job)} 在{job.get('place', '')}面试"
+    window = str(slots.get("interview_window") or interview_window_of(job))
+    detail = f"{day} {window} 在{job.get('place', '')}面试"
     head = f"好嘞，登记好了：{who}，{detail}。" if who else f"好嘞，{detail}。"
     return [head, "期待你来面试，到了联系我。"]
 
@@ -652,6 +698,8 @@ def _faq_retry(stage: str, slots: dict[str, Any]) -> str:
 # ── 主流程 ────────────────────────────────────────────
 def _absorb(slots: dict[str, Any], text: str, strict_name: bool = False) -> None:
     """顺手把客户自报的档案字段记下来（问城市那一轮也常一起报）。"""
+    if strict_name and remember_interview_period(slots, text):
+        strict_name = False
     phone = extract_phone(text)
     if phone:
         slots["phone"] = phone
@@ -717,9 +765,20 @@ def enter_info_result(
 
 def _book(slots: dict[str, Any], when: datetime, now: datetime | None = None) -> FlowResult:
     job = _job_of(slots)
+    window = interview_window_of(job)
+    period = str(slots.get("interview_period") or "")
+    if period:
+        selected = _preferred_interview_window(job, period)
+        if selected is None:
+            return FlowResult(
+                reply=f"这个岗位的面试时间是：{window}。暂时无法确认{period}场，哪个已公布的时段方便？",
+                stage=STAGE_COLLECT, slots=slots, source="collect",
+            )
+        window, hour, minute = selected
+        when = when.replace(hour=hour, minute=minute)
     pin_position(slots, job)
     slots["interview_at"] = when.isoformat()
-    slots["interview_window"] = interview_window_of(job)
+    slots["interview_window"] = window
     slots["interview_place"] = job.get("place", "")
     slots["interview_agreed"] = True
     slots["booked"] = True
@@ -728,6 +787,9 @@ def _book(slots: dict[str, Any], when: datetime, now: datetime | None = None) ->
     # 两种情况都不经过模型。
     booked = _one_shot_script(slots, SCRIPT_STAGE_BOOKED)
     parts = [booked] if booked else _done_parts(slots, when, now)
+    if period and booked and window not in booked:
+        # 保留运营材料和媒体，只补上当前实际选中的场次。
+        parts.insert(0, f"面试时间：{day_label(when, now)} {window}。")
     return FlowResult(
         reply="",
         parts=parts,
@@ -736,8 +798,42 @@ def _book(slots: dict[str, Any], when: datetime, now: datetime | None = None) ->
         finished=True,
         action=ACTION_BOOK,
         # 运营预约话术由渲染层定稿，审核不得再改写地点或媒体标记。
-        source="script" if booked else "",
+        source="script" if booked else "fact" if period else "",
     )
+
+
+def reschedule_interview(state: dict[str, Any], text: str, now: datetime | None = None) -> FlowResult | None:
+    """已约客户明确要求改时段才更新；问句、重复资料及普通闲聊不重约。"""
+    slots = state.setdefault("slots", {})
+    if not slots.get("booked"):
+        return None
+    match = re.fullmatch(
+        r"面试(?:时间)?(?:改为|改到|改成)(?P<day>大后天|后天|明天|今天)?(?P<period>早上|上午|下午|晚上)",
+        (text or "").strip().strip("，,。.！! "),
+    )
+    if not match:
+        return None
+    # 只有成功选到岗位现有场次才能改原预约，失败时保留原日期/场次/完成状态。
+    updated = dict(slots)
+    updated["interview_period"] = _INTERVIEW_PERIODS[match['period']]
+    offset = extract_day_offset(match['day'] or "")
+    if offset is not None:
+        updated["interview_day_offset"] = offset
+        when = next_interview(now, offset)
+    else:
+        try:
+            when = datetime.fromisoformat(str(slots["interview_at"]))
+        except (KeyError, ValueError):
+            return None
+    result = _book(updated, when, now)
+    if result.stage != STAGE_DONE:
+        return FlowResult(reply=result.reply, stage=STAGE_DONE, slots=slots, finished=True, source="fact")
+    same = all(updated.get(key) == slots.get(key) for key in ("interview_at", "interview_window"))
+    slots.update(updated)
+    result.slots = slots
+    if same:
+        result.action = None
+    return result
 
 
 def explicit_city_change(
@@ -759,7 +855,7 @@ def explicit_city_change(
         return None
     slots.update({"city": city, "job_index": 0, "interview_offer_sent": False,
                   "interview_agreed": False, "booked": False,
-                  "interview_at": "", "interview_place": "", "interview_window": ""})
+                  "interview_at": "", "interview_place": "", "interview_window": "", "interview_period": ""})
     pin_position(slots, {})
     result = enter_info_result(slots, next_interview(now, _day_offset_of(slots)), now)
     state["stage"] = result.stage
@@ -787,14 +883,16 @@ def step(
     stage = str(state.get("stage") or STAGE_ASK_CITY)
     slots: dict[str, Any] = state.setdefault("slots", {})
     state["turns"] = int(state.get("turns") or 0) + 1
+    rescheduled = reschedule_interview(state, text, now)
+    if rescheduled is not None:
+        return rescheduled
+    if stage == STAGE_DONE:
+        return FlowResult(reply="", stage=STAGE_DONE, slots=slots, finished=True)
     # 客户说了「后天/明天/今天」就按他的来，没说才用默认的明天
     day_offset = extract_day_offset(text)
     if day_offset is not None:
         slots["interview_day_offset"] = day_offset
     when = next_interview(now, _day_offset_of(slots))
-
-    if stage == STAGE_DONE:
-        return FlowResult(reply="", stage=STAGE_DONE, slots=slots, finished=True)
 
     changed = explicit_city_change(state, text, now)
     if changed is not None:
@@ -806,6 +904,7 @@ def step(
          (stage == STAGE_SEND_INFO and slots.get("interview_offer_sent")))
         and is_agree(text)
     ):
+        remember_interview_period(slots, text)
         _absorb(slots, text)
         return _agree_interview(state, slots, when, now)
 
@@ -882,7 +981,8 @@ def step(
         return FlowResult(reply=_interview_ask(slots), stage=stage, slots=slots)
 
     if stage == STAGE_COLLECT:
-        _absorb(slots, text, strict_name=True)
+        period_answer = remember_interview_period(slots, text)
+        _absorb(slots, text, strict_name=not period_answer)
         prompt = _collect_prompt(slots)
         if not prompt:
             result = _book(slots, when, now)
@@ -1016,10 +1116,10 @@ def _route_by_graph(
             state["stage"] = STAGE_COLLECT
             state["node"] = STAGE_COLLECT
             return FlowResult(reply=missing, stage=STAGE_COLLECT, slots=slots)
-        state["stage"] = STAGE_DONE
         result = _book(slots, when, None)
-        state["node"] = STAGE_DONE
-        if config_body:
+        state["stage"] = result.stage
+        state["node"] = result.stage
+        if config_body and result.stage == STAGE_DONE:
             result.parts = [config_body, *result.parts]
             result.reply = "\n".join(result.parts)
         return result
@@ -1033,7 +1133,7 @@ def _route_by_graph(
         if not prompt:
             result = _book(slots, when, None)
             state["stage"] = result.stage
-            state["node"] = STAGE_DONE
+            state["node"] = result.stage
             return result
         reply = config_body or prompt
         return FlowResult(reply=reply, stage=STAGE_COLLECT, slots=slots)
