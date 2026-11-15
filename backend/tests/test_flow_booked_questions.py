@@ -66,6 +66,12 @@ async def setup_flow(monkeypatch):
         session.add(vertical)
         await session.commit()
         data["vertical_id"] = vertical.id
+        # Competing shared wage FAQ must not steal a named expense question,
+        # even when that question has no FAQ of its own or its field is empty.
+        session.add(KbFaq(tenant_id=1, vertical_id=vertical.id, scope_level="global",
+                          question="工资多少", answer="{wage}",
+                          keywords=json.dumps(["工资", "多少钱", "多少钱一个月", "多少钱一天"]), priority=200))
+        await session.commit()
     yield data
     async with SessionLocal() as session:
         await session.execute(delete(KbFaq).where(KbFaq.vertical_id == data["vertical_id"]))
@@ -149,6 +155,55 @@ async def test_unbooked_faq_also_retains_selected_job_answer(admin_client, setup
     assert body["reply"] == SELECTED["medical_text"]
     assert body["stage"] == "ask_interview" and body["action"] is None
     assert setup_flow["review_calls"] == setup_flow["model_calls"] == 0
+
+
+@pytest.mark.parametrize("question", ["体检多少钱，能报销吗？", "体检费从工资里扣吗？"])
+@pytest.mark.parametrize("faq", [True, False])
+async def test_missing_medical_cost_does_not_answer_wages_or_other_base(admin_client, setup_flow, question, faq):
+    snapshot = {**SELECTED, "medical_text": ""}
+    setup_flow["jobs"] = [{**FIRST, "medical_text": "另一基地体检190元可报销"}, snapshot]
+    key, slots = await seed(setup_flow, question, "{medical}", snapshot=snapshot, faq=faq)
+    body = await ask(admin_client, key, question)
+    assert body["reply"] == "这个我确认一下，稍后回你"
+    assert body["stage"] == "done" and body["slots"] == slots and body["action"] is None
+    assert setup_flow["unknown"] == [question]
+    assert setup_flow["review_calls"] == setup_flow["model_calls"] == 0
+    assert not setup_flow["push_calls"]
+
+
+@pytest.mark.parametrize("booked", [True, False])
+async def test_medical_cost_uses_selected_job_faq_before_generic_money_match(admin_client, setup_flow, booked):
+    question = "体检多少钱，能报销吗？"
+    selected = {**SELECTED, "medical_text": "本测试岗位体检82元，按本岗规定不报销"}
+    setup_flow["jobs"] = [{**FIRST, "medical_text": "另一基地体检190元可报销"}, selected]
+    key, slots = await seed(setup_flow, question, "{medical}", stage="done" if booked else "ask_interview",
+                            snapshot=selected, booked=booked)
+    body = await ask(admin_client, key, question)
+    assert body["reply"] == selected["medical_text"]
+    assert body["stage"] == ("done" if booked else "ask_interview")
+    assert body["slots"] == slots and body["action"] is None
+    assert setup_flow["review_calls"] == setup_flow["model_calls"] == 0
+
+
+@pytest.mark.parametrize("question", [
+    "宿舍多少钱一个月？", "社保一个月扣多少钱？", "工衣多少钱？",
+    "培训费从工资扣吗？", "去面试的路费能报销吗？", "入职要交多少钱？",
+])
+async def test_other_expenses_are_not_wage_questions(admin_client, setup_flow, question):
+    snapshot = {**SELECTED, "welfare_text": "本岗包住", "hours_text": "本岗八小时"}
+    key, slots = await seed(setup_flow, question, "", snapshot=snapshot, faq=False)
+    body = await ask(admin_client, key, question)
+    assert body["reply"] == "这个我确认一下，稍后回你"
+    assert body["slots"] == slots and body["action"] is None
+    assert setup_flow["unknown"] == [question]
+
+
+@pytest.mark.parametrize("question", ["多少钱？", "一天多少钱？"])
+async def test_money_without_an_expense_subject_still_answers_selected_wages(admin_client, setup_flow, question):
+    key, slots = await seed(setup_flow, question, "", faq=False)
+    body = await ask(admin_client, key, question)
+    assert body["reply"] == "工价：" + SELECTED["wage_text"]
+    assert body["slots"] == slots and body["action"] is None
 
 
 async def test_direct_kb_still_filters_media_before_bypassing_model(monkeypatch):

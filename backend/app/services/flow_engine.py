@@ -28,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .flow_graph import entry_node, node_body, pick_next
+from .question_topics import is_non_wage_cost_question
 
 # 固定 UTC+8：Windows 上常常没有 tzdata，依赖 zoneinfo 会在测试环境直接炸
 TZ = timezone(timedelta(hours=8), "CST")
@@ -1247,6 +1248,10 @@ def _job_fact_answer(slots: dict[str, Any], text: str) -> str:
     的「转正175/班」发给了地铁安检的客户。岗位数据答不了的（纹身/体检这类）
     才落到知识库，而那类条目本来就该按雇主作用域配置。
     """
+    # “体检多少钱”“体检费从工资扣吗”不能因包含钱/工资而发工价表。
+    # 费用政策交给对应的本岗FAQ；没有材料时沿用缺字段待确认路径。
+    if is_non_wage_cost_question(text):
+        return ""
     snapshot = slots.get("job_snapshot") if isinstance(slots.get("job_snapshot"), dict) else {}
     if not snapshot:
         return ""
