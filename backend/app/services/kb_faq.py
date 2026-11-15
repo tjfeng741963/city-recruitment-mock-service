@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models_kb import DEFAULT_TENANT_ID, Employer, KbFaq, Location, Vertical
 from .kb_policy import shared_answer_allowed
+from .question_topics import WAGE_KEYWORDS, is_non_wage_cost_question, is_wage_keyword
 
 # scope 从窄到宽的检索顺序
 SCOPE_ORDER = ("position", "employer", "city", "vertical", "global")
@@ -91,7 +92,7 @@ def looks_like_question(text: str) -> bool:
 # 只收**无歧义的概念词**：「远」「多大」这类泛词不收，否则「宿舍多大」会误命中
 # 「年龄」。宁可少扩，不能错配——错配比漏答更糟（答错要赔钱，漏答只是不答）。
 _SYNONYM_GROUPS: tuple[tuple[str, ...], ...] = (
-    ("工资", "薪资", "工钱", "工价", "待遇", "收入", "月薪", "时薪", "日薪", "挣多少", "多少钱"),
+    WAGE_KEYWORDS,
     ("住宿", "宿舍", "包住", "住宿条件", "几人间"),
     ("吃饭", "包吃", "伙食", "食堂", "管饭"),
     ("社保", "五险", "一金", "保险", "缴纳"),
@@ -120,8 +121,13 @@ def match_keywords(question: str, keywords: list[str]) -> int:
     """
     text = question or ""
     score = 0
+    expense_question = is_non_wage_cost_question(text)
     for word in keywords:
         if not word:
+            continue
+        # 具体费用优先，不能让“多少钱”同义扩展成工资，或因“从工资扣”
+        # 命中工资FAQ；体检/社保等主题关键词仍按正常作用域查找。
+        if expense_question and is_wage_keyword(word):
             continue
         if word in text:
             score += len(word) * 2

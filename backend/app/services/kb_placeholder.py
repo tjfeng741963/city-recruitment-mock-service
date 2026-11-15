@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models_kb import DEFAULT_TENANT_ID, KbEntry
 from .kb_policy import shared_answer_allowed
+from .question_topics import is_non_wage_cost_question, is_wage_keyword
 
 # 一条话术标题最多能带出多少条：库里会有几百条，全量扫也能接受，但留个上限防跑飞
 MAX_ENTRIES = 500
@@ -63,10 +64,17 @@ def keywords_of(title: str) -> list[str]:
     return seen
 
 
-def match(question: str, title: str) -> bool:
-    """客户问法里包含标题的任一关键词就算命中。"""
+def _matching_words(question: str, title: str) -> list[str]:
     text = question or ""
-    return any(word in text for word in keywords_of(title))
+    expense_question = is_non_wage_cost_question(text)
+    return [word for word in keywords_of(title) if word in text and not (
+        expense_question and is_wage_keyword(word)
+    )]
+
+
+def match(question: str, title: str) -> bool:
+    """按主题关键词匹配；具体费用问题不靠工资/多少钱命中旧话术。"""
+    return bool(_matching_words(question, title))
 
 
 async def lookup_entry(
@@ -115,7 +123,7 @@ async def lookup_entry(
     for entry in rows:
         if not (entry.body or "").strip():
             continue
-        words = [w for w in keywords_of(entry.title) if w in text]
+        words = _matching_words(text, entry.title)
         if not words:
             continue
         entry_city = str(getattr(entry, "city", None) or "").strip()
