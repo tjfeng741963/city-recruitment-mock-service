@@ -89,7 +89,17 @@ _NAME_STOPWORDS = {
     "广州", "深圳", "东莞", "番禺", "天河", "白云", "龙华", "宝安", "龙岗", "长安", "虎门",
     "手机", "电话", "号码", "联系", "方式", "微信", "你好", "在吗", "可以", "没有", "明天",
     "今天", "后天", "男生", "女生", "普工", "面试", "工厂", "我们", "我是", "名字", "姓名",
+    # P1-3：纯确认词/时段词/日期词不得入 name（「确认」「下午吧」曾被当成姓名）
+    "确认", "好的", "好嘞", "行吧", "嗯嗯", "上午", "下午", "晚上", "早上", "中午",
+    "大后天", "上午吧", "下午吧", "晚上吧", "好的呢", "可以的",
 }
+
+# 姓名候选里出现这些字样直接否掉（覆盖组合词，如「下午两点吧」）
+_NAME_BANNED_SUBSTR = ("上午", "下午", "晚上", "早上", "中午", "明天", "今天", "后天",
+                       "确认", "手机", "电话", "号码", "面试", "工厂", "报名", "登记",
+                       "注册", "咨询", "了解", "想")
+# 语气尾巴：带这些结尾的 token 是口语应答不是人名
+_NAME_TAIL_CHARS = ("吧", "呀", "呢", "嘛", "啊", "哈", "哦", "噢", "了", "的", "呗", "啦")
 
 
 @dataclass
@@ -239,8 +249,14 @@ def _name_token(text: str) -> str:
         for suffix in ("的手机", "的手机号", "电话"):
             if token.endswith(suffix) and len(token) > len(suffix):
                 token = token[: -len(suffix)]
-        if 2 <= len(token) <= 4 and token not in _NAME_STOPWORDS:
-            return token
+        if not (2 <= len(token) <= 4) or token in _NAME_STOPWORDS:
+            continue
+        # P1-3 守卫：时段/日期/确认字样与语气尾巴都不是人名
+        if token.endswith(_NAME_TAIL_CHARS):
+            continue
+        if any(word in token for word in _NAME_BANNED_SUBSTR):
+            continue
+        return token
     return ""
 
 
@@ -250,6 +266,10 @@ def extract_name(text: str, strict: bool = False) -> str:
     strict=False 只认明确线索（「我叫张三」）——问城市那一轮把「广州」当人名的坑踩过。
     strict=True 才敢把光秃秃的「张三」当名字，用在 collect 阶段。
     """
+    # 显式称谓模式（「王先生」「李女士」）在任何阶段都算明确姓名线索
+    match = re.search(r"[\u4e00-\u9fa5]{1,3}(?:先生|女士|小姐)", text or "")
+    if match:
+        return match.group(0)
     for cue in ("我叫", "名字叫", "姓名叫", "姓名是", "我是"):
         if cue in text:
             name = _name_token(text.split(cue, 1)[1])
@@ -293,6 +313,59 @@ def is_agree(text: str) -> bool:
         return True
     # 「好几号到？」这种长句里的「好」不算答应，短句才算
     return len(text) <= 12 and any(word in text for word in _AGREE)
+
+
+# P2-7：长句表态（「行 这个可以 明天下午面试」）也是同意面试。
+# 宽松判定：明确同意词 + 面试/到场意向，且不含第三方/条件/疑问信号。
+_STRONG_AGREE = ("可以", "好的", "好呀", "好啊", "好嘞", "行", "没问题", "方便", "能来",
+                 "嗯", "ok", "OK", "Ok", "准时", "确认")
+_CONSENT_BLOCKERS = ("朋友", "同事", "别人", "亲戚", "家人", "如果", "要是", "可能",
+                     "考虑", "不一定", "再看", "的话", "有空", "领导")
+_CONSENT_INTENT = ("面试", "过去", "过来", "到厂", "到场", "上班")
+
+
+def agrees_to_interview(text: str) -> bool:
+    """同意面试的完整判定：短句沿用 is_agree，长句表态也接得住。"""
+    if is_agree(text):
+        return True
+    value = (text or "").strip()
+    if not value or len(value) > 30:
+        return False
+    if looks_like_question(value) or _is_bare_greeting(value) or is_disagree(value):
+        return False
+    if any(word in value for word in _CONSENT_BLOCKERS):
+        return False
+    return (
+        any(word in value for word in _STRONG_AGREE)
+        and any(word in value for word in _CONSENT_INTENT)
+    )
+
+
+# P0-2：拒绝词句里混着意向/登记/询问信号时不判拒（「算了 就这个吧 怎么面试」）。
+_REFUSAL_REGISTER_SIGNALS = ("登记", "报名", "就这个", "这个吧", "怎么面试", "怎么报名",
+                             "怎么过去", "怎么去", "再来")
+_REFUSAL_ASK_SIGNALS = ("想了解", "工资", "多少钱", "工价", "待遇", "薪资", "福利")
+
+
+def mixed_refusal(text: str) -> bool:
+    """拒绝词命中，但句子里同时有意向/登记/询问信号 → 不是真拒绝。"""
+    if not is_disagree(text):
+        return False
+    return (
+        any(s in text for s in _REFUSAL_REGISTER_SIGNALS)
+        or any(s in text for s in _REFUSAL_ASK_SIGNALS)
+    )
+
+
+# done 复活时必须排除的纯确认/应答词：这些不是面试意向（「收到」「好的」不算）
+_BARE_CONFIRM = ("好", "好的", "好嘞", "好吧", "行", "行吧", "可以", "可以的", "确认",
+                 "嗯", "嗯嗯", "哦", "噢", "哦哦", "要", "要得", "中", "同意", "没问题",
+                 "收到", "谢谢", "嗯呢", "好的呢")
+
+
+def _is_bare_confirm(text: str) -> bool:
+    value = (text or "").strip().strip("，,。.！!？?~～ ")
+    return value in _BARE_CONFIRM
 
 
 def is_disagree(text: str) -> bool:
@@ -514,17 +587,61 @@ def interview_window_of(job: dict[str, Any]) -> str:
 
 _INTERVIEW_PERIODS = {"早上": "上午", "上午": "上午", "下午": "下午", "晚上": "晚上"}
 
+# P1-4/P3-8：口语改口（「那就下午两点吧」「上午要上班」）里不能当场次选择的信号
+_PERIOD_NOISE = re.compile(
+    r"上班|加班|没空|有事|忙|朋友|别人|同事|亲戚|家人|领导|如果|要是|可能|考虑"
+    r"|不一定|再看|的话|有空|改天|再说|问问|了解一下"
+)
+
+_CN_HOUR = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+            "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+
+
+def _time_point_hour(text: str) -> int | None:
+    """从「两点 / 14:30 / 9点」里取具体时间点的小时数；没有返回 None。"""
+    value = text or ""
+    match = re.search(r"(\d{1,2})(?:点|:|：)", value)
+    if match:
+        hour = int(match.group(1))
+        return hour if 0 <= hour < 24 else None
+    match = re.search(r"([零一二两三四五六七八九十]+)点", value)
+    if match:
+        cn = match.group(1)
+        if cn == "十":
+            return 10
+        if "十" in cn:
+            head, _, tail = cn.partition("十")
+            hour = _CN_HOUR.get(head, 0) * 10 + _CN_HOUR.get(tail, 0)
+            return hour if 0 <= hour < 24 else None
+        if cn in _CN_HOUR:
+            return _CN_HOUR[cn]
+    return None
+
 
 def remember_interview_period(slots: dict[str, Any], text: str) -> bool:
-    """只从本人确认或收集阶段的时段短答取偏好，不从班次问题取。"""
+    """只从本人确认或收集阶段的时段短答取偏好，不从班次问题取。
+
+    P1-4/P3-8：口语改口（「那就下午两点吧」）也必须覆盖旧 period——
+    问句、拒绝、带条件/第三方/忙碌信号的句子不当作场次选择。
+    """
     value = (text or "").strip().strip("，,。.！! ")
-    if not is_agree(value) and not re.fullmatch(
+    matched = bool(is_agree(value) or re.fullmatch(
         r"(?:我)?(?:大后天|后天|明天|今天)?(?:早上|上午|下午|晚上)(?:去|来|过去)?(?:面试)?(?:可以|方便)?", value
-    ):
-        return False
+    ))
+    if not matched:
+        value = (text or "").strip().strip("，,。.！!？? ")
+        if (
+            not value or len(value) > 20 or looks_like_question(value)
+            or is_disagree(value) or _PERIOD_NOISE.search(value)
+        ):
+            return False
     found = re.findall(r"早上|上午|下午|晚上", value)
     if len(set(_INTERVIEW_PERIODS[word] for word in found)) == 1:
         slots["interview_period"] = _INTERVIEW_PERIODS[found[0]]
+        return True
+    hour = _time_point_hour(value)
+    if hour is not None:
+        slots["interview_period"] = "上午" if hour < 12 else "下午" if hour < 18 else "晚上"
         return True
     return False
 
@@ -551,6 +668,51 @@ def _preferred_interview_window(job: dict[str, Any], period: str) -> tuple[str, 
             continue
         return f"{period}{hour:02d}:{minute:02d}-{end_hour:02d}:{end_minute:02d}", hour, minute
     return None
+
+
+def _published_windows(job: dict[str, Any]) -> str:
+    """岗位公布的可用场次清单（「上午09:00-12:00、下午14:30-17:00」）。"""
+    windows: list[str] = []
+    for match in re.finditer(
+        r"(?P<label>上午|早上|下午|晚上)?\s*(?P<h>\d{1,2})(?:[:：](?P<m>\d{2}))?点?\s*"
+        r"(?:-|~|～|—|至|到)\s*(?P<end_label>上午|下午|晚上)?\s*"
+        r"(?P<eh>\d{1,2})(?:[:：](?P<em>\d{2}))?点?", interview_window_of(job)
+    ):
+        hour, minute = int(match['h']), int(match['m'] or 0)
+        end_hour, end_minute = int(match['eh']), int(match['em'] or 0)
+        label = _INTERVIEW_PERIODS.get(match['label'] or "", "")
+        end_label = match['end_label'] or label
+        if label in {"下午", "晚上"} and 1 <= hour < 12:
+            hour += 12
+        if end_label in {"下午", "晚上"} and 1 <= end_hour < 12:
+            end_hour += 12
+        if not (0 <= hour < 24 and 0 <= end_hour < 24 and 0 <= minute < 60 and 0 <= end_minute < 60):
+            continue
+        if (end_hour, end_minute) <= (hour, minute):
+            continue
+        actual = "上午" if hour < 12 else "下午" if hour < 18 else "晚上"
+        text = f"{actual}{hour:02d}:{minute:02d}-{end_hour:02d}:{end_minute:02d}"
+        if text not in windows:
+            windows.append(text)
+    return "、".join(windows)
+
+
+_PERIOD_ANCHOR = {"早上": 8, "上午": 9, "下午": 14, "晚上": 19}
+
+
+def _closest_period(job: dict[str, Any], desired: str) -> str:
+    """客户确认接受时，选与原意图最接近的已公布场次；没有公布时段返回空串。"""
+    desired = _INTERVIEW_PERIODS.get(desired, desired)
+    anchor = _PERIOD_ANCHOR.get(desired, 9)
+    best, best_gap = "", None
+    for period in ("上午", "下午", "晚上"):
+        selected = _preferred_interview_window(job, period)
+        if selected is None:
+            continue
+        gap = abs(selected[1] - anchor)
+        if best_gap is None or gap < best_gap:
+            best, best_gap = period, gap
+    return best
 
 
 def send_info_parts(
@@ -685,7 +847,14 @@ def _done_parts(
         part for part in (str(slots.get("name") or ""), str(slots.get("phone") or "")) if part
     )
     window = str(slots.get("interview_window") or interview_window_of(job))
-    detail = f"{day} {window} 在{job.get('place', '')}面试"
+    # P2-5 五要素：地方 + 工厂 + 姓名 + 电话 + 面试时间
+    place = str(job.get("place") or "")
+    factory = _factory(job) if job else ""
+    if place and factory:
+        where = f"在{place}的{factory}面试"
+    else:
+        where = f"在{place or factory}面试" if (place or factory) else "面试"
+    detail = f"{day} {window} {where}"
     head = f"好嘞，登记好了：{who}，{detail}。" if who else f"好嘞，{detail}。"
     return [head, "期待你来面试，到了联系我。"]
 
@@ -764,17 +933,36 @@ def enter_info_result(
     )
 
 
-def _book(slots: dict[str, Any], when: datetime, now: datetime | None = None) -> FlowResult:
+def _book(
+    slots: dict[str, Any],
+    when: datetime,
+    now: datetime | None = None,
+    text: str = "",
+) -> FlowResult:
     job = _job_of(slots)
     window = interview_window_of(job)
     period = str(slots.get("interview_period") or "")
     if period:
         selected = _preferred_interview_window(job, period)
         if selected is None:
-            return FlowResult(
-                reply=f"这个岗位的面试时间是：{window}。暂时无法确认{period}场，哪个已公布的时段方便？",
-                stage=STAGE_COLLECT, slots=slots, source="collect",
-            )
+            # P0-1/P1-4：冲突时客户改口的新时段优先覆盖；纯确认类就就近接受
+            # 岗位公布的场次（在回复里明说实际时间），绝不永久卡死。
+            remember_interview_period(slots, text)
+            period = str(slots.get("interview_period") or "")
+            selected = _preferred_interview_window(job, period) if period else None
+            if selected is None and _is_bare_confirm(text):
+                closest = _closest_period(job, period)
+                if closest:
+                    slots["interview_period"] = closest
+                    period = closest
+                    selected = _preferred_interview_window(job, period)
+            if selected is None:
+                options = _published_windows(job)
+                hint = f"可选场次：{options}。" if options else ""
+                return FlowResult(
+                    reply=f"这个岗位的面试时间是：{window}。暂时无法确认{period}场，{hint}哪个已公布的时段方便？",
+                    stage=STAGE_COLLECT, slots=slots, source="collect",
+                )
         window, hour, minute = selected
         when = when.replace(hour=hour, minute=minute)
     pin_position(slots, job)
@@ -826,7 +1014,7 @@ def reschedule_interview(state: dict[str, Any], text: str, now: datetime | None 
             when = datetime.fromisoformat(str(slots["interview_at"]))
         except (KeyError, ValueError):
             return None
-    result = _book(updated, when, now)
+    result = _book(updated, when, now, text=text)
     if result.stage != STAGE_DONE:
         return FlowResult(reply=result.reply, stage=STAGE_DONE, slots=slots, finished=True, source="fact")
     same = all(updated.get(key) == slots.get(key) for key in ("interview_at", "interview_window"))
@@ -888,6 +1076,10 @@ def step(
     if rescheduled is not None:
         return rescheduled
     if stage == STAGE_DONE:
+        # P0-2：done 不是黑洞——客户再报姓名/电话/登记意向时复活继续登记
+        revived = revive_from_done(state, text, now)
+        if revived is not None:
+            return revived
         return FlowResult(reply="", stage=STAGE_DONE, slots=slots, finished=True)
     # 客户说了「后天/明天/今天」就按他的来，没说才用默认的明天
     day_offset = extract_day_offset(text)
@@ -905,17 +1097,21 @@ def step(
          (stage == STAGE_SEND_INFO and slots.get("interview_offer_sent")))
         and not slots.get("booked") and is_disagree(text) and not looks_like_question(text)
     ):
+        # P0-2：拒绝词句里混着意向/登记/询问信号时不判拒，走正常分支
+        handled = _handle_mixed_refusal(state, slots, text, stage, when, now, kb_answer)
+        if handled is not None:
+            return handled
         return _decline_interview(state, slots)
 
     # 明确同意优先于节点的材料 FAQ；greet 发完卡仍在 send_info 也须能接住。
     if (
         (stage == STAGE_ASK_INTERVIEW or
          (stage == STAGE_SEND_INFO and slots.get("interview_offer_sent")))
-        and is_agree(text)
+        and agrees_to_interview(text)
     ):
         remember_interview_period(slots, text)
         _absorb(slots, text)
-        return _agree_interview(state, slots, when, now)
+        return _agree_interview(state, slots, when, now, text=text)
 
     # ── 节点化编排 ──────────────────────────────────────────────────────
     # 有节点图且当前节点能走出去，就按图的边决定下一步；走不出去（没配边、
@@ -969,6 +1165,10 @@ def step(
         _absorb(slots, text)
         # 拒绝优先：客户说「这两天不行」里也含「行」，顺序反了就会误约
         if is_disagree(text):
+            # P0-2：混着登记/询问信号的拒绝词句不判拒
+            handled = _handle_mixed_refusal(state, slots, text, stage, when, now, kb_answer)
+            if handled is not None:
+                return handled
             slots["recruit_status"] = "disqualified"
             state["stage"] = STAGE_DONE
             return FlowResult(
@@ -978,13 +1178,13 @@ def step(
                 finished=True,
                 action=ACTION_GAVE_UP,
             )
-        if is_agree(text) and not looks_like_question(text):
-            return _agree_interview(state, slots, when, now)
+        if agrees_to_interview(text) and not looks_like_question(text):
+            return _agree_interview(state, slots, when, now, text=text)
         # 插问（体检 / 住宿 / 地点）：先答，答完还停在邀约
         if kb_answer or looks_like_question(text):
             return _answer_side_question(state, stage, slots, text, kb_answer)
-        if is_agree(text):
-            return _agree_interview(state, slots, when, now)
+        if agrees_to_interview(text):
+            return _agree_interview(state, slots, when, now, text=text)
         # 答非所问：换一种说法重问，不把同一句连发三遍
         slots["ask_retries"] = int(slots.get("ask_retries") or 0) + 1
         return FlowResult(reply=_interview_ask(slots), stage=stage, slots=slots)
@@ -994,7 +1194,7 @@ def step(
         _absorb(slots, text, strict_name=not period_answer)
         prompt = _collect_prompt(slots)
         if not prompt:
-            result = _book(slots, when, now)
+            result = _book(slots, when, now, text=text)
             state["stage"] = result.stage
             return result
         if not (slots.get("name") or slots.get("phone")):
@@ -1044,6 +1244,12 @@ def _route_by_graph(
     # 默认边里的「可以,行,好,去」太宽，客户回「不行」也会命中「行」被当成答应，
     # 直接跳去要姓名电话（与 stage 分支的「拒绝优先」规则冲突）。这里提前拦。
     if current == STAGE_ASK_INTERVIEW and is_disagree(text) and not slots.get("booked"):
+        # P0-2：混着登记/询问信号的拒绝词句不判拒
+        handled = _handle_mixed_refusal(
+            state, slots, text, STAGE_ASK_INTERVIEW, when, None, kb_answer)
+        if handled is not None:
+            state["node"] = handled.stage
+            return handled
         slots["recruit_status"] = "disqualified"
         state["stage"] = STAGE_DONE
         state["node"] = STAGE_DONE
@@ -1108,6 +1314,12 @@ def _route_by_graph(
         # 后者绝不能被 _book 登记成已约（2026-11-14 实测：回「不去」被回了
         # 「好嘞，登记好了」并推了 book_interview）。与 stage 分支的规则保持一致。
         if is_disagree(text) and not slots.get("booked"):
+            # P0-2：混着登记/询问信号的拒绝词句不判拒
+            handled = _handle_mixed_refusal(
+                state, slots, text, STAGE_ASK_INTERVIEW, when, None, kb_answer)
+            if handled is not None:
+                state["node"] = handled.stage
+                return handled
             slots["recruit_status"] = "disqualified"
             state["stage"] = STAGE_DONE
             return FlowResult(
@@ -1125,7 +1337,7 @@ def _route_by_graph(
             state["stage"] = STAGE_COLLECT
             state["node"] = STAGE_COLLECT
             return FlowResult(reply=missing, stage=STAGE_COLLECT, slots=slots)
-        result = _book(slots, when, None)
+        result = _book(slots, when, None, text=text)
         state["stage"] = result.stage
         state["node"] = result.stage
         if config_body and result.stage == STAGE_DONE:
@@ -1140,7 +1352,7 @@ def _route_by_graph(
         state["stage"] = STAGE_COLLECT
         prompt = _collect_prompt(slots)
         if not prompt:
-            result = _book(slots, when, None)
+            result = _book(slots, when, None, text=text)
             state["stage"] = result.stage
             state["node"] = result.stage
             return result
@@ -1167,8 +1379,8 @@ def _route_by_graph(
         if _is_bare_greeting(text) or looks_like_question(text):
             reply = config_body or _interview_ask(slots)
             return FlowResult(reply=reply, stage=STAGE_ASK_INTERVIEW, slots=slots)
-        if is_agree(text):
-            result = _agree_interview(state, slots, when, None)
+        if agrees_to_interview(text):
+            result = _agree_interview(state, slots, when, None, text=text)
             state["node"] = STAGE_COLLECT if result.stage == STAGE_COLLECT else result.stage
             return result
         # 答非所问：换说法重问，不把同一句连发三遍（与 stage 分支同规则）
@@ -1212,11 +1424,74 @@ def _decline_interview(state: dict[str, Any], slots: dict[str, Any]) -> FlowResu
                       finished=True, action=ACTION_GAVE_UP, source="fact")
 
 
+def _handle_mixed_refusal(
+    state: dict[str, Any],
+    slots: dict[str, Any],
+    text: str,
+    stage: str,
+    when: datetime,
+    now: datetime | None,
+    kb_answer: str | None,
+) -> FlowResult | None:
+    """拒绝词句里混着意向信号时的分流：登记意向→收资料；询问意向→答事实。
+
+    纯拒绝返回 None，由调用方走原放弃分支。
+    """
+    if not is_disagree(text):
+        return None
+    if any(s in text for s in _REFUSAL_REGISTER_SIGNALS):
+        remember_interview_period(slots, text)
+        _absorb(slots, text, strict_name=True)
+        day_offset = extract_day_offset(text)
+        if day_offset is not None:
+            slots["interview_day_offset"] = day_offset
+        when = next_interview(now, _day_offset_of(slots))
+        return _agree_interview(state, slots, when, now, text=text)
+    if any(s in text for s in _REFUSAL_ASK_SIGNALS):
+        return _answer_side_question(state, stage, slots, text, kb_answer)
+    return None
+
+
+def revive_from_done(
+    state: dict[str, Any], text: str, now: datetime | None = None
+) -> FlowResult | None:
+    """done/disqualified 黑洞复活（P0-2）。
+
+    结束状态的客户再发消息时，检测到姓名/电话/面试意向 → 清掉 disqualified
+    回到 collect 继续登记；纯确认/应答（「收到」「好的」）保持原静默收尾。
+    """
+    slots = state.setdefault("slots", {})
+    if slots.get("booked"):
+        return None
+    value = (text or "").strip().strip("，,。.！!？?~～ ")
+    if not value or _is_bare_greeting(text) or _is_bare_confirm(text):
+        return None
+    phone = extract_phone(text)
+    name = extract_name(text, strict=True)
+    wants_interview = (
+        any(s in text for s in _REFUSAL_REGISTER_SIGNALS) or agrees_to_interview(text)
+    )
+    if not (phone or name or wants_interview):
+        return None
+    slots.pop("recruit_status", None)
+    slots["interview_agreed"] = True
+    remember_interview_period(slots, text)
+    _absorb(slots, text, strict_name=True)
+    day_offset = extract_day_offset(text)
+    if day_offset is not None:
+        slots["interview_day_offset"] = day_offset
+    when = next_interview(now, _day_offset_of(slots))
+    state["stage"] = STAGE_COLLECT
+    state["node"] = STAGE_COLLECT
+    return _agree_interview(state, slots, when, now, text=text)
+
+
 def _agree_interview(
     state: dict[str, Any],
     slots: dict[str, Any],
     when: datetime,
     now: datetime | None = None,
+    text: str = "",
 ) -> FlowResult:
     """客户答应来：姓名手机都在就直接约成，缺一个就进 collect 只要缺的那个。"""
     slots["interview_agreed"] = True
@@ -1224,7 +1499,7 @@ def _agree_interview(
     prompt = _collect_prompt(slots)
     if prompt:
         return FlowResult(reply=prompt, stage=STAGE_COLLECT, slots=slots, source="collect")
-    result = _book(slots, when, now)
+    result = _book(slots, when, now, text=text)
     state["stage"] = result.stage
     return result
 
@@ -1315,3 +1590,25 @@ def _answer_side_question(
     followup = _faq_retry(stage, slots)
     state["stage"] = stage
     return FlowResult(reply=followup, stage=stage, slots=slots)
+
+
+def align_reply_with_slots(reply: str, slots: dict[str, Any]) -> str:
+    """回复里的日期/时段说法与 slots 冲突时按 slots 改写（P2-6）。
+
+    客户说了「后天上午」而 slots 记的是 day_offset=2/period=上午，模型嘴上的
+    「明天」一律从 slots 重渲染；没记过的槽位不动。
+    """
+    out = str(reply or "")
+    offset = slots.get("interview_day_offset")
+    if isinstance(offset, int) and not isinstance(offset, bool):
+        label = {0: "今天", 1: "明天", 2: "后天", 3: "大后天"}.get(offset)
+        if label:
+            for word, word_offset in _DAY_WORDS:
+                if word_offset != offset and word in out:
+                    out = out.replace(word, label)
+    period = str(slots.get("interview_period") or "")
+    if period:
+        for word, canonical in _INTERVIEW_PERIODS.items():
+            if canonical != period and word in out:
+                out = out.replace(word, period)
+    return out
