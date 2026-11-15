@@ -34,6 +34,24 @@ describe("local agent conversation flow", () => {
     ]));
   });
 
+  // 红点灭而复现的回归：点开会话必须落库该会话已读，否则 15s 轮询
+  // listConversations 会把库里的原值读回来，运营以为自己点过了却又有红点。
+  it("marks the conversation read when its messages are opened", async () => {
+    // 自造未读：同文件前面的用例已经打开过这个消息，不能依赖种子初值
+    app.db.prepare("UPDATE agent_conversations SET unread=3 WHERE device_code='local-device-001' AND customer_id=700001").run();
+    const before = await app.inject({ method: "GET", url: "/api/v1/agent/conversations?device_code=local-device-001", headers: headers() });
+    expect(before.json().total_unread).toBe(3);
+
+    const opened = await app.inject({ method: "GET", url: "/api/v1/agent/messages?device_code=local-device-001&customer_id=700001&after_id=0", headers: headers() });
+    expect(opened.statusCode).toBe(200);
+
+    // 落库，不是只在前端减数字：重新查会话列表必须读到 0
+    expect(app.db.prepare("SELECT unread FROM agent_conversations WHERE device_code='local-device-001' AND customer_id=700001").get())
+      .toMatchObject({ unread: 0 });
+    const after = await app.inject({ method: "GET", url: "/api/v1/agent/conversations?device_code=local-device-001", headers: headers() });
+    expect(after.json().total_unread).toBe(0);
+  });
+
   it("keeps the required device contract for a missing device code", async () => {
     const response = await app.inject({ method: "GET", url: "/api/v1/agent/conversations?device_code=", headers: headers() });
     expect(response.statusCode).toBe(422);

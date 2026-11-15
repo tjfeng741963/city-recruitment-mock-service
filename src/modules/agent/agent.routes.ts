@@ -162,7 +162,17 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     const deviceCode = request.query.device_code ?? "";
     if (!canAccessDevice(getUserScope(db, request.auth!), deviceCode)) return reply.code(403).send({ detail: "Device scope required" });
     bridgeStore.expireClaims(deviceCode);
-    const rows = db.prepare("SELECT * FROM agent_messages WHERE device_code=? AND customer_id=? AND id>? ORDER BY created_at, id").all(deviceCode, Number(request.query.customer_id ?? 0), Number(request.query.after_id ?? 0)) as Array<Record<string, unknown>>;
+    const customerId = Number(request.query.customer_id ?? 0);
+    const rows = db.prepare("SELECT * FROM agent_messages WHERE device_code=? AND customer_id=? AND id>? ORDER BY created_at, id").all(deviceCode, customerId, Number(request.query.after_id ?? 0)) as Array<Record<string, unknown>>;
+    // 会话级已读：能拉到消息就说明运营正看着这个会话，未读必须落库清零。
+    //
+    // 之前只有整台设备的 clear-unread，没有会话级入口；前端点开会话时只把数组里的
+    // unread 改成 0，从不发请求，于是 15s 轮询 listConversations 又把库里的原值读回来，
+    // 红点灭而复现。这里挂在唯一必然发生的「打开会话」路径上，刷新和轮询都不会复活。
+    // 不动 updated_at：那列决定列表排序，清未读不该把会话顶到最前。
+    if (Number.isSafeInteger(customerId) && customerId > 0) {
+      db.prepare("UPDATE agent_conversations SET unread=0 WHERE device_code=? AND customer_id=? AND unread<>0").run(deviceCode, customerId);
+    }
     // 会话页按 role 决定气泡左右；agent_messages 只有 direction，这里补一层映射。
     return { items: rows.map((row) => ({ ...row, role: row.direction === "inbound" ? "customer" : "agent" })), takeover: false };
   });
