@@ -784,6 +784,53 @@ def _period_conflict_text(
     )
 
 
+_SECTION_HEAD = re.compile(r"^【[^】]{1,12}】")
+# 媒体标记不是段标题：【图片:厂门.jpg】 行必须跟着上一段走，
+# 否则客户端会收到一个「只有标记、没有文字」的段（纯媒体段虽然能发，
+# 但和文字拆成两条会让「文字说了发图」和「图」对不上）。
+_MEDIA_HEAD = re.compile(r"^【(?:图片|视频)\s*[:：]")
+
+
+def _starts_section(line: str) -> bool:
+    value = str(line or "").strip()
+    return bool(_SECTION_HEAD.match(value)) and not _MEDIA_HEAD.match(value)
+
+
+def split_script_sections(text: str) -> list[str]:
+    """把一段运营话术切成多条消息。
+
+    为什么需要：运营在「岗位话术」里写的是【用人要求】【上班时间】【工资待遇】
+    这样分好段的长文，客户端按 parts 逐条发送、条目之间有 2 秒间隔，看起来才是
+    「一条一条发」。以前整段作为**一条**消息发出（2026-11-15 线上实测：三段要求
+    糊成一坨），客户体验和人工客服对不上。
+
+    切分规则（保守，宁可少切不乱切）：
+      1. 以空行分段（运营最自然的写法）
+      2. 以行首【标题】另起一段（没有空行时也能切开）
+      3. 段内不拆句、不改字——工价一个字都不能动
+      4. 只有一段时原样返回，不会把一句话拆散
+    """
+    raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not raw:
+        return []
+    sections: list[str] = []
+    for block in re.split(r"\n\s*\n", raw):
+        block = block.strip("\n")
+        if not block.strip():
+            continue
+        # 没有空行时，行首【标题】也要另起一段（媒体标记除外，它跟着上一段）
+        current: list[str] = []
+        for line in block.split("\n"):
+            if _starts_section(line) and current and _starts_section(current[0]):
+                sections.append("\n".join(current).strip())
+                current = [line]
+            else:
+                current.append(line)
+        if current:
+            sections.append("\n".join(current).strip())
+    return [section for section in sections if section.strip()]
+
+
 def send_info_parts(
     slots: dict[str, Any], when: datetime | None = None, now: datetime | None = None
 ) -> list[str]:
@@ -803,11 +850,12 @@ def send_info_parts(
     pin_position(slots, job)
     scripted = _one_shot_script(slots, SCRIPT_STAGE_SEND_INFO)
     if scripted:
-        # 岗位话术命中：整段直发，模型不参与（工价一个字都不能被改写）。
-        # 媒体标记【图片:x】原样留在正文里，客户端据此发图。
+        # 岗位话术命中：按段落拆成多条发，模型不参与（工价一个字都不能被改写）。
+        # 媒体标记【图片:x】原样留在正文里，客户端据此发图——切分只按空行/【标题】，
+        # 标记永远留在段内，不会被拆断。
         # 单轮单源：只发话术这一段，不再拼一句邀约——邀约属于 ask_interview
         # 时点，由下一轮的追问（话术一次/智能体换说法）接管。
-        return [scripted]
+        return split_script_sections(scripted) or [scripted]
     when = when or next_interview(now, _day_offset_of(slots))
     day = day_label(when, now)
     part1 = "\n".join(_job_card_lines(job))
@@ -1076,6 +1124,13 @@ def _book(
     if period and booked and window not in booked:
         # 保留运营材料和媒体，只补上当前实际选中的场次。
         parts.insert(0, f"面试时间：{day_label(when, now)} {window}。")
+    # 面试通知（点③）：后台在 base_sections.interview_notice 里写的是
+    # 「先发前两条，回复了再发后三条」这类分条注意事项，以前全链路没人读它，
+    # 客户约上了却收不到任何面试通知。这里在确认语之后按段落补发，整会话一次。
+    notice = _interview_notice_parts(slots, job, window)
+    if notice:
+        slots["interview_notice_sent"] = True
+        parts = [*parts, *notice]
     return FlowResult(
         reply="",
         parts=parts,
@@ -1090,6 +1145,26 @@ def _book(
 
 _RESCHEDULE_INTENT = ("改", "换", "调", "推迟", "推后", "顺延", "提前", "晚点", "早点",
                       "迟到", "晚到", "来不及", "赶不上", "有事")
+
+
+def _interview_notice_parts(
+    slots: dict[str, Any], job: dict[str, Any], window: str = ""
+) -> list[str]:
+    """约成后的面试通知：取岗位/后台配置的 notice 模板，渲染后按段拆开。
+
+    为什么要有：客户约上面试后，运营在后台「面试通知模板」里写好注意事项
+    （带什么证件、几点到、找谁），实际一条都没发出去。这段和岗位卡一样属于
+    运营原文，占位符由代码替换，模型不参与改写。
+    """
+    if slots.get("interview_notice_sent"):
+        return []
+    template = str((job or {}).get("interview_notice") or "").strip()
+    if not template:
+        return []
+    from .device_scripts import render_script
+
+    rendered = render_script(template, job or {}, window or interview_window_of(job or {}))
+    return split_script_sections(rendered)
 
 
 def _reschedule_day(value: str) -> int | None:

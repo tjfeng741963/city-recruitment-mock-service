@@ -419,6 +419,11 @@ async def flow_answer(
         # 岗位话术命中：整段按运营台词直发（占位符由代码替换、媒体标记原样保留），
         # 这轮一次模型都不调——工价/年龄/地点一个字都不许被改写。
         # 状态推进仍走确定性规则：发过卡 + 进 ask_interview。
+        # 媒体白名单必须取自这段话术本身：以前这里不设 media_material，
+        # allowed_media 只剩空列表，review_loop/filter_parts 把运营配的
+        # 【图片:x】【视频:x】当作未授权标记全部删掉——文本发出去、图一张没有
+        # （2026-11-15 线上实测「发图片、视频没出来」）。
+        media_material = str(position_script.get("content") or "")
         slots["city"] = city_hint
         slots.setdefault("job_index", 0)
         absorb_profile(slots, payload.text)
