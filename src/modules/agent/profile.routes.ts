@@ -6,7 +6,7 @@ import { deviceFactoryIds, loadFactories } from "../../shared/device-factories.j
 import { mediaAssetsByNames, parsePositionMedia, resolveMediaRefs, type ResolvedMedia } from "../../shared/media-assets.js";
 import { createMessageChannelProvider } from "../messaging/message-channel-provider.js";
 import { DeviceBridgeStore } from "../messaging/device-bridge.js";
-import { sendInviteGroupLine } from "../../shared/invite-group.js";
+import { buildInviteLine, readInviteGroupConfig, sendInviteGroupLine } from "../../shared/invite-group.js";
 
 /**
  * 候选人档案接口（4222 侧写入/读取）。
@@ -205,17 +205,34 @@ export async function registerProfileRoutes(app: FastifyInstance, db: DatabaseSy
     profileJson.interview_agreed = agreed;
     const registration = [merged.city, merged.factory_name, merged.name, merged.phone];
     const invited = !gaveUp && agreed && registration.every(value => value.trim() !== "") && /^1[3-9][0-9]{9}$/.test(merged.phone);
-    // 摘要由实际合并后的字段生成，不信任调用方传入的拼接文本；record 仍表示案底。
+    // 登记摘要保持「城市 厂名 姓名 电话」——候选人页的「登记摘要」列靠它，
+    // 少了厂名运营就分不清这人约的是哪个厂。
     const registrationText = invited ? registration.map(value => value.trim()).join(" ") : "";
     if (registrationText) profileJson.registration_text = registrationText;
     else delete profileJson.registration_text;
-    // 自动登记摘要占独立一行，更新时只替换上一条摘要，保留人工备注。
+    // 改名（客户原话「要姓名+手机号 → 改备注」）：备注写邀约群那一行的格式
+    // `深11/9 谢子鑫 18077352958`，运营在候选人列表/企微搜索框里一眼对上名单。
+    // 拼不出来（缺面试日期/城市简写）时退回登记摘要，不能让备注变空。
+    const inviteLine = invited
+      ? buildInviteLine({
+          city: merged.city, interviewDate: merged.interview_date,
+          name: merged.name, phone: merged.phone,
+          cityAbbr: readInviteGroupConfig(db).cityAbbr,
+        })
+      : "";
+    const autoRemark = inviteLine || registrationText;
+    // 更新时只替换自动生成的那一行，人工备注原样保留。
     const previousRegistration = asText(savedProfile.registration_text);
+    const previousInvite = asText(savedProfile.invite_line);
     const manualRemark = remark.split(/\r?\n/).filter(line =>
       !(previousRegistration && line.trim() === previousRegistration) &&
-      !(registrationText && line.trim() === registrationText)
+      !(previousInvite && line.trim() === previousInvite) &&
+      !(registrationText && line.trim() === registrationText) &&
+      !(inviteLine && line.trim() === inviteLine)
     ).join("\n").trim();
-    remark = [registrationText, manualRemark].filter(Boolean).join("\n");
+    if (inviteLine) profileJson.invite_line = inviteLine;
+    else delete profileJson.invite_line;
+    remark = [autoRemark, manualRemark].filter(Boolean).join("\n");
     let recruitStatus = conversation.recruit_status;
     let state = conversation.state;
     if (gaveUp) recruitStatus = "disqualified";
