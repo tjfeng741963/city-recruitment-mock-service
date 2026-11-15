@@ -1041,6 +1041,9 @@ def _with_parts(result: FlowResult, parts: list[str]) -> FlowResult:
         attachments=result.attachments,
         unknown_question=result.unknown_question,
         source=result.source,
+        # 诊断信息必须跟着走：审核循环每次改写都会重建对象，
+        # 不传就等于把「为什么回这句」整条线索丢了。
+        trace=dict(result.trace),
     )
 
 
@@ -1142,6 +1145,9 @@ async def review_loop(
         return result
     reviewer = build_reviewer()
     if reviewer is None:
+        # B 不在：回复原样发出。这一条必须记下来——灰度复盘时要能区分
+        # 「模型没审」和「审了放行」，否则误判成审核起了作用。
+        result.trace.setdefault("review", []).append({"stage": "no_reviewer"})
         return result
     slots = state.get("slots") or {}
     fact_card = _fact_card_text(slots)
@@ -1150,26 +1156,40 @@ async def review_loop(
     verdict = await reviewer.review(
         transcript or [], draft, fact_card, snapshot, is_script=is_script
     )
+    # 只留判定结论与原因，不留完整草稿：草稿可能含客户隐私，库里已有 final 文本。
+    result.trace.setdefault("review", []).append(
+        {"round": 1, "verdict": verdict.get("verdict"), "reason": str(verdict.get("reason") or "")[:200]}
+    )
     if verdict.get("verdict") != "revise":
         return result
     if is_script:
         # 话术被打回（残留/重复）：B 无权改写文案，渲染层 render_script 已保证
         # 数字与已知占位符 → 按原文案强制发送，绝不静默不发
+        result.trace.setdefault("review", []).append({"stage": "script_kept"})
         return result
     if provider is None:
         # A 不在（这轮是纯确定性输出被 B 打回）：无法重写，直接进兜底
+        result.trace.setdefault("review", []).append({"stage": "fallback_no_provider"})
         return finish(_forced_fallback(state, text, result))
     revised = await _rewrite_draft(state, text, provider, draft, verdict, transcript, allowed)
     if revised:
         revised = filter_parts(revised, allowed)
     if revised and _fact_guard("\n".join(revised), slots):
         draft = revised
+        result.trace.setdefault("review", []).append({"stage": "rewritten"})
+    elif revised:
+        # 重写稿被事实护栏拦下（编了工价）——灰度里这类最多，必须单独可见。
+        result.trace.setdefault("review", []).append({"stage": "rewrite_blocked_by_fact_guard"})
     verdict = await reviewer.review(
         transcript or [], draft, fact_card, snapshot, is_script=is_script
+    )
+    result.trace.setdefault("review", []).append(
+        {"round": 2, "verdict": verdict.get("verdict"), "reason": str(verdict.get("reason") or "")[:200]}
     )
     if verdict.get("verdict") != "revise":
         return finish(_with_parts(result, draft))
     # 第 2 轮仍打回：丢弃 B 意见，兜底强制发送
+    result.trace.setdefault("review", []).append({"stage": "forced_fallback"})
     return finish(_forced_fallback(state, text, result))
 
 
