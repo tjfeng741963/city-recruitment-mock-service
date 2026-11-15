@@ -118,6 +118,24 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     const result = db.prepare("DELETE FROM agent_devices WHERE id=?").run(id);
     return result.changes ? { success: true } : reply.code(404).send({ detail: "Device not found" });
   });
+  // 登录二维码的网页读取口。设备用自己的桥接令牌 POST 上传（见 device-bridge.routes.ts），
+  // 网页这一侧用用户 JWT 读——二维码等同于登录凭证，拿到就能顶替这个号登录，不能公开。
+  app.get<{ Params: { code: string } }>("/api/v1/agent/devices/:code/login-qr", async (request, reply) => {
+    const code = String(request.params.code);
+    if (!canAccessDevice(getUserScope(db, request.auth!), code)) {
+      return reply.code(403).send({ detail: "Device scope required" });
+    }
+    const row = bridgeStore.loginQr(code);
+    if (!row) return { available: false };
+    return {
+      available: true,
+      // 直接给 data URL，前端 <img src> 拿来即用，不用再拼前缀
+      image: row.image_b64.startsWith("data:") ? row.image_b64 : `data:image/png;base64,${row.image_b64}`,
+      width: row.width,
+      height: row.height,
+      captured_at: row.captured_at,
+    };
+  });
   // 本地新增，目标站契约里没有这条（7 轮 parity 快照均未抓到同类端点）——
   // 纯运维工具：管理员在后台填完某设备自己的 dify_url/dify_key 后，一键验证能否连上，
   // 不用等真实客户发消息才发现配置错了。调用既有的 DifyProvider.healthCheck()，不新建逻辑。

@@ -141,6 +141,12 @@ export const devicesApi = {
     request<{ device: { state: string; heartbeat_at: number; account_id: string } | null; commands: BridgeCommand[] }>(
       `/api/v1/bridge/devices/${enc(code)}`,
     ),
+  // 企微登录二维码：设备在云端掉登录时，客户端把扫码窗截图传上来，这里读给用户扫。
+  // 没有二维码时返回 {available:false}，不是 404——"还没轮到这张图"是正常状态。
+  loginQr: (code: string) =>
+    request<{ available: boolean; image?: string; width?: number; height?: number; captured_at?: string }>(
+      `/api/v1/agent/devices/${enc(code)}/login-qr`,
+    ),
   pair: (code: string) =>
     request<{ device_code: string; device_token: string }>(`/api/v1/bridge/devices/${enc(code)}/pair`, { method: "POST", ...json({}) }),
   workflow: (id: number) => request<{ ok: boolean; message: string }>(`/api/v1/agent/device/${id}/workflow`),

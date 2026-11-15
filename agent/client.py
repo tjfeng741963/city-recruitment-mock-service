@@ -207,6 +207,37 @@ class BridgeClient:
             },
         )
 
+    def upload_login_qr(
+        self,
+        image_b64: str,
+        width: int,
+        height: int,
+        captured_at: str,
+    ) -> dict:
+        """POST /login-qr：把企微登录窗的截图送到服务端，供网页显示给用户扫。
+
+        机器在云端，扫码的人看不到那块屏幕——不把二维码送出去，掉登录就只能
+        干等现场有人去看。服务端按 device_code 只保留最新一张（旧帧对扫码没用）。
+
+        返回 {"ok": true}；失败抛异常，由调用方决定是否记日志重试。
+        """
+        code = quote(self.device_code, safe="")
+        return self._request(
+            "POST",
+            f"/api/v1/bridge/devices/{code}/login-qr",
+            {
+                "image_b64": image_b64,
+                "width": int(width or 0),
+                "height": int(height or 0),
+                "captured_at": captured_at or "",
+            },
+        )
+
+    def clear_login_qr(self) -> dict:
+        """DELETE /login-qr：登录恢复后清掉残留的二维码，免得网页还在显示旧图。"""
+        code = quote(self.device_code, safe="")
+        return self._request("DELETE", f"/api/v1/bridge/devices/{code}/login-qr")
+
 
 def describe_error(exc: Exception) -> str:
     if isinstance(exc, urllib.error.HTTPError):

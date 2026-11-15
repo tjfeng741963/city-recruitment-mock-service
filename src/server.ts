@@ -43,7 +43,13 @@ declare module "fastify" {
  * with real payloads while every other contract returned 403.
  */
 const DEVICE_TOKEN_ROUTES = new Set(["heartbeat", "claim", "receipts", "inbound", "outbound"].map(action => `POST /api/v1/bridge/devices/:code/${action}`)
-  .concat(["GET /api/v1/bridge/devices/:code/config"]));
+  .concat([
+    "GET /api/v1/bridge/devices/:code/config",
+    // 登录二维码：设备用自己的桥接令牌上传/清除，路由内 authenticate() 校验，
+    // 不走用户 JWT（客户端没有登录态）。网页读取走用户鉴权的 /api/v1/agent/... 那侧。
+    "POST /api/v1/bridge/devices/:code/login-qr",
+    "DELETE /api/v1/bridge/devices/:code/login-qr",
+  ]));
 const PUBLIC_ROUTES = new Set([
   "POST /api/v1/auth/login",
   "GET /api/v1/agent/reminder-config",

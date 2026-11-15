@@ -55,6 +55,7 @@ win.set_dpi_aware()
 
 import compat  # noqa: E402
 import login_watch  # noqa: E402
+import login_qr  # noqa: E402
 import reply_store as rlog  # noqa: E402
 import client as agent_client  # noqa: E402
 import register as agent_register  # noqa: E402
@@ -1494,6 +1495,13 @@ def acquire_single_instance() -> bool:
         return True
     if _mutex_handle and _mutex_owner_pid == pid:
         return True
+
+    # 这把锁保护的是「两个进程同时抢企微前台」，而抢前台只有 Windows 存在。
+    # 非 Windows 平台（CI 的 ubuntu 跑单测）本来就没有 ctypes.windll，
+    # 命中下面的 except 会被当成「已有实例在运行」而误拦，所以这里直接放行。
+    if sys.platform != "win32":
+        return True
+
     try:
         kernel32 = ctypes.windll.kernel32
         ERROR_ALREADY_EXISTS = 183
@@ -1508,7 +1516,7 @@ def acquire_single_instance() -> bool:
         setattr(sys, claim_key, pid)
         return True
     except Exception:  # noqa: BLE001
-        # 互斥体本身建不出来（极端环境）：宁可拦住，也不要冒双开的风险
+        # Windows 上互斥体建不出来（极端环境）：宁可拦住，也不要冒双开的风险
         return False
 
 
@@ -1639,10 +1647,15 @@ def main() -> int:
         if reporter is not None:
             reporter.remote_config = remote
 
+    # 登录二维码上传器：企微掉登录时把扫码窗截图送到服务端，网页上就能扫。
+    # 机器在云端，没人看得到那块屏幕——这是唯一能让用户自己扫码的路径。
+    qr_pusher = login_qr.LoginQrPusher()
+
     if not args.watch:
         wecom_state = detect_wecom_state()
         log(f"[自检] 企微状态 {wecom_state}（{WECOM_STATE_TEXT.get(wecom_state, '未知')}）")
         login_watch.alert_login_required(wecom_state, log=log)
+        qr_pusher.tick(wecom_state, remote_client, log=log)
         if reporter is not None:
             reporter.tick(wecom_state, pending_count(), force=True)
         scan(store, cfg)
@@ -1657,6 +1670,7 @@ def main() -> int:
     wecom_state = detect_wecom_state()
     log(f"[自检] 企微状态 {wecom_state}（{WECOM_STATE_TEXT.get(wecom_state, '未知')}）")
     login_watch.alert_login_required(wecom_state, log=log)
+    qr_pusher.tick(wecom_state, remote_client, log=log)
     if reporter is not None:
         reporter.tick(wecom_state, pending_count(), force=True)
     scan(store, cfg)
@@ -1676,6 +1690,8 @@ def main() -> int:
                 wecom_state = state
             # 掉登录时把企微窗口拉到前台并提示扫码（内部有 120s 冷却，非登录态不动作）
             login_watch.alert_login_required(wecom_state, log=log)
+            # 掉登录时把扫码窗截图传到网页（内部约 30s 一次；恢复后自动清除旧图）
+            qr_pusher.tick(wecom_state, remote_client, log=log)
             if reporter is not None:
                 reporter.tick(wecom_state, pending_count())
 

@@ -213,6 +213,54 @@
   margin: 0;
 }
 
+/* 企微登录二维码：设备在云端掉登录时，客户端把扫码窗截图传上来给用户扫。
+   二维码必须足够大且不在加载时跳版，所以 img 写死了宽高。 */
+.dv-qr {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  padding: var(--s-4);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+}
+
+.dv-qr-title {
+  margin: 0;
+  font-size: var(--t-subhead);
+  font-weight: 600;
+}
+
+.dv-qr-hint,
+.dv-qr-meta {
+  margin: 0;
+  font-size: var(--t-callout);
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+.dv-qr-error {
+  margin: 0;
+  color: var(--err);
+  font-size: var(--t-callout);
+}
+
+/* 白底是扫码的硬要求：深色或透明背景会明显降低摄像头识别率 */
+.dv-qr-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.dv-qr-img {
+  display: block;
+  background: #fff;
+  padding: var(--s-2);
+  border-radius: var(--r-xs);
+  image-rendering: pixelated;   /* 二维码缩放后也要保持锐利，别被插值糊掉 */
+}
+
 .dv-rename {
   display: flex;
   align-items: flex-end;
