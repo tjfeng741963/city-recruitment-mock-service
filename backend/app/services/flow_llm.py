@@ -43,10 +43,13 @@ from .flow_engine import (
     _day_offset_of,
     _decline_interview,
     _gave_up_text,
+    _handle_mixed_refusal,
     _is_bare_greeting,
     _job_fact_answer,
     _script_sent,
     _stage_script,
+    align_reply_with_slots,
+    agrees_to_interview,
     extract_day_offset,
     enter_info_result,
     extract_city,
@@ -58,6 +61,7 @@ from .flow_engine import (
     looks_like_question,
     next_interview,
     remember_interview_period,
+    revive_from_done,
     reschedule_interview,
     remote_job_cities,
     step as fallback_step,
@@ -236,6 +240,8 @@ def _switch_to_candidate(slots: dict[str, Any], state: dict[str, Any], now: date
         return None
     slots["job_index"] = candidates[0][0]
     slots["interview_offer_sent"] = False
+    # P2-7：换岗不继承旧岗的同意，客户对新岗位重新表态后才进 collect
+    slots["interview_agreed"] = False
     when = next_interview(now, _day_offset_of(slots))
     result = enter_info_result(slots, when, now)
     state["stage"] = result.stage
@@ -406,7 +412,7 @@ def apply_result(
             stage, finished = STAGE_COLLECT, False
         else:
             if slots.get("interview_period"):
-                result = _book(slots, when, now)
+                result = _book(slots, when, now, text=text)
                 state["stage"] = result.stage
                 return result
             slots["interview_at"] = when.isoformat()
@@ -425,6 +431,8 @@ def apply_result(
         finished = True
 
     reply = str(data.get("reply") or "").strip()
+    # P2-6：回复里的日期/时段说法必须与 slots 一致，冲突的按 slots 改写
+    reply = align_reply_with_slots(reply, slots)
     parts = _split_parts(reply)
 
     # 兜底：模型编了工价 / 给了空话，退回确定性话术（在副本上跑，别污染真状态）
@@ -751,7 +759,7 @@ def apply_decision(
 
     # 约成：姓名电话齐 + 已答应 → 代码登记（时间/地点/确认话术都在这里算）
     if slots.get("interview_agreed") and slots.get("name") and slots.get("phone"):
-        result = _book(slots, when, now)
+        result = _book(slots, when, now, text=text)
         state["stage"] = result.stage
         return result
 
@@ -770,6 +778,8 @@ def apply_decision(
     unknown = str(data.get("unknown_question") or "").strip()
     if not reply and unknown:
         reply = "这个我确认一下，稍后回你"
+    # P2-6：回复里的日期/时段说法必须与 slots 一致，冲突的按 slots 改写
+    reply = align_reply_with_slots(reply, slots)
     parts = _split_parts(reply)
 
     # 兜底：空话/编了工价 → 退确定性状态机（事实卡 → 知识库 → 确认一下）
@@ -833,6 +843,12 @@ async def a_step(
     # 已选岗位事实优先；知识库原文也不能再被审核模型改成面试提醒。
     if stage == STAGE_DONE or slots.get("booked"):
         slots_kept = state.get("slots") or {}
+        # P0-2：done 不是黑洞——客户再报姓名/电话/登记意向时复活继续登记
+        if stage == STAGE_DONE and not slots_kept.get("booked"):
+            revived = revive_from_done(state, text, now)
+            if revived is not None:
+                state["node"] = revived.stage
+                return revived
         # done 也表示拒绝/交人工，只有 booked 才能声称已经预约。
         # 拒绝后的普通确认不再借用材料 FAQ 或审核模型重启邀约。
         if not slots_kept.get("booked") and (
@@ -881,6 +897,11 @@ async def a_step(
          (stage == STAGE_SEND_INFO and slots.get("interview_offer_sent")))
         and is_disagree(text) and not looks_like_question(text)
     ):
+        # P0-2：拒绝词句里混着意向/登记/询问信号时不判拒，走正常分支
+        handled = _handle_mixed_refusal(state, slots, text, stage, when, now, kb_answer)
+        if handled is not None:
+            state["node"] = handled.stage
+            return handled
         return _decline_interview(state, slots)
 
     # 明确报城市/招聘区域时直接按真实岗位发卡，模型不能把「广东城际」
@@ -900,9 +921,7 @@ async def a_step(
     if (
         (stage == STAGE_ASK_INTERVIEW or
          (stage == STAGE_SEND_INFO and slots.get("interview_offer_sent")))
-        and is_agree(text)
-        and not looks_like_question(text)
-        and not _is_bare_greeting(text)
+        and agrees_to_interview(text)
     ):
         remember_interview_period(slots, text)
         _absorb(slots, text)
@@ -910,7 +929,7 @@ async def a_step(
         if day_offset is not None:
             slots["interview_day_offset"] = day_offset
         when = next_interview(now, _day_offset_of(slots))
-        result = _agree_interview(state, slots, when, now)
+        result = _agree_interview(state, slots, when, now, text=text)
         state["node"] = result.stage
         return result
 
