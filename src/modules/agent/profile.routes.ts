@@ -4,6 +4,9 @@ import { timingSafeEqual } from "node:crypto";
 import { canAccessDevice, getUserScope } from "../../auth/user-scopes.js";
 import { deviceFactoryIds, loadFactories } from "../../shared/device-factories.js";
 import { mediaAssetsByNames, parsePositionMedia, resolveMediaRefs, type ResolvedMedia } from "../../shared/media-assets.js";
+import { createMessageChannelProvider } from "../messaging/message-channel-provider.js";
+import { DeviceBridgeStore } from "../messaging/device-bridge.js";
+import { sendInviteGroupLine } from "../../shared/invite-group.js";
 
 /**
  * 候选人档案接口（4222 侧写入/读取）。
@@ -251,7 +254,47 @@ export async function registerProfileRoutes(app: FastifyInstance, db: DatabaseSy
       throw error;
     }
 
-    return { ok: true, customer_id: String(conversation.customer_id), recruit_status: recruitStatus };
+    // R1：名单自动发内部邀约群（录屏 02:10 实证格式 `深11/9 谢子鑫 18077352958`）。
+    // 只有四要素齐全并判为 invited 才发；发不出去只记错误，绝不影响档案保存。
+    // 幂等键含候选人 event id 与面试日期，重复推送同一人同一天不会刷屏。
+    let inviteGroupStatus = "";
+    if (invited && registrationText) {
+      const eventRow = db.prepare(
+        "SELECT id FROM candidate_events WHERE device_code=? AND customer_id=? AND event_type='invited' ORDER BY id DESC LIMIT 1",
+      ).get(conversation.device_code, String(conversation.customer_id)) as { id: number } | undefined;
+      const sent = await sendInviteGroupLine(
+        db,
+        {
+          deviceCode: conversation.device_code,
+          customerId: String(conversation.customer_id),
+          candidateEventId: eventRow?.id ?? 0,
+          city: merged.city,
+          interviewDate: merged.interview_date,
+          name: merged.name,
+          phone: merged.phone,
+        },
+        {
+          // bridge 通道的 sendMessage 会阻塞等设备回执（最长 30 秒），而名单发群
+          // 只需要「已入队」——键鼠客户端是异步 claim 的，等待必然超时并把状态误记成
+          // failed。这里直接入队后立即返回，真实结果由设备回执推进 bridge_commands。
+          send: async ({ deviceCode, customerId, content, idempotencyKey }) => {
+            if ((process.env.REA_MESSAGE_CHANNEL_PROVIDER ?? "mock") === "bridge") {
+              try {
+                new DeviceBridgeStore(db).enqueue({ deviceCode, customerId, content, idempotencyKey });
+                return { success: true };
+              } catch (error) {
+                return { success: false, error: error instanceof Error ? error.message : "入队失败" };
+              }
+            }
+            const channel = createMessageChannelProvider(undefined, db);
+            return channel.sendMessage({ deviceCode, customerId, content, idempotencyKey });
+          },
+        },
+      );
+      inviteGroupStatus = sent.status;
+    }
+
+    return { ok: true, customer_id: String(conversation.customer_id), recruit_status: recruitStatus, invite_group: inviteGroupStatus };
   });
 
   app.get<{ Querystring: { device_code?: string; customer_id?: string; external_conversation_id?: string } }>("/api/v1/agent/profile", async (request, reply) => {

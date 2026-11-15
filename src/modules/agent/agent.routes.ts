@@ -11,6 +11,7 @@ import { readWeComConfig } from "../wecom/wecom-config.js";
 import { deviceDifyConfig, HttpDifyProvider } from "../dify/dify-provider.js";
 import { listReminderTasks } from "./followup.js";
 import { loadFactories, parseDeviceData, readDeviceFactoryIds } from "../../shared/device-factories.js";
+import { readInviteGroupConfig } from "../../shared/invite-group.js";
 
 export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync, notifier: StreamNotifier = NOOP_NOTIFIER) {
   const messageChannel = createMessageChannelProvider(undefined, db);
@@ -288,19 +289,29 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
   });
   app.get<{ Querystring: { event_type?: string; page?: string; page_size?: string } }>("/api/v1/agent/candidates", async (request) => {
     const page = Math.max(1, Number(request.query.page) || 1), pageSize = Math.min(1000, Math.max(1, Number(request.query.page_size) || 50));
-    const scopeFilter = deviceConstraint(getUserScope(db, request.auth!), "device_code");
+    // 带 JOIN 时条件必须显式前缀：candidate_events 与 bridge_devices 都有
+    // device_code，不加 c. 会报 ambiguous column name（scoped 用户直接 500）。
+    const scopeFilter = deviceConstraint(getUserScope(db, request.auth!), "c.device_code");
     const conditions: string[] = [];
     const params: Array<string | number> = [];
-    if (request.query.event_type) { conditions.push("event_type=?"); params.push(request.query.event_type); }
+    if (request.query.event_type) { conditions.push("c.event_type=?"); params.push(request.query.event_type); }
     if (scopeFilter.sql) conditions.push(scopeFilter.sql.replace(/^ AND /, ""));
     params.push(...scopeFilter.values);
     const where = conditions.length ? ` WHERE ${conditions.join(" AND ")}` : "";
     // Target item has no data_json/updated_at, and does carry wechat_id
     // (stored inside data_json locally since the column doesn't exist).
     const COLUMNS = "id,device_code,customer_id,nickname,event_type,event_at,name,phone,interview_date,interview_time,factory_name,province,city,district,status,remind_count,disqualified_reason,created_at,data_json";
-    const rows = db.prepare(`SELECT ${COLUMNS} FROM candidate_events${where} ORDER BY id DESC LIMIT ? OFFSET ?`).all(...params, pageSize, (page - 1) * pageSize) as Array<Record<string, unknown>>;
+    // 归属账号 = 该设备登录的企微账号（bridge_devices.account_id）。
+    // 候选人表里没有这个字段，页面又必须显示「这条名单是从哪个账号发的」，
+    // 所以在查询里 join 出来；设备没上报过账号时回空串。
+    const rows = db.prepare(`SELECT c.${COLUMNS.split(",").join(",c.")},
+        COALESCE(b.account_id,'') AS account
+       FROM candidate_events c
+       LEFT JOIN bridge_devices b ON b.device_code = c.device_code
+       ${where}
+       ORDER BY c.id DESC LIMIT ? OFFSET ?`).all(...params, pageSize, (page - 1) * pageSize) as Array<Record<string, unknown>>;
     const items = rows.map(serializeCandidate);
-    const total = (db.prepare(`SELECT COUNT(*) count FROM candidate_events${where}`).get(...params) as { count: number }).count;
+    const total = (db.prepare(`SELECT COUNT(*) count FROM candidate_events c${where}`).get(...params) as { count: number }).count;
     return { items, total };
   });
   app.post<{ Body: Record<string, unknown> }>("/api/v1/agent/candidates", async (request, reply) => {
@@ -316,6 +327,75 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     const result = db.prepare("UPDATE candidate_events SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(request.body?.status ?? "marked", Number(request.params.id));
     return result.changes ? db.prepare("SELECT * FROM candidate_events WHERE id=?").get(Number(request.params.id)) : reply.code(404).send({ detail: "候选人不存在" });
   });
+  /**
+   * 候选人列表的「提醒到场」按钮。
+   *
+   * 过去页面只有 remind_count 的展示，没有任何点击入口；「回复规则 → 面试提醒」
+   * 里配的话术也没有读取方。这里用配置话术发一条，成功才累加 remind_count。
+   */
+  app.post<{ Params: { id: string } }>("/api/v1/agent/candidates/:id/remind", async (request, reply) => {
+    const id = Number(request.params.id);
+    const candidate = db.prepare(
+      "SELECT id, device_code, customer_id, interview_date, remind_count FROM candidate_events WHERE id=?",
+    ).get(id) as { id: number; device_code: string; customer_id: string; interview_date: string; remind_count: number } | undefined;
+    if (!candidate) return reply.code(404).send({ detail: "候选人不存在" });
+    if (!canAccessDevice(getUserScope(db, request.auth!), candidate.device_code)) return reply.code(403).send({ detail: "Device scope required" });
+
+    const customerId = Number(candidate.customer_id);
+    if (!Number.isSafeInteger(customerId)) return reply.code(422).send({ detail: "customer_id 无效" });
+
+    let script = "";
+    try {
+      const row = db.prepare("SELECT value_json FROM agent_configs WHERE kind='reminder' AND recruiter_id='global'").get() as { value_json: string } | undefined;
+      const parsed = row ? JSON.parse(row.value_json || "{}") as Record<string, unknown> : {};
+      script = String(parsed.script ?? "").trim();
+    } catch { script = ""; }
+    const content = script || "明天面试记得准时到哈，到了给我发个消息";
+    const remindCount = Number(candidate.remind_count ?? 0);
+
+    try {
+      const sent = await messageChannel.sendMessage({
+        deviceCode: candidate.device_code,
+        customerId,
+        content,
+        idempotencyKey: `remind:${candidate.device_code}:${candidate.customer_id}:${remindCount + 1}`,
+      });
+      if (!sent.success) return reply.code(502).send({ detail: sent.error ?? "发送失败" });
+      db.prepare("UPDATE candidate_events SET remind_count=remind_count+1,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(id);
+      return { success: true, remind_count: remindCount + 1, content };
+    } catch (error) {
+      return reply.code(502).send({ detail: error instanceof Error ? error.message : "发送失败" });
+    }
+  });
+
+  /**
+   * 内部邀约群配置（R1）。
+   *
+   * 客户给的格式是 `深11/9 谢子鑫 18077352958`，城市简写映射表还没给全，
+   * 所以做成可配置：运营在页面上填群名和映射，没配的城市取首字兜底。
+   */
+  app.get("/api/v1/agent/invite-group", async () => readInviteGroupConfig(db));
+  app.put<{ Body: Record<string, unknown> }>("/api/v1/agent/invite-group", async (request, reply) => {
+    if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin access required" });
+    const body = request.body ?? {};
+    const payload = {
+      enabled: body.enabled === true,
+      group_name: String(body.group_name ?? "").trim(),
+      device_code: String(body.device_code ?? "").trim(),
+      city_abbr: body.city_abbr && typeof body.city_abbr === "object" && !Array.isArray(body.city_abbr) ? body.city_abbr : {},
+    };
+    db.prepare(`INSERT INTO agent_configs(kind,recruiter_id,value_json,updated_at) VALUES ('invite_group','global',?,CURRENT_TIMESTAMP)
+      ON CONFLICT(kind,recruiter_id) DO UPDATE SET value_json=excluded.value_json,updated_at=CURRENT_TIMESTAMP`)
+      .run(JSON.stringify(payload));
+    return readInviteGroupConfig(db);
+  });
+  // 发送记录：运营要能查「这条名单到底发出去了没有」
+  app.get<{ Querystring: { limit?: string } }>("/api/v1/agent/invite-group/sends", async (request) => {
+    const limit = Math.min(200, Math.max(1, Number(request.query.limit) || 50));
+    const rows = db.prepare("SELECT * FROM invite_group_sends ORDER BY id DESC LIMIT ?").all(limit) as Array<Record<string, unknown>>;
+    return { items: rows, total: rows.length };
+  });
+
   // Target item shape: id, account, customer_id, nickname, device_code, status,
   // created_at — updated_at is not exposed.
   app.get("/api/v1/agent/old-friends", async (request) => {

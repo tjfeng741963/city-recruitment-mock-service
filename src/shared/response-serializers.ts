@@ -47,6 +47,8 @@ const CANDIDATE_KEYS = [
   "id", "device_code", "customer_id", "nickname", "wechat_id", "event_type", "event_at", "name",
   "phone", "interview_date", "interview_time", "factory_name", "province", "city", "district", "status",
   "remind_count", "disqualified_reason", "created_at", "registration_text",
+  // 归属账号：设备登录的企微账号，由候选人查询 join 出来（不在 candidate_events 表里）。
+  "account",
 ] as const;
 
 const DEVICE_KEYS = [
