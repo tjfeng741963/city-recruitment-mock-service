@@ -14,6 +14,7 @@ import { registerAuthRoutes } from "./auth/auth.routes.js";
 import { AUTH_INVALID, AUTH_MISSING } from "./auth/rbac.js";
 import { collectValidationErrors, matchContract } from "./shared/request-contracts.js";
 import { registerCoreRoutes } from "./modules/core/core.routes.js";
+import { registerPositionFactoryRoutes } from "./modules/core/position-factory.routes.js";
 import { registerGenericRoutes } from "./modules/generic/generic.routes.js";
 import { registerResourceRoutes } from "./modules/resources/resource.routes.js";
 import { registerFileRoutes } from "./modules/files/file.routes.js";
@@ -28,6 +29,8 @@ import { registerProfileRoutes } from "./modules/agent/profile.routes.js";
 import { registerJobRoutes } from "./modules/agent/profile.routes.js";
 import { registerUnknownQuestionRoutes } from "./modules/agent/unknown-questions.routes.js";
 import { registerKbV3Routes } from "./modules/agent/kb-v3.routes.js";
+import { registerKbPublishRoutes } from "./modules/agent/kb-publish.routes.js";
+import { registerPositionScriptRoutes } from "./modules/agent/position-scripts.routes.js";
 import { registerFollowupRoutes } from "./modules/agent/followup.js";
 import { EventBus, createStreamNotifier } from "./modules/messaging/stream-events.js";
 import { registerWeComRoutes } from "./modules/wecom/wecom.routes.js";
@@ -49,6 +52,9 @@ const DEVICE_TOKEN_ROUTES = new Set(["heartbeat", "claim", "receipts", "inbound"
     // 不走用户 JWT（客户端没有登录态）。网页读取走用户鉴权的 /api/v1/agent/... 那侧。
     "POST /api/v1/bridge/devices/:code/login-qr",
     "DELETE /api/v1/bridge/devices/:code/login-qr",
+    // 媒体下载由设备 token 或 X-Profile-Token 鉴权（路由内校验），
+    // 因此这里的 Bearer 不能当用户 JWT 解析，否则设备 token 会被判 401。
+    "GET /api/v1/agent/media/:name",
   ]));
 const PUBLIC_ROUTES = new Set([
   "POST /api/v1/auth/login",
@@ -158,6 +164,10 @@ export function buildServer() {
   registerUnknownQuestionRoutes(app, db);
   // 知识库 v3 配置接口：品类 / 位置树 / 招工方 / 场景问答 / 模板包
   registerKbV3Routes(app, db);
+  registerKbPublishRoutes(app, db);
+  // 岗位话术 + 媒体资源库（迁移 030/031）：后台配置 + 设备端媒体下载
+  registerPositionScriptRoutes(app, db);
+  registerPositionFactoryRoutes(app, db);
   registerFollowupRoutes(app, db);
   registerWeComRoutes(app, db);
   registerActivationRoutes(app, db);

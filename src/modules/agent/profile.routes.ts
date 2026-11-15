@@ -2,14 +2,16 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
 import { timingSafeEqual } from "node:crypto";
 import { canAccessDevice, getUserScope } from "../../auth/user-scopes.js";
+import { deviceFactoryIds, loadFactories } from "../../shared/device-factories.js";
+import { mediaAssetsByNames, parsePositionMedia, resolveMediaRefs, type ResolvedMedia } from "../../shared/media-assets.js";
 
 /**
  * 候选人档案接口（4222 侧写入/读取）。
  *
  * 语义见 docs/候选人档案契约.md：
- * - 档案必须落到 4222 的 agent_conversations，前端（Vue 产物）不做任何改动；
+ * - 档案必须落到 4222 的 agent_conversations，编译后的 Vue 产物不做改动；
  * - POST 幂等 + 部分更新：profile 里出现的键才覆盖，没出现的保持原值；
- * - 有 interview_date -> recruit_status='invited' / state='pending_invite'，并 upsert 一条
+ * - 同意邀约且城市/工厂/姓名/有效手机齐全 -> invited，并 upsert 一条
  *   candidate_events(event_type='invited') 供 /agent/candidates 展示；
  * - stage='gave_up' -> recruit_status='disqualified'，candidate_events 记 'disqualified'。
  *
@@ -95,9 +97,13 @@ function findConversation(db: DatabaseSync, deviceCode: string, customerId: stri
  * 同一个人同一事件类型只保留一条，反复推送只更新时间/字段，不会在候选人页堆重复行。
  */
 function upsertCandidateEvent(db: DatabaseSync, row: ConversationRow, eventType: "invited" | "disqualified", fields: Record<string, string>) {
-  const existing = db.prepare("SELECT id FROM candidate_events WHERE device_code=? AND customer_id=? AND event_type=? ORDER BY id DESC LIMIT 1")
-    .get(row.device_code, String(row.customer_id), eventType) as { id: number } | undefined;
-  const status = eventType;
+  const existing = db.prepare("SELECT id,data_json,status FROM candidate_events WHERE device_code=? AND customer_id=? AND event_type=? ORDER BY id DESC LIMIT 1")
+    .get(row.device_code, String(row.customer_id), eventType) as { id: number; data_json: string; status: string } | undefined;
+  const data = { ...parseJson(existing?.data_json ?? "{}"), source: "profile", customer_id: row.customer_id,
+    ...(fields.registration_text ? { registration_text: fields.registration_text } : {}),
+  };
+  // 档案同步只补资料，不能把运营已经标记的候选人状态改回初始状态。
+  const status = existing?.status || eventType;
   const values = [
     fields.nickname ?? row.nickname,
     fields.name ?? "",
@@ -111,13 +117,13 @@ function upsertCandidateEvent(db: DatabaseSync, row: ConversationRow, eventType:
     status,
   ];
   if (existing) {
-    db.prepare(`UPDATE candidate_events SET nickname=?,name=?,phone=?,interview_date=?,interview_time=?,factory_name=?,province=?,city=?,district=?,status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-      .run(...values, existing.id);
+    db.prepare(`UPDATE candidate_events SET nickname=?,name=?,phone=?,interview_date=?,interview_time=?,factory_name=?,province=?,city=?,district=?,status=?,data_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+      .run(...values, JSON.stringify(data), existing.id);
     return existing.id;
   }
   const inserted = db.prepare(`INSERT INTO candidate_events(device_code,customer_id,nickname,event_type,event_at,name,phone,interview_date,interview_time,factory_name,province,city,district,status,data_json)
     VALUES (?,?,?,?,CURRENT_TIMESTAMP,?,?,?,?,?,?,?,?,?,?)`)
-    .run(row.device_code, String(row.customer_id), values[0], eventType, values[1], values[2], values[3], values[4], values[5], values[6], values[7], values[8], status, JSON.stringify({ source: "profile", customer_id: row.customer_id }));
+    .run(row.device_code, String(row.customer_id), values[0], eventType, values[1], values[2], values[3], values[4], values[5], values[6], values[7], values[8], status, JSON.stringify(data));
   return Number(inserted.lastInsertRowid);
 }
 
@@ -177,19 +183,36 @@ export async function registerProfileRoutes(app: FastifyInstance, db: DatabaseSy
       district: conversation.district ?? "",
     };
     for (const field of COLUMN_FIELDS) {
-      if (has(field)) merged[field] = asText(profile[field]);
+      if (has(field)) merged[field] = asText(profile[field]).trim();
     }
     // 备注：契约里 8090 送的是 notes，前端读的是 remark 列，这里映射一次。
     let remark = conversation.remark ?? "";
     if (has("remark")) remark = asText(profile.remark);
     else if (has("notes")) remark = asText(profile.notes);
 
-    const profileJson = { ...parseJson(conversation.profile_json ?? "{}"), ...profile };
+    const savedProfile = parseJson(conversation.profile_json ?? "{}");
+    const profileJson = { ...savedProfile, ...profile };
 
     const gaveUp = asText(profile.stage) === "gave_up";
-    // 只有本次推送真的带了面试日期才切 invited：否则一次「只改备注」的推送会把
-    // 已经 disqualified 的候选重新拉回面试队列。
-    const invited = !gaveUp && has("interview_date") && merged.interview_date.trim() !== "";
+    // 兼容旧客户端的 collect/booked；显式 false 优先，日期不作为同意凭据。
+    let agreed = profileJson.interview_agreed === true;
+    if (gaveUp) agreed = false;
+    else if (has("interview_agreed")) agreed = profile.interview_agreed === true;
+    else if (profile.stage === "collect" || profile.stage === "booked") agreed = true;
+    profileJson.interview_agreed = agreed;
+    const registration = [merged.city, merged.factory_name, merged.name, merged.phone];
+    const invited = !gaveUp && agreed && registration.every(value => value.trim() !== "") && /^1[3-9][0-9]{9}$/.test(merged.phone);
+    // 摘要由实际合并后的字段生成，不信任调用方传入的拼接文本；record 仍表示案底。
+    const registrationText = invited ? registration.map(value => value.trim()).join(" ") : "";
+    if (registrationText) profileJson.registration_text = registrationText;
+    else delete profileJson.registration_text;
+    // 自动登记摘要占独立一行，更新时只替换上一条摘要，保留人工备注。
+    const previousRegistration = asText(savedProfile.registration_text);
+    const manualRemark = remark.split(/\r?\n/).filter(line =>
+      !(previousRegistration && line.trim() === previousRegistration) &&
+      !(registrationText && line.trim() === registrationText)
+    ).join("\n").trim();
+    remark = [registrationText, manualRemark].filter(Boolean).join("\n");
     let recruitStatus = conversation.recruit_status;
     let state = conversation.state;
     if (gaveUp) recruitStatus = "disqualified";
@@ -197,9 +220,6 @@ export async function registerProfileRoutes(app: FastifyInstance, db: DatabaseSy
       recruitStatus = "invited";
       state = "pending_invite";
     }
-
-    db.prepare(`UPDATE agent_conversations SET name=?,phone=?,remark=?,factory_name=?,interview_date=?,interview_time=?,profile_json=?,province=?,city=?,district=?,recruit_status=?,state=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-      .run(merged.name, merged.phone, remark, merged.factory_name, merged.interview_date, merged.interview_time, JSON.stringify(profileJson), merged.province, merged.city, merged.district, recruitStatus, state, conversation.id);
 
     const row: ConversationRow = { ...conversation, ...merged, remark, recruit_status: recruitStatus, state };
     const eventFields = {
@@ -212,15 +232,23 @@ export async function registerProfileRoutes(app: FastifyInstance, db: DatabaseSy
       province: merged.province,
       city: merged.city,
       district: merged.district,
+      registration_text: registrationText,
     };
-    if (gaveUp) upsertCandidateEvent(db, row, "disqualified", eventFields);
-    else if (invited) {
-      upsertCandidateEvent(db, row, "invited", eventFields);
-      // 沟通中 → 已约面：invited 建好的同一推送里把 pending 的 communicating 收尾
-      convertCommunicatingEvents(db, row);
-    } else if (asText(profile.stage) === "collect") {
-      // collect 阶段只建「沟通中」；部分更新语义不受影响，profile 照常合并
-      ensureCommunicatingEvent(db, row);
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.prepare(`UPDATE agent_conversations SET name=?,phone=?,remark=?,factory_name=?,interview_date=?,interview_time=?,profile_json=?,province=?,city=?,district=?,recruit_status=?,state=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+        .run(merged.name, merged.phone, remark, merged.factory_name, merged.interview_date, merged.interview_time, JSON.stringify(profileJson), merged.province, merged.city, merged.district, recruitStatus, state, conversation.id);
+      if (gaveUp) upsertCandidateEvent(db, row, "disqualified", eventFields);
+      else if (invited) {
+        upsertCandidateEvent(db, row, "invited", eventFields);
+        convertCommunicatingEvents(db, row);
+      } else if (asText(profile.stage) === "collect") {
+        ensureCommunicatingEvent(db, row);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
     }
 
     return { ok: true, customer_id: String(conversation.customer_id), recruit_status: recruitStatus };
@@ -247,6 +275,7 @@ export async function registerProfileRoutes(app: FastifyInstance, db: DatabaseSy
       name: row.name ?? "",
       phone: row.phone ?? "",
       remark: row.remark ?? "",
+      registration_text: asText(profile.registration_text),
       factory_name: row.factory_name ?? "",
       interview_date: row.interview_date ?? "",
       interview_time: row.interview_time ?? "",
@@ -283,13 +312,28 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
    * 之前城市识别是 flow_engine 里硬编码的 3 个城市，后台新建任何城市都认不出来。
    * 只返回招聘中的城市，带上区县别名（「番禺」「龙华」这类客户常说的小地名）。
    */
-  app.get("/api/v1/agent/cities", async (request, reply) => {
+  app.get<{ Querystring: { device_code?: string } }>("/api/v1/agent/cities", async (request, reply) => {
     if (!authorizeProfileRequest(request) && !request.auth) {
       return reply.code(403).send({ detail: "Not authenticated" });
     }
     const rows = db.prepare(
-      "SELECT city_name, province, data_json FROM cities WHERE recruitment_status='enabled' ORDER BY id",
-    ).all() as Array<{ city_name: string; province: string; data_json: string }>;
+      "SELECT id, city_name, province, data_json FROM cities WHERE recruitment_status IN ('enabled','active') ORDER BY id",
+    ).all() as Array<{ id: number; city_name: string; province: string; data_json: string }>;
+    // 周边城市：后台「周边城市设置」配的关系。主城查不到岗位时 Python 侧按这个列表兜底，
+    // 过去这张表只有管理页自己读写，招聘链路里没有任何消费方。
+    const linkRows = db.prepare(
+      `SELECT s.city_name AS city, t.city_name AS neighbor
+         FROM city_links l
+         JOIN cities s ON s.id = l.city_id
+         JOIN cities t ON t.id = l.linked_city_id
+        ORDER BY s.city_name, t.city_name`,
+    ).all() as Array<{ city: string; neighbor: string }>;
+    const neighborsByCity = new Map<string, string[]>();
+    for (const row of linkRows) {
+      const list = neighborsByCity.get(row.city) ?? [];
+      list.push(row.neighbor);
+      neighborsByCity.set(row.city, list);
+    }
     const items = rows.map((row) => {
       let districts: string[] = [];
       try {
@@ -298,34 +342,99 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
           districts = parsed.districts.filter((d): d is string => typeof d === "string" && d.trim() !== "");
         }
       } catch { districts = []; }
-      return { city_name: row.city_name, province: row.province ?? "", districts };
+      return {
+        city_name: row.city_name,
+        province: row.province ?? "",
+        districts,
+        neighbors: neighborsByCity.get(row.city_name) ?? [],
+      };
     });
+    // 设备 → 工厂多选绑定（契约 §5）：绑了厂就只返回这些厂所在城市，
+    // 让 8090 的城市识别不会把设备根本接不了的城市的岗拿出来问。
+    // 没传 device_code / 设备不存在 / 没绑厂 → 原逻辑（全量城市）不变。
+    const citiesDeviceCode = String(request.query.device_code ?? "").trim();
+    if (citiesDeviceCode) {
+      const boundFactoryIds = deviceFactoryIds(db, citiesDeviceCode);
+      if (boundFactoryIds.length) {
+        const boundCities = new Set(loadFactories(db, boundFactoryIds).map((factory) => factory.city_name).filter((name) => name !== ""));
+        const filtered = items.filter((item) => boundCities.has(item.city_name));
+        return { items: filtered, total: filtered.length };
+      }
+    }
     return { items, total: items.length };
   });
 
-  app.get<{ Querystring: { city?: string } }>("/api/v1/agent/jobs", async (request, reply) => {
+  app.get<{ Querystring: { city?: string; device_code?: string } }>("/api/v1/agent/jobs", async (request, reply) => {
     if (!authorizeProfileRequest(request) && !request.auth) {
       return reply.code(403).send({ detail: "Not authenticated" });
     }
     const city = String((request.query as { city?: string }).city ?? "").trim();
     if (!city) return reply.code(422).send({ detail: "city is required" });
 
-    const rows = db.prepare(
+    // 城市「在招」状态的取值不统一：历史数据是 'active'
+    // （response-serializers 的默认值），而 POST /cities 新建时默认写 'enabled'。
+    // 只认 'enabled' 会让存量城市全部查不到岗位 → Python 侧每轮都走
+    // 「已记下，我帮你问问」，自动回复形同停摆（2026-11-14 实测复现）。
+    // 招聘链路必须两种都认；上面 /agent/cities 与下面周边城市兜底同理。
+    //
+    // 设备 → 工厂多选绑定（契约 §4）：设备绑了厂就只出这些厂的岗，避免拿 A 厂
+    // 的号去说 B 厂的待遇。没传 device_code / 设备不存在 / 没绑厂 → 原逻辑不变，
+    // 客户端绝不能因为没绑厂就收不到岗位。
+    const deviceCode = String(request.query.device_code ?? "").trim();
+    const boundFactoryIds = deviceCode ? deviceFactoryIds(db, deviceCode) : [];
+    // id 列表只拼占位符，值全部走参数绑定。
+    const factoryClause = boundFactoryIds.length
+      ? `\n         AND sp.factory_id IN (${boundFactoryIds.map(() => "?").join(",")})`
+      : "";
+    const queryJobs = db.prepare(
       `SELECT sp.id AS position_id, sp.position_name, sp.data_json AS sp_json, f.factory_name, f.data_json AS f_json,
               c.city_name, c.province,
+              e.id AS employer_id,
               v.code AS vertical_code, v.config_json AS vertical_config
        FROM service_positions sp
        LEFT JOIN factories f ON sp.factory_id = f.id
        JOIN cities c ON sp.city_id = c.id
        LEFT JOIN employer e ON e.tenant_id = 1 AND e.display_name = f.factory_name
        LEFT JOIN vertical v ON v.id = e.vertical_id
-       WHERE sp.status='enabled' AND (f.status IS NULL OR f.status='enabled') AND c.recruitment_status='enabled'
-         AND (c.city_name = ? OR c.city_name LIKE '%' || ? || '%')`
-    ).all(city, city) as Array<{
+       WHERE sp.status='enabled' AND (f.status IS NULL OR f.status='enabled')
+         AND c.recruitment_status IN ('enabled','active')
+         AND (c.city_name = ? OR c.city_name LIKE '%' || ? || '%')${factoryClause}`
+    );
+    const queryArgs = (cityName: string): Array<string | number> =>
+      boundFactoryIds.length ? [cityName, cityName, ...boundFactoryIds] : [cityName, cityName];
+    type JobRow = {
       position_id: number; position_name: string; sp_json: string; factory_name: string;
       f_json: string; city_name: string; province: string;
       vertical_code: string | null; vertical_config: string | null;
-    }>;
+    };
+    const rows = queryJobs.all(...queryArgs(city)) as JobRow[];
+
+    /**
+     * 主城查不到岗位时，按后台「周边城市设置」再查一次（东莞没单 → 推广州）。
+     * 过去 city_links 只有管理页自己读写，招聘链路里没有任何消费方；
+     * 返回里带上 cross_city，让回复层知道「这是隔壁城市的岗」，话术要说明。
+     */
+    let crossCity = "";
+    if (!rows.length) {
+      const neighborRows = db.prepare(
+        `SELECT t.city_name AS neighbor
+           FROM city_links l
+           JOIN cities s ON s.id = l.city_id
+           JOIN cities t ON t.id = l.linked_city_id
+          WHERE (s.city_name = ? OR s.city_name LIKE '%' || ? || '%')
+            AND t.recruitment_status IN ('enabled','active')
+          ORDER BY t.city_name`,
+      ).all(city, city) as Array<{ neighbor: string }>;
+      for (const { neighbor } of neighborRows) {
+        const neighborJobs = queryJobs.all(...queryArgs(neighbor)) as JobRow[];
+        if (neighborJobs.length) {
+          rows.push(...neighborJobs);
+          crossCity = neighbor;
+          break;
+        }
+      }
+    }
+
 
     const pick = (raw: string): Record<string, string> => {
       try {
@@ -363,6 +472,27 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
         return out;
       } catch { return {}; }
     };
+    /**
+     * 岗位媒体（契约 §4）：来源是 service_positions.data_json.media（[{name,kind}]），
+     * 这里按 media_assets 补 sha256；查不到的资源直接丢弃，否则会把必然 404 的
+     * 名字交给客户端，回复层念了图却没有文件。
+     *
+     * pick() 只透标量、数组会被它丢掉，所以媒体不能走 pick，单独解析。
+     */
+    const mediaByPosition = new Map<number, ResolvedMedia[]>();
+    {
+      const refsByPosition = new Map<number, ReturnType<typeof parsePositionMedia>>();
+      const names: string[] = [];
+      for (const row of rows) {
+        const refs = parsePositionMedia(row.sp_json);
+        refsByPosition.set(row.position_id, refs);
+        for (const ref of refs) names.push(ref.name);
+      }
+      const assets = mediaAssetsByNames(db, names);
+      for (const [positionId, refs] of refsByPosition) {
+        mediaByPosition.set(positionId, resolveMediaRefs(refs, assets));
+      }
+    }
     const items = rows.map((row) => {
       const sp = pick(row.sp_json);
       const f = pick(row.f_json);
@@ -388,6 +518,9 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
         // 运营在后台填的新字段也不该再改一次代码才能生效。
         ...sp,
         position_id: row.position_id,
+        // 雇主 id：知识库按招工方硬过滤要用它。设备没绑厂/没绑 employer 时
+        // 之前只能落到 global，于是「问工资」会答成别家厂的工价（实测串台）。
+        employer_id: Number((row as { employer_id?: number | null }).employer_id ?? 0) || 0,
         factory_name: row.factory_name,
         job_title: row.position_name,
         // 品类：没有匹配到 employer 时按名字猜（地铁/安检 → 地铁），再不行按工厂
@@ -405,13 +538,19 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
         height_text: String(sp.height_text ?? ""),
         line_text: String(sp.line_text ?? ""),
         ethnicity_policy: String(sp.ethnicity_policy ?? ""),
-        cert_text: String(sp.cert_text ?? ""),
+        // 网页「岗位模板」新增的语义字段保存在 base_sections；材料也必须
+        // 从本岗位读取，不能用整段面试通知或别的基地的通用材料代替。
+        cert_text: String(sp.cert_text || sec.cert_text || ""),
         place: String(sp.place ?? f.place ?? row.factory_name),
         interview_time: String(sp.interview_time ?? f.interview_time ?? ""),
         province: row.province ?? "",
         city: row.city_name,
+        // 主城没单、按后台周边城市兜底取到的岗：回复层要说清「这是隔壁城市的」
+        cross_city: crossCity !== "",
+        // 岗位配图/视频：与话术里的【图片:xxx】对应，客户端按 name 下载本地缓存
+        media: mediaByPosition.get(row.position_id) ?? [],
       };
     });
-    return { items };
+    return { items, cross_city: crossCity, asked_city: city };
   });
 }

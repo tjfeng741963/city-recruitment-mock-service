@@ -30,7 +30,7 @@ interface DeliveryRow {
 export interface InboundMessageResult {
   status: "processed" | "duplicate";
   event_id: string;
-  reply_status: "simulated" | "sent" | "api_accepted" | "human_takeover" | "observe_only" | "failed" | "pending";
+  reply_status: "simulated" | "sent" | "api_accepted" | "human_takeover" | "observe_only" | "old_friend" | "failed" | "pending";
   error?: string;
 }
 
@@ -83,6 +83,17 @@ export class MessageAutomationService {
     // recordEvent/createDelivery/Dify/渠道入队之前返回。
     if (deviceData.observe_only === true) {
       return { status: "processed", event_id: input.eventId, reply_status: "observe_only" };
+    }
+
+    // 老友保护：运营在「老友管理」里标为不可聊（unreleased）的老客户，
+    // AI 不自动回复，只记录消息与未读，等人工处理。
+    // 过去这张表只有读写接口、没人消费，页面承诺的「不自动回复」从未生效。
+    // released = 运营手动放行，照常走自动回复。
+    const oldFriend = this.db.prepare(
+      "SELECT status FROM old_friend_records WHERE device_code=? AND CAST(customer_id AS TEXT)=? ORDER BY id DESC LIMIT 1",
+    ).get(input.deviceCode, String(input.customerId)) as { status: string } | undefined;
+    if (oldFriend && oldFriend.status !== "released") {
+      return { status: "processed", event_id: input.eventId, reply_status: "old_friend" };
     }
 
     const replyEventId = `${input.eventId}:reply`;

@@ -10,6 +10,7 @@ import { NOOP_NOTIFIER, type StreamNotifier } from "../messaging/stream-events.j
 import { readWeComConfig } from "../wecom/wecom-config.js";
 import { deviceDifyConfig, HttpDifyProvider } from "../dify/dify-provider.js";
 import { listReminderTasks } from "./followup.js";
+import { loadFactories, parseDeviceData, readDeviceFactoryIds } from "../../shared/device-factories.js";
 
 export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync, notifier: StreamNotifier = NOOP_NOTIFIER) {
   const messageChannel = createMessageChannelProvider(undefined, db);
@@ -72,7 +73,23 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
   app.get<{ Querystring: { my?: string } }>("/api/v1/agent/devices", async (request) => {
     const rows = db.prepare("SELECT * FROM agent_devices ORDER BY id DESC").all() as Array<Record<string, unknown>>;
     const scope = getUserScope(db, request.auth!);
-    return { items: rows.map(serializeAgentDevice).filter((row) => canAccessDevice(scope, String(row.device_code ?? ""))) };
+    return {
+      // 过滤必须放在 serializeAgentDevice() 之后：表里没有 device_code 列，
+      // 它是 serialize 时从 data_json 里提出来的。直接过滤原始 row 会拿到
+      // undefined，把受限用户的设备列表整片滤空（CI 实测 expected [] 即此因）。
+      // serialize 的声明类型不含 device_code，故显式放宽为字典以通过 typecheck。
+      items: rows
+        .map((row) => {
+          // 设备 → 工厂多选绑定：每行带上 factory_ids 与厂名/城市，
+          // 后台设备列表直接回显多选结果，不用前端再逐台去拉 /factories。
+          const factoryIds = readDeviceFactoryIds(db, parseDeviceData(row.data_json).factory_ids);
+          const serialized = serializeAgentDevice(row) as Record<string, unknown>;
+          return { ...serialized, factory_ids: factoryIds, factories: loadFactories(db, factoryIds) };
+        })
+        // 过滤参数用显式断言：展开后的对象类型不带索引签名，
+        // 直接取 device_code 会报 TS2339（与运行时无关，纯粹是类型推断的坑）。
+        .filter((row) => canAccessDevice(scope, String((row as Record<string, unknown>).device_code ?? ""))),
+    };
   });
   app.post<{ Body: Record<string, unknown> }>("/api/v1/agent/devices", async (request, reply) => {
     if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin required to create devices" });
@@ -94,6 +111,12 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
       return reply.code(404).send({ detail: "设备不存在" });
     }
     const merged = { ...data, ...(request.body ?? {}) } as Record<string, unknown>;
+    // 设备 → 工厂多选绑定：本次提交了 factory_ids 就规范化后落库——
+    // 去重、丢掉非整数与库里不存在的 id（忽略而不是整单 422），空数组 = 不绑任何厂。
+    // 没提交这个键时保持原值，老客户端不受影响（与 vertical_id 的按需校验同一思路）。
+    if ("factory_ids" in (request.body ?? {})) {
+      merged.factory_ids = readDeviceFactoryIds(db, (request.body as Record<string, unknown>).factory_ids);
+    }
     // 品类必填（2026-11-13 与 HR 对齐）：一个微信号只做一个板块，没有综合号。
     // 只在本次请求显式提交了 vertical_id 时校验，避免老客户端改别的字段被挡。
     if ("vertical_id" in (request.body ?? {})) {
@@ -157,7 +180,17 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     const deviceCode = request.query.device_code ?? "";
     if (!canAccessDevice(getUserScope(db, request.auth!), deviceCode)) return reply.code(403).send({ detail: "Device scope required" });
     bridgeStore.expireClaims(deviceCode);
-    const rows = db.prepare("SELECT * FROM agent_messages WHERE device_code=? AND customer_id=? AND id>? ORDER BY created_at, id").all(deviceCode, Number(request.query.customer_id ?? 0), Number(request.query.after_id ?? 0)) as Array<Record<string, unknown>>;
+    const customerId = Number(request.query.customer_id ?? 0);
+    const rows = db.prepare("SELECT * FROM agent_messages WHERE device_code=? AND customer_id=? AND id>? ORDER BY created_at, id").all(deviceCode, customerId, Number(request.query.after_id ?? 0)) as Array<Record<string, unknown>>;
+    // 会话级已读：能拉到消息就说明运营正看着这个会话，未读必须落库清零。
+    //
+    // 之前只有整台设备的 clear-unread，没有会话级入口；前端点开会话时只把数组里的
+    // unread 改成 0，从不发请求，于是 15s 轮询 listConversations 又把库里的原值读回来，
+    // 红点灭而复现。这里挂在唯一必然发生的「打开会话」路径上，刷新和轮询都不会复活。
+    // 不动 updated_at：那列决定列表排序，清未读不该把会话顶到最前。
+    if (Number.isSafeInteger(customerId) && customerId > 0) {
+      db.prepare("UPDATE agent_conversations SET unread=0 WHERE device_code=? AND customer_id=? AND unread<>0").run(deviceCode, customerId);
+    }
     // 会话页按 role 决定气泡左右；agent_messages 只有 direction，这里补一层映射。
     return { items: rows.map((row) => ({ ...row, role: row.direction === "inbound" ? "customer" : "agent" })), takeover: false };
   });
@@ -298,7 +331,7 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
       return reply.code(400).send({ detail: "device_code and customer_id are required" });
     }
     if (!canAccessDevice(getUserScope(db, request.auth!), String(body.device_code))) return reply.code(403).send({ detail: "Device scope required" });
-    const result = db.prepare("INSERT INTO old_friend_records(account,customer_id,nickname,device_code,status) VALUES (?,?,?,?,?)").run(String(body.account ?? ""), String(body.customer_id), String(body.nickname ?? ""), String(body.device_code), String(body.status ?? "released"));
+    const result = db.prepare("INSERT INTO old_friend_records(account,customer_id,nickname,device_code,status) VALUES (?,?,?,?,?)").run(String(body.account ?? ""), String(body.customer_id), String(body.nickname ?? ""), String(body.device_code), body.status === "released" ? "released" : "unreleased");
     return db.prepare("SELECT * FROM old_friend_records WHERE id=?").get(Number(result.lastInsertRowid));
   });
   app.put<{ Params: { id: string } }>("/api/v1/agent/old-friends/:id/release", async (request, reply) => {
@@ -310,7 +343,9 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
   app.put<{ Params: { id: string } }>("/api/v1/agent/old-friends/:id/unrelease", async (request, reply) => {
     const friend = db.prepare("SELECT device_code FROM old_friend_records WHERE id=?").get(Number(request.params.id)) as { device_code: string } | undefined;
     if (!friend || !canAccessDevice(getUserScope(db, request.auth!), friend.device_code)) return reply.code(404).send({ detail: "Old friend not found" });
-    const result = db.prepare("UPDATE old_friend_records SET status='active',updated_at=CURRENT_TIMESTAMP WHERE id=?").run(Number(request.params.id));
+    // 前端词表只有 released / unreleased（可聊 / 不可聊），写 'active' 会让行内
+    // 徽标与三个计数卡都对不上，所以这里必须用 unreleased。
+    const result = db.prepare("UPDATE old_friend_records SET status='unreleased',updated_at=CURRENT_TIMESTAMP WHERE id=?").run(Number(request.params.id));
     return result.changes ? { success: true } : reply.code(404).send({ detail: "Old friend not found" });
   });
   app.delete<{ Params: { id: string } }>("/api/v1/agent/old-friends/:id", async (request, reply) => {

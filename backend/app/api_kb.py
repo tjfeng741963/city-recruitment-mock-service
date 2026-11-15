@@ -11,15 +11,19 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
+import re
 
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 
 from .deps import AdminUser, CurrentUser, ServiceOrUser, SessionDep
-from .models_kb import DEFAULT_TENANT_ID, KbCategory, KbEntry, KbFragment
+from .models_kb import DEFAULT_TENANT_ID, KbCategory, KbEntry, KbFragment, KbFaq
 from .services.kb_answer import answer as generate_answer
 from .services.kb_search import SearchQuery, extract_age_from_query, search
+from .services.kb_policy import shared_answer_allowed
+from .services.kb_faq import _PLACEHOLDER_KEYS
 from .services.llm_provider import OpenAICompatibleProvider
 from .settings import settings
 
@@ -85,6 +89,7 @@ class EntryOut(BaseModel):
     title: str
     category_id: int | None
     city: str | None
+    factory_name: str | None
     age_min: int | None
     age_max: int | None
     wage_min: float | None
@@ -266,6 +271,67 @@ def _build_search_text(payload: EntryIn) -> str:
     return " ".join(p for p in parts if p).strip()
 
 
+def _legacy_shared_allowed(kind: str, factory: str | None, title: str, body: str, fragments: list[str]) -> bool:
+    return kind != "script" or bool((factory or "").strip()) or shared_answer_allowed(
+        title, "\n".join([body, *fragments]),
+    )
+
+
+def _check_legacy_write(payload: EntryIn) -> None:
+    if not _legacy_shared_allowed(payload.kind, payload.factory_name, payload.title, payload.body,
+                                  [fragment.content or "" for fragment in payload.fragments]):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            "旧知识库中的工资、厂规话术必须填写真实工厂归属；无厂归属的通用话术不能承诺招聘条件。")
+
+
+def _json_list(raw: str) -> list[str]:
+    try:
+        value = json.loads(raw)
+        return [str(item) for item in value] if isinstance(value, list) else []
+    except (TypeError, ValueError):
+        return []
+
+
+@router.get("/governance/audit")
+async def audit_governance(session: SessionDep, admin: AdminUser) -> dict:
+    """只读检查真实 Python 知识库；不推断归属，不同步或迁移数据。"""
+    del admin
+    faqs = (await session.execute(select(KbFaq).where(KbFaq.tenant_id == DEFAULT_TENANT_ID))).scalars().all()
+    entries = (await session.execute(select(KbEntry).where(KbEntry.tenant_id == DEFAULT_TENANT_ID))).scalars().all()
+    fragments = (await session.execute(select(KbFragment).join(KbEntry, KbFragment.entry_id == KbEntry.id)
+                                      .where(KbEntry.tenant_id == DEFAULT_TENANT_ID))).scalars().all()
+    fragments_by_entry: dict[int, list[str]] = {}
+    for fragment in fragments:
+        fragments_by_entry.setdefault(fragment.entry_id, []).append(fragment.content or "")
+    items = []
+    field_pattern = re.compile(r"\{([^{}\n|]{1,40})(?:\|([^{}\n]{1,200}))?\}")
+    fact_fields = {*_PLACEHOLDER_KEYS, *_PLACEHOLDER_KEYS.values()}
+    render_fields = fact_fields | {"employer", "address", "walk_guide", "interview_time"}
+    for faq in faqs:
+        if faq.scope_level not in {"position", "employer"}:
+            code = None
+            if not shared_answer_allowed(faq.question, faq.answer, keywords=_json_list(faq.keywords),
+                                         media=_json_list(faq.media), fact_fields=fact_fields):
+                code = "shared_policy"
+            elif (any(match.group(1) not in render_fields or match.group(2) is not None
+                      for match in field_pattern.finditer(faq.answer))
+                  or re.search(r"[{}]", field_pattern.sub("", faq.answer))):
+                code = "shared_placeholder"
+            if code:
+                items.append({"table": "kb_faq", "id": faq.id, "question": faq.question, "answer": faq.answer,
+                              "status": faq.status, "scope_level": faq.scope_level, "code": code})
+    for entry in entries:
+        if not _legacy_shared_allowed(entry.kind, entry.factory_name, entry.title, entry.body, fragments_by_entry.get(entry.id, [])):
+            items.append({"table": "kb_entry", "id": entry.id, "question": entry.title, "answer": entry.body,
+                          "status": entry.status, "factory_name": entry.factory_name, "code": "unscoped_legacy_policy"})
+    return {"source": "python", "faq_total": len(faqs), "legacy_total": len(entries), "needs_review": len(items), "items": items,
+            "faq_inventory": [{"id": row.id, "question": row.question, "answer": row.answer, "scope_level": row.scope_level,
+                               "vertical_id": row.vertical_id, "scope_location_id": row.scope_location_id,
+                               "scope_employer_id": row.scope_employer_id, "scope_position_id": row.scope_position_id,
+                               "keywords": _json_list(row.keywords), "media": _json_list(row.media),
+                               "priority": row.priority, "status": row.status} for row in faqs]}
+
+
 @router.get("/entries", response_model=list[EntryOut])
 async def list_entries(
     session: SessionDep,
@@ -319,6 +385,7 @@ async def create_entry(payload: EntryIn, session: SessionDep, user: ServiceOrUse
     # ServiceOrUser：除了管理后台的用户 token，4222 的「未知问题转知识库」
     # 也走这条（X-Profile-Token 服务间通道，见 deps.get_service_or_user）。
     del user
+    _check_legacy_write(payload)
     if payload.age_min is not None and payload.age_max is not None:
         if payload.age_min > payload.age_max:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "年龄下限不能大于上限")
@@ -368,6 +435,7 @@ async def update_entry(
     entry = await session.get(KbEntry, entry_id)
     if entry is None or entry.tenant_id != DEFAULT_TENANT_ID:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "条目不存在")
+    _check_legacy_write(payload)
     if (
         payload.age_min is not None
         and payload.age_max is not None
@@ -418,6 +486,10 @@ async def set_entry_status(
     entry = await session.get(KbEntry, entry_id)
     if entry is None or entry.tenant_id != DEFAULT_TENANT_ID:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "条目不存在")
+    if payload.status == "enabled":
+        fragments = (await session.execute(select(KbFragment).where(KbFragment.entry_id == entry.id))).scalars().all()
+        if not _legacy_shared_allowed(entry.kind, entry.factory_name, entry.title, entry.body, [item.content or "" for item in fragments]):
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "请先补齐真实工厂归属或修正招聘政策，再启用这条旧知识库话术。")
     entry.status = payload.status
     await session.commit()
     await session.refresh(entry)

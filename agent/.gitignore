@@ -6,6 +6,9 @@ config.json
 # 心跳/上报游标（含 device_code），每台机器不同
 .report_state.json
 .report_state.json.tmp
+# 已打过首句的会话集合（每台机器不同，勿入库）
+.greeted.json
+.greeted.json.part
 
 # 运行数据
 reply_log.db
