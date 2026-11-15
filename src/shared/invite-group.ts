@@ -21,6 +21,17 @@ export interface InviteGroupConfig {
   deviceCode: string;
   /** 城市名 → 简写映射，如 {"深圳":"深","东莞":"万"} */
   cityAbbr: Record<string, string>;
+  /**
+   * 企业微信群机器人 Webhook 地址（推荐通道）。
+   *
+   * 为什么优先用它：建群本身企业微信没有开放接口，只能人工建一次；建好后
+   * 在群里加一个「群机器人」就能拿到 ，
+   * 后端直接 POST 即可送达。相比键鼠自动化，它不依赖客户端在线、不需要
+   * 按群名搜索定位（搜不到就会拒绝发送），也不会因为群久不活跃被挤出
+   * 本地会话表前 500 条而失败。
+   * 留空则退回原来的客户端发群通道。
+   */
+  webhookUrl: string;
 }
 
 export const DEFAULT_INVITE_GROUP_CONFIG: InviteGroupConfig = {
@@ -28,6 +39,7 @@ export const DEFAULT_INVITE_GROUP_CONFIG: InviteGroupConfig = {
   groupName: "",
   deviceCode: "",
   cityAbbr: {},
+  webhookUrl: "",
 };
 
 export function readInviteGroupConfig(db: DatabaseSync): InviteGroupConfig {
@@ -54,6 +66,7 @@ export function readInviteGroupConfig(db: DatabaseSync): InviteGroupConfig {
     groupName: String(raw.group_name ?? "").trim(),
     deviceCode: String(raw.device_code ?? "").trim(),
     cityAbbr,
+    webhookUrl: String(raw.webhook_url ?? "").trim(),
   };
 }
 
@@ -101,6 +114,49 @@ export interface InviteGroupSendResult {
 }
 
 /**
+ * 只接受企业微信官方群机器人地址。
+ *
+ * 不做「任意 URL 都能填」：这个配置会让服务端主动发 POST，开放出去等于
+ * 把后台变成一个 SSRF 跳板（内网地址、云元数据端点都能打）。只放行
+ * qyapi.weixin.qq.com 的 /cgi-bin/webhook/send，够用且没有开放面。
+ */
+export function isAllowedWebhookUrl(raw: string): boolean {
+  const value = String(raw ?? "").trim();
+  if (!value) return false;
+  let parsed: URL;
+  try { parsed = new URL(value); } catch { return false; }
+  if (parsed.protocol !== "https:") return false;
+  if (parsed.hostname !== "qyapi.weixin.qq.com") return false;
+  if (!parsed.pathname.startsWith("/cgi-bin/webhook/send")) return false;
+  return parsed.searchParams.get("key") !== null && (parsed.searchParams.get("key") ?? "") !== "";
+}
+
+/** 群机器人只认 text/text 或 markdown/text 包体；这里用纯文本，最稳。 */
+export type InviteGroupWebhookSender = (url: string, content: string) => Promise<{ success: boolean; error?: string }>;
+
+export const defaultWebhookSender: InviteGroupWebhookSender = async (url, content) => {
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ msgtype: "text", text: { content } }),
+      signal: AbortSignal.timeout(8000),
+    });
+    const text = await response.text();
+    let data: Record<string, unknown> = {};
+    try { data = text ? JSON.parse(text) as Record<string, unknown> : {}; } catch { data = {}; }
+    // 企微即使 HTTP 200 也可能带 errcode，必须看 body
+    const errcode = Number(data.errcode ?? 0);
+    if (!response.ok || (Number.isFinite(errcode) && errcode !== 0)) {
+      return { success: false, error: `企业微信群机器人返回 ${errcode || response.status}: ${String(data.errmsg ?? text).slice(0, 200)}` };
+    }
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+};
+
+/**
  * 把一行名单发到内部邀约群，并落一条发送记录。
  *
  * 幂等：同一位候选人在同一面试日期只发一次（幂等键带了 event id 与日期）。
@@ -111,7 +167,11 @@ export interface InviteGroupSendResult {
 export async function sendInviteGroupLine(
   db: DatabaseSync,
   input: InviteGroupSendInput,
-  deps: { send: (args: { deviceCode: string; customerId: number; content: string; idempotencyKey: string }) => Promise<{ success: boolean; error?: string }> },
+  deps: {
+    send: (args: { deviceCode: string; customerId: number; content: string; idempotencyKey: string }) => Promise<{ success: boolean; error?: string }>;
+    /** 群机器人发送；不传就用默认 HTTP 实现（测试里替换掉） */
+    webhook?: InviteGroupWebhookSender;
+  },
 ): Promise<InviteGroupSendResult> {
   const config = readInviteGroupConfig(db);
   const content = buildInviteLine({ city: input.city, interviewDate: input.interviewDate, name: input.name, phone: input.phone, cityAbbr: config.cityAbbr });
@@ -129,9 +189,33 @@ export async function sendInviteGroupLine(
     record("skipped", "字段不全：城市/面试日期/姓名/手机号");
     return { status: "skipped", content, reason: "字段不全" };
   }
-  if (!config.enabled || !config.groupName) {
-    record("skipped", "未配置邀约群");
+  if (!config.enabled) {
+    record("skipped", "未启用自动发群");
+    return { status: "skipped", content, reason: "未启用自动发群" };
+  }
+  // 两条通道二选一：配了合法 Webhook 就走机器人（不依赖客户端），
+  // 否则退回客户端发群。两边都没有可用配置时明确跳过，不假装发过。
+  const useWebhook = isAllowedWebhookUrl(config.webhookUrl);
+  if (!useWebhook && !config.groupName) {
+    record("skipped", "未配置邀约群（群名或 Webhook 地址）");
     return { status: "skipped", content, reason: "未配置邀约群" };
+  }
+  if (config.webhookUrl && !useWebhook) {
+    // 填了地址但格式不对：明确记失败，别静默降级到客户端发群——
+    // 运营以为走的是机器人，实际却在依赖某台在线电脑，排查会很痛苦。
+    record("failed", "Webhook 地址无效：只接受 https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...");
+    return { status: "failed", content, reason: "Webhook 地址无效" };
+  }
+
+  if (useWebhook) {
+    const sender = deps.webhook ?? defaultWebhookSender;
+    const sent = await sender(config.webhookUrl, content);
+    if (!sent.success) {
+      record("failed", sent.error ?? "Webhook 发送失败");
+      return { status: "failed", content, reason: sent.error };
+    }
+    record("sent", "");
+    return { status: "sent", content };
   }
 
   const deviceCode = config.deviceCode || input.deviceCode;

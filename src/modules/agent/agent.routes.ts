@@ -11,7 +11,7 @@ import { readWeComConfig } from "../wecom/wecom-config.js";
 import { deviceDifyConfig, HttpDifyProvider } from "../dify/dify-provider.js";
 import { listReminderTasks } from "./followup.js";
 import { loadFactories, parseDeviceData, readDeviceFactoryIds } from "../../shared/device-factories.js";
-import { readInviteGroupConfig } from "../../shared/invite-group.js";
+import { isAllowedWebhookUrl, readInviteGroupConfig } from "../../shared/invite-group.js";
 
 export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync, notifier: StreamNotifier = NOOP_NOTIFIER) {
   const messageChannel = createMessageChannelProvider(undefined, db);
@@ -374,20 +374,48 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
    * 客户给的格式是 `深11/9 谢子鑫 18077352958`，城市简写映射表还没给全，
    * 所以做成可配置：运营在页面上填群名和映射，没配的城市取首字兜底。
    */
-  app.get("/api/v1/agent/invite-group", async () => readInviteGroupConfig(db));
+  // 群机器人 Webhook 里带 key，等同发送凭据：读回来时打码，只让运营知道「配过了」。
+  const maskWebhook = (url: string) => {
+    if (!url) return "";
+    try {
+      const parsed = new URL(url);
+      const key = parsed.searchParams.get("key") ?? "";
+      if (!key) return `${parsed.origin}${parsed.pathname}`;
+      parsed.searchParams.set("key", `${key.slice(0, 8)}****${key.slice(-4)}`);
+      return parsed.toString();
+    } catch { return "****"; }
+  };
+  app.get("/api/v1/agent/invite-group", async () => {
+    const config = readInviteGroupConfig(db);
+    return { ...config, webhookUrl: "", webhookConfigured: Boolean(config.webhookUrl), webhookPreview: maskWebhook(config.webhookUrl) };
+  });
   app.put<{ Body: Record<string, unknown> }>("/api/v1/agent/invite-group", async (request, reply) => {
     if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin access required" });
     const body = request.body ?? {};
+    const current = readInviteGroupConfig(db);
+    // webhook_url 不传 = 保留原值（读回来是打码的，前端不能拿打码值覆盖真值）；
+    // 传空串 = 明确清除。地址必须先过白名单校验，否则后台会变成 SSRF 跳板。
+    const rawWebhook = body.webhook_url;
+    let webhookUrl = current.webhookUrl;
+    if (typeof rawWebhook === "string") {
+      const trimmed = rawWebhook.trim();
+      if (trimmed === "") webhookUrl = "";
+      else if (!isAllowedWebhookUrl(trimmed)) {
+        return reply.code(422).send({ detail: "Webhook 地址无效：只接受 https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..." });
+      } else webhookUrl = trimmed;
+    }
     const payload = {
       enabled: body.enabled === true,
       group_name: String(body.group_name ?? "").trim(),
       device_code: String(body.device_code ?? "").trim(),
       city_abbr: body.city_abbr && typeof body.city_abbr === "object" && !Array.isArray(body.city_abbr) ? body.city_abbr : {},
+      webhook_url: webhookUrl,
     };
     db.prepare(`INSERT INTO agent_configs(kind,recruiter_id,value_json,updated_at) VALUES ('invite_group','global',?,CURRENT_TIMESTAMP)
       ON CONFLICT(kind,recruiter_id) DO UPDATE SET value_json=excluded.value_json,updated_at=CURRENT_TIMESTAMP`)
       .run(JSON.stringify(payload));
-    return readInviteGroupConfig(db);
+    const saved = readInviteGroupConfig(db);
+    return { ...saved, webhookUrl: "", webhookConfigured: Boolean(saved.webhookUrl), webhookPreview: maskWebhook(saved.webhookUrl) };
   });
   // 发送记录：运营要能查「这条名单到底发出去了没有」
   app.get<{ Querystring: { limit?: string } }>("/api/v1/agent/invite-group/sends", async (request) => {

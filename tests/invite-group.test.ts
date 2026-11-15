@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildServer } from "../src/server.js";
-import { buildInviteLine, cityAbbrOf, monthDayOf } from "../src/shared/invite-group.js";
+import { buildInviteLine, cityAbbrOf, isAllowedWebhookUrl, monthDayOf } from "../src/shared/invite-group.js";
 
 /**
  * R1：名单自动发内部邀约群（录屏 02:10 实证）。
@@ -110,7 +110,8 @@ describe("invite group send on candidate registration", () => {
     });
     expect(pushed.json()).toMatchObject({ invite_group: "skipped" });
     expect(app.db.prepare("SELECT COUNT(*) AS n FROM bridge_commands").get()).toMatchObject({ n: 0 });
-    expect(app.db.prepare("SELECT status,error FROM invite_group_sends").get()).toMatchObject({ status: "skipped", error: "未配置邀约群" });
+    // 关闭与未配置现在分开记：运营要能分清「我没打开」还是「我打开了但没配群」
+    expect(app.db.prepare("SELECT status,error FROM invite_group_sends").get()).toMatchObject({ status: "skipped", error: "未启用自动发群" });
   });
 
   it("does not send before the four fields are complete", async () => {
@@ -118,5 +119,89 @@ describe("invite group send on candidate registration", () => {
     const pushed = await pushProfile({ stage: "collect", name: "谢子鑫", phone: "", city: "深圳" });
     expect(pushed.json().recruit_status).not.toBe("invited");
     expect(app.db.prepare("SELECT COUNT(*) AS n FROM bridge_commands").get()).toMatchObject({ n: 0 });
+  });
+});
+
+/**
+ * 群机器人 Webhook 通道。
+ *
+ * 为什么加它：建群企业微信没有开放接口，只能人工建一次；建好后在群里加
+ * 群机器人就是一条固定 URL，后端直接 POST 即可。相比键鼠自动化，它不依赖
+ * 客户端在线、不需要按群名搜索，也不会因群久不活跃被挤出本地会话表而失败。
+ *
+ * 安全：这个配置会让服务端主动发 POST，必须只放行企微官方地址，
+ * 否则后台等于一个 SSRF 跳板（内网、云元数据端点都能打）。
+ */
+describe("invite group webhook", () => {
+  const VALID = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=693a91f6-7xxx-4bc4-97a0-0ec2sifa5aaa";
+
+  it("accepts only the official WeCom group robot endpoint over https", () => {
+    expect(isAllowedWebhookUrl(VALID)).toBe(true);
+    expect(isAllowedWebhookUrl("http://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abc")).toBe(false);
+    expect(isAllowedWebhookUrl("https://qyapi.weixin.qq.com/cgi-bin/webhook/send")).toBe(false);
+    expect(isAllowedWebhookUrl("https://evil.example.com/cgi-bin/webhook/send?key=abc")).toBe(false);
+    expect(isAllowedWebhookUrl("http://169.254.169.254/latest/meta-data")).toBe(false);
+    expect(isAllowedWebhookUrl("https://qyapi.weixin.qq.com/cgi-bin/message/send?key=abc")).toBe(false);
+    expect(isAllowedWebhookUrl("")).toBe(false);
+  });
+
+  it("posts the line to the robot and records it as sent", async () => {
+    process.env.REA_DATABASE_PATH = ":memory:";
+    const { buildServer } = await import("../src/server.js");
+    const app = buildServer();
+    await app.ready();
+    const admin = (await app.inject({ method: "POST", url: "/api/v1/auth/login", payload: { username: "local-admin", password: "local-demo-only" } })).json().access_token;
+    const headers = { authorization: `Bearer ${admin}` };
+
+    await app.inject({ method: "PUT", url: "/api/v1/agent/invite-group", headers, payload: { enabled: true, webhook_url: VALID, city_abbr: { 深圳: "深" } } });
+    // 读回来必须是打码的，且不返回真值
+    const readBack = (await app.inject({ method: "GET", url: "/api/v1/agent/invite-group", headers })).json();
+    expect(readBack).toMatchObject({ enabled: true, webhookConfigured: true });
+    expect(readBack.webhookUrl).toBe("");
+    expect(readBack.webhookPreview).not.toContain("0ec2sifa5aaa");
+
+    const { sendInviteGroupLine } = await import("../src/shared/invite-group.js");
+    const calls: Array<{ url: string; content: string }> = [];
+    const result = await sendInviteGroupLine(app.db, {
+      deviceCode: "local-device-001", customerId: "700001", candidateEventId: 1,
+      city: "深圳", interviewDate: "2026-11-09", name: "谢子鑫", phone: "18077352958",
+    }, {
+      send: async () => { throw new Error("client channel must not be used when webhook is configured"); },
+      webhook: async (url, content) => { calls.push({ url, content }); return { success: true }; },
+    });
+
+    expect(result).toMatchObject({ status: "sent", content: "深11/9 谢子鑫 18077352958" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe(VALID);
+    expect(app.db.prepare("SELECT content,status FROM invite_group_sends").get()).toMatchObject({ content: "深11/9 谢子鑫 18077352958", status: "sent" });
+    await app.close();
+  });
+
+  it("rejects a non-WeCom URL instead of silently falling back to the client", async () => {
+    process.env.REA_DATABASE_PATH = ":memory:";
+    const { buildServer } = await import("../src/server.js");
+    const app = buildServer();
+    await app.ready();
+    const admin = (await app.inject({ method: "POST", url: "/api/v1/auth/login", payload: { username: "local-admin", password: "local-demo-only" } })).json().access_token;
+    const headers = { authorization: `Bearer ${admin}` };
+
+    const rejected = await app.inject({ method: "PUT", url: "/api/v1/agent/invite-group", headers, payload: { enabled: true, webhook_url: "http://169.254.169.254/latest/meta-data" } });
+    expect(rejected.statusCode).toBe(422);
+    expect((await app.inject({ method: "GET", url: "/api/v1/agent/invite-group", headers })).json()).toMatchObject({ webhookConfigured: false });
+
+    // 直接写入非法地址（绕过接口校验）时，发送必须明确失败，不能偷偷走客户端
+    app.db.prepare(`INSERT INTO agent_configs(kind,recruiter_id,value_json) VALUES ('invite_group','global',?)`)
+      .run(JSON.stringify({ enabled: true, group_name: "内部邀约群", webhook_url: "https://evil.example.com/x?key=1" }));
+    const { sendInviteGroupLine } = await import("../src/shared/invite-group.js");
+    const result = await sendInviteGroupLine(app.db, {
+      deviceCode: "local-device-001", customerId: "700001", candidateEventId: 2,
+      city: "深圳", interviewDate: "2026-11-09", name: "谢子鑫", phone: "18077352958",
+    }, {
+      send: async () => { throw new Error("must not fall back to client"); },
+      webhook: async () => ({ success: true }),
+    });
+    expect(result.status).toBe("failed");
+    expect(app.db.prepare("SELECT status,error FROM invite_group_sends").get()).toMatchObject({ status: "failed" });
+    await app.close();
   });
 });

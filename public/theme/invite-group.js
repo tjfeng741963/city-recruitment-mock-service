@@ -165,7 +165,17 @@
     form.enabled = enabled;
     wrap.appendChild(field("", enabledRow, "关闭时名单只落库不发群，发送记录里记为「已跳过」。"));
 
-    wrap.appendChild(field("群名称", input("groupName", "例如：内部邀约群"), "客户端会把这个名字输进企微搜索框来定位会话，必须和企微里的群名完全一致。"));
+    wrap.appendChild(field("群名称", input("groupName", "例如：内部邀约群"), "客户端会把这个名字输进企微搜索框来定位会话，必须和企微里的群名完全一致。只在「用客户端发群」时需要。"));
+
+    // 群机器人 Webhook（推荐通道）：填了就走 HTTP POST，不依赖任何客户端。
+    // 读回来是打码的（带 key 等同发送凭据），留空表示「不修改」。
+    wrap.appendChild(field(
+      "群机器人 Webhook（推荐）",
+      input("webhookUrl", "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..."),
+      "企业微信群里加「群机器人」后复制的地址。填了就优先走它：不依赖客户端、不用搜群名。地址会打码显示，留空表示不修改。",
+    ));
+    form.webhookHint = el("p", "rk-ig-hint", "");
+    wrap.appendChild(form.webhookHint);
 
     var select = el("select", "rk-ig-select");
     select.id = "rk-ig-device";
@@ -331,6 +341,14 @@
     var cfg = config || {};
     if (form.enabled) form.enabled.checked = cfg.enabled === true;
     if (form.groupName) form.groupName.value = text(cfg.groupName);
+    if (form.webhookUrl) form.webhookUrl.value = "";
+    if (form.webhookHint) {
+      const configured = cfg.webhookConfigured === true;
+      form.webhookHint.textContent = configured
+        ? `已配置：${text(cfg.webhookPreview) || "****"}（留空保存表示不修改）`
+        : "尚未配置 Webhook；未配置时走客户端发群（需填群名）。";
+      form.webhookHint.style.color = configured ? "#166534" : "#92400e";
+    }
     if (form.deviceCode) {
       while (form.deviceCode.options.length > 1) form.deviceCode.remove(1);
       state.devices.forEach(function (device) {
@@ -379,6 +397,9 @@
       device_code: form.deviceCode ? text(form.deviceCode.value).trim() : "",
       city_abbr: currentMap(),
     };
+    // 留空 = 不修改（读回来是打码值，不能拿它覆盖真值）；填了就校验并保存
+    const webhookInput = form.webhookUrl ? text(form.webhookUrl.value).trim() : "";
+    if (webhookInput) payload.webhook_url = webhookInput;
     api("PUT", "/api/v1/agent/invite-group", payload)
       .then(function (config) {
         fillConfig(config);
