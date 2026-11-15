@@ -26,6 +26,7 @@ from .deps import ServiceOrUser, SessionDep
 from .services import agent_session
 from .services import flow_session as store
 from .services import kb_faq, kb_placeholder, profile_push, unknown_questions
+from .services import old_friend
 from .services import flow_graph
 from .services import device_scripts
 from .services.device_scripts import (
@@ -537,6 +538,9 @@ async def flow_answer(
 
     # 事件先落库，推送再尽力而为：推失败不回滚、不影响回复
     out_profile = profile_push.build_profile(result.slots, result.stage, result.action)
+    # 老客户识别只认客户自述（「我之前来过」「上次面试」），命中就随档案推给 4222，
+    # 那边落 old_friend_records(status='unreleased')，入站拦截随即生效。
+    out_profile.update(old_friend.old_friend_fields(payload.text))
     if (profile_records or result.action) and profile_push.has_content(out_profile):
         try:
             await profile_push.push(device_code, payload.session_key, out_profile)

@@ -193,6 +193,21 @@ export async function registerProfileRoutes(app: FastifyInstance, db: DatabaseSy
     if (has("remark")) remark = asText(profile.remark);
     else if (has("notes")) remark = asText(profile.notes);
 
+    // 老客户（客户原话：「从客户聊天后，ai 判断转为老友」）：
+    // 8090 只在客户自述「我之前来过」这类话时带 old_friend=true。
+    // 落库为 unreleased（不可聊）——入站拦截随即生效，AI 不再自动回复，
+    // 等运营在「老友管理」里放行。人工已放行过的（released）不被覆盖。
+    if (has("old_friend") && profile.old_friend === true) {
+      const existingFriend = db.prepare(
+        "SELECT id FROM old_friend_records WHERE device_code=? AND CAST(customer_id AS TEXT)=? ORDER BY id DESC LIMIT 1",
+      ).get(conversation.device_code, String(conversation.customer_id)) as { id: number } | undefined;
+      if (!existingFriend) {
+        db.prepare("INSERT INTO old_friend_records(account,customer_id,nickname,device_code,status,data_json) VALUES (?,?,?,?,?,?)")
+          .run("", String(conversation.customer_id), conversation.nickname ?? "", conversation.device_code, "unreleased",
+            JSON.stringify({ source: "ai", reason: asText(profile.old_friend_reason) }));
+      }
+    }
+
     const savedProfile = parseJson(conversation.profile_json ?? "{}");
     const profileJson = { ...savedProfile, ...profile };
 
