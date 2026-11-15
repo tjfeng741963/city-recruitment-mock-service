@@ -140,6 +140,34 @@
 
   const idsOf = (device) => (Array.isArray(device?.factory_ids) ? device.factory_ids : []).map(Number).filter((id) => id > 0);
 
+  // 地铁安检不该出现在「绑定工厂」里。
+  //
+  // 根因：v3 里地铁安检是 subway 品类的招工方（employer.vertical_id），
+  // 但旧的 factories 表没有品类列，029_kb_real_subway.sql 为了给「安检员」岗位
+  // 挂父节点，把 6 家地铁面试点直接插进了 factories，于是绑定抽屉按 /factories
+  // 全量列出时，它们和松下万宝、广州酒家混在一起，没有任何依据能区分。
+  //
+  // 这里不靠猜关键字（「地铁」「安检」这种名字匹配迟早误伤真实工厂），
+  // 而是拿招工方表的 subway 品类名单做权威比对，按 display_name ↔ factory_name 对上。
+  // 取不到名单时降级为「不过滤」——宁可多显示几个，也不能让抽屉打不开。
+  let subwayCache = { at: 0, names: new Set() };
+  async function subwayNames(force = false) {
+    if (!force && subwayCache.names.size && Date.now() - subwayCache.at < 300_000) return subwayCache.names;
+    try {
+      const verticals = await api("/api/v1/verticals");
+      const subway = (verticals.items || []).find((row) => String(row.code) === "subway");
+      if (!subway) return subwayCache.names;
+      const employers = await api(`/api/v1/employers?vertical_id=${Number(subway.id)}`);
+      subwayCache = {
+        at: Date.now(),
+        names: new Set((employers.items || []).map((row) => String(row.display_name || "")).filter(Boolean)),
+      };
+    } catch {
+      // 品类接口没有权限或尚未配置时保持原样：不隐藏任何工厂。
+    }
+    return subwayCache.names;
+  }
+
   // 行内文案优先用接口回传的 factories（带厂名/城市名）；老接口没有这个字段时按 id 反查工厂缓存。
   function boundNames(device) {
     const list = Array.isArray(device?.factories) ? device.factories : [];
@@ -385,8 +413,14 @@
       }
     });
 
+    // 过滤地铁安检：按招工方表 subway 品类的 display_name 比对。
+    // 已勾选的保留——老设备如果历史上绑过安检，还得能在抽屉里取消，否则就永久绑死了。
+    const pickable = (items, hidden) =>
+      items.filter((factory) => selected.has(factory.id) || !hidden.has(factory.name));
+
     try {
-      render(await factories());
+      const [all, hidden] = await Promise.all([factories(), subwayNames()]);
+      render(pickable(all, hidden));
     } catch (caught) {
       loading.remove();
       error.textContent = `工厂加载失败：${caught.message}`;
