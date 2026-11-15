@@ -67,6 +67,20 @@ function asText(value: unknown): string {
   return "";
 }
 
+/** kb_faq.keywords 是 JSON 数组字符串；坏数据退化成空数组，不影响匹配。 */
+function parseFaqKeywords(raw: unknown): string[] {
+  if (Array.isArray(raw)) return raw.map((item) => asText(item).trim()).filter(Boolean);
+  if (typeof raw !== "string" || !raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed.map((item) => asText(item).trim()).filter(Boolean);
+  } catch {
+    /* 坏数据不阻塞匹配 */
+  }
+  return [];
+}
+void parseFaqKeywords; // kb-match 暂用旧表，保留给将来切 kb_faq 时用
+
 function parseJson(value: string): Record<string, unknown> {
   try {
     const parsed: unknown = JSON.parse(value || "{}");
@@ -307,6 +321,12 @@ export async function registerJobRoutes(app: FastifyInstance, db: DatabaseSync) 
     if (!text) return reply.code(422).send({ detail: "text is required" });
     const cityHint = String(request.query.city ?? "").trim();
 
+    // 这里保持读旧表 knowledge_items，**不要**改读 kb_faq。
+    // 原因：Python 回复链路已经先用 kb_faq 硬过滤检索（services/kb_faq.py），
+    // 本接口是「kb_faq 未命中时」的兜底层，专门捞历史后台条目。
+    // 两边都读 kb_faq 会变成同一库查两遍，且 kb_faq 的关键词更宽，
+    // 会把本该 miss 的问法误命中（2026-11-15 实测：闲聊问法命中了面试话术）。
+    // 页面写入已改到 kb_faq（knowledge-compat.routes.ts），那部分由 Python 直接消费。
     const rows = db.prepare(
       "SELECT id, title, content, data_json FROM knowledge_items WHERE status='enabled' ORDER BY id",
     ).all() as Array<{ id: number; title: string; content: string; data_json: string }>;

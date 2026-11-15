@@ -101,6 +101,10 @@ describe("agent jobs feed mapping", () => {
   });
 
   it("matches backoffice knowledge so what operators type is actually used", async () => {
+    // 2026-11-15 衔接调整后的语义：
+    //   页面 /api/v1/knowledge 写入 → kb_faq（Python 回复链路第①级直接命中）
+    //   /api/v1/agent/kb-match 仍是第③级兜底，读历史表 knowledge_items
+    // 所以这里分开验证：新写的进 kb_faq，兜底层仍受鉴权保护且不乱命中。
     const created = await app.inject({
       method: "POST",
       url: "/api/v1/knowledge",
@@ -109,14 +113,21 @@ describe("agent jobs feed mapping", () => {
     });
     expect(created.statusCode).toBe(200);
 
+    // 新写的条目落在 kb_faq，列表能查到（这是 AI 第①级检索的数据源）
+    const listed = await app.inject({
+      method: "GET",
+      url: "/api/v1/knowledge?search=体检要自己出钱吗",
+      headers: admin(),
+    });
+    expect(listed.json().items).toEqual([
+      expect.objectContaining({ question: "体检要自己出钱吗" }),
+    ]);
+
+    // 兜底层仍受服务鉴权保护
     const anonymous = await app.inject({ method: "GET", url: "/api/v1/agent/kb-match?text=体检要钱吗" });
     expect(anonymous.statusCode).toBe(403);
 
-    const hit = await app.inject({ method: "GET", url: "/api/v1/agent/kb-match?text=体检要钱吗", headers: svc });
-    expect(hit.statusCode).toBe(200);
-    expect(hit.json().hit).toMatchObject({ content: expect.stringContaining("体检费") });
-
-    // 匹配不上的问法必须返回 null，不能随便塞一条
+    // 兜底层读历史 knowledge_items；匹配不上必须返回 null，不能瞎命中
     const miss = await app.inject({ method: "GET", url: "/api/v1/agent/kb-match?text=今天天气怎么样", headers: svc });
     expect(miss.json().hit).toBeNull();
   });
