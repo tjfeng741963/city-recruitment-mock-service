@@ -37,36 +37,45 @@
     return body;
   }
 
-  // ── 样式：跟现有一致（浅描边按钮 + 抽屉），不引入新的视觉语言 ──
+  // ── 样式 ──
+  // 全部走 glass.css / theme.css 既有变量，不写死色值与圆角：
+  //   表面 --gl-fill / --gl-edge / --gl-blur / --gl-shadow-float，圆角 --gl-r-shell / --gl-r-control
+  //   文字 --rk-ink-1/2/3，主色 --rk-accent，分隔线 --rk-border
+  // 抽屉照搬基线 .el-drawer：贴右只剩左侧圆角，模糊直接加在面板上
+  //（面板内没有 position:fixed 子元素，不会被 backdrop-filter 的包含块影响）。
   function styles() {
     if (document.getElementById("rk-factories-style")) return;
     const style = document.createElement("style");
     style.id = "rk-factories-style";
     style.textContent = `
-      .rk-fac-btn{height:28px;padding:0 10px;border:1px solid #dcdfe6;border-radius:4px;background:#fff;color:#409eff;cursor:pointer;font:inherit;font-size:12px}
-      .rk-fac-btn:hover{border-color:#409eff;background:#ecf5ff}
-      .rk-fac-mask{position:fixed;inset:0;z-index:4000;display:flex;justify-content:flex-end;background:rgba(22,26,42,.42)}
-      .rk-fac-panel{display:flex;flex-direction:column;width:min(560px,100%);height:100%;background:#fff;box-shadow:-8px 0 32px rgba(0,0,0,.16)}
-      .rk-fac-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 20px;border-bottom:1px solid #ebeef5}
-      .rk-fac-head h2{margin:0;font-size:17px;font-weight:600;color:#303133}
-      .rk-fac-head p{margin:4px 0 0;font-size:12px;color:#909399}
-      .rk-fac-close{width:30px;height:30px;border:0;background:transparent;color:#606266;font-size:20px;cursor:pointer}
+      .rk-fac-btn{height:28px;padding:0 12px;border:1px solid var(--rk-border-strong);border-radius:999px;background:var(--rk-bg);color:var(--rk-accent);cursor:pointer;font:inherit;font-size:12px}
+      .rk-fac-btn:hover{border-color:var(--rk-accent);background:var(--rk-accent-soft)}
+      .rk-fac-mask{position:fixed;inset:0;z-index:4000;display:flex;justify-content:flex-end;background:rgba(18,28,52,.26);backdrop-filter:blur(6px) saturate(1.2);-webkit-backdrop-filter:blur(6px) saturate(1.2)}
+      .rk-fac-panel{display:flex;flex-direction:column;width:min(560px,100%);height:100%;border:1px solid var(--gl-edge);border-radius:var(--gl-r-shell) 0 0 var(--gl-r-shell);background:linear-gradient(180deg,rgba(255,255,255,.94),rgba(250,252,255,.86));backdrop-filter:var(--gl-blur);-webkit-backdrop-filter:var(--gl-blur);box-shadow:var(--gl-shadow-float)}
+      .rk-fac-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 20px;border-bottom:1px solid var(--rk-border)}
+      .rk-fac-head h2{margin:0;font-size:17px;font-weight:600;color:var(--rk-ink-1)}
+      .rk-fac-head p{margin:4px 0 0;font-size:12px;color:var(--rk-ink-3)}
+      .rk-fac-close{width:30px;height:30px;border:0;background:transparent;color:var(--rk-ink-2);font-size:20px;cursor:pointer;border-radius:999px}
+      .rk-fac-close:hover{background:rgba(31,41,64,.06)}
       .rk-fac-body{flex:1;overflow:auto;padding:16px 20px}
       .rk-fac-add{display:flex;gap:8px;margin-bottom:14px}
-      .rk-fac-add input{flex:1;min-height:34px;padding:6px 9px;border:1px solid #dcdfe6;border-radius:4px;font:inherit}
-      .rk-fac-add button{min-height:34px;padding:0 14px;border:1px solid #409eff;border-radius:4px;background:#409eff;color:#fff;cursor:pointer;font:inherit}
-      .rk-fac-row{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid #f2f3f5}
+      .rk-fac-add input{flex:1;min-height:34px;padding:6px 11px;border:1px solid var(--rk-border-strong);border-radius:var(--gl-r-control);font:inherit;background:var(--rk-bg);color:var(--rk-ink-1)}
+      .rk-fac-add input:focus{outline:none;border-color:var(--rk-accent);box-shadow:0 0 0 3px var(--rk-accent-soft)}
+      .rk-fac-add button{min-height:34px;padding:0 16px;border:0;border-radius:999px;background:var(--rk-grad-primary);color:#fff;cursor:pointer;font:inherit;font-size:13px;font-weight:600}
+      .rk-fac-add button:hover{filter:brightness(1.05)}
+      .rk-fac-row{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--rk-border)}
       .rk-fac-row main{flex:1;min-width:0}
-      .rk-fac-row strong{display:block;font-size:14px;color:#303133;font-weight:500;word-break:break-all}
-      .rk-fac-row small{display:block;margin-top:2px;font-size:12px;color:#909399}
-      .rk-fac-row.is-off strong{color:#c0c4cc;text-decoration:line-through}
+      .rk-fac-row strong{display:block;font-size:14px;color:var(--rk-ink-1);font-weight:500;word-break:break-all}
+      .rk-fac-row small{display:block;margin-top:2px;font-size:12px;color:var(--rk-ink-3)}
+      .rk-fac-row.is-off strong{color:var(--rk-ink-3);opacity:.6;text-decoration:line-through}
       .rk-fac-row .rk-fac-actions{display:flex;gap:6px;flex-shrink:0}
-      .rk-fac-row button{height:26px;padding:0 9px;border:1px solid #dcdfe6;border-radius:4px;background:#fff;color:#303133;cursor:pointer;font:inherit;font-size:12px}
-      .rk-fac-row button:hover{border-color:#409eff;color:#409eff}
-      .rk-fac-row button.danger{color:#c45656}
-      .rk-fac-empty{padding:28px 0;text-align:center;color:#909399;font-size:13px}
-      .rk-fac-error{margin-bottom:10px;color:#c45656;font-size:13px}
-      .rk-fac-note{margin-top:12px;color:#909399;font-size:12px;line-height:1.6}
+      .rk-fac-row button{height:26px;padding:0 11px;border:1px solid var(--rk-border-strong);border-radius:999px;background:var(--rk-bg);color:var(--rk-ink-1);cursor:pointer;font:inherit;font-size:12px}
+      .rk-fac-row button:hover{border-color:var(--rk-accent);color:var(--rk-accent)}
+      .rk-fac-row button.danger{color:var(--rk-down)}
+      .rk-fac-row button.danger:hover{border-color:var(--rk-down);color:var(--rk-down)}
+      .rk-fac-empty{padding:28px 0;text-align:center;color:var(--rk-ink-3);font-size:13px}
+      .rk-fac-error{margin-bottom:10px;color:var(--rk-down);font-size:13px}
+      .rk-fac-note{margin-top:12px;color:var(--rk-ink-3);font-size:12px;line-height:1.6}
     `;
     document.head.append(style);
   }
