@@ -35,8 +35,15 @@ export class ActivationJobService {
     this.events = events ?? new MessageEventService(db, { webhookSecret: process.env.REA_WEBHOOK_SECRET ?? "local-webhook-secret" });
   }
 
-  enqueueScan(strategy?: ActivationStrategyCode): JobRecord {
-    return this.store.enqueue({ kind: "activation.scan", payload: { strategy: strategy ?? null } });
+  enqueueScan(strategy?: ActivationStrategyCode, customerIds?: string[]): JobRecord {
+    return this.store.enqueue({ kind: "activation.scan", payload: { strategy: strategy ?? null, customer_ids: customerIds ?? null } });
+  }
+
+  /** 手填名单：只对这些客户跑扫描，其他客户不受影响。 */
+  enqueueManualScan(customerIds: string[], strategy?: ActivationStrategyCode): JobRecord {
+    const ids = Array.from(new Set(customerIds.map((id) => String(id ?? "").trim()).filter((id) => id !== "")));
+    if (!ids.length) throw new Error("customer_ids 不能为空");
+    return this.enqueueScan(strategy, ids);
   }
 
   enqueueConfiguredScan(): JobRecord {
@@ -62,7 +69,11 @@ export class ActivationJobService {
       if (!STRATEGIES.includes(strategy)) throw new Error(`Unknown activation strategy: ${strategy}`);
       const config = parseConfig(this.db, strategy);
       if (!config.enabled || globallyPaused) continue;
-      const customerIds = this.customerIds();
+      // 手填名单优先：运营指定了哪几个客户，就只扫这几个，不扩散到全库。
+      const manual = Array.isArray(job.payload.customer_ids)
+        ? (job.payload.customer_ids as unknown[]).map((id) => String(id ?? "").trim()).filter(Boolean)
+        : [];
+      const customerIds = manual.length ? manual : this.customerIds();
       for (const customerId of customerIds) {
         const context = contextFor(this.db, customerId, strategy);
         const result = evaluateActivationRule({ strategy, context, config, globallyPaused, now: this.clock.now() });
