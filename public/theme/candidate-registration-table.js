@@ -44,6 +44,42 @@ export function regionText(row) {
 }
 
 /** 「提醒到场」点击处理：调接口并把结果反馈给操作人。 */
+/**
+ * 手动转老友（客户要的入口）。
+ *
+ * 为什么放在候选人页：运营是在这张表里判断「这人我认识了，别再让 AI 自动回」，
+ * 让他再去对话页找同一个客户是多余的一步。
+ *
+ * 标记后走的是与 AI 自动判定完全相同的表（old_friend_records，status=unreleased），
+ * 入站拦截立刻生效；要恢复自动回复去「老友管理」点「放行」。
+ */
+async function markOldFriend(row) {
+  const token = localStorage.getItem("token") || "";
+  const name = row?.nickname || row?.name || row?.customer_id || "该客户";
+  if (!row?.id || !row?.device_code || row?.customer_id === undefined) return;
+  if (!window.confirm(`把「${name}」转为老友？之后 AI 不再自动回复他，需要人工处理。`)) return;
+  try {
+    const response = await fetch("/api/v1/agent/old-friends/mark", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        device_code: row.device_code,
+        customer_id: String(row.customer_id),
+        nickname: row.nickname || row.name || "",
+        status: "unreleased",
+      }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      window.alert(body?.detail || "转为老友失败");
+      return;
+    }
+    window.alert(`已把「${name}」转为老友，AI 将不再自动回复。`);
+  } catch (error) {
+    window.alert(`转为老友失败：${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 async function remindCandidate(row) {
   const token = localStorage.getItem("token") || "";
   const id = row?.id;
@@ -114,6 +150,17 @@ export function addRegistrationColumn(node, createVNode, withCtx) {
         added.push(makeColumn("candidate-status", {
           label: "客户状态", width: 100,
           formatter: (row) => statusLabel(row?.status),
+        }));
+      }
+      if (!existing.has("candidate-old-friend")) {
+        added.push(makeColumn("candidate-old-friend", { label: "老友", width: 90 }, {
+          default: withCtx(({ row }) => [
+            createVNode("button", {
+              type: "button",
+              class: "candidate-remind-btn",
+              onClick: () => markOldFriend(row),
+            }, "转老友"),
+          ]),
         }));
       }
       if (!existing.has("candidate-remind")) {

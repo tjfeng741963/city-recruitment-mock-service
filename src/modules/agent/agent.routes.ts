@@ -176,7 +176,21 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     const result = await new HttpDifyProvider().healthCheck({ baseUrl, apiKey });
     return { device_id: id, base_url: baseUrl, healthy: result.healthy, latency_ms: result.latency_ms, error: result.error };
   });
-  app.get<{ Querystring: { device_code?: string } }>("/api/v1/agent/conversations", async (request, reply) => { const deviceCode = request.query.device_code ?? ""; if (!canAccessDevice(getUserScope(db, request.auth!), deviceCode)) return reply.code(403).send({ detail: "Device scope required" }); bridgeStore.expireClaims(deviceCode); const rows = db.prepare("SELECT * FROM agent_conversations WHERE device_code=? ORDER BY updated_at DESC").all(deviceCode); return { items: rows, total_unread: (rows as Array<Record<string, unknown>>).reduce((sum, row) => sum + Number(row.unread ?? 0), 0) }; });
+  app.get<{ Querystring: { device_code?: string } }>("/api/v1/agent/conversations", async (request, reply) => {
+    const deviceCode = request.query.device_code ?? "";
+    if (!canAccessDevice(getUserScope(db, request.auth!), deviceCode)) return reply.code(403).send({ detail: "Device scope required" });
+    bridgeStore.expireClaims(deviceCode);
+    // is_old_friend 必须由服务端算：对话页的「转为老友」按钮过去只改前端内存，
+    // 刷新/轮询就被列表覆盖回去，运营以为标了其实没标。
+    const rows = db.prepare(`SELECT c.*,
+        EXISTS(SELECT 1 FROM old_friend_records f
+                WHERE f.device_code=c.device_code AND CAST(f.customer_id AS TEXT)=CAST(c.customer_id AS TEXT)) AS is_old_friend
+      FROM agent_conversations c WHERE c.device_code=? ORDER BY c.updated_at DESC`).all(deviceCode) as Array<Record<string, unknown>>;
+    return {
+      items: rows.map((row) => ({ ...row, is_old_friend: Boolean(row.is_old_friend) })),
+      total_unread: rows.reduce((sum, row) => sum + Number(row.unread ?? 0), 0),
+    };
+  });
   app.get<{ Querystring: { device_code?: string; customer_id?: string; after_id?: string } }>("/api/v1/agent/messages", async (request, reply) => {
     const deviceCode = request.query.device_code ?? "";
     if (!canAccessDevice(getUserScope(db, request.auth!), deviceCode)) return reply.code(403).send({ detail: "Device scope required" });
@@ -439,7 +453,22 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
       return reply.code(400).send({ detail: "device_code and customer_id are required" });
     }
     if (!canAccessDevice(getUserScope(db, request.auth!), String(body.device_code))) return reply.code(403).send({ detail: "Device scope required" });
-    const result = db.prepare("INSERT INTO old_friend_records(account,customer_id,nickname,device_code,status) VALUES (?,?,?,?,?)").run(String(body.account ?? ""), String(body.customer_id), String(body.nickname ?? ""), String(body.device_code), body.status === "released" ? "released" : "unreleased");
+    // 幂等：同一台设备同一个客户只保留一条老友记录。
+    // 过去每点一次「转为老友」就 INSERT 一行，重复点会堆出一串重复记录，
+    // 页面上看起来像同一个人被标了多次。
+    const deviceCode = String(body.device_code);
+    const customerId = String(body.customer_id);
+    const status = body.status === "released" ? "released" : "unreleased";
+    const existing = db.prepare(
+      "SELECT id FROM old_friend_records WHERE device_code=? AND CAST(customer_id AS TEXT)=? ORDER BY id DESC LIMIT 1",
+    ).get(deviceCode, customerId) as { id: number } | undefined;
+    if (existing) {
+      db.prepare("UPDATE old_friend_records SET nickname=COALESCE(NULLIF(?, ''), nickname), status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?")
+        .run(String(body.nickname ?? ""), status, existing.id);
+      return db.prepare("SELECT * FROM old_friend_records WHERE id=?").get(existing.id);
+    }
+    const result = db.prepare("INSERT INTO old_friend_records(account,customer_id,nickname,device_code,status) VALUES (?,?,?,?,?)")
+      .run(String(body.account ?? ""), customerId, String(body.nickname ?? ""), deviceCode, status);
     return db.prepare("SELECT * FROM old_friend_records WHERE id=?").get(Number(result.lastInsertRowid));
   });
   app.put<{ Params: { id: string } }>("/api/v1/agent/old-friends/:id/release", async (request, reply) => {

@@ -110,4 +110,44 @@ describe("old friend inbound protection", () => {
     const statuses = (await rows).json().items.map((row: { status: string }) => row.status);
     expect(statuses.every((status: string) => status === "released" || status === "unreleased")).toBe(true);
   });
+
+  // 「手动转老友」入口：客户在候选人页/对话页点一下就能把客户标成老友。
+  // 过去 mark 是纯 INSERT，重复点会堆出多条记录；会话列表也不返回老友状态，
+  // 对话页那个按钮只改内存，刷新就回到未标记。
+  it("marks a customer once even when the button is clicked repeatedly", async () => {
+    const first = await inboundAndDrain({ event_id: "of-m1", contact_id: "wxid_mark_1", nickname: "老客户", content: "在吗" });
+    const customerId = String(first.response.json().customer_id);
+
+    const once = await app.inject({
+      method: "POST", url: "/api/v1/agent/old-friends/mark", headers: admin,
+      payload: { device_code: "pc-old-01", customer_id: customerId, nickname: "老客户" },
+    });
+    expect(once.statusCode).toBe(200);
+    expect(once.json()).toMatchObject({ status: "unreleased" });
+
+    const twice = await app.inject({
+      method: "POST", url: "/api/v1/agent/old-friends/mark", headers: admin,
+      payload: { device_code: "pc-old-01", customer_id: customerId, nickname: "老客户" },
+    });
+    expect(twice.json().id).toBe(once.json().id);
+    expect(app.db.prepare("SELECT COUNT(*) AS n FROM old_friend_records WHERE device_code='pc-old-01' AND CAST(customer_id AS TEXT)=?").get(customerId)).toMatchObject({ n: 1 });
+  });
+
+  it("exposes the old friend flag on the conversation list so the button survives a refresh", async () => {
+    const first = await inboundAndDrain({ event_id: "of-m3", contact_id: "wxid_mark_2", nickname: "老客户", content: "在吗" });
+    const customerId = String(first.response.json().customer_id);
+
+    const before = (await app.inject({ method: "GET", url: "/api/v1/agent/conversations?device_code=pc-old-01", headers: admin })).json();
+    const beforeRow = before.items.find((item: { customer_id: number }) => String(item.customer_id) === customerId);
+    expect(beforeRow.is_old_friend).toBe(false);
+
+    await app.inject({
+      method: "POST", url: "/api/v1/agent/old-friends/mark", headers: admin,
+      payload: { device_code: "pc-old-01", customer_id: customerId, nickname: "老客户" },
+    });
+
+    const after = (await app.inject({ method: "GET", url: "/api/v1/agent/conversations?device_code=pc-old-01", headers: admin })).json();
+    const afterRow = after.items.find((item: { customer_id: number }) => String(item.customer_id) === customerId);
+    expect(afterRow.is_old_friend).toBe(true);
+  });
 });
