@@ -112,7 +112,8 @@ export function serializeServicePosition(row: Row): Row {
   result.interview_days = Array.isArray(result.interview_days) ? result.interview_days : [];
   result.interview_points = Array.isArray(result.interview_points) ? result.interview_points : [];
   const sections = result.base_sections && typeof result.base_sections === "object" ? result.base_sections as Row : {};
-  const sectionKeys = Object.keys(POSITION_DEFAULTS.base_section_labels as Row);
+  // 网页允许新增语义字段；读回时保留它们，否则保存后再次编辑就会丢失。
+  const sectionKeys = [...new Set([...Object.keys(POSITION_DEFAULTS.base_section_labels as Row), ...Object.keys(sections)])];
   result.base_sections = Object.fromEntries(sectionKeys.map((key) => [key, String(sections[key] ?? "")]));
   result.base_section_labels = result.base_section_labels && typeof result.base_section_labels === "object" ? result.base_section_labels : {};
   return result;

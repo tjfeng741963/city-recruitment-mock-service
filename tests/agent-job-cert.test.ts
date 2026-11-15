@@ -47,6 +47,10 @@ describe("position interview materials from the admin form", () => {
       base_sections: { salary_detail: "本岗工资", interview_notice: "原面试通知", cert_text: "无犯罪证明+已体检即可" },
     } });
     expect(saved.statusCode).toBe(200);
+    // 通过网页读回，再提交一次，模拟下一次只改其他字段的正常编辑。
+    const read = (await app.inject({ method: "GET", url: `/api/v1/service-positions/${a}`, headers: admin() })).json();
+    expect(read.base_sections.cert_text).toBe("无犯罪证明+已体检即可");
+    expect((await app.inject({ method: "PUT", url: `/api/v1/service-positions/${a}`, headers: admin(), payload: read })).statusCode).toBe(200);
     const items = await jobs();
     expect(items.find((j) => j.position_id === a)).toMatchObject({ cert_text: "无犯罪证明+已体检即可", wage_text: "本岗工资" });
     expect(items.find((j) => j.position_id === b)).toMatchObject({ cert_text: "身份证原件及本岗要求的复印件", wage_text: "另一岗位工资" });
@@ -59,6 +63,21 @@ describe("position interview materials from the admin form", () => {
 
   it("leaves missing materials empty instead of parsing a notice or borrowing another base", async () => {
     const id = await create("材料待确认", { cert_text: "", base_sections: { cert_text: "", interview_notice: "携带资料：历史通知，尚未核对" } });
+    expect((await jobs()).find((j) => j.position_id === id)?.cert_text).toBe("");
+  });
+
+  it.each([false, true])("keeps facts hidden from the form when saving materials (legacy nesting: %s)", async (nested) => {
+    const facts = { wage_text: "原独立工资", line_text: "原线路", rest_text: "原月休", place: "原面试地点", medical_text: "原体检要求", base_sections: { salary_detail: "原工资模板" } };
+    const id = await create(`原事实保留-${nested}`, nested ? { data_json: facts } : facts);
+    const saved = await app.inject({ method: "PUT", url: `/api/v1/service-positions/${id}`, headers: admin(), payload: {
+      position_name: `原事实保留-${nested}`, base_sections: { salary_detail: "原工资模板", cert_text: "本岗新材料" },
+    } });
+    expect(saved.statusCode).toBe(200);
+    expect((await jobs()).find((j) => j.position_id === id)).toMatchObject({ wage_text: "原独立工资", line_text: "原线路", rest_text: "原月休", place: "原面试地点", medical_text: "原体检要求", cert_text: "本岗新材料" });
+    // 明确清空有值字段必须生效，保留逻辑不能把旧值填回来。
+    const read = saved.json();
+    read.base_sections.cert_text = "";
+    expect((await app.inject({ method: "PUT", url: `/api/v1/service-positions/${id}`, headers: admin(), payload: read })).statusCode).toBe(200);
     expect((await jobs()).find((j) => j.position_id === id)?.cert_text).toBe("");
   });
 });
