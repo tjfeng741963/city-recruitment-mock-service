@@ -19,8 +19,9 @@ from ..models_kb import DEFAULT_TENANT_ID, KbEntry
 from .kb_policy import shared_answer_allowed
 from .question_topics import is_non_wage_cost_question, is_wage_keyword
 
-# 一条话术标题最多能带出多少条：库里会有几百条，全量扫也能接受，但留个上限防跑飞
-MAX_ENTRIES = 500
+# 一条话术标题最多能带出多少条：库里会有几百条，全量扫也能接受，但留个上限防跑飞。
+# 2026-11-15：存量已 534 条，原来上限 500 会让最后 34 条永远不参与匹配。
+MAX_ENTRIES = 2000
 
 # 标题切词时的分隔符：中文标题里常见「体检 / 住宿」「体检报销吗」这类写法
 _SPLIT = re.compile(r"[^\u4e00-\u9fa5A-Za-z0-9]+")

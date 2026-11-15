@@ -101,10 +101,20 @@ def test_send_info_returns_multiple_parts() -> None:
 
 def test_done_goes_silent() -> None:
     state, _ = _run(["广州", "可以", "张三 13800138000"])
-    after = step(state, "我明天几点到？", now=NOW)
+    # 已约后客户只是应答/寒暄：保持静默，不再追问
+    after = step(state, "好的", now=NOW)
     assert after.stage == STAGE_DONE
     assert after.finished is True
     assert after.reply == "" and after.parts == []
+
+
+def test_done_still_answers_fact_question() -> None:
+    """已约客户问「面试在哪儿」不能装死（2026-11-15 实测：连发 4 次同一句/空回复）。"""
+    state, _ = _run(["广州", "可以", "张三 13800138000"])
+    after = step(state, "面试到底在哪儿啊", now=NOW)
+    assert after.stage == STAGE_DONE
+    assert after.reply.strip(), "问事实不能回空"
+    assert "地点：" in after.reply
 
 
 def test_refuse_interview_ends_flow() -> None:

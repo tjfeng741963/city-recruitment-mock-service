@@ -79,9 +79,13 @@ _DISAGREE = (
 _ASK_FORM = ("能不能", "可不可以", "行不行", "来不来", "去不去", "要不要")
 
 # 判断"这句话是不是在问事"，决定要不要走知识库
+# 2026-11-15 真实聊天记录复盘：「宿舍几人间」「多大年龄能做」「一天上几个小时」
+# 「体检费谁出」都因为不含标记词被判成陈述句，直接掉进「答非所问 → 再邀约」。
 _QUESTION_MARKS = (
     "?", "？", "吗", "呢", "多少", "怎么", "怎样", "能不能", "可不可以",
     "行不行", "有没有", "要不要", "是不是", "什么", "几点", "多久", "几号", "哪里", "在哪",
+    "多大", "几个", "几天", "几人间", "几岁", "几小时", "可不可以",
+    "几天休", "包不包", "扣不扣", "管不管",
 )
 
 # 姓名抽取时要排掉的词：两个汉字的常用词太多，不排就会把「手机」当人名
@@ -97,7 +101,12 @@ _NAME_STOPWORDS = {
 # 姓名候选里出现这些字样直接否掉（覆盖组合词，如「下午两点吧」）
 _NAME_BANNED_SUBSTR = ("上午", "下午", "晚上", "早上", "中午", "明天", "今天", "后天",
                        "确认", "手机", "电话", "号码", "面试", "工厂", "报名", "登记",
-                       "注册", "咨询", "了解", "想")
+                       "注册", "咨询", "了解", "想",
+                       # P1-5：改期口语句被当成姓名（实测「能改天吗」被登记成姓名）
+                       "改天", "改期", "改到", "提前", "晚点", "推后", "推迟", "有事",
+                       # P1-6：问句里的名词被当成姓名（「工资多少」→ 姓名=工资多少）
+                       "工资", "多少", "几", "钱", "上班", "时间", "地点", "线路", "收到",
+                       "谢谢", "在吗", "你好", "在不在")
 # 语气尾巴：带这些结尾的 token 是口语应答不是人名
 _NAME_TAIL_CHARS = ("吧", "呀", "呢", "嘛", "啊", "哈", "哦", "噢", "了", "的", "呗", "啦")
 
@@ -552,6 +561,37 @@ def _jobs_of(slots: dict[str, Any]) -> list[dict[str, str]]:
     return jobs_for_city(str(slots.get("city") or ""))
 
 
+def distinct_places(slots: dict[str, Any]) -> list[str]:
+    """当前城市/工厂下岗位的面试地点（基地）去重清单，按岗位顺序。"""
+    places: list[str] = []
+    for job in _jobs_of(slots):
+        place = str(job.get("place") or "").strip()
+        if place and place not in places:
+            places.append(place)
+    return places
+
+
+def select_position_by_place(slots: dict[str, Any], text: str) -> bool:
+    """客户报基地/面试地点（「陈村」「陈村基地」）时钉到对应岗位。
+
+    地铁号一个工厂下多个基地（陈村/竹料），岗位卡按 place 区分。只在
+    ask_city 或首句问过地点后用；抽不到地点就保持原岗位，不乱换。
+    """
+    value = (text or "").strip()
+    if not value:
+        return False
+    for index, job in enumerate(_jobs_of(slots)):
+        place = str(job.get("place") or "").strip()
+        if not place:
+            continue
+        base = re.sub(r"(基地|中心|站|厂区|园区|分部)$", "", place)
+        if place in value or (len(base) >= 2 and base in value):
+            slots["job_index"] = index
+            pin_position(slots, job)
+            return True
+    return False
+
+
 def _job_of(slots: dict[str, Any]) -> dict[str, str]:
     jobs = _jobs_of(slots)
     if not jobs:
@@ -715,6 +755,35 @@ def _closest_period(job: dict[str, Any], desired: str) -> str:
     return best
 
 
+def _first_published_window(job: dict[str, Any]) -> tuple[str, int, int] | None:
+    """岗位公布的第一场（按上午/下午/晚上顺序）。客户没挑场次时用它定时刻。"""
+    for period in ("上午", "下午", "晚上"):
+        selected = _preferred_interview_window(job, period)
+        if selected is not None:
+            return selected
+    return None
+
+
+# 冲突追问的三种说法：同一个客户连问 4 次时不能把这句原样复读 4 遍
+# （2026-11-15 复测：上午/下午冲突时逐字相同连发 4 次，客户以为机器人卡死）。
+_PERIOD_CONFLICT_ASK = (
+    "这个岗位的面试时间是：{published}。暂时无法确认{period}场，可选场次：{options}。哪个已公布的时段方便？",
+    "目前只有{published}这一场，{period}场确实安排不了。要不就这场？你回「可以」我马上给你登记。",
+    "再确认一下：{published}，这是这个岗位唯一在招的场次。能来的话回我一声，名额我先给你留着。",
+)
+
+
+def _period_conflict_text(
+    slots: dict[str, Any], job: dict[str, Any], period: str, window: str
+) -> str:
+    options = _published_windows(job) or window
+    slots["period_conflict"] = int(slots.get("period_conflict") or 0) + 1
+    index = min(slots["period_conflict"], len(_PERIOD_CONFLICT_ASK)) - 1
+    return _PERIOD_CONFLICT_ASK[index].format(
+        published=options, period=period, options=options
+    )
+
+
 def send_info_parts(
     slots: dict[str, Any], when: datetime | None = None, now: datetime | None = None
 ) -> list[str]:
@@ -772,7 +841,11 @@ def _job_card_lines(job: dict[str, Any]) -> list[str]:
             value = str(job.get(key) or "").strip()
             # 空字段不出现：「吃住：」后面空着比不写更奇怪
             if key and label and value:
-                lines.append(f"{label}：{value}")
+                # 值自带标签时不再套一层：4222 把地铁线路写进了 welfare_text
+                # （src/modules/agent/profile.routes.ts），照抄会变成
+                # 「吃住：安排线路：广东城际全线路」这种两层标签的怪句子。
+                own = re.match(r"^([\u4e00-\u9fa5]{2,6})[:：]", value)
+                lines.append(value if own and own.group(1) != label else f"{label}：{value}")
         return lines
 
     # 老路径（没有 schema）：保持原来的五段
@@ -784,7 +857,9 @@ def _job_card_lines(job: dict[str, Any]) -> list[str]:
     ):
         value = str(job.get(key) or "").strip()
         if value:
-            lines.append(f"{label}：{value}")
+            # 值自带标签（「安排线路：…」被写进 welfare_text）时不再套「吃住：」
+            own = re.match(r"^([\u4e00-\u9fa5]{2,6})[:：]", value)
+            lines.append(value if own and own.group(1) != label else f"{label}：{value}")
     return lines
 
 
@@ -892,6 +967,24 @@ def absorb_profile(slots: dict[str, Any], text: str, strict_name: bool = False) 
     _absorb(slots, text, strict_name=strict_name)
 
 
+def acknowledge_contact_update(slots: dict[str, Any], text: str) -> str:
+    """已约客户补发/更正姓名电话：记进 slots 并返回「已更新」话术，没变化返回空串。
+
+    只在整句确实带手机号或明确姓名线索时才动档案——否则「工资多少」会被
+    strict_name 抽成姓名「工资多少」并覆盖旧资料（2026-11-15 实测）。
+    """
+    phone = extract_phone(text)
+    explicit_name = extract_name(text, strict=False)
+    if not phone and not explicit_name:
+        return ""
+    before = (str(slots.get("name") or ""), str(slots.get("phone") or ""))
+    _absorb(slots, text, strict_name=bool(explicit_name))
+    after = (str(slots.get("name") or ""), str(slots.get("phone") or ""))
+    if after != before and all(after):
+        return f"收到，资料我更新好了：{after[0]} {after[1]}，面试安排不变，到了联系我。"
+    return ""
+
+
 def _no_job_parts(city: str) -> list[str]:
     return [
         f"已记下，你找{city}的厂。我帮你问问这边有没有合适的岗位，有消息马上回你。"
@@ -957,14 +1050,18 @@ def _book(
                     period = closest
                     selected = _preferred_interview_window(job, period)
             if selected is None:
-                options = _published_windows(job)
-                hint = f"可选场次：{options}。" if options else ""
                 return FlowResult(
-                    reply=f"这个岗位的面试时间是：{window}。暂时无法确认{period}场，{hint}哪个已公布的时段方便？",
+                    reply=_period_conflict_text(slots, job, period, window),
                     stage=STAGE_COLLECT, slots=slots, source="collect",
                 )
         window, hour, minute = selected
         when = when.replace(hour=hour, minute=minute)
+    else:
+        # 客户没挑场次：日期按默认，时刻必须是岗位公布的第一场，
+        # 不能留 09:00 却对外说「14:00-16:00」（档案推送/到店提醒会对不上）。
+        first = _first_published_window(job)
+        if first is not None:
+            when = when.replace(hour=first[1], minute=first[2])
     pin_position(slots, job)
     slots["interview_at"] = when.isoformat()
     slots["interview_window"] = window
@@ -991,21 +1088,73 @@ def _book(
     )
 
 
+_RESCHEDULE_INTENT = ("改", "换", "调", "推迟", "推后", "顺延", "提前", "晚点", "早点",
+                      "迟到", "晚到", "来不及", "赶不上", "有事")
+
+
+def _reschedule_day(value: str) -> int | None:
+    """改期句里的目标日期：优先取「改到/换到/推迟到」后面的那个词。
+
+    「我明天有事，能改后天吗」里同时有明天和后天，取错就把客户改到明天了。
+    """
+    match = re.search(r"(?:改|换|调|推迟|顺延|推)(?:到|成|为)?\s*(大后天|后天|明天|今天)", value)
+    if match:
+        return extract_day_offset(match.group(1))
+    found = re.findall(r"大后天|后天|明天|今天", value)
+    return extract_day_offset(found[-1]) if found else None
+
+
 def reschedule_interview(state: dict[str, Any], text: str, now: datetime | None = None) -> FlowResult | None:
-    """已约客户明确要求改时段才更新；问句、重复资料及普通闲聊不重约。"""
+    """已约客户要求改时间/改日期：识别口语改期，改不成就说清可选场次。
+
+    2026-11-15 真实聊天记录复盘：人工客服对「我明天有事，能改后天吗」「能改到
+    下午吗」「我晚点到」一律说「可以」，然后给硬截止并重发面试通知。原来的实现
+    只认「面试改到后天下午」这一句机器话，真实说法 8 句里 7 句改不了，还会被
+    「改天行不行」判成流失。
+    """
     slots = state.setdefault("slots", {})
     if not slots.get("booked"):
         return None
-    match = re.fullmatch(
-        r"面试(?:时间)?(?:改为|改到|改成)(?P<day>大后天|后天|明天|今天)?(?P<period>早上|上午|下午|晚上)",
-        (text or "").strip().strip("，,。.！! "),
-    )
-    if not match:
+    value = (text or "").strip().strip("，,。.！!？?~～ ")
+    if not value or not any(word in value for word in _RESCHEDULE_INTENT):
         return None
+    # 改的是联系方式/资料，不是时间：「电话改成139…」以前会被当改期吞掉。
+    if re.search(r"电话|手机|号码|姓名|名字|微信|身份证", value):
+        return None
+    # 只是迟到/晚到，不是改预约：安抚 + 让他到了说一声，不动日期场次。
+    if ("晚点" in value or "迟到" in value or "晚到" in value) and not any(
+        word in value for word in ("改", "换", "调", "推迟", "顺延", "提前")
+    ):
+        return FlowResult(
+            reply="可以，路上注意安全，到了给我发个消息，我在这边等你。",
+            stage=STAGE_DONE, slots=slots, finished=True, source="fact",
+        )
+    offset = _reschedule_day(value)
+    period_word = ""
+    match = re.search(r"(?:改|换|调|推迟|顺延)(?:到|成|为)?\s*(早上|上午|下午|晚上)", value)
+    if match:
+        period_word = match.group(1)
+    else:
+        found = re.findall(r"早上|上午|下午|晚上", value)
+        period_word = found[-1] if found else ""
+    if not period_word:
+        hour = _time_point_hour(value)
+        if hour is not None:
+            period_word = "上午" if hour < 12 else ("下午" if hour < 18 else "晚上")
+    period = _INTERVIEW_PERIODS.get(period_word, "")
+    if offset is None and not period:
+        # 只说了「改天/能改吗」：问清哪天哪个时段，绝不因此判流失。
+        # 但「我改主意了」「换了工作」这类不是改期，交回上层处理。
+        if not re.search(r"改天|改期|换一天|改时间|推迟|提前|顺延|哪天|改到|换个时间", value):
+            return None
+        return FlowResult(
+            reply="可以改，你想改到哪天、哪个时段？我按岗位公布的场次给你重新安排。",
+            stage=STAGE_DONE, slots=slots, finished=True, source="fact",
+        )
     # 只有成功选到岗位现有场次才能改原预约，失败时保留原日期/场次/完成状态。
     updated = dict(slots)
-    updated["interview_period"] = _INTERVIEW_PERIODS[match['period']]
-    offset = extract_day_offset(match['day'] or "")
+    if period:
+        updated["interview_period"] = period
     if offset is not None:
         updated["interview_day_offset"] = offset
         when = next_interview(now, offset)
@@ -1080,6 +1229,36 @@ def step(
         revived = revive_from_done(state, text, now)
         if revived is not None:
             return revived
+        # 已约客户补发/更正姓名电话：记下来并明确回「已更新」，不再重复邀约。
+        if slots.get("booked"):
+            ack = acknowledge_contact_update(slots, text)
+            if ack:
+                return FlowResult(reply=ack, stage=STAGE_DONE, slots=slots,
+                                  finished=True, source="fact")
+        # 已约/已结束后客户还在问事（「面试到底在哪儿啊」）时不能空回复：
+        # a_step 在 done 分支自己答，但确定兜底路径（本函数）以前直接返回
+        # reply=""，客户端只能发一条空消息，客户看到的是机器人「装死」。
+        if looks_like_question(text):
+            fact = _job_fact_answer(slots, text)
+            if fact:
+                return FlowResult(reply="", parts=[fact], stage=STAGE_DONE,
+                                  slots=slots, finished=True, source="fact")
+            if kb_answer:
+                return FlowResult(reply=kb_answer, stage=STAGE_DONE, slots=slots,
+                                  finished=True, source="kb")
+            if slots.get("booked"):
+                # 问的事答不上也不能装死：把已约信息再说一遍，客户至少知道
+                # 该去哪个基地、哪个时段（「我到了找谁」这类问题尤其如此）。
+                when_txt = "，".join(
+                    x for x in (str(slots.get("interview_window") or ""),
+                                str(slots.get("interview_place") or "")) if x
+                )
+                extra = f"（{when_txt}）" if when_txt else ""
+                return FlowResult(
+                    reply=f"你之前已经约好面试啦{extra}，到了直接联系我就行~"
+                          "有其他想了解的也随时问我。",
+                    stage=STAGE_DONE, slots=slots, finished=True, source="fact",
+                )
         return FlowResult(reply="", stage=STAGE_DONE, slots=slots, finished=True)
     # 客户说了「后天/明天/今天」就按他的来，没说才用默认的明天
     day_offset = extract_day_offset(text)
@@ -1141,6 +1320,9 @@ def step(
             return FlowResult(reply=_city_ask(slots), stage=STAGE_ASK_CITY, slots=slots)
         slots["city"] = city
         slots.setdefault("job_index", 0)
+        # 首句问过地点时客户会答「陈村基地」：不按地点选岗就永远发 jobs[0]，
+        # 陈村客户收到竹料的卡。
+        select_position_by_place(slots, text)
         _absorb(slots, text)
         result = enter_info_result(slots, when, now)
         state["stage"] = result.stage
@@ -1164,7 +1346,9 @@ def step(
     if stage == STAGE_ASK_INTERVIEW:
         _absorb(slots, text)
         # 拒绝优先：客户说「这两天不行」里也含「行」，顺序反了就会误约
-        if is_disagree(text):
+        # 已约客户不走拒绝：api_flow 的 done 重激活可能把他带回本阶段，
+        # 「改天行不行」以前在这里被判流失，预约直接作废（2026-11-15 实测）。
+        if is_disagree(text) and not slots.get("booked"):
             # P0-2：混着登记/询问信号的拒绝词句不判拒
             handled = _handle_mixed_refusal(state, slots, text, stage, when, now, kb_answer)
             if handled is not None:
@@ -1301,6 +1485,7 @@ def _route_by_graph(
             return FlowResult(reply=_city_ask(slots), stage=STAGE_ASK_CITY, slots=slots)
         slots["city"] = city
         slots.setdefault("job_index", 0)
+        select_position_by_place(slots, text)
         _absorb(slots, text)
         result = enter_info_result(slots, when, None)
         state["stage"] = result.stage
@@ -1439,6 +1624,13 @@ def _handle_mixed_refusal(
     """
     if not is_disagree(text):
         return None
+    # 「改天行不行 / 能改天吗」是想换个时间，不是不来了：
+    # 直接判 disqualified 会把还能救的客户丢掉（2026-11-15 真实对话复盘）。
+    if ("改天" in text or "改期" in text or "换一天" in text) and looks_like_question(text):
+        return FlowResult(
+            reply="可以，你哪天方便过来？我按你说的日期给你登记。",
+            stage=stage, slots=slots, source="collect",
+        )
     if any(s in text for s in _REFUSAL_REGISTER_SIGNALS):
         remember_interview_period(slots, text)
         _absorb(slots, text, strict_name=True)
@@ -1506,13 +1698,68 @@ def _agree_interview(
 
 _JOB_FACT_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # (快照字段, 触发词)。顺序即优先级：一句话问多个字段时取先命中的。
-    ("wage_text", ("工资", "工价", "多少钱", "薪资", "待遇", "多少钱一天", "多少钱一个月", "多少钱一小时", "一小时多少", "一天多少")),
-    ("hours_text", ("几个小时", "班次", "上班时间", "几点", "长白班", "两班倒", "工时", "休息")),
-    ("age_text", ("年龄", "几岁", "多大", "岁数", "限制吗")),
-    ("welfare_text", ("吃住", "住宿", "包吃", "包住", "宿舍", "福利", "吃怎么")),
-    ("place", ("在哪", "地址", "地点", "哪里面试", "哪儿")),
+    # 2026-11-15 真实聊天记录复盘补齐：面试时间/宿舍/体检/保险/日结/纹身/身高/
+    # 证件这些字段 4222 早就下发了，之前一个触发词都没配，客户问就变「确认一下」。
+    ("wage_text", ("工资", "工价", "多少钱", "薪资", "待遇", "多少钱一天", "多少钱一个月",
+                   "多少钱一小时", "一小时多少", "一天多少", "怎么算", "纯工价")),
+    ("interview_time", ("面试时间", "什么时候面试", "几点面试", "面试几点", "明天几点到",
+                        "什么时候可以面试", "明天能面试", "可以面试吗")),
+    ("hours_text", ("几个小时", "几个钟", "班次", "上班时间", "几点上班", "长白班", "两班倒",
+                    "工时", "上班几个小时")),
+    ("rest_text", ("月休", "休息几天", "几天休", "休假", "一个月几天休息")),
+    ("age_text", ("年龄", "几岁", "多大", "岁数", "限制吗", "超龄")),
+    ("welfare_text", ("吃住", "住宿", "包吃", "包住", "福利", "吃怎么", "包不包吃")),
+    ("dorm_text", ("几人间", "有空调", "热水器", "住的地方", "宿舍怎么样")),
+    # 地铁岗位的线路信息（4222 有时写进 welfare_text，有时写进 line_text/note）
+    ("line_text", ("线路", "哪条线", "安排哪")),
+    # 体检/社保/证件属于「政策口径」，必须走按岗位配好的 FAQ：岗位里的
+    # medical_text 只写「要体检」，不代表报价，抢答会把工价/要求冒充成金额。
+    ("advance_text", ("日结", "预支", "借支", "压工资", "几号发工资", "发工资")),
+    ("tattoo_policy", ("纹身", "刺青", "花臂")),
+    ("height_text", ("身高", "多高")),
+    ("ethnicity_policy", ("民族", "少数民族")),
+    ("place", ("在哪", "地址", "地点", "哪里面试", "哪儿", "怎么走")),
     ("job_title", ("做什么", "什么工作", "干什么的", "什么岗位", "招什么")),
 )
+
+_FACT_LABELS = {
+    "wage_text": "工价",
+    "hours_text": "班次",
+    "rest_text": "月休",
+    "age_text": "年龄要求",
+    "interview_time": "面试时间",
+    "welfare_text": "吃住",
+    "dorm_text": "住宿",
+    "line_text": "安排线路",
+    "medical_text": "体检",
+    "insurance_text": "保险",
+    "advance_text": "发薪/预支",
+    "tattoo_policy": "纹身要求",
+    "height_text": "身高要求",
+    "ethnicity_policy": "民族要求",
+    "cert_text": "证件要求",
+    "place": "地点",
+    "job_title": "岗位",
+    "factory_name": "工厂",
+}
+
+
+def _age_range(age_text: str) -> tuple[int, int] | None:
+    """从「18-45岁」「16到43岁」里取年龄区间。"""
+    numbers = re.findall(r"\d{2}", age_text or "")
+    if len(numbers) >= 2:
+        low, high = int(numbers[0]), int(numbers[1])
+        return (low, high) if low <= high else (high, low)
+    return None
+
+
+def _age_in_text(text: str) -> int | None:
+    """从「我52了」「52岁」里取客户自报年龄。"""
+    match = re.search(r"(\d{2})\s*(?:岁|周岁)", text or "")
+    if match:
+        return int(match.group(1))
+    match = re.search(r"我\s*(?:今年)?\s*(\d{2})(?!\d)", text or "")
+    return int(match.group(1)) if match else None
 
 
 def _job_fact_answer(slots: dict[str, Any], text: str) -> str:
@@ -1525,26 +1772,45 @@ def _job_fact_answer(slots: dict[str, Any], text: str) -> str:
     """
     # “体检多少钱”“体检费从工资扣吗”不能因包含钱/工资而发工价表。
     # 费用政策交给对应的本岗FAQ；没有材料时沿用缺字段待确认路径。
-    if is_non_wage_cost_question(text):
-        return ""
     snapshot = slots.get("job_snapshot") if isinstance(slots.get("job_snapshot"), dict) else {}
     if not snapshot:
         return ""
     lowered = str(text or "")
+    # “体检多少钱”“体检费从工资扣吗”不能因包含钱/工资而发工价表，也不能拿
+    # medical_text（写的是「要不要体检」）充当报价——金额只在按岗位配好的
+    # FAQ 里，没配就承认要确认。这条规则有专门用例守着，别改。
+    if is_non_wage_cost_question(lowered):
+        return ""
+    # 客户自报年龄（「我52了还能去吗」）：直接跟岗位年龄上限比，别装傻。
+    asked_age = _age_in_text(lowered)
+    if asked_age is not None and re.search(r"岁|年龄|还能|能做|可以去|可以不|行不行|要吗", lowered):
+        age_text = str(snapshot.get("age_text") or "").strip()
+        limits = _age_range(age_text)
+        if age_text and limits:
+            if limits[0] <= asked_age <= limits[1]:
+                return f"年龄要求：{age_text}，{asked_age} 岁没问题。"
+            return f"年龄要求：{age_text}，{asked_age} 岁超了，我帮你看看别的岗位？"
     for field, patterns in _JOB_FACT_PATTERNS:
-        if any(p in lowered for p in patterns):
-            value = str(snapshot.get(field) or "").strip()
-            if value:
-                label = {
-                    "wage_text": "工价",
-                    "hours_text": "班次",
-                    "age_text": "年龄要求",
-                    "welfare_text": "吃住",
-                    "place": "地点",
-                    "job_title": "岗位",
-                    "factory_name": "工厂",
-                }.get(field, field)
-                return f"{label}：{value}"
+        if not any(p in lowered for p in patterns):
+            continue
+        value = str(snapshot.get(field) or "").strip()
+        if field == "welfare_text" and value and not re.search(
+            r"吃|住|宿舍|餐|饭|补贴|伙食", value
+        ):
+            # 这个字段填的其实是线路（「安排线路：广东城际全线路」），
+            # 不是吃住：先用独立住宿字段答，没有就交给知识库，绝不冒充吃住。
+            dorm = str(snapshot.get("dorm_text") or "").strip()
+            if dorm:
+                return f"住宿：{dorm}"
+            continue
+        if not value:
+            continue
+        if field == "age_text":
+            asked = _age_in_text(lowered)
+            limits = _age_range(value)
+            if asked and limits and not (limits[0] <= asked <= limits[1]):
+                return f"年龄要求：{value}，{asked} 岁超了，我帮你看看别的岗位？"
+        return f"{_FACT_LABELS[field]}：{value}"
     return ""
 
 
@@ -1579,9 +1845,20 @@ def _answer_side_question(
             source="kb",
         )
     if looks_like_question(text):
+        # 同一个问题连问三次不能收到三句一模一样的话（2026-11-15 实测：
+        # 「要押金吗」连问三次，客户收到三条逐字相同的「确认一下」）。
+        tries = int(slots.get("faq_retries") or 0) + 1
+        slots["faq_retries"] = tries
+        head = (
+            "这个我确认一下，稍后回你"
+            if tries == 1
+            else "这个我得跟厂里再核实一下，确认好马上回你"
+            if tries == 2
+            else "这个问题我已经记下了，核实完第一时间发你"
+        )
         return FlowResult(
             reply="",
-            parts=["这个我确认一下，稍后回你", _faq_retry(stage, slots)],
+            parts=[head, _faq_retry(stage, slots)],
             stage=stage,
             slots=slots,
             unknown_question=text,
