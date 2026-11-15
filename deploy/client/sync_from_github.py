@@ -42,12 +42,31 @@ def _norm(data: bytes) -> bytes:
     return data.replace(b"\r\n", b"\n")
 
 
-def _fetch(ref: str) -> tarfile.TarFile:
+def _fetch_payload(ref: str) -> bytes:
+    """取 tar 包。优先用系统 curl（Windows 自带，走 schannel 证书链）。
+
+    客户端 Python 常缺 CA 证书，直接 urllib 会 SSLCertVerificationError；
+    用系统 curl 既能验证证书，也不用往客户端塞 certifi。
+    """
     url = TARBALL.format(repo=REPO, ref=ref)
+    if shutil.which("curl"):
+        import subprocess
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "repo.tar.gz"
+            subprocess.run(
+                ["curl", "-sSL", "--fail", "-o", str(out), url],
+                check=True, timeout=120,
+            )
+            return out.read_bytes()
     req = urllib.request.Request(url, headers={"User-Agent": "client-sync"})
     with urllib.request.urlopen(req, timeout=60) as resp:
-        payload = resp.read()
-    return tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz")
+        return resp.read()
+
+
+def _fetch(ref: str) -> tarfile.TarFile:
+    return tarfile.open(fileobj=io.BytesIO(_fetch_payload(ref)), mode="r:gz")
 
 
 def _iter_members(archive: tarfile.TarFile):
