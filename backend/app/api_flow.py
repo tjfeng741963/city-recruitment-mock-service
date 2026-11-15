@@ -201,7 +201,23 @@ async def flow_answer(
             [
                 (store.EVENT_INBOUND, {"text": payload.text}),
                 # 关闭语也是实际发出的内容：落 reply 事件，AgentSession 才能读到
-                (store.EVENT_REPLY, {"text": closing, "parts": [closing]}),
+                (
+                    store.EVENT_REPLY,
+                    {
+                        "text": closing,
+                        "parts": [closing],
+                        # 灰度复盘：这条是「客户拒接后的收尾语」，不是普通回复。
+                        # 单独标记出来，才统计得出「说了不去之后还追问」这种红线。
+                        "trace": {
+                            "source": "closing",
+                            "stage_from": stage_before,
+                            "stage_to": "done",
+                            "action": None,
+                            "kb_entry_id": "",
+                            "recruit_status": str(slots.get("recruit_status") or ""),
+                        },
+                    },
+                ),
             ],
         )
         return FlowAnswerOut(
@@ -501,6 +517,7 @@ async def flow_answer(
         inbound_text = (payload.text or "").strip()
         incoming_key = re.sub(r"[\s\W_]+", "", inbound_text)
         reply_key = re.sub(r"[\s\W_]+", "", result.reply)
+        echo_guarded = False
         if (
             len(inbound_text) >= 6
             and incoming_key
@@ -510,6 +527,9 @@ async def flow_answer(
             fallback = (kb_answer or "").strip() or "我在的，你想了解哪方面？工作内容、工资待遇还是面试时间？"
             result.reply = fallback
             result.parts = [fallback]
+            # 灰度复盘要能看出「模型这次复读了，被兜底换掉」——否则会把兜底话术
+            # 误当成模型的正常输出。
+            echo_guarded = True
         # 媒体兜底：命中的条目带【图片/视频:名称】而模型回复里弄丢了 → 补回，
         # 保证客户真的能收到视频/图片（2026-11-12「我的视频呢」教训）
         existing_markers = markers_in(result.reply)
@@ -528,8 +548,30 @@ async def flow_answer(
         # 回声兜底、KB 补媒体/重复答复都发生在审核之后，落库前再统一校验。
         result.parts = filter_parts(result.parts or [result.reply], allowed_media) or ["这个我确认一下，稍后回你"]
         result.reply = "\n".join(result.parts)
+        # 灰度复盘用的诊断：这条回复是谁生成的、走了哪一步、命中了哪条知识库、
+        # 审核动过没有、兜底触发过没有。追加字段不影响回放——project() 只读 text。
+        trace = dict(result.trace or {})
+        trace.update(
+            {
+                "source": result.source,                      # script/card/fact/collect/kb/""
+                "stage_from": stage_before,
+                "stage_to": result.stage,
+                "action": result.action,
+                "kb_entry_id": kb_entry_id or "",
+                "kb_repeat": kb_repeat,
+                "kb_markers": list(kb_markers),
+                "kb_answer_len": len(kb_answer or ""),
+                "city": str(result.slots.get("city") or ""),
+                "position_id": result.slots.get("position_id") or "",
+                "booked": bool(result.slots.get("booked")),
+                "recruit_status": str(result.slots.get("recruit_status") or ""),
+                "echo_guarded": echo_guarded,
+                "kb_natural_rewrite": bool(kb_repeat and kb_entry_id),
+                "media_appended": len(missing_markers),
+            }
+        )
         # parts 一并落库：回放时能看出「那轮其实发了两条」
-        records.append((store.EVENT_REPLY, {"text": result.reply, "parts": result.parts}))
+        records.append((store.EVENT_REPLY, {"text": result.reply, "parts": result.parts, "trace": trace}))
         if kb_entry_id:
             # 记住这条 KB 已对本会话发过：同条目再命中就走短版+补媒体，不重发整段
             records.append((store.EVENT_KB, {"id": kb_entry_id}))

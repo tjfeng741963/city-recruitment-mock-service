@@ -132,6 +132,10 @@ class FlowResult:
     # collect=代码生成的必填资料提示 / kb=知识库原文直答 / 空串=其他。
     # 给审核循环（flow_llm.review_loop）区分「话术只能过或打回渲染层」用。
     source: str = ""
+    # 本轮诊断信息，只用于事后复盘，**不下发客户端**（不进 to_dict）。
+    # 灰度测试要求「每条回复都能查到为什么这么回」，所以在这里攒，
+    # 由 api_flow 一并写进 EVENT_REPLY 的 body。
+    trace: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.parts = [part for part in (self.parts or []) if part]
