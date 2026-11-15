@@ -17,6 +17,7 @@ import { registerCoreRoutes } from "./modules/core/core.routes.js";
 import { registerPositionFactoryRoutes } from "./modules/core/position-factory.routes.js";
 import { registerGenericRoutes } from "./modules/generic/generic.routes.js";
 import { registerResourceRoutes } from "./modules/resources/resource.routes.js";
+import { registerKnowledgeCompatRoutes } from "./modules/agent/knowledge-compat.routes.js";
 import { registerFileRoutes } from "./modules/files/file.routes.js";
 import { registerAgentRoutes } from "./modules/agent/agent.routes.js";
 import { registerActivationRoutes } from "./modules/activation/activation.routes.js";
@@ -146,6 +147,10 @@ export function buildServer() {
   });
   registerAuthRoutes(app, auth);
   registerCoreRoutes(app, db);
+  // knowledge 的旧契约先由兼容层接管（读写 kb_faq，AI 实际回复用的表），
+  // 这样 registerResourceRoutes 里的 knowledge 会跳过，不会重复注册。
+  // 关掉兼容层（REA_KB_COMPAT=off）就回落到旧表 knowledge_items。
+  registerKnowledgeCompatRoutes(app, db);
   registerResourceRoutes(app, db);
   registerFileRoutes(app, db);
   registerAgentRoutes(app, db, notifier);

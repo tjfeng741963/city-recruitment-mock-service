@@ -69,6 +69,20 @@ function asText(value: unknown): string {
   return "";
 }
 
+/** kb_faq.keywords 是 JSON 数组字符串；坏数据退化成空数组，不影响匹配。 */
+function parseFaqKeywords(raw: unknown): string[] {
+  if (Array.isArray(raw)) return raw.map((item) => asText(item).trim()).filter(Boolean);
+  if (typeof raw !== "string" || !raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed.map((item) => asText(item).trim()).filter(Boolean);
+  } catch {
+    /* 坏数据不阻塞匹配 */
+  }
+  return [];
+}
+void parseFaqKeywords; // kb-match 暂用旧表，保留给将来切 kb_faq 时用
+
 function parseJson(value: string): Record<string, unknown> {
   try {
     const parsed: unknown = JSON.parse(value || "{}");

@@ -26,6 +26,11 @@ function rowData(row: Record<string, unknown>): Record<string, unknown> {
   } catch { return {}; }
 }
 
+/** knowledge 的路由是否已被 agent/knowledge-compat.routes.ts 接管（读写 kb_faq）。 */
+function knowledgeCompatEnabled(): boolean {
+  return (process.env.REA_KB_COMPAT ?? "on").trim().toLowerCase() !== "off";
+}
+
 function canAccessResource(resource: Resource, row: Record<string, unknown>, scope: UserScope): boolean {
   if (scope.isAdmin) return true;
   const data = rowData(row);
@@ -159,6 +164,11 @@ export async function registerResourceRoutes(app: FastifyInstance, db: DatabaseS
   // 现在是拿答案去 8090 建 script 话术（X-Profile-Token），成功才标 resolved。
 
   for (const resource of resources) {
+    // knowledge 的路由已由 agent/knowledge-compat.routes.ts 接管：那条路线读写
+    // kb_faq（AI 实际回复用的表），不再是 knowledge_items。这里跳过，否则
+    // Fastify 会因重复注册抛 FST_ERR_DUPLICATED_ROUTE。
+    // 回退方式：把环境变量 REA_KB_COMPAT 设成 off，本分支即不再跳过。
+    if (resource.name === "knowledge" && knowledgeCompatEnabled()) continue;
     const base = `/api/v1/${resource.name}`;
     app.get<{ Querystring: Record<string, unknown> }>(base, async (request) => {
       const result = list(db, resource, request.query, getUserScope(db, request.auth!));
@@ -279,8 +289,12 @@ export async function registerResourceRoutes(app: FastifyInstance, db: DatabaseS
     return { success: true, device_code: request.query.device_code ?? "", eval_date: request.query.eval_date ?? new Date().toISOString().slice(0, 10), total: 0, invited: 0, failed: 0 };
   });
   app.get<{ Querystring: Record<string, unknown> }>("/api/v1/agent/report/account-summary", async (request) => serializeAccountSummary({ prefix: request.query.prefix ?? "", date_range: { start: request.query.start_date ?? "", end: request.query.end_date ?? "" }, total: {}, accounts: [], daily_trend: [] }));
+  // knowledge 的两个批量接口已由 agent/knowledge-compat.routes.ts 接管
+  // （读写 kb_faq）。这里按同一开关跳过，否则 Fastify 报 FST_ERR_DUPLICATED_ROUTE。
+  if (!knowledgeCompatEnabled()) {
   app.post<{ Body: { ids?: number[]; status?: string; is_active?: boolean } }>("/api/v1/knowledge/batch/update", async (request) => { const ids = Array.isArray(request.body?.ids) ? request.body.ids : []; const scope = getUserScope(db, request.auth!); const resource = resources.find((item) => item.name === "knowledge")!; let updated = 0; for (const id of ids) { const row = db.prepare("SELECT * FROM knowledge_items WHERE id=?").get(Number(id)) as Record<string, unknown> | undefined; if (!row || !canAccessResource(resource, row, scope)) continue; const result = db.prepare("UPDATE knowledge_items SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(request.body?.status ?? (request.body?.is_active === false ? "disabled" : "enabled"), Number(id)); updated += Number(result.changes); } return { success: true, updated }; });
   app.post<{ Body: { ids?: number[] } }>("/api/v1/knowledge/batch/delete", async (request) => { const ids = Array.isArray(request.body?.ids) ? request.body.ids : []; const scope = getUserScope(db, request.auth!); const resource = resources.find((item) => item.name === "knowledge")!; let deleted = 0; for (const id of ids) { const row = db.prepare("SELECT * FROM knowledge_items WHERE id=?").get(Number(id)) as Record<string, unknown> | undefined; if (!row || !canAccessResource(resource, row, scope)) continue; deleted += Number(db.prepare("DELETE FROM knowledge_items WHERE id=?").run(Number(id)).changes); } return { success: true, deleted }; });
+  }
   // Target shape: {cities: array, unlimited: boolean} — no items envelope.
   // Target item shape: {city_name, interview_site_name}.
   app.get("/api/v1/holiday-schedules/my-cities", async (request) => {
