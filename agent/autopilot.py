@@ -35,6 +35,7 @@ import ctypes
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -178,6 +179,27 @@ def is_system_conv(conv_id: str, name: str = "") -> bool:
     if any(conv_id.startswith(p) for p in SYSTEM_PREFIXES):
         return True
     return any(n in (name or "") for n in SYSTEM_NAMES)
+
+
+# 媒体消息在会话页上的占位标签。企微的消息类型码（collector 的 content_type
+# 是 "type<code>"）里，图片常见 3/13、视频 43、文件 49、位置 48；
+# 这里不追求精确，只保证「这条消息确实发过」在网页上看得见。
+_MEDIA_LABELS = {
+    3: "[图片]",
+    13: "[图片]",
+    43: "[视频]",
+    48: "[位置]",
+    49: "[文件]",
+}
+
+
+def _media_label(content_type: object) -> str:
+    """非文本消息的占位标签；认不出的类型统一记 [媒体]，绝不返回空串。"""
+    raw = str(content_type or "")
+    match = re.fullmatch(r"type(\d+)", raw)
+    if match:
+        return _MEDIA_LABELS.get(int(match.group(1)), "[媒体]")
+    return "[媒体]"
 
 
 # ── 企微状态自检（只读探测，绝不激活窗口）─────────────────────────────────────
@@ -600,6 +622,14 @@ class Reporter:
             cid = (m.get("external_conversation_id") or "").strip()
             msg_id = str(m.get("external_msgid") or "").strip()
             text = (m.get("content") or "").strip()
+            # 媒体消息（图片/视频/文件/位置）本来没有文本。以前「没文本就跳过」
+            # 把它们整条丢掉：图确实发出去了，网页会话页却一条记录都没有，
+            # 运营以为没发（2026-11-15 线上实测点④）。这里给一个占位标签再上报，
+            # 4222 的接口要求 content 非空，占位符正好满足契约。
+            # 只给「确实是媒体类型」的补标签：content_type 为空或 text 的
+            # 空正文仍旧跳过——那是脏数据，没东西可展示。
+            if not text and re.fullmatch(r"type\d+", str(m.get("content_type") or "")):
+                text = _media_label(m.get("content_type"))
             if not cid or not msg_id or not text:
                 continue
             name = names.get(cid, "")
