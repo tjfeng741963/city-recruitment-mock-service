@@ -106,9 +106,15 @@ def build_profile(
     # 岗位字段统一为 4222 jobs 契约名：job_title 岗位（含工种）、factory_name 厂名
     title = str(job.get("job_title") or "")
     factory = str(job.get("factory_name") or "").strip()
+    if not factory and title:
+        # 厂名缺失时用「厂名 岗位」的前半截兜底：4222 判报名成功要求
+        # city+factory+name+phone 四件齐全，少了厂名这条已约线索在后台
+        # 直接看不到（实测会降成 stage=offered，不生成 invited 事件）。
+        factory = title.split(" ")[0].strip()
     interview_date, interview_time = _date_time(slots.get("interview_at"))
     # 默认窗口是「09:00-11:00」，比 interview_at 的整点更准，优先用它
     window = str(slots.get("interview_window") or "").strip() or interview_time
+    place = str(slots.get("interview_place") or job.get("place") or "").strip()
 
     fields = {
         "name": str(slots.get("name") or "").strip(),
@@ -123,6 +129,9 @@ def build_profile(
         "factory_name": factory,
         "interview_date": interview_date,
         "interview_time": window,
+        # 面试地点：候选人页原来完全看不到，客户问「在哪个基地」客服要另查。
+        # 4222 现在没这一列时会忽略，落了 profile_json 也算留痕。
+        "interview_place": place,
         "notes": str(slots.get("notes") or ""),
     }
     profile: dict[str, Any] = {
