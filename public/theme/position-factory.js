@@ -28,13 +28,13 @@
     const card = document.createElement("section");
     card.id = "rk-position-factory";
     card.setAttribute("aria-label", "岗位工厂归属");
-    card.style.cssText = "margin:0 0 20px;padding:16px;border:1px solid #dcdfe6;border-radius:8px;background:#fff";
+    card.style.cssText = "margin:0 0 20px;padding:16px 18px;border:1px solid var(--gl-edge);border-radius:var(--gl-r-card);background:linear-gradient(180deg,rgba(255,255,255,.92),rgba(250,252,255,.78));backdrop-filter:var(--gl-blur);-webkit-backdrop-filter:var(--gl-blur);box-shadow:var(--gl-shadow)";
     const title = document.createElement("h3");
     title.textContent = "岗位工厂归属";
-    title.style.cssText = "margin:0 0 8px;font-size:16px";
+    title.style.cssText = "margin:0 0 8px;font-size:16px;color:var(--rk-ink-1)";
     const note = document.createElement("p");
     note.textContent = "设备绑定工厂后，只能查询归属于该工厂的岗位。下面的工厂名称文字不能代替归属设置。";
-    note.style.cssText = "font-size:13px;line-height:1.6;color:#606266";
+    note.style.cssText = "font-size:13px;line-height:1.6;color:var(--rk-ink-2)";
     const status = document.createElement("p");
     status.setAttribute("role", "status");
     status.textContent = "正在读取工厂归属…";
@@ -46,7 +46,7 @@
     const save = document.createElement("button");
     save.type = "button";
     save.textContent = "保存工厂归属";
-    save.style.cssText = "min-height:34px;padding:4px 12px;border:1px solid #409eff;border-radius:4px;background:#409eff;color:white;cursor:pointer";
+    save.style.cssText = "min-height:34px;padding:4px 16px;border:0;border-radius:999px;background:var(--rk-grad-primary);color:#fff;font-weight:600;cursor:pointer";
     select.disabled = save.disabled = true;
     label.append(select);
     card.append(title, note, label, save, status);
