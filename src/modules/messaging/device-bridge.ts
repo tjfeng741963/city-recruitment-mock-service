@@ -89,12 +89,22 @@ export class DeviceBridgeStore {
     const device = this.status(code);
     if (!device) throw new BridgeError("Device not paired", 404);
     if (state === "online" && !accountId) throw new BridgeError("Logged-in account id is required", 422);
-    if (accountId && device.account_id && accountId !== device.account_id) throw new BridgeError("Device is bound to a different account");
+    // 绑定以客户端实时上报为准（2026-11-15 业务口径）。
+    // 原来「账号不一致就 409」把设备钉死在首次登录的账号上：客户端换号后
+    // 每次心跳都被拒（实测 Device is bound to a different account），
+    // 设备被判离线，看板/会话同步整段断流。现在改成跟随客户端并留一条
+    // 审计事件，运营仍能查到「这台设备什么时候换过号」。
+    const previousAccount = device.account_id ?? "";
+    const rebound = Boolean(accountId && previousAccount && accountId !== previousAccount);
     // status() 返回的是生效状态（超时的 online 已折算成 offline），所以这里
     // 的“变化”与路由层观察到的一致：设备重复上报同一状态时既不落流水也不推送。
     const changed = device.state !== state;
     this.db.prepare("UPDATE bridge_devices SET state=?,heartbeat_at=?,account_id=CASE WHEN ?<>'' THEN ? ELSE account_id END WHERE device_code=?")
       .run(state, this.now(), accountId, accountId, code);
+    if (rebound) {
+      this.db.prepare("INSERT INTO device_events(device_code,event_type,reason,created_at) VALUES (?,?,?,?)")
+        .run(code, "account_rebound", `${previousAccount}->${accountId}`, new Date(this.now()).toISOString());
+    }
     if (changed) {
       // 掉线事件流水：推送节流以它为基准，重启不丢。
       this.db.prepare("INSERT INTO device_events(device_code,event_type,reason,created_at) VALUES (?,?,?,?)")

@@ -64,10 +64,21 @@ describe("independent device bridge", () => {
     expect(app.db.prepare("SELECT COUNT(*) n FROM agent_messages WHERE source_event_id=? AND status='sent'").get(eventId+":outbound")).toMatchObject({ n: 1 });
   });
 
-  it("enforces per-device credentials and rejects switching the bound account", async () => {
+  it("enforces per-device credentials and follows the account the client reports", async () => {
     expect((await app.inject({ method: "POST", url: "/api/v1/bridge/devices/local-device-001/claim", headers: admin, payload: {} })).statusCode).toBe(401);
     await call("heartbeat", { state: "online", account_id: "wx-owner" });
-    expect((await call("heartbeat", { state: "online", account_id: "another-account" })).statusCode).toBe(409);
+    // 换号不再拒收：绑定跟随客户端，并留一条审计事件（2026-11-15 业务口径）
+    expect((await call("heartbeat", { state: "online", account_id: "another-account" })).statusCode).toBe(200);
+    const afterRebind = new DeviceBridgeStore(app.db, () => Date.now());
+    expect(afterRebind.status("local-device-001")).toMatchObject({
+      state: "online",
+      account_id: "another-account",
+    });
+    expect(
+      app.db
+        .prepare("SELECT event_type,reason FROM device_events WHERE device_code=? AND event_type='account_rebound'")
+        .get("local-device-001"),
+    ).toMatchObject({ event_type: "account_rebound", reason: "wx-owner->another-account" });
     const pair = await app.inject({ method: "POST", url: "/api/v1/bridge/devices/local-device-001/pair", headers: admin });
     expect(pair.statusCode).toBe(200);
     expect((await call("claim")).statusCode).toBe(401);
