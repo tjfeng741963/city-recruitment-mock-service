@@ -388,16 +388,15 @@ export async function registerResourceRoutes(app: FastifyInstance, db: DatabaseS
       try { return String((JSON.parse(row.data_json || "{}") as Record<string, unknown>).device_code ?? ""); } catch { return ""; }
     }).filter((code) => code !== "" && (onlyDevice === "" || code === onlyDevice));
 
-    const day = "date(?)";
     const results: Array<{ device_code: string; eval_date: string; total: number; invited: number; failed: number }> = [];
     for (const code of codes) {
       const conv = db.prepare(
         `SELECT COUNT(DISTINCT customer_id) AS total,
                 SUM(CASE WHEN interview_date<>'' THEN 1 ELSE 0 END) AS invited
-           FROM agent_conversations WHERE device_code=? AND ${day}`,
+           FROM agent_conversations WHERE device_code=? AND date(created_at)=date(?)`,
       ).get(code, evalDate) as { total: number | null; invited: number | null };
       const failed = db.prepare(
-        `SELECT COUNT(*) AS n FROM agent_messages WHERE device_code=? AND ${day} AND status IN ('failed','timeout')`,
+        `SELECT COUNT(*) AS n FROM agent_messages WHERE device_code=? AND date(created_at)=date(?) AND status IN ('failed','timeout')`,
       ).get(code, evalDate) as { n: number | null };
       const total = Number(conv.total ?? 0);
       const invited = Number(conv.invited ?? 0);
