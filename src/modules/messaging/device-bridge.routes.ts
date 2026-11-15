@@ -280,6 +280,52 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
       return reply.code(result.reply_status === "failed" ? 502 : 200).send({ ...result, customer_id: customerId });
     });
   }
+  /**
+   * 登录二维码：云端机器上的企微掉登录后，把扫码窗截图送到网页，让用户用手机扫。
+   *
+   * 为什么必须服务端中转：机器在云端（134.175.40.31 这类专用机），扫码的人和
+   * 运营都看不到那块屏幕。没有这条路，每次风控掉线只能等现场有人去看屏幕。
+   *
+   * 鉴权：设备用桥接令牌（Bearer），网页用用户 JWT —— 两条独立的读写路径。
+   * 为什么不开成公开接口：二维码等同于登录凭证，拿到它就能顶替这个号登录。
+   */
+  app.post<{ Params: { code: string }; Body: Record<string, unknown> }>(
+    "/api/v1/bridge/devices/:code/login-qr",
+    async (req, reply) => {
+      const code = req.params.code;
+      const token = (req.headers.authorization ?? "").replace(/^Bearer /, "");
+      if (!store.authenticate(code, token)) return reply.code(401).send({ detail: "Invalid device token" });
+      if (!store.enabled(code)) return reply.code(403).send({ detail: "Device disabled" });
+      const body = req.body ?? {};
+      const image = typeof body.image_b64 === "string" ? body.image_b64 : "";
+      // 一张 400x560 的二维码 PNG base64 约 20-60KB；超过 2MB 说明客户端传的是
+      // 原始位图或整屏截图，直接拒绝，免得把 SQLite 撑爆。
+      if (!image || image.length > 2_000_000) {
+        return reply.code(422).send({ detail: "image_b64 required (max 2000000 chars)" });
+      }
+      const capturedAt = typeof body.captured_at === "string" && body.captured_at
+        ? body.captured_at
+        : new Date().toISOString();
+      store.saveLoginQr(
+        code,
+        image,
+        Number(body.width ?? 0) || 0,
+        Number(body.height ?? 0) || 0,
+        capturedAt,
+      );
+      return { ok: true };
+    },
+  );
+  app.delete<{ Params: { code: string } }>(
+    "/api/v1/bridge/devices/:code/login-qr",
+    async (req, reply) => {
+      const code = req.params.code;
+      const token = (req.headers.authorization ?? "").replace(/^Bearer /, "");
+      if (!store.authenticate(code, token)) return reply.code(401).send({ detail: "Invalid device token" });
+      store.clearLoginQr(code);
+      return { ok: true };
+    },
+  );
   // 返回 store 供 server.ts 挂 30s 掉线清扫定时器。
   return store;
 }

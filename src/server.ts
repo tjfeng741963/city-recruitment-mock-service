@@ -17,6 +17,7 @@ import { registerCoreRoutes } from "./modules/core/core.routes.js";
 import { registerPositionFactoryRoutes } from "./modules/core/position-factory.routes.js";
 import { registerGenericRoutes } from "./modules/generic/generic.routes.js";
 import { registerResourceRoutes } from "./modules/resources/resource.routes.js";
+import { registerKnowledgeCompatRoutes } from "./modules/agent/knowledge-compat.routes.js";
 import { registerFileRoutes } from "./modules/files/file.routes.js";
 import { registerAgentRoutes } from "./modules/agent/agent.routes.js";
 import { registerActivationRoutes } from "./modules/activation/activation.routes.js";
@@ -48,6 +49,10 @@ declare module "fastify" {
 const DEVICE_TOKEN_ROUTES = new Set(["heartbeat", "claim", "receipts", "inbound", "outbound"].map(action => `POST /api/v1/bridge/devices/:code/${action}`)
   .concat([
     "GET /api/v1/bridge/devices/:code/config",
+    // 登录二维码：设备用自己的桥接令牌上传/清除，路由内 authenticate() 校验，
+    // 不走用户 JWT（客户端没有登录态）。网页读取走用户鉴权的 /api/v1/agent/... 那侧。
+    "POST /api/v1/bridge/devices/:code/login-qr",
+    "DELETE /api/v1/bridge/devices/:code/login-qr",
     // 媒体下载由设备 token 或 X-Profile-Token 鉴权（路由内校验），
     // 因此这里的 Bearer 不能当用户 JWT 解析，否则设备 token 会被判 401。
     "GET /api/v1/agent/media/:name",
@@ -142,6 +147,10 @@ export function buildServer() {
   });
   registerAuthRoutes(app, auth);
   registerCoreRoutes(app, db);
+  // knowledge 的旧契约先由兼容层接管（读写 kb_faq，AI 实际回复用的表），
+  // 这样 registerResourceRoutes 里的 knowledge 会跳过，不会重复注册。
+  // 关掉兼容层（REA_KB_COMPAT=off）就回落到旧表 knowledge_items。
+  registerKnowledgeCompatRoutes(app, db);
   registerResourceRoutes(app, db);
   registerFileRoutes(app, db);
   registerAgentRoutes(app, db, notifier);

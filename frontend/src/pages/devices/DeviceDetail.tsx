@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { devicesApi } from "../../api/admin";
 import { ApiError } from "../../api/client";
 import { Badge, Button, EmptyState, Input, ListGroup, ListRow, Skeleton } from "@ui";
@@ -8,6 +8,100 @@ import { LocationDialog } from "./DeviceDialogs";
 import { STATE_LABEL, STATE_TONE, failedCommands } from "./model";
 
 const LEGACY_ORIGIN = import.meta.env.VITE_LEGACY_ORIGIN ?? "http://127.0.0.1:8080";
+
+// 二维码轮询间隔。客户端约 30 秒传一帧，5 秒拉一次既能及时看到新码，也不会打太多请求。
+const QR_POLL_MS = 5000;
+// 超过这个秒数就提示"这张图可能已经过期"——企微二维码约 2 分钟刷新一次。
+const QR_STALE_SECONDS = 90;
+
+/**
+ * 企微登录二维码面板。
+ *
+ * 解决的场景：账号跑在云端的机器上（用户碰不到那块屏幕）。企微被风控登出后
+ * 那台机器会弹出扫码窗，但没人看得见——客户端把窗口截下来传到这里，
+ * 用户就可以在自己的浏览器上扫码，重新登录云端那台机器的微信。
+ *
+ * 只在设备非在线时轮询：在线说明已经登上了，没必要一直拉。
+ */
+function LoginQrPanel({ code, state }: { code: string; state: DeviceCard["state"] }) {
+  const [qr, setQr] = useState<{ image: string; captured_at: string } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    if (state === "online") {
+      setQr(null);
+      setLoading(false);
+      return;
+    }
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    async function poll() {
+      try {
+        const res = await devicesApi.loginQr(code);
+        if (!alive) return;
+        setQr(res.available && res.image ? { image: res.image, captured_at: res.captured_at ?? "" } : null);
+        setError(null);
+      } catch (err) {
+        if (!alive) return;
+        setError(err instanceof ApiError ? err.detail : "读取二维码失败");
+      } finally {
+        if (alive) {
+          setLoading(false);
+          setNow(Date.now());
+          timer = setTimeout(poll, QR_POLL_MS);
+        }
+      }
+    }
+
+    poll();
+    return () => {
+      alive = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [code, state]);
+
+  if (state === "online") return null;
+
+  const ageSeconds = qr?.captured_at
+    ? Math.max(0, Math.round((now - new Date(qr.captured_at).getTime()) / 1000))
+    : 0;
+  const stale = qr !== null && Number.isFinite(ageSeconds) && ageSeconds > QR_STALE_SECONDS;
+
+  return (
+    <section className="dv-qr" aria-live="polite">
+      <h2 className="dv-qr-title">用手机扫码登录云端那台电脑的微信</h2>
+      <p className="dv-qr-hint">
+        这台设备不在线。如果那台电脑的企业微信退出了登录，屏幕上会弹出二维码——
+        下面就是它，用要登录的那个微信扫一下就行，不用去现场。
+      </p>
+
+      {loading && !qr && <p className="dv-muted">正在等设备上传二维码…</p>}
+
+      {!loading && !qr && !error && (
+        <p className="dv-muted">
+          还没收到二维码。可能是设备程序没在跑，或者企业微信还停在别的界面。
+          设备一旦弹出扫码窗，这里会自动出现。
+        </p>
+      )}
+
+      {error && <p className="dv-qr-error">{error}</p>}
+
+      {qr && (
+        <div className="dv-qr-box">
+          <img className="dv-qr-img" src={qr.image} alt="企业微信登录二维码" width={228} height={312} />
+          <p className="dv-muted dv-qr-meta">
+            {stale
+              ? `这张图是 ${ageSeconds} 秒前的，可能已经过期，正在等新的一帧…`
+              : `二维码 ${ageSeconds} 秒前更新，扫不了会在这里自动换新`}
+          </p>
+        </div>
+      )}
+    </section>
+  );
+}
 
 function RenameRow({ card, onRenamed }: { card: DeviceCard; onRenamed: () => void }) {
   const [name, setName] = useState(card.device.name);
@@ -96,6 +190,9 @@ export function DeviceDetailView({
           {canPair && card.state === "unpaired" && <Button size="sm" onClick={onPair}>生成连接口令</Button>}
         </div>
       )}
+
+      {/* 云端机器掉登录时，二维码由客户端截屏传上来，用户在这里扫码即可 */}
+      <LoginQrPanel code={card.device.device_code} state={card.state} />
 
       <ListGroup header="基本信息">
         <div className="ui-row"><RenameRow key={card.device.name} card={card} onRenamed={onChanged} /></div>

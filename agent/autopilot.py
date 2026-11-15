@@ -56,6 +56,7 @@ win.set_dpi_aware()
 import compat  # noqa: E402
 import echo_guard  # noqa: E402
 import login_watch  # noqa: E402
+import login_qr  # noqa: E402
 import media_fetch  # noqa: E402
 import reply_store as rlog  # noqa: E402
 import client as agent_client  # noqa: E402
@@ -1675,7 +1676,7 @@ def acquire_single_instance() -> bool:
         setattr(sys, claim_key, pid)
         return True
     except Exception:  # noqa: BLE001
-        # 互斥体本身建不出来（极端环境）：宁可拦住，也不要冒双开的风险
+        # Windows 上互斥体建不出来（极端环境）：宁可拦住，也不要冒双开的风险
         return False
 
 
@@ -1810,10 +1811,15 @@ def main() -> int:
         if reporter is not None:
             reporter.remote_config = remote
 
+    # 登录二维码上传器：企微掉登录时把扫码窗截图送到服务端，网页上就能扫。
+    # 机器在云端，没人看得到那块屏幕——这是唯一能让用户自己扫码的路径。
+    qr_pusher = login_qr.LoginQrPusher()
+
     if not args.watch:
         wecom_state = detect_wecom_state()
         log(f"[自检] 企微状态 {wecom_state}（{WECOM_STATE_TEXT.get(wecom_state, '未知')}）")
         login_watch.alert_login_required(wecom_state, log=log)
+        qr_pusher.tick(wecom_state, remote_client, log=log)
         if reporter is not None:
             reporter.tick(wecom_state, pending_count(), force=True)
         scan(store, cfg)
@@ -1828,6 +1834,7 @@ def main() -> int:
     wecom_state = detect_wecom_state()
     log(f"[自检] 企微状态 {wecom_state}（{WECOM_STATE_TEXT.get(wecom_state, '未知')}）")
     login_watch.alert_login_required(wecom_state, log=log)
+    qr_pusher.tick(wecom_state, remote_client, log=log)
     if reporter is not None:
         reporter.tick(wecom_state, pending_count(), force=True)
     scan(store, cfg)
@@ -1847,6 +1854,8 @@ def main() -> int:
                 wecom_state = state
             # 掉登录时把企微窗口拉到前台并提示扫码（内部有 120s 冷却，非登录态不动作）
             login_watch.alert_login_required(wecom_state, log=log)
+            # 掉登录时把扫码窗截图传到网页（内部约 30s 一次；恢复后自动清除旧图）
+            qr_pusher.tick(wecom_state, remote_client, log=log)
             if reporter is not None:
                 reporter.tick(wecom_state, pending_count())
 

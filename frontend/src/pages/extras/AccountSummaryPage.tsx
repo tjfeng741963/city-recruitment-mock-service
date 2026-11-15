@@ -4,7 +4,8 @@ import { summaryApi, type AccountSummary, type SummaryAccount, type SummaryTotal
 import { SettingsHead } from "./Heads";
 import { errorText, localDate } from "./model";
 
-// The old page was hard-wired to this account prefix (郎职师).
+// 账号前缀沿用历史值（郎职师），但页面标题不再露出这个名字——
+// 它是早期写死的账号名，客户看到会以为这是别人家的报表。
 const PREFIX = "langzhishi";
 
 type Preset = "today" | "week" | "month" | "custom";
@@ -122,7 +123,7 @@ export function AccountSummaryPage() {
       <SettingsHead />
       <div className="ex-toolbar">
         <div className="ex-toolbar-text">
-          <h2>郎职师 · 运营汇总</h2>
+          <h2>运营汇总</h2>
           <p>按账号统计新增求职者、邀约和签到人数。</p>
         </div>
       </div>
