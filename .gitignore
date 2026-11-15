@@ -8,6 +8,8 @@ data/*.sqlite-journal
 .playwright-cli/
 *.log
 .env*
+# 配置模板必须入库：.env* 会连 .env.example 一起忽略，导致服务端模板从未提交
+!.env.example
 bridge/node_modules/
 bridge/过程文件/
 *.tsbuildinfo

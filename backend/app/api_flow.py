@@ -16,33 +16,73 @@ from __future__ import annotations
 
 import os
 import re
+import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
 from .deps import ServiceOrUser, SessionDep
+from .services import agent_session
 from .services import flow_session as store
 from .services import kb_faq, kb_placeholder, profile_push, unknown_questions
 from .services import flow_graph
 from .services import device_scripts
-from .services.device_scripts import fetch_device_meta, fetch_scripts, pick_script, render_script
+from .services.device_scripts import (
+    fetch_device_meta,
+    fetch_position_scripts,
+    fetch_scripts,
+    pick_position_script,
+    pick_script,
+    render_script,
+)
 from .services.flow_engine import (
+    SCRIPT_STAGE_GREET,
+    SCRIPT_STAGE_SEND_INFO,
     STAGE_ASK_CITY,
     STAGE_ASK_INTERVIEW,
     STAGE_COLLECT,
     STAGE_SEND_INFO,
     FlowResult,
     absorb_profile,
+    enter_info_result,
     extract_city,
+    interview_window_of,
     jobs_for_city,
+    pin_position,
     send_info_parts,
+    set_position_scripts,
     set_remote_cities,
     set_remote_jobs,
 )
 from .services.job_lookup import lookup_cities, lookup_jobs, vertical_hint_of
-from .services.flow_llm import a_step
+from .services.flow_llm import a_step, review_loop
 from .services.llm_provider import build_provider
+from .services.media_guard import filter_parts, markers_from_refs, markers_in
+
+_warned_no_device = False
+
+
+def _resolve_device_code(explicit: str) -> str:
+    """本轮该用哪台设备：显式传入 > FLOW_PROFILE_DEVICE > 空（通配）。
+
+    空态是「不知道是哪台」，此时按通配处理（不拿别台设备的城市/板块/话术去套），
+    并只告警一次——每轮刷日志会把 run.log 冲爆。
+    2026-11-14 之前这里兜底到硬编码的 pc-office-01（已停用的办公机），
+    导致线上 pc-win-01 的整段对话都按那台机器的口径取数，实测串台。
+    """
+    global _warned_no_device
+    code = (explicit or "").strip() or os.getenv(
+        "FLOW_PROFILE_DEVICE", profile_push.DEFAULT_DEVICE
+    ).strip()
+    if not code and not _warned_no_device:
+        _warned_no_device = True
+        logging.getLogger(__name__).warning(
+            "/flow/answer 与 /flow/greet 未收到 device_code，且未配置 "
+            "FLOW_PROFILE_DEVICE：设备元信息与话术按通配处理，可能串用其他设备配置"
+        )
+    return code
+
 
 router = APIRouter(prefix="/api/v1/flow", tags=["flow"])
 
@@ -124,7 +164,17 @@ async def flow_answer(
     stage_before = str(state.get("stage") or "")
     # done 重激活：流程结束后客户再来消息（问工资/换岗位…），AI 要继续服务
     # 而不是永远沉默——重置流程从问城市重新开始，老客户档案抽取照常
-    flow_reset = stage_before == "done"
+    slots = state.setdefault("slots", {})
+    # 流失/不合适是终态，不是「聊完了」。
+    # 原来只要 stage==done 就一律重激活到 ask_interview，导致客户明确说
+    # 「我不去了」之后，下一条随便发个「在吗」又被问一次
+    # 「这两天能不能过来面试？能来的话我把名额给你留着」——
+    # 2026-11-14 三路模拟实测各 4 次，属骚扰级业务红线。
+    abandoned = str(slots.get("recruit_status") or "").strip() in {
+        "disqualified",
+        "gave_up",
+    }
+    flow_reset = stage_before == "done" and not abandoned
     if flow_reset:
         # 只重置阶段、保留 slots/profile——老客户的档案和城市不能丢。
         # 回到 ask_interview（老客户已看过岗位）：插问 KB 分支继续可用
@@ -132,11 +182,33 @@ async def flow_answer(
         before["stage"] = "ask_interview"
         before_profile = dict(state.get("profile") or {})
         stage_before = "ask_interview"
-    slots = state.setdefault("slots", {})
 
-    device_code = payload.device_code or os.getenv(
-        "FLOW_PROFILE_DEVICE", profile_push.DEFAULT_DEVICE
-    )
+    if abandoned and stage_before == "done":
+        # 客户已明确放弃（流程已结束 + 标记流失/不合适）：不再推进、不再邀约。
+        # 只回一句终止语并记一条入站事件，保留 slots 供人工在看板恢复。
+        # 之前这里会重激活到 ask_interview，于是「在吗」这种随口一句
+        # 又会收到「这两天能不能过来面试」，实测 4 次，属骚扰级红线。
+        closing = "好的，那就不打扰你了。后面想了解哪个城市的岗位，随时跟我说哈。"
+        await store.append_events(
+            session,
+            payload.session_key,
+            [
+                (store.EVENT_INBOUND, {"text": payload.text}),
+                # 关闭语也是实际发出的内容：落 reply 事件，AgentSession 才能读到
+                (store.EVENT_REPLY, {"text": closing, "parts": [closing]}),
+            ],
+        )
+        return FlowAnswerOut(
+            reply=closing,
+            parts=[closing],
+            stage="done",
+            finished=True,
+            action=None,
+            slots=dict(slots),
+            profile=dict(state.get("profile") or {}),
+        )
+
+    device_code = _resolve_device_code(payload.device_code)
 
     # 知识库两段式：
     #   ① 新路径 kb_faq —— 按品类 + 招工方硬过滤，命中就用岗位事实渲染占位符。
@@ -156,23 +228,103 @@ async def flow_answer(
         meta = await fetch_device_meta(device_code)
     except Exception:  # noqa: BLE001  meta 拉不到按通配，流程不中断
         meta = dict(device_scripts.EMPTY_META)
+    # 岗位级硬编码话术（与 meta 同一份 config 缓存，不额外打网络）：
+    # 注入引擎后，send_info / ask_interview / booked 命中即整段直发，不调模型。
+    position_scripts: list[dict[str, Any]] = []
+    try:
+        position_scripts = await fetch_position_scripts(device_code)
+    except Exception:  # noqa: BLE001  话术拉不到就走知识库/模型，不影响回复
+        position_scripts = []
+    set_position_scripts(position_scripts)
+
+    # 先加载本轮岗位再查 FAQ，不能用 ContextVar 中旧请求的岗位填答案。
+    # 城市线索：先看客户这轮说的，再看已有槽位（别名归一在 4222 侧，这里只透传）
+    # 后台维护的城市/区县先注入进去，否则运营新建的城市（如北京）永远识别不出来。
+    try:
+        set_remote_cities(await lookup_cities())
+    except Exception:  # noqa: BLE001  城市清单拉不到就退回硬编码别名，不影响回复
+        set_remote_cities([])
+    city_hint = extract_city(payload.text) or str(slots.get("city") or "")
+
+    # ① 按城市查真实岗位（60s 缓存，失败返回 []）并注入引擎：
+    #    本轮所有取岗位的地方（发信息/模型简报/工价护栏/档案推送）统一走
+    #    jobs_for_city：只认远端数据。无城市线索时清空注入；
+    #    城市查不到岗位时引擎走「已记下，帮你问问」话术并记未知问题。
+    if city_hint:
+        try:
+            # 口径优先级：设备绑定 > 客户这轮说的品类 > 环境变量默认。
+            # 地铁号的设备配置说 subway，就不该被客户随口一句「工厂」带偏。
+            # device_code 一并透传：4222 按设备绑定的工厂过滤岗位。
+            remote_jobs = await lookup_jobs(
+                city_hint,
+                vertical_hint=vertical_hint_of(payload.text),
+                device_scope=str(meta.get("job_scope") or ""),
+                device_code=device_code,
+            )
+        except Exception:  # noqa: BLE001
+            remote_jobs = []
+        set_remote_jobs({city_hint: remote_jobs})
+        # 旧 greet 只存了岗位编号，漏存事实快照。按当前设备可见岗位的精确 id
+        # 补齐，不能用 job_index/首岗猜；已有快照或本轮换城时均保持原状态。
+        if (
+            city_hint == str(slots.get("city") or "")
+            and slots.get("interview_offer_sent")
+            and slots.get("position_id")
+            and not slots.get("job_snapshot")
+        ):
+            pinned_job = next(
+                (job for job in remote_jobs
+                 if str(job.get("position_id") or "") == str(slots["position_id"])),
+                None,
+            )
+            if pinned_job:
+                pin_position(slots, pinned_job)
+    else:
+        set_remote_jobs({})
+
     if stage_before in _KB_STAGES:
         city_hint_for_kb = (
-            str(meta.get("city") or "")
+            str(slots.get("city") or "")
             or extract_city(payload.text)
-            or str(slots.get("city") or "")
+            or str(meta.get("city") or "")
         )
-        employer_id_hint = int(meta.get("employer_id") or 0) or None
-        location_id_hint = int(meta.get("location_id") or 0) or None
-        position_id_hint = int(meta.get("position_id") or 0) or None
+        # 已选岗位优先于设备默认值；缺 id 代表未知，不能借设备旧雇主填空。
+        selected = "position_id" in slots or "job_snapshot" in slots
+        identity = slots if selected else meta
+        position_id_hint = int(identity.get("position_id") or 0) or None
+        jobs_for_kb = jobs_for_city(city_hint_for_kb) or []
+        snapshot = slots.get("job_snapshot")
+        snapshot = snapshot if isinstance(snapshot, dict) else {}
+        if position_id_hint:
+            job_for_faq = next(
+                (job for job in jobs_for_kb if int(job.get("position_id") or 0) == position_id_hint),
+                snapshot if selected else {},
+            )
+        elif selected:
+            job_for_faq = snapshot
+        else:
+            # 多岗位且没有明确选择时不拿首岗当客户已选岗位。
+            job_for_faq = jobs_for_kb[0] if len(jobs_for_kb) == 1 else {}
+        employer_id_hint = int(
+            job_for_faq.get("employer_id", identity.get("employer_id")) or 0
+        ) or None
+        location_id_hint = int(
+            job_for_faq.get("location_id", identity.get("location_id")) or 0
+        ) or None
+        factory_hint = str(
+            job_for_faq.get("factory_name")
+            or ("" if selected else meta.get("factory_name")) or ""
+        )
 
         # ① 新路径：kb_faq 硬过滤（position → employer → city → global）
-        # vertical_code 必须跟设备绑定走：写死 factory 会让地铁设备永远查不到自己的包。
+        # 已选岗位提供品类时用该岗位，否则沿用设备品类，不能写死 factory。
         try:
             faq_hit = await kb_faq.lookup(
                 session,
                 payload.text,
-                vertical_code=str(meta.get("vertical_code") or "factory"),
+                vertical_code=str(
+                    job_for_faq.get("vertical_code") or meta.get("vertical_code") or "factory"
+                ),
                 employer_id=employer_id_hint,
                 location_id=location_id_hint,
                 position_id=position_id_hint,
@@ -182,15 +334,9 @@ async def flow_answer(
         if faq_hit:
             # 占位符用岗位事实渲染：工价/年龄/吃住都来自运营维护的岗位字段，
             # 模板里一个数字都没有，所以换工价不用改话术。
-            job_for_faq = (jobs_for_city(city_hint_for_kb) or [{}])[0]
-            try:
-                location_ctx, employer_name = await kb_faq.resolve_context(
-                    session,
-                    employer_id=employer_id_hint,
-                    location_id=location_id_hint,
-                )
-            except Exception:  # noqa: BLE001
-                location_ctx, employer_name = {}, ""
+            # 岗位身份来自 Node，不能拿裸数字编号去另一份库查地址/厂名。
+            # 没有已确认岗位事实时保持空值，让缺字段规则走正常兜底。
+            location_ctx, employer_name = {}, factory_hint
             rendered = kb_faq.render(
                 faq_hit.answer,
                 job=job_for_faq,
@@ -209,7 +355,8 @@ async def flow_answer(
                     session,
                     payload.text,
                     city=city_hint_for_kb,
-                    factory=str(meta.get("factory_name") or ""),
+                    factory=factory_hint,
+                    require_factory=True,
                 )
             except Exception:  # noqa: BLE001  查库失败等同于没命中，不能挡住回复
                 kb_hit = None
@@ -231,33 +378,6 @@ async def flow_answer(
                 else:
                     kb_answer = kb_hit["body"]
 
-    # 城市线索：先看客户这轮说的，再看已有槽位（别名归一在 4222 侧，这里只透传）
-    # 后台维护的城市/区县先注入进去，否则运营新建的城市（如北京）永远识别不出来。
-    try:
-        set_remote_cities(await lookup_cities())
-    except Exception:  # noqa: BLE001  城市清单拉不到就退回硬编码别名，不影响回复
-        set_remote_cities([])
-    city_hint = extract_city(payload.text) or str(slots.get("city") or "")
-
-    # ① 按城市查真实岗位（60s 缓存，失败返回 []）并注入引擎：
-    #    本轮所有取岗位的地方（发信息/模型简报/工价护栏/档案推送）统一走
-    #    jobs_for_city：只认远端数据。无城市线索时清空注入；
-    #    城市查不到岗位时引擎走「已记下，帮你问问」话术并记未知问题。
-    if city_hint:
-        try:
-            # 口径优先级：设备绑定 > 客户这轮说的品类 > 环境变量默认。
-            # 地铁号的设备配置说 subway，就不该被客户随口一句「工厂」带偏。
-            remote_jobs = await lookup_jobs(
-                city_hint,
-                vertical_hint=vertical_hint_of(payload.text),
-                device_scope=str(meta.get("job_scope") or ""),
-            )
-        except Exception:  # noqa: BLE001
-            remote_jobs = []
-        set_remote_jobs({city_hint: remote_jobs})
-    else:
-        set_remote_jobs({})
-
     # ② 按设备拉 config 话术：send_info 轮命中就整段直发，不过模型（防改数字）
     script: dict[str, Any] | None = None
     if city_hint:
@@ -272,19 +392,46 @@ async def flow_answer(
         and not slots.get("interview_offer_sent")
     )
 
-    if script and will_send_info and str(script.get("content") or "").strip():
-        # 全部交给智能体编排（2026-11-12 用户指令）：运营话术不再是整段直发，
-        # 而是作为素材交给模型组织（工价护栏保护数字）；话术里的媒体标记
-        # 【图片/视频:x】也由模型取舍。档案抽取照常做。
+    # 这一轮要发的那张卡是哪个岗：岗位 id 从岗位项本身取（不从 job_index 推算）
+    card_job: dict[str, Any] = (jobs_for_city(city_hint) or [{}])[0] if city_hint else {}
+    position_script = (
+        pick_position_script(
+            position_scripts, int(card_job.get("position_id") or 0), SCRIPT_STAGE_SEND_INFO
+        )
+        if will_send_info and card_job
+        else None
+    )
+
+    # 每客户一个标准智能体上下文（AgentSession）：从事件日志投影最近轮次
+    # （客户/我方逐轮累积，含话术与卡片），传给 A（决策 Prompt）与 B（审核查重）
+    transcript = agent_session.surface(agent_session.build_transcript(events))
+    provider = build_provider()
+    media_material = kb_answer or ""
+    device_material_used = False
+
+    if position_script and str(position_script.get("content") or "").strip():
+        # 岗位话术命中：整段按运营台词直发（占位符由代码替换、媒体标记原样保留），
+        # 这轮一次模型都不调——工价/年龄/地点一个字都不许被改写。
+        # 状态推进仍走确定性规则：发过卡 + 进 ask_interview。
         slots["city"] = city_hint
         slots.setdefault("job_index", 0)
         absorb_profile(slots, payload.text)
-        job = (jobs_for_city(city_hint) or [{}])[0]
+        result = enter_info_result(slots)
+    elif script and will_send_info and str(script.get("content") or "").strip():
+        # 设备级城市话术：仍作为素材交给模型组织（工价护栏保护数字）；
+        # 单轮单源：素材只给话术本身，不再拼接 kb_answer——KB 是另一个来源，
+        # 命中就该单独答（2026-11-14 话术一次性语义）。
+        slots["city"] = city_hint
+        slots.setdefault("job_index", 0)
+        absorb_profile(slots, payload.text)
+        job = card_job
         script_material = render_script(str(script.get("content") or ""), job)
-        material = script_material if not kb_answer else kb_answer + "\n" + script_material
+        media_material = script_material
+        device_material_used = True
         result = await a_step(
-            state, payload.text, build_provider(), kb_answer=material,
+            state, payload.text, provider, kb_answer=script_material,
             graph=await _load_graph_for(session, device_code, meta),
+            transcript=transcript,
         )
         # 语义保持：这轮按「已发岗位+邀约」推进，下一站 ask_interview
         result.stage = STAGE_ASK_INTERVIEW
@@ -292,9 +439,31 @@ async def flow_answer(
     else:
         # ③ 主路径交给模型；没配模型或调用失败时，a_step 内部退到确定性状态机
         result = await a_step(
-            state, payload.text, build_provider(), kb_answer=kb_answer,
+            state, payload.text, provider, kb_answer=kb_answer,
             graph=await _load_graph_for(session, device_code, meta),
+            transcript=transcript,
         )
+    # B 审核循环：逐条把关要发的内容。打回 → A 重写一次 → 再审；
+    # 2 轮后仍打回 → 兜底强制发送（事实卡直答 → 确定性提问 → 确认一下）。
+    # B 不可用仍执行媒体白名单校验；模型审核是增强，不阻塞正常回复。
+    # 只从当前素材和已选岗位构造白名单，不能从模型草稿、客户原话或历史消息取。
+    if device_material_used or result.source in {"script", "card", "fact", "collect"} or result.action:
+        # 本轮没使用 KB，不能把命中但未采用的另一份素材补到运营回复后。
+        kb_markers, kb_entry_id, kb_repeat = [], None, False
+        if not device_material_used:
+            media_material = result.reply
+    kb_markers = list(dict.fromkeys(marker for item in kb_markers for marker in markers_in(item)))
+    allowed_media = markers_in(media_material) + kb_markers
+    selected_slots = result.slots
+    current_jobs = jobs_for_city(str(selected_slots.get("city") or ""))
+    pinned = selected_slots.get("position_id")
+    if pinned:
+        selected_job = next((job for job in current_jobs if str(job.get("position_id")) == str(pinned)), {})
+    else:
+        index = int(selected_slots.get("job_index") or 0)
+        selected_job = current_jobs[index] if 0 <= index < len(current_jobs) else {}
+    allowed_media.extend(markers_from_refs(selected_job.get("media")))
+    result = await review_loop(state, payload.text, provider, result, transcript, allowed_media=allowed_media)
     # 「沟通中」标记：一进 collect 就给 4222 发一次 stage=collect，让候选人页
     # 先出现「已答应面试，等联系方式」的一条。绕过 has_content 强推一次；
     # 槽位先记下保证整轮只推一次，推送本身尽力而为（失败不回滚不影响回复）。
@@ -337,10 +506,11 @@ async def flow_answer(
             result.parts = [fallback]
         # 媒体兜底：命中的条目带【图片/视频:名称】而模型回复里弄丢了 → 补回，
         # 保证客户真的能收到视频/图片（2026-11-12「我的视频呢」教训）
-        if kb_markers and not re.search(r"【(?:图片|视频):[^】]+】", result.reply):
-            result.reply = result.reply.rstrip() + "\n" + "\n".join(kb_markers)
-            if result.parts:
-                result.parts = [p.rstrip() for p in result.parts] + [kb_markers[-1]]
+        existing_markers = markers_in(result.reply)
+        missing_markers = [marker for marker in kb_markers if marker not in existing_markers]
+        if missing_markers:
+            result.parts = (result.parts or [result.reply]) + missing_markers
+            result.reply = "\n".join(result.parts)
         # 二次命中：回复覆盖为自然短句（stage/slots 推进保留）。
         # 括号元语言绝不下发——2026-11-12 被模型复读给客户的教训
         if kb_repeat and kb_entry_id:
@@ -349,6 +519,9 @@ async def flow_answer(
             else:
                 result.reply = "这个问题刚才已经回复过你啦，有其他想了解的随时问我。"
             result.parts = [result.reply]
+        # 回声兜底、KB 补媒体/重复答复都发生在审核之后，落库前再统一校验。
+        result.parts = filter_parts(result.parts or [result.reply], allowed_media) or ["这个我确认一下，稍后回你"]
+        result.reply = "\n".join(result.parts)
         # parts 一并落库：回放时能看出「那轮其实发了两条」
         records.append((store.EVENT_REPLY, {"text": result.reply, "parts": result.parts}))
         if kb_entry_id:
@@ -414,9 +587,7 @@ async def flow_greet(
       * 地铁号没绑城市 → 不知道发哪个城市的安检岗，得先问城市
     这两种都 `skipped=True` 并给出 detail，客户端据此决定要不要发问句。
     """
-    device_code = payload.device_code or os.getenv(
-        "FLOW_PROFILE_DEVICE", profile_push.DEFAULT_DEVICE
-    )
+    device_code = _resolve_device_code(payload.device_code)
     try:
         meta = await fetch_device_meta(device_code)
     except Exception:  # noqa: BLE001  meta 拉不到就当没绑，不发卡
@@ -447,8 +618,13 @@ async def flow_greet(
         )
 
     # 拉该板块的岗位：有城市按城市查，没绑城市就把整个板块的在招岗位拉回来
+    # device_code 透传：4222 只回该设备绑定工厂的岗位。
     try:
-        jobs = await lookup_jobs(city, device_scope="subway" if vertical_code == "subway" else "all")
+        jobs = await lookup_jobs(
+            city,
+            device_scope="subway" if vertical_code == "subway" else "all",
+            device_code=device_code,
+        )
     except Exception:  # noqa: BLE001
         jobs = []
     # 设备绑了具体工厂就只留这家；没绑就用板块全量
@@ -468,17 +644,89 @@ async def flow_greet(
 
     set_remote_jobs({city: jobs})
 
-    # 用与 send_info 完全相同的那套渲染：工价/年龄/地点全部来自岗位数据，
-    # 不走模型——首句尤其不能错，客户第一眼看到的就是它。
-    slots = {"city": city, "job_index": 0, "vertical_id": vertical_id}
+    # 岗位级话术：greet（加好友首句）/ send_info 等时点命中即整段直发，不调模型
+    position_scripts: list[dict[str, Any]] = []
+    try:
+        position_scripts = await fetch_position_scripts(device_code)
+    except Exception:  # noqa: BLE001  话术拉不到就走默认岗位卡
+        position_scripts = []
+    set_position_scripts(position_scripts)
+
+    # 话术一次性（scripted_sent）：greet 整个会话只发一次。会话已有事件时
+    # 投影出旧 slots，greet 发过就不再命中（换回老行为发岗位卡）。
+    existing_slots: dict[str, Any] = {}
+    try:
+        existing_slots = dict((store.project(await store.load_events(session, payload.session_key)).get("slots") or {}))
+    except Exception:  # noqa: BLE001  投影失败按全新会话处理
+        existing_slots = {}
+    if isinstance(existing_slots.get("scripted_sent"), dict):
+        scripted_sent: dict[str, Any] = dict(existing_slots["scripted_sent"])
+    else:
+        scripted_sent = {}
+
+    slots: dict[str, Any] = {
+        **existing_slots,
+        "city": city,
+        "job_index": 0,
+        "vertical_id": vertical_id,
+        "scripted_sent": scripted_sent,
+    }
+    # 发卡这一刻钉岗位 id：能取到卡片岗位的 id 就用它，取不到才退到设备绑定的岗位
+    card_job = jobs[0]
+    slots["position_id"] = (
+        pin_position(slots, card_job) or int(meta.get("position_id") or 0)
+    )
+
+    # 首句话术：有岗位话术就用（有 position 匹配 position，没有用设备默认），
+    # 一条都没有则保持现有默认——用与 send_info 同一套渲染发岗位卡。
+    greet = None
+    if not scripted_sent.get("greet"):
+        greet = pick_position_script(
+            position_scripts, int(slots.get("position_id") or 0), SCRIPT_STAGE_GREET
+        )
+    greet_text = (
+        render_script(
+            str(greet.get("content") or ""), card_job, interview_window_of(card_job)
+        ).strip()
+        if greet
+        else ""
+    )
+    if greet_text:
+        # 配了「加好友首句」话术 → 只发话术（通常是先问城市），**不发岗位卡**。
+        # 2026-11-14 实测：刚加好友就收到一张卡，客户说「我想去南昌」时卡和城市
+        # 对不上。业务口径：加好友 → 问地点 → 拿到地点 → 发该厂硬编码岗位。
+        # 下一轮客户说了城市，走 ask_city 分支正常发卡（interview_offer_sent 不置位）。
+        # 占位符仍用该板块第一个岗位的数据渲染（{{factory}}/{{wage}} 不落空）。
+        # 话术一次性：greet 发过即记账，重复触发 greet 不再发同一句。
+        scripted_sent["greet"] = True
+        slots["scripted_sent"] = scripted_sent
+        parts = [greet_text]
+        await store.append_events(
+            session,
+            payload.session_key,
+            [
+                (store.EVENT_STAGE, {"to": STAGE_ASK_CITY}),
+                (store.EVENT_SLOT, {"key": "scripted_sent", "value": scripted_sent}),
+                (store.EVENT_REPLY, {"text": "\n".join(parts)}),
+            ],
+        )
+        return GreetOut(
+            reply="\n".join(parts),
+            parts=parts,
+            stage=STAGE_ASK_CITY,
+            skipped=False,
+            detail=f"greet 话术 · {vertical_code} · {len(jobs)} 个岗位",
+        )
+
+    # 没配首句话术：保持老行为（直接发岗位卡），工价/年龄/地点全部来自岗位数据
     parts = send_info_parts(slots)
+    slots["interview_offer_sent"] = True
 
     records: list[tuple[str, dict[str, Any]]] = [
         (store.EVENT_STAGE, {"to": STAGE_SEND_INFO}),
-        (store.EVENT_SLOT, {"key": "city", "value": city}),
-        (store.EVENT_SLOT, {"key": "job_index", "value": 0}),
-        # 首句已经把岗位卡发出去了：不记这一位，下一轮进 send_info 会再发一遍整张卡
-        (store.EVENT_SLOT, {"key": "interview_offer_sent", "value": True}),
+        # 发卡过程会钉岗位身份、事实快照和话术记账；整套保存，后续 answer
+        # 从事件回放才能拿到同一岗位的工资，不能只手工挑部分字段落库。
+        *store.diff_slots(existing_slots, slots),
     ]
     if parts:
         records.append((store.EVENT_REPLY, {"text": "\n".join(parts)}))

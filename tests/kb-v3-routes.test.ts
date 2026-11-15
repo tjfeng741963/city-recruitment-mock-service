@@ -290,10 +290,10 @@ describe("kb v3 config routes", () => {
         method: "PUT",
         url: `/api/v1/kb-faqs/${seeded!.id}`,
         headers: admin,
-        payload: { answer: "运营手改的答案" },
+        payload: { answer: "{wage_text}" },
       });
       expect(edited.statusCode).toBe(200);
-      expect(edited.json()).toMatchObject({ answer: "运营手改的答案", template_item_id: null });
+      expect(edited.json()).toMatchObject({ answer: "{wage_text}", template_item_id: null });
 
       expect((await app.inject({ method: "PUT", url: "/api/v1/kb-faqs/999999", headers: admin, payload: {} })).statusCode).toBe(404);
     });

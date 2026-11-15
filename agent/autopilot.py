@@ -54,7 +54,9 @@ from wecom_io_core import win  # noqa: E402
 win.set_dpi_aware()
 
 import compat  # noqa: E402
+import echo_guard  # noqa: E402
 import login_watch  # noqa: E402
+import media_fetch  # noqa: E402
 import reply_store as rlog  # noqa: E402
 import client as agent_client  # noqa: E402
 import register as agent_register  # noqa: E402
@@ -114,6 +116,10 @@ RECEIPT_RETRY_INTERVAL = 10.0
 # ── 上报与心跳 ───────────────────────────────────────────────────────────────
 # 只做 HTTP，不产生任何键鼠事件。失败一律忽略，下一轮自然补。
 REPORT_STATE = ROOT / ".report_state.json"   # 游标 + 上次成功的 device_code
+# 已发过「加好友首句」的会话集合。放本地文件而不是只放内存：重启客户端很常见，
+# 只放内存会在重启后把老客户当新好友重新打招呼（对方看到两条首句）。
+GREET_STATE = ROOT / ".greeted.json"
+GREET_STATE_LIMIT = 2000                     # 只留最近 N 个会话，文件不会无限长
 REPORT_INTERVAL = 30.0                       # 心跳/上报间隔（按时间戳判断，不 sleep）
 REPORT_MAX_MESSAGES = 50                     # 单次上报最多条数
 REPORT_FIRST_WINDOW = 24 * 3600              # 首次没有游标时只补最近 24 小时
@@ -145,7 +151,14 @@ _user32 = ctypes.WinDLL("user32", use_last_error=True)
 
 
 def log(msg: str) -> None:
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+    text = f"[{time.strftime('%H:%M:%S')}] {msg}"
+    try:
+        print(text, flush=True)
+    except UnicodeEncodeError:
+        # 模型回复带 emoji 时 GBK 控制台写不进去——2026-11-13 实测整个 drain
+        # 循环被日志异常打断，机器静默半天。降级输出，日志绝不能中断业务
+        enc = sys.stdout.encoding or "gbk"
+        print(text.encode(enc, "replace").decode(enc, "replace"), flush=True)
 
 
 def wal_signature(data_dir: Path) -> tuple:
@@ -430,6 +443,17 @@ class Reporter:
         fresh = fresh[:REPORT_MAX_MESSAGES]
 
         convs: dict[str, dict] = {}
+        inbound_pool: list[dict] = []
+        for m in rows:
+            if m.get("is_self") or not (m.get("text") or "").strip():
+                continue
+            inbound_pool.append({
+                "external_conversation_id": m.get("conv_id") or "",
+                "external_msgid": str(m.get("id") or ""),
+                "direction": "inbound",
+                "content": m.get("text") or "",
+                "sent_at": _to_ts(m.get("time")),
+            })
         for m in fresh:
             cid = m["conv_id"]
             ts = _to_ts(m.get("time"))
@@ -447,14 +471,39 @@ class Reporter:
                 {
                     "external_conversation_id": cid,
                     "external_msgid": str(m.get("id") or ""),
-                    "direction": "outbound" if m.get("is_self") else "inbound",
+                    "direction": m.get("direction") or ("outbound" if m.get("is_self") else "inbound"),
                     "content": (m.get("text") or "")[:20000],
                     "content_type": "text" if m.get("is_text") else f"type{m.get('type') or 0}",
                     "sent_at": _iso(ts),
                 }
             )
+        # 防御层：方向判错时客户原话会以 outbound 上报（历史 bug），这里按内容兜一层。
+        kept, echoes = echo_guard.filter_echo_messages(batch["messages"], pool=inbound_pool)
+        if echoes:
+            self._drop_echoes(echoes)
+            batch["messages"] = kept
         batch["conversations"] = list(convs.values())
         return batch
+
+    def _drop_echoes(self, echoes: list[tuple[dict, dict, float]]) -> None:
+        """丢弃回声并把游标推过去，避免同一条消息每轮被反复挑出来刷日志。"""
+        with self._lock:
+            for item, matched, score in echoes:
+                try:
+                    mid = int(item.get("external_msgid") or 0)
+                except (TypeError, ValueError):
+                    mid = 0
+                cid = item.get("external_conversation_id") or ""
+                if mid > self._cursor.get(cid, 0):
+                    self._cursor[cid] = mid
+        for item, matched, score in echoes:
+            log(
+                f"[回声] 疑似方向错乱已纠正 msgid={item.get('external_msgid')} "
+                f"文本={(item.get('content') or '')[:20]!r} "
+                f"会话={item.get('external_conversation_id')} "
+                f"命中 inbound msgid={matched.get('external_msgid')} 相似度={score:.0%}（已丢弃 outbound）"
+            )
+        self._save()
 
     # ---------- 发送（后台线程） ----------
     def _run(self, heartbeat: dict, batch: dict) -> None:
@@ -558,12 +607,19 @@ class Reporter:
             event_id = f"{cid}:{msg_id}"
             key = json.dumps([*destination, event_id], ensure_ascii=False)
             with self._lock:
-                self._bridge_pending.setdefault(key, {
-                    "destination": destination,
-                    "direction": direction,
-                    "event": {"event_id": event_id, "contact_id": cid, "content": text, "nickname": name,
-                              "sent_at": m.get("sent_at") or ""},
-                })
+                staged = self._bridge_pending.get(key)
+                if staged is not None and staged.get("direction") != direction:
+                    # 同一条消息只有一个真实方向；队列里留着旧方向就会在原时间点
+                    # 多出一条反向气泡（4222 的唯一索引是 source_event_id+direction）
+                    log(f"[桥接] {event_id} 方向 {staged.get('direction')}→{direction}，以本次为准")
+                    staged = None
+                if staged is None:
+                    self._bridge_pending[key] = {
+                        "destination": destination,
+                        "direction": direction,
+                        "event": {"event_id": event_id, "contact_id": cid, "content": text,
+                                  "nickname": name, "sent_at": m.get("sent_at") or ""},
+                    }
         return self._save() if self._bridge_pending else True
 
     def _send_bridge_messages(self) -> None:
@@ -724,12 +780,85 @@ def build_brain(cfg: dict, log_fn=print):
             timeout=float(bcfg.get("timeout") or 20),
             history_limit=int(bcfg.get("history_limit") or 6),
             mode=str(bcfg.get("mode")),
+            # 设备身份随请求带给服务端：少了它，服务端只能按 FLOW_PROFILE_DEVICE
+            # 取设备口径，多设备部署会静默串用别台设备的城市/板块/话术。
+            device_code=str(cfg.get("device_code") or ""),
         )
         label = "知识库" if bcfg.get("mode") == "kb" else "流程编排"
-        log_fn(f"回复来源：{label} {bcfg['base_url']}（失败暂停，待人工处理）")
+        log_fn(
+            f"回复来源：{label} {bcfg['base_url']}"
+            f"（device_code={cfg.get('device_code') or '未配置'}，失败暂停，待人工处理）"
+        )
         return instance
     log_fn(f"回复来源：固定文本（brain.mode={bcfg.get('mode')!r}）")
     return None
+
+
+def _load_greeted() -> set[str]:
+    """读本地「已打过首句」的会话集合。文件不存在/损坏都当成空集合。"""
+    try:
+        data = json.loads(GREET_STATE.read_text(encoding="utf-8"))
+        return {str(x) for x in (data.get("sessions") or []) if str(x).strip()}
+    except (OSError, ValueError):
+        return set()
+
+
+def _save_greeted(seen: set[str]) -> None:
+    """原子写回（.part → rename），写失败只记日志——首句状态丢了顶多重复打招呼。"""
+    try:
+        tmp = GREET_STATE.with_name(GREET_STATE.name + ".part")
+        items = sorted(seen)[-GREET_STATE_LIMIT:]
+        tmp.write_text(json.dumps({"sessions": items}, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, GREET_STATE)
+    except OSError as exc:
+        log(f"[首句] 写 {GREET_STATE.name} 失败（忽略）：{exc}")
+
+
+def _is_first_contact(cid: str, seen: set[str]) -> bool:
+    """该会话是否第一次出现。
+
+    判定依据（按可靠性排序）：
+    1. `.greeted.json` 里已有 → 不是首次（跨重启有效）；
+    2. `reply_log` 里已有 status='sent' 记录 → 不是首次。这一条是为了兼容
+       "升级前就在聊"的老会话：它们从没进过 greeted 集合，但明显已经打过招呼，
+       不能当新好友再发一遍首句；命中时顺手补登记，后面不再反复查库。
+    """
+    if cid in seen:
+        return False
+    try:
+        if rlog.sent_count(cid) > 0:
+            seen.add(cid)
+            _save_greeted(seen)
+            return False
+    except Exception:  # noqa: BLE001 查库失败就当首次，最坏是多打一次招呼
+        pass
+    return True
+
+
+def _prefetch_media(parts: list[str], cfg: dict) -> None:
+    """发送前把 parts 里引用的素材补到本地（缺什么下什么）。
+
+    只下载，不改 parts——发送链路仍按原样解析标记，改一行都会碰到已验证的实现。
+    失败的媒体只记日志，文字部分照发。
+    """
+    server = (cfg.get("server") or "").strip()
+    token = (cfg.get("device_token") or "").strip()
+    medias: list[tuple[str, str]] = []
+    for raw in parts:
+        try:
+            _, found = core_send.split_media_marks(raw)
+        except Exception:  # noqa: BLE001
+            continue
+        medias.extend(found)
+    if not medias:
+        return
+    if not server or not token:
+        log("    [媒体] 未配置 server/device_token，跳过预取（只发文字）")
+        return
+    try:
+        media_fetch.prefetch(medias, base_url=server, token=token, log=log)
+    except Exception as exc:  # noqa: BLE001
+        log(f"    [媒体] 预取异常（忽略，只发文字）：{type(exc).__name__}: {exc}")
 
 
 def build_history(store: Store, conv_id: str, limit: int = 6) -> list[str]:
@@ -817,6 +946,8 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
     """
     global _last_reply_at, _last_error, _last_block_log
     stats = {"sent": 0, "failed": 0, "skipped": 0, "merged": 0, "blocked": 0}
+    # 每轮读一次首句记录；drain 是单线程的，一轮内新增的会话就地写回
+    greeted = _load_greeted()
 
     if wecom_state != "online" and not dry:
         left = len(rlog.pending(include_failed=True))
@@ -901,7 +1032,35 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             hint = (it["in_text"] or "").strip()
             res = {"ok": False, "detail": "知识库未初始化"}
             try:
-                if not hint:
+                # ── 加好友首句 ────────────────────────────────────────
+                # 只在「该会话第一次出现消息」时走 /flow/greet。为什么不靠
+                # hint 判断首次：加好友会插入 type=1011 的空文本记录，首句恰恰
+                # 常常没有可回复的文本；所以"是否首次"必须用会话维度判断。
+                # DRY-RUN 不发请求：greet 会在服务端推进 stage，干跑不该改状态。
+                greeted_now = False
+                if (
+                    not dry
+                    and _brain is not None
+                    and str(getattr(_brain, "mode", "")) == "flow"
+                    and _is_first_contact(cid, greeted)
+                ):
+                    gres: dict = {}
+                    try:
+                        gres = _brain.greet(cid)
+                    except Exception as exc:  # noqa: BLE001
+                        gres = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+                    if gres.get("ok"):
+                        # 只有成功才落盘：失败说明服务端没走到阶段，下条消息重试首句，
+                        # 而不是永久退化成一个不带招呼的普通回复。
+                        greeted.add(cid)
+                        _save_greeted(greeted)
+                        res = gres
+                        greeted_now = True
+                    else:
+                        log(f"    [首句] 失败（{gres.get('detail')}），退回 /flow/answer")
+                if greeted_now:
+                    pass
+                elif not hint:
                     res = {"ok": False, "detail": f"消息没有文本（type={it['in_type']}）"}
                 elif _brain is not None:
                     res = _brain.reply(hint, build_history(store, cid), session_key=cid)
@@ -953,6 +1112,10 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             log("    DRY-RUN，未发送")
             stats["sent"] += 1
             continue
+
+        # 真正按键之前先把素材补到本地：send.paste_media 只认本地文件，
+        # 缺文件它只会打一行"未找到"。这里失败也不阻断，文字照发。
+        _prefetch_media(parts, cfg)
 
         # 按键之前先确认剪贴板可写，避免 Ctrl+F 打开搜索框后才卡住
         if not compat.wait_clipboard_writable(timeout=15):
@@ -1532,6 +1695,10 @@ def release_single_instance() -> None:
 
 
 def main() -> int:
+    try:  # 日志/控制台 GBK 容错：emoji 一律 replace，绝不因日志崩业务
+        sys.stdout.reconfigure(errors="replace")
+    except Exception:  # noqa: BLE001
+        pass
     ap = argparse.ArgumentParser(description="企业微信自动回复（队列 + 回复历史）")
     ap.add_argument("--target", default=argparse.SUPPRESS, help="all 或某个会话名")
     ap.add_argument("--data-dir", default=argparse.SUPPRESS, help="企微 Data 目录绝对路径，覆盖 config.json")

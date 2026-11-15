@@ -31,11 +31,20 @@ def clear_cache() -> None:
     _cache.clear()
 
 
-async def _fetch_items(city: str, token: str, url: str) -> list[dict[str, Any]]:
-    """发一次真实请求。只在这层碰网络，测试 monkeypatch 这里。"""
+async def _fetch_items(
+    city: str, token: str, url: str, device_code: str = ""
+) -> list[dict[str, Any]]:
+    """发一次真实请求。只在这层碰网络，测试 monkeypatch 这里。
+
+    device_code 交给 4222 做「设备绑定工厂」过滤：同一城市不同设备绑的厂不同，
+    过滤必须在服务端做（那边才知道设备→工厂的绑定关系），这里只透传。
+    """
+    params: dict[str, str] = {"city": city}
+    if device_code:
+        params["device_code"] = device_code
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         resp = await client.get(
-            url, params={"city": city}, headers={"X-Profile-Token": token}
+            url, params=params, headers={"X-Profile-Token": token}
         )
         resp.raise_for_status()
         data = resp.json()
@@ -86,6 +95,7 @@ async def lookup_jobs(
     city: str,
     vertical_hint: str = "",
     device_scope: str = "",
+    device_code: str = "",
 ) -> list[dict[str, Any]]:
 
     """按城市查岗位。任何失败都返回 []，由上层走「已记下，帮你问问」话术。
@@ -96,15 +106,18 @@ async def lookup_jobs(
       2. vertical_hint —— 客户这轮明确说的品类（factory / subway）。
          2026-11-13 实测：客户说「我是去工厂，不是去安检」，系统还在推地铁。
       3. 都没给 → 环境变量 FLOW_ONLY_SUBWAY 的阶段性默认。
+
+    device_code 透传给 4222：设备绑了哪几家工厂，那边只回那几家的岗位。
     """
     city = str(city or "").strip()
     if not city:
         return []
+    device_code = str(device_code or "").strip()
     hint = vertical_hint if vertical_hint in ("factory", "subway") else ""
     scope = device_scope if device_scope in ("subway", "all") else ""
-    # 缓存键必须带口径：同城在设备级/客户级/默认三种口径下结果不同，
-    # 混用会把工厂岗漏发给地铁号（反之亦然）。
-    cache_key = f"{city}|{scope}|{hint}"
+    # 缓存键必须带口径 + 设备：同城在设备级/客户级/默认三种口径下结果不同，
+    # 不同设备绑的工厂也不同，混用会把 A 厂的岗发给 B 厂号（反之亦然）。
+    cache_key = f"{city}|{scope}|{hint}|{device_code}"
     now = time.monotonic()
     cached = _cache.get(cache_key)
     if cached and now < cached[0]:
@@ -114,7 +127,7 @@ async def lookup_jobs(
         return []
     url = os.getenv("FLOW_JOBS_URL", DEFAULT_JOBS_URL)
     try:
-        items = await _fetch_items(city, token, url)
+        items = await _fetch_items(city, token, url, device_code)
     except Exception:  # noqa: BLE001  超时/4222 挂了/返回乱码：一律空结果
         items = []
     # 字段齐全的排前面：占位/空壳岗位往往什么都没填，别让它们抢第一位

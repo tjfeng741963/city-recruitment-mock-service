@@ -152,19 +152,28 @@ def test_kb_hit_answers_and_keeps_stage() -> None:
 
     assert answered.stage == STAGE_ASK_INTERVIEW
     assert answered.parts[0] == "体检费自己先出，满一个月厂里报销。"
-    assert "能不能过来面试" in answered.parts[-1]
+    # 答上了就只答：不再追加「能不能过来面试」（2026-11-14 实测连问 5 句都被塞一句邀约，
+    # 客户体感是「你答了但一直在催我去面试」）
+    assert len(answered.parts) == 1
+    assert "能不能过来面试" not in answered.parts[-1]
     assert answered.unknown_question == ""
     # 答完还在邀约，客户接着答应就行
     assert step(state, "那可以", now=NOW).stage == STAGE_COLLECT
 
 
 def test_kb_miss_falls_back_and_reports_question() -> None:
+    """KB 没答上：兜底确认 + 记客户原话。
+
+    契约更新（单轮单源）：「宿舍有没有空调」这类吃住插问由岗位事实卡直答
+    （原则②，优先于知识库）——见 test_single_source.py 的串厂回归；
+    这里用事实卡覆盖不了的问题锁 unknown 兜底路径。
+    """
     state, _ = _run(["广州"])
-    missed = step(state, "宿舍有没有空调", now=NOW)
+    missed = step(state, "那边要交服装费吗", now=NOW)
 
     assert missed.stage == STAGE_ASK_INTERVIEW
     assert "这个我确认一下，稍后回你" in missed.reply
-    assert missed.unknown_question == "宿舍有没有空调"
+    assert missed.unknown_question == "那边要交服装费吗"
     assert "能不能过来面试" in missed.reply
 
 

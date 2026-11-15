@@ -10,6 +10,7 @@ import { NOOP_NOTIFIER, type StreamNotifier } from "../messaging/stream-events.j
 import { readWeComConfig } from "../wecom/wecom-config.js";
 import { deviceDifyConfig, HttpDifyProvider } from "../dify/dify-provider.js";
 import { listReminderTasks } from "./followup.js";
+import { loadFactories, parseDeviceData, readDeviceFactoryIds } from "../../shared/device-factories.js";
 
 export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync, notifier: StreamNotifier = NOOP_NOTIFIER) {
   const messageChannel = createMessageChannelProvider(undefined, db);
@@ -72,7 +73,23 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
   app.get<{ Querystring: { my?: string } }>("/api/v1/agent/devices", async (request) => {
     const rows = db.prepare("SELECT * FROM agent_devices ORDER BY id DESC").all() as Array<Record<string, unknown>>;
     const scope = getUserScope(db, request.auth!);
-    return { items: rows.map(serializeAgentDevice).filter((row) => canAccessDevice(scope, String(row.device_code ?? ""))) };
+    return {
+      // 过滤必须放在 serializeAgentDevice() 之后：表里没有 device_code 列，
+      // 它是 serialize 时从 data_json 里提出来的。直接过滤原始 row 会拿到
+      // undefined，把受限用户的设备列表整片滤空（CI 实测 expected [] 即此因）。
+      // serialize 的声明类型不含 device_code，故显式放宽为字典以通过 typecheck。
+      items: rows
+        .map((row) => {
+          // 设备 → 工厂多选绑定：每行带上 factory_ids 与厂名/城市，
+          // 后台设备列表直接回显多选结果，不用前端再逐台去拉 /factories。
+          const factoryIds = readDeviceFactoryIds(db, parseDeviceData(row.data_json).factory_ids);
+          const serialized = serializeAgentDevice(row) as Record<string, unknown>;
+          return { ...serialized, factory_ids: factoryIds, factories: loadFactories(db, factoryIds) };
+        })
+        // 过滤参数用显式断言：展开后的对象类型不带索引签名，
+        // 直接取 device_code 会报 TS2339（与运行时无关，纯粹是类型推断的坑）。
+        .filter((row) => canAccessDevice(scope, String((row as Record<string, unknown>).device_code ?? ""))),
+    };
   });
   app.post<{ Body: Record<string, unknown> }>("/api/v1/agent/devices", async (request, reply) => {
     if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin required to create devices" });
@@ -94,6 +111,12 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
       return reply.code(404).send({ detail: "设备不存在" });
     }
     const merged = { ...data, ...(request.body ?? {}) } as Record<string, unknown>;
+    // 设备 → 工厂多选绑定：本次提交了 factory_ids 就规范化后落库——
+    // 去重、丢掉非整数与库里不存在的 id（忽略而不是整单 422），空数组 = 不绑任何厂。
+    // 没提交这个键时保持原值，老客户端不受影响（与 vertical_id 的按需校验同一思路）。
+    if ("factory_ids" in (request.body ?? {})) {
+      merged.factory_ids = readDeviceFactoryIds(db, (request.body as Record<string, unknown>).factory_ids);
+    }
     // 品类必填（2026-11-13 与 HR 对齐）：一个微信号只做一个板块，没有综合号。
     // 只在本次请求显式提交了 vertical_id 时校验，避免老客户端改别的字段被挡。
     if ("vertical_id" in (request.body ?? {})) {

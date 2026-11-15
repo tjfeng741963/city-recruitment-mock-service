@@ -85,6 +85,9 @@
   function text(value) {
     return value === undefined || value === null ? "" : String(value);
   }
+  function resourcePath(key) {
+    return key === "faq" ? "/api/v1/kb-faqs" : "/api/v1/" + key + "s";
+  }
   function statusChip(status) {
     var on = status === "enabled" || status === "published";
     var chip = el("span", "rk-kb-chip", on ? "启用" : status);
@@ -181,7 +184,7 @@
     return Promise.all([
       api("GET", "/api/v1/verticals"),
       api("GET", "/api/v1/locations?page_size=1000"),
-      api("GET", "/api/v1/employers"),
+      api("GET", "/api/v1/employers?page_size=1000"),
     ]).then(function (results) {
       state.lookups.verticals = (results[0] && results[0].items) || [];
       state.lookups.locations = (results[1] && results[1].items) || [];
@@ -201,7 +204,7 @@
     var request = key === "template"
       ? api("GET", "/api/v1/kb-templates")
       : key === "faq"
-        ? api("GET", "/api/v1/kb-faqs?page_size=200")
+        ? loadFaqPages(1, [])
         : key === "device"
           ? api("GET", "/api/v1/agent/devices")
           : api("GET", "/api/v1/" + key + "s");
@@ -221,6 +224,18 @@
       });
   }
 
+  function loadFaqPages(page, rows) {
+    return api("GET", "/api/v1/kb-faqs?page_size=1000&page=" + page).then(function (payload) {
+      var items = payload.items || [];
+      var all = rows.concat(items);
+      if (all.length < payload.total) {
+        if (!items.length) throw new Error("问答列表未加载完整，请刷新后重试。");
+        return loadFaqPages(page + 1, all);
+      }
+      return { items: all, total: payload.total };
+    });
+  }
+
   function renderList(key, rows) {
     var node = ensurePanel();
     var list = node.querySelector(".rk-kb-list");
@@ -228,6 +243,23 @@
 
     var bar = el("div", "rk-kb-bar");
     bar.appendChild(el("span", "rk-kb-count", rows.length + " 条"));
+    if (key === "faq") {
+      var audit = el("button", "rk-kb-ghost", "导出审计清单");
+      audit.type = "button";
+      audit.addEventListener("click", function () {
+        api("GET", "/api/v1/kb-faqs/audit").then(function (result) {
+          var url = URL.createObjectURL(new Blob([JSON.stringify(result, null, 2)], { type: "application/json" }));
+          var link = el("a");
+          link.href = url;
+          link.download = "kb-faq-audit-" + new Date().toISOString().slice(0, 10) + ".json";
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+        }).catch(function (error) { window.alert("审计失败：" + error.message); });
+      });
+      bar.appendChild(audit);
+    }
     if (key !== "template") {
       var add = el("button", "rk-kb-primary", addLabel(key));
       add.type = "button";
@@ -235,6 +267,7 @@
       bar.appendChild(add);
     }
     list.appendChild(bar);
+    if (key === "faq") renderPublication(list);
 
     if (!rows.length) {
       list.appendChild(el("p", "rk-kb-empty", "还没有数据。点上面的按钮新建，或先导入模板包。"));
@@ -276,6 +309,16 @@
         edit.type = "button";
         edit.addEventListener("click", function () { openEditor(key, row); });
         ops.appendChild(edit);
+        if (key === "faq" && row.status === "enabled") {
+          var disable = el("button", "rk-kb-link", "停用");
+          disable.type = "button";
+          disable.addEventListener("click", function () {
+            api("PUT", resourcePath(key) + "/" + row.id, { status: "disabled" })
+              .then(function () { loadTab(key); })
+              .catch(function (error) { window.alert(error.message); });
+          });
+          ops.appendChild(disable);
+        }
         var del = el("button", "rk-kb-link rk-kb-danger", "删除");
         del.type = "button";
         del.addEventListener("click", function () { remove(key, row); });
@@ -293,6 +336,78 @@
       : key === "location" ? "新建区域"
         : key === "employer" ? "新建招工方"
           : "新建问答";
+  }
+
+  function renderPublication(list) {
+    var box = el("section", "rk-kb-empty");
+    box.setAttribute("aria-label", "回复服务发布");
+    box.appendChild(el("p", null, "保存后请预览并发布，实际回复才会更新。本批支持共享场景问答；专属问答需完成归属核对。"));
+    var actions = el("div", "rk-kb-bar");
+    var previewButton = el("button", "rk-kb-primary", "预览发布");
+    var historyButton = el("button", "rk-kb-ghost", "发布记录");
+    previewButton.type = historyButton.type = "button";
+    actions.appendChild(previewButton);
+    actions.appendChild(historyButton);
+    box.appendChild(actions);
+    var output = el("div");
+    output.setAttribute("role", "status");
+    box.appendChild(output);
+    list.appendChild(box);
+    function failed(error) {
+      var issues = error.payload && error.payload.issues;
+      output.textContent = "操作失败：" + error.message + (Array.isArray(issues) ? " " + issues.map(function (row) { return "#" + row.id + " " + row.detail; }).join("；") : "");
+    }
+    function preview(rollbackOf) {
+      output.textContent = "正在核对实际回复服务…";
+      previewButton.disabled = historyButton.disabled = true;
+      api("POST", "/api/v1/kb-publish/preview", rollbackOf ? { rollback_of: rollbackOf } : {}).then(function (result) {
+        output.textContent = "";
+        output.appendChild(el("p", null, (rollbackOf ? "回滚预览。" : "发布预览。") + "目标：" + result.target_url + "；实例：" + result.target_id));
+        output.appendChild(el("p", null, "共 " + result.items.length + " 条，变更 " + result.changes.length + " 条。" + result.note));
+        var detail = el("details");
+        detail.appendChild(el("summary", null, "查看逐条变更"));
+        result.changes.forEach(function (change) {
+          var before = change.before;
+          var after = change.after;
+          detail.appendChild(el("p", null, "#" + change.source_id + " " + (after || before).question + " · " + ({ create: "新增", update: "更新", disable: "停用" }[change.action] || change.action)
+            + "\n原内容：" + (before ? before.answer + "（" + before.status + "）" : "无")
+            + "\n发布后：" + (after ? after.answer + "（" + after.status + "）" : "保留原文并停用")));
+        });
+        output.appendChild(detail);
+        var apply = el("button", "rk-kb-primary", rollbackOf ? "确认回滚到此发布之前" : "确认发布到回复服务");
+        apply.type = "button";
+        apply.disabled = result.changes.length === 0;
+        var confirmation = el("p");
+        apply.addEventListener("click", function () {
+          apply.disabled = true;
+          confirmation.textContent = "正在提交并等待回复服务确认…";
+          api("POST", "/api/v1/kb-publish/apply", { preview_id: result.preview_id }).then(function (confirmed) {
+            confirmation.textContent = "回复服务已确认" + (rollbackOf ? "回滚" : "发布") + "。发布编号：" + confirmed.publication_id + "；已管理 " + confirmed.managed_count + " 条问答。";
+          }).catch(function (error) {
+            confirmation.textContent = "尚未取得成功确认：" + error.message;
+            apply.disabled = false;
+          });
+        });
+        output.appendChild(apply);
+        output.appendChild(confirmation);
+      }).catch(failed).finally(function () { previewButton.disabled = historyButton.disabled = false; });
+    }
+    previewButton.addEventListener("click", function () { preview(null); });
+    historyButton.addEventListener("click", function () {
+      output.textContent = "正在读取实际回复服务的发布记录…";
+      api("GET", "/api/v1/kb-publish/history").then(function (result) {
+        output.textContent = "目标：" + result.target_url + "；实例：" + result.target_id;
+        if (!result.items.length) output.appendChild(el("p", null, "还没有发布记录。"));
+        result.items.forEach(function (row) {
+          var line = el("p", null, row.created_at + " · " + row.id + " ");
+          var rollback = el("button", "rk-kb-link", "预览回滚 " + row.id);
+          rollback.type = "button";
+          rollback.addEventListener("click", function () { preview(row.id); });
+          line.appendChild(rollback);
+          output.appendChild(line);
+        });
+      }).catch(failed);
+    });
   }
 
   function lookupName(list, id, field) {
@@ -354,6 +469,11 @@
           return target ? label + "·" + target : label;
         } },
         { label: "优先级", field: "priority" },
+        { label: "内容检查", render: function (row) {
+          var issues = row.governance || [];
+          var prefix = row.status === "disabled" ? "已停用" : "启用";
+          return issues.length ? prefix + " · 需整理：" + issues.map(function (issue) { return issue.detail; }).join(" ") : prefix + " · 通过";
+        } },
       ];
     }
     if (key === "device") {
@@ -391,13 +511,14 @@
   function openEditor(key, row) {
     var node = ensurePanel();
     var isNew = !row;
-    var draft = isNew ? {} : Object.assign({}, row);
+    var draft = isNew ? (key === "faq" ? { scope_level: "global", status: "enabled", keywords: [], media: [] } : {}) : Object.assign({}, row);
 
     var overlay = el("div", "rk-kb-modal");
     overlay.setAttribute("role", "dialog");
     overlay.setAttribute("aria-modal", "true");
     var card = el("form", "rk-kb-card");
     card.appendChild(el("h3", null, (isNew ? "新建" : "编辑") + TABS.filter(function (t) { return t.key === key; })[0].label));
+    if (key === "faq") card.appendChild(el("p", "rk-kb-sub", "全局、品类和城市问答请引用当前岗位字段，如“这边工价是{wage}”。固定工资或厂规请绑定具体招工方/岗位；无法确认的旧条目可先停用。"));
 
     var fields = fieldsOf(key, draft);
     fields.forEach(function (field) { card.appendChild(renderField(field, draft, card)); });
@@ -421,8 +542,8 @@
       save.disabled = true;
       var payload = collectFields(card, fields);
       var request = isNew
-        ? api("POST", "/api/v1/" + key + "s", payload)
-        : api("PUT", "/api/v1/" + key + "s/" + draft.id, payload);
+        ? api("POST", resourcePath(key), payload)
+        : api("PUT", resourcePath(key) + "/" + draft.id, payload);
       request.then(function () {
         overlay.remove();
         loadTab(key);
@@ -540,7 +661,7 @@
     return [
       { name: "question", label: "问题", required: true, placeholder: "包吃住吗" },
       { name: "keywords", label: "命中关键词", type: "list", placeholder: "逗号分隔：包吃,包住,吃住" },
-      { name: "answer", label: "答案模板", type: "textarea", required: true, placeholder: "{welfare} 或直接写死一句话" },
+      { name: "answer", label: "答案模板", type: "textarea", required: true, placeholder: "共享层使用{wage}、{welfare}等本岗字段；专属口径绑定招工方或岗位" },
       { name: "media", label: "图片/视频标记", type: "list", placeholder: "【图片:宿舍】【视频:车间】" },
       { name: "vertical_id", label: "限定品类", type: "select", source: "verticals", allowEmpty: "（通用）" },
       { name: "scope_level", label: "作用域", type: "select", options: [
@@ -554,6 +675,7 @@
       { name: "scope_employer_id", label: "作用招工方（employer 级必填）", type: "select", source: "employers", allowEmpty: "（不限）" },
       { name: "scope_position_id", label: "作用岗位 id（position 级必填）", type: "number" },
       { name: "priority", label: "优先级", type: "number" },
+      { name: "status", label: "状态", type: "select", options: [{ value: "enabled", label: "启用" }, { value: "disabled", label: "停用（保留原文待核对）" }] },
     ];
   }
 
@@ -633,7 +755,7 @@
   function remove(key, row) {
     var name = row.display_name || row.name || row.question || row.code;
     if (!window.confirm("确定删除「" + text(name) + "」？")) return;
-    api("DELETE", "/api/v1/" + key + "s/" + row.id)
+    api("DELETE", resourcePath(key) + "/" + row.id)
       .then(function () { loadTab(key); })
       .catch(function (error) {
         // 被引用时后端回 409 并说明谁在用，原样展示，不吞
@@ -645,7 +767,8 @@
     if (!window.confirm("导入模板包 " + code + "？已存在同问题的条目会跳过，不会覆盖改过的内容。")) return;
     api("POST", "/api/v1/kb-templates/" + encodeURIComponent(code) + "/import")
       .then(function (result) {
-        window.alert("导入完成：新增 " + result.imported + " 条，跳过 " + result.skipped + " 条。");
+        var blocked = result.blocked || [];
+        window.alert("导入完成：新增 " + result.imported + " 条，跳过 " + result.skipped + " 条。" + (blocked.length ? "\n有 " + blocked.length + " 条内容未导入，需要核对：\n" + blocked.map(function (item) { return item.question + "：" + item.detail; }).join("\n") : ""));
         loadTab("template");
       })
       .catch(function (error) { window.alert("导入失败：" + error.message); });

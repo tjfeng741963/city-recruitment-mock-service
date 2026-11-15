@@ -60,11 +60,16 @@ describe("device config distribution", () => {
       takeover_sessions: [],
       abandoned_sessions: [],
       factory_name: "",
+      // 多厂绑定：未绑定时回空数组（消费方按「不限」处理）
+      factory_ids: [],
+      factories: [],
       city: "",
       // 知识库 v3：品类/招工方 id，未绑定时回 0
       vertical_id: 0,
       employer_id: 0,
       scripts: [{ stage: "send_info", city: "深圳", title: "龙华厂标准介绍", content: "您好，龙华电子厂…" }],
+      // 契约 §5：岗位话术是新增字段，本设备没配时下发空数组（不是 undefined）
+      position_scripts: [],
     });
     // 话术更新时间更晚 → version 取较新者
     app.db.prepare("UPDATE device_scripts SET updated_at='2026-11-11T00:00:00Z' WHERE device_code='local-device-001'").run();

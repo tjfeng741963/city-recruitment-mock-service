@@ -65,7 +65,7 @@ async def _say(client: AsyncClient, key: str, text: str, **extra) -> dict:
 async def test_send_info_uses_remote_jobs(
     admin_client: AsyncClient, monkeypatch
 ) -> None:  # noqa: ANN001
-    async def fake_fetch(city: str, token: str, url: str) -> list[dict]:
+    async def fake_fetch(city: str, token: str, url: str, device_code: str = "") -> list[dict]:
         assert city == "深圳"
         return REMOTE_JOBS
 
@@ -101,7 +101,7 @@ async def test_send_info_without_jobs_says_will_ask(
 async def test_config_script_feeds_model_as_material(
     admin_client: AsyncClient, monkeypatch
 ) -> None:  # noqa: ANN001
-    async def remote_jobs(city: str, token: str, url: str) -> list[dict]:
+    async def remote_jobs(city: str, token: str, url: str, device_code: str = "") -> list[dict]:
         return REMOTE_JOBS  # 岗位接口返回远端真实岗位 → 填占位符
 
     monkeypatch.setattr(job_lookup, "_fetch_items", remote_jobs)

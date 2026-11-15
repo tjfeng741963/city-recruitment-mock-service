@@ -45,6 +45,7 @@ describe("local static shell (default)", () => {
   it("serves the re-themed legacy bundle without configuration", async () => {
     const response = await app.inject({ method: "GET", url: "/login" });
     expect(response.body).toContain("/assets/index-BGyFQL9Q.js");
+    expect(response.body).toContain('src="/theme/candidate-registration.js"');
     expect(response.body).toContain("/theme/theme.css");
     expect(response.body).toContain("/theme/motion.css");
     expect(response.body).toContain("/theme/glass.css");
@@ -63,6 +64,9 @@ describe("local static shell (default)", () => {
     ["/theme/device-code.js", "javascript"],
     ["/theme/login-motion.js", "javascript"],
     ["/theme/interaction.js", "javascript"],
+    ["/theme/candidate-registration.js", "javascript"],
+    ["/theme/candidate-registration-table.js", "javascript"],
+    ["/theme/candidate-registration.css", "text/css"],
     ["/theme/fonts/google-sans-flex-latin-wght-normal.woff2", "font/woff2"],
   ])("serves theme asset %s", async (url, type) => {
     const response = await app.inject({ method: "GET", url });

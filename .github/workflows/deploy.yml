@@ -74,8 +74,42 @@ jobs:
       - name: Run isolated HTTP acceptance
         run: python scripts/acceptance-smoke.py
 
+      - name: Verify FAQ publication over both HTTP services
+        run: python scripts/kb-publication-smoke.py
+
+  test-postgres-publication:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: kb_publish_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres-ci-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install backend dependencies
+        run: |
+          python -m pip install uv
+          uv pip install --system -r backend/pyproject.toml
+      - name: Verify actual PostgreSQL publication transactions
+        env:
+          PYTHONUTF8: "1"
+          KB_PUBLICATION_TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres-ci-only@127.0.0.1:5432/kb_publish_test
+        run: python scripts/kb-publication-postgres.py
+
   deploy:
-    needs: test
+    needs: [test, test-postgres-publication]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
@@ -224,6 +258,79 @@ jobs:
             if [ "$i" -eq 45 ]; then
               echo "health check failed: api not healthy within 90s (status=$status)" >&2
               docker compose -f docker-compose.production.yml logs --tail 80 api >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          REMOTE
+
+      # ─────────────────────────────────────────────────────────────
+      # python-backend：systemd 托管、真正对外服务 8090 的那一份。
+      # 它不参与上面 source/ 的部署路径，历史上完全靠手工更新，
+      # 2026-11-14 曾因此落后 origin/main 61 个提交且压着未提交改动。
+      # 这里把它纳入流水线：暂停 → 修正属主 → 硬同步 → 依赖检查 →
+      # 重启 → 健康检查，失败自动回滚到上一个提交。
+      # ─────────────────────────────────────────────────────────────
+      - name: Deploy systemd backend
+        env:
+          SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes "$SSH_USER@$SSH_HOST" \
+            sh -s -- "$GITHUB_SHA" <<'REMOTE'
+          set -eu
+          revision=$1
+          case "$revision" in ''|*[!0-9a-f]*) exit 2;; esac
+          PB=/srv/apps/city-recruitment-mock-service/python-backend
+          cd "$PB"
+          old=$(git rev-parse HEAD)
+          echo "python-backend: $(git rev-parse --short "$old") -> $(echo "$revision" | cut -c1-7)"
+
+          # 属主修正：历史上有 root 属主的文件，deploy 没有免密 sudo 改不了，
+          # 借 root 容器改（与上面 source 部署同一手法）。
+          # .venv / .git / data 跳过：前者几万个文件，后者是运行数据。
+          docker run --rm --user root --entrypoint sh -v "$PB:/pb" \
+            -e OWNER="$(id -u):$(id -g)" node:22.21.1-bookworm-slim \
+            -c 'cd /pb && for f in * .[!.]*; do case "$f" in .venv|.git|data|.|..) continue;; esac; chown -R "$OWNER" "$f" 2>/dev/null || true; done'
+
+          git fetch origin main --quiet
+          git reset --hard "$revision" >/dev/null
+          # 干净才继续：带脏文件去重启等于跑未知代码
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "python-backend working tree dirty after reset:" >&2
+            git status --porcelain >&2
+            exit 1
+          fi
+
+          # 依赖没变就别动 venv（uv sync 会重算解析，慢且可能拉网）
+          if git diff --quiet "$old" "$revision" -- backend/pyproject.toml backend/uv.lock 2>/dev/null; then
+            echo "deps unchanged, skip sync"
+          else
+            echo "deps changed, syncing"
+            if command -v uv >/dev/null 2>&1; then
+              ( cd backend && uv sync --frozen )
+            else
+              echo "WARN: uv not on PATH, dependency sync skipped" >&2
+            fi
+          fi
+
+          # 版本没变就不重启，避免每次推送都无谓中断一次服务
+          if [ "$old" = "$revision" ]; then
+            echo "already at this revision, no restart"
+            exit 0
+          fi
+
+          sudo -n systemctl restart recruit-backend
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8090/healthz 2>/dev/null; then
+              echo "python-backend healthy at $(git rev-parse --short HEAD)"
+              exit 0
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "health check failed after 60s, rolling back to $(echo "$old" | cut -c1-7)" >&2
+              git reset --hard "$old" >/dev/null
+              sudo -n systemctl restart recruit-backend
+              echo "rolled back; deploy job fails so the problem is visible" >&2
               exit 1
             fi
             sleep 2
