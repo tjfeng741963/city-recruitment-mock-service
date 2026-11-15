@@ -49,6 +49,9 @@ jobs:
         working-directory: frontend
         run: npm run build
 
+      - name: Check migration numbers
+        run: node scripts/check-migrations.mjs
+
       - name: Typecheck backend
         run: npx tsc --noEmit
 

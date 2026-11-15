@@ -19,8 +19,9 @@
 检查项（任一失败就不会部署）：
 
 1. `npm ci`
-2. `npx tsc --noEmit` 后端类型检查
-3. `npx vitest run --testTimeout=20000` 全部测试
+2. `node scripts/check-migrations.mjs` 迁移编号检查（重号/非法文件名会让迁移器静默跳过，必须挡在部署前）
+3. `npx tsc --noEmit` 后端类型检查
+4. `npx vitest run --testTimeout=20000` 全部测试
 
 部署步骤（在服务器上以 `deploy` 用户执行）：拉取并 checkout 该提交 → 备份 `.env.production` 和 SQLite 数据库（带提交号和时间戳）→ `docker compose build` + `up -d` → 60 秒内轮询 `http://127.0.0.1:4222/login`，失败则打印容器日志并让流水线标红。
 
@@ -32,6 +33,7 @@
 
 ```bash
 npm ci
+node scripts/check-migrations.mjs
 npx tsc --noEmit
 npx vitest run --testTimeout=20000
 ```

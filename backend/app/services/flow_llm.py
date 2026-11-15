@@ -48,6 +48,7 @@ from .flow_engine import (
     _job_fact_answer,
     _script_sent,
     _stage_script,
+    acknowledge_contact_update,
     align_reply_with_slots,
     agrees_to_interview,
     extract_day_offset,
@@ -64,6 +65,7 @@ from .flow_engine import (
     revive_from_done,
     reschedule_interview,
     remote_job_cities,
+    select_position_by_place,
     step as fallback_step,
 )
 from .agent_session import transcript_lines
@@ -849,6 +851,18 @@ async def a_step(
             if revived is not None:
                 state["node"] = revived.stage
                 return revived
+        # 已约客户补发或更正姓名/电话：记下来并明确回一句「已更新」。
+        # 以前这类消息被当普通闲聊，客户改完电话收到的却是再邀约一条（2026-11-15）。
+        if stage == STAGE_DONE and slots_kept.get("booked"):
+            ack = acknowledge_contact_update(slots_kept, text)
+            if ack:
+                return FlowResult(
+                    reply=ack,
+                    stage=STAGE_DONE,
+                    slots=slots_kept,
+                    finished=True,
+                    source="fact",
+                )
         # done 也表示拒绝/交人工，只有 booked 才能声称已经预约。
         # 拒绝后的普通确认不再借用材料 FAQ 或审核模型重启邀约。
         if not slots_kept.get("booked") and (
@@ -871,6 +885,8 @@ async def a_step(
                 finished=True,
                 source="kb",
             )
+        # 费用/政策类问题答不上时按既定规则「确认一下」并记未知，不借预约信息糊弄
+        # （「体检多少钱」拿不到本岗 FAQ 就必须认，不能答成「你已经约好了」）。
         if looks_like_question(text):
             return FlowResult(reply="这个我确认一下，稍后回你", stage=STAGE_DONE,
                               slots=slots_kept, finished=True, unknown_question=text, source="fact")
@@ -911,6 +927,11 @@ async def a_step(
         rf"(?:我在|我想去|我要去|我去|我想在|想去|去)?{re.escape(city_answer)}(?:市)?(?:找工作|找厂|上班|工作)?",
         (text or "").strip().strip("，,。.！!？? "),
     ):
+        return fallback_step(state, text, now=now, kb_answer=kb_answer, graph=graph)
+
+    # 首句问过地点后客户答「陈村基地」：按地点钉岗位再走确定性发卡。
+    # 不交给模型——模型不知道 place 与岗位的对应关系，只会把地点当成新城市。
+    if stage == STAGE_ASK_CITY and slots.get("city") and select_position_by_place(slots, text):
         return fallback_step(state, text, now=now, kb_answer=kb_answer, graph=graph)
 
     # 「还有别的厂吗 / 换一个」→ 代码列岗位。模型不知道岗位列表，让它答必然编造。

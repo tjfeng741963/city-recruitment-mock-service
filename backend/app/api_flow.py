@@ -43,9 +43,11 @@ from .services.flow_engine import (
     STAGE_ASK_CITY,
     STAGE_ASK_INTERVIEW,
     STAGE_COLLECT,
+    STAGE_DONE,
     STAGE_SEND_INFO,
     FlowResult,
     absorb_profile,
+    distinct_places,
     enter_info_result,
     extract_city,
     interview_window_of,
@@ -91,7 +93,7 @@ router = APIRouter(prefix="/api/v1/flow", tags=["flow"])
 # send_info 必须含在内：新好友首句就收到岗位卡（POST /flow/greet），
 # 紧接着问的「多少钱」「包吃住吗」正落在 send_info 阶段——不含进来就查不到
 # kb_answer，只能把岗位卡再发一遍（2026-11-14 模拟实测）。
-_KB_STAGES = {STAGE_SEND_INFO, STAGE_ASK_INTERVIEW, STAGE_COLLECT}
+_KB_STAGES = {STAGE_SEND_INFO, STAGE_ASK_INTERVIEW, STAGE_COLLECT, STAGE_DONE}
 
 
 class FlowAnswerIn(BaseModel):
@@ -175,7 +177,10 @@ async def flow_answer(
         "disqualified",
         "gave_up",
     }
-    flow_reset = stage_before == "done" and not abandoned
+    # 已约客户（booked）不重激活：否则他每发一句都被重新问「这两天能不能过来
+    # 面试」，改期/问地点/补资料全被当成新的邀约（2026-11-15 实测）。
+    # 这类客户保持 done，由 a_step 的 done 分支分流：改期 → 事实 → 知识库。
+    flow_reset = stage_before == "done" and not abandoned and not slots.get("booked")
     if flow_reset:
         # 只重置阶段、保留 slots/profile——老客户的档案和城市不能丢。
         # 回到 ask_interview（老客户已看过岗位）：插问 KB 分支继续可用
@@ -722,7 +727,40 @@ async def flow_greet(
             detail=f"greet 话术 · {vertical_code} · {len(jobs)} 个岗位",
         )
 
-    # 没配首句话术：保持老行为（直接发岗位卡），工价/年龄/地点全部来自岗位数据
+    # 没配首句话术：一个工厂多个面试基地时先问去哪个基地，不直接甩卡。
+    # 2026-11-15 实测：地铁号（陈村/竹料两个基地）加好友第一句就收到 jobs[0]
+    # 的卡，客户问「包吃住吗」收到的却是另一基地的面试地点。业务口径是
+    # 加好友 → 问地点 → 拿到地点再发该基地的岗位；只有一个基地时问地点是废话，
+    # 仍保持老行为直接发卡，工厂号不受影响。
+    places = distinct_places(slots)
+    if len(places) >= 2:
+        factory = str(card_job.get("factory_name") or card_job.get("job_title") or "").strip()
+        lead = f"在招{factory}" if factory else "有岗在招"
+        ask = (
+            f"你好，我们这边{lead}，面试基地有：{'、'.join(places)}。"
+            "你在哪个基地方便？确定后我把岗位详情和面试时间发你。"
+        )
+        # 只落 stage + 岗位身份/快照 + 回复，不置 interview_offer_sent：
+        # 下一轮拿到基地才发卡。快照仍然要存——客户在答基地之前问「工资多少」
+        # 也得能按岗位事实答，不能因为没有卡就掉回模型编造。
+        await store.append_events(
+            session,
+            payload.session_key,
+            [
+                (store.EVENT_STAGE, {"to": STAGE_ASK_CITY}),
+                *store.diff_slots(existing_slots, slots),
+                (store.EVENT_REPLY, {"text": ask}),
+            ],
+        )
+        return GreetOut(
+            reply=ask,
+            parts=[ask],
+            stage=STAGE_ASK_CITY,
+            skipped=False,
+            detail=f"无 greet 话术 · 多基地先问地点（{len(places)} 个）",
+        )
+
+    # 没配首句话术且只有一个基地：保持老行为（直接发岗位卡），工价/年龄/地点全部来自岗位数据
     parts = send_info_parts(slots)
     slots["interview_offer_sent"] = True
 
