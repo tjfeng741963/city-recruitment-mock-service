@@ -311,6 +311,10 @@ async def flow_answer(
     else:
         set_remote_jobs({})
 
+    # 知识库命中结果在 _KB_STAGES 分支内才产生；外层写 trace 时要读它，
+    # 所以必须先在这里占位，否则非 KB 阶段一走就是 UnboundLocalError。
+    faq_hit: Any | None = None
+
     if stage_before in _KB_STAGES:
         city_hint_for_kb = (
             str(slots.get("city") or "")
@@ -481,6 +485,15 @@ async def flow_answer(
     # 2 轮后仍打回 → 兜底强制发送（事实卡直答 → 确定性提问 → 确认一下）。
     # B 不可用仍执行媒体白名单校验；模型审核是增强，不阻塞正常回复。
     # 只从当前素材和已选岗位构造白名单，不能从模型草稿、客户原话或历史消息取。
+    # 知识库「查到过什么」与「最后用了没有」是两件事，必须分开记。
+    # 下面 488 行会把未采用的命中重置掉（避免把命中但没用的素材补到运营回复后），
+    # 如果不在这里留一份快照，灰度复盘就分不清「库里没有」和「有但没采用」。
+    kb_hit_snapshot = {
+        "id": f"faq:{faq_hit.id}" if faq_hit else "",
+        "tier": str(getattr(faq_hit, "tier", "") or ""),
+        "candidates": list(getattr(faq_hit, "candidates", []) or []),
+    }
+
     if device_material_used or result.source in {"script", "card", "fact", "collect"} or result.action:
         # 本轮没使用 KB，不能把命中但未采用的另一份素材补到运营回复后。
         kb_markers, kb_entry_id, kb_repeat = [], None, False
@@ -572,11 +585,19 @@ async def flow_answer(
         trace = dict(result.trace or {})
         trace.update(
             {
+                "device_code": device_code,                   # 哪台机器/哪个企微号说的
                 "source": result.source,                      # script/card/fact/collect/kb/""
                 "stage_from": stage_before,
                 "stage_to": result.stage,
                 "action": result.action,
                 "kb_entry_id": kb_entry_id or "",
+                # 「查到过什么」与「最后用了没有」分开记：
+                # kb_used=False 表示命中了知识库但本轮回复来自岗位事实/话术，
+                # 这不是故障，但复盘时必须能区分「库里没有」和「有但没采用」。
+                "kb_used": bool(kb_entry_id),
+                "kb_hit_id": kb_hit_snapshot["id"],
+                "kb_tier": kb_hit_snapshot["tier"],
+                "kb_candidates": kb_hit_snapshot["candidates"],
                 "kb_repeat": kb_repeat,
                 "kb_markers": list(kb_markers),
                 "kb_answer_len": len(kb_answer or ""),

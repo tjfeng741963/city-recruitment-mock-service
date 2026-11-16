@@ -1137,6 +1137,10 @@ async def review_loop(
     draft = list(result.parts) or ([result.reply] if result.reply else [])
     if not draft:
         return result
+    # 审核前的原稿必须留一份：灰度里最想知道的是「模型本来想说什么、
+    # 最后被改成了什么」。只记最终文本，等于把审核这一环变成黑盒。
+    # 截断到 500 字：复盘看的是差异，不是全文。
+    result.trace.setdefault("draft_before_review", " | ".join(draft)[:500])
     if result.source in {"card", "fact", "collect", "kb"}:
         # 首次发卡、主动换岗、重问事实都必须展示当前岗位。模型判重/重写
         # 会把新基地卡片或工资改成面试邀约；必填资料提示也不能改成面试材料。
