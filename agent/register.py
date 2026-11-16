@@ -21,6 +21,9 @@ DEVICE_CODE_PREFIX = "pc-"
 MACHINE_HASH_LENGTH = 12
 REGISTER_TIMEOUT = 20
 
+# pythonw 拉起时没有控制台，reg 查询会自己新建一个黑窗口；见 autopilot.py 的说明。
+_CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+
 
 def machine_guid() -> str:
     """读 Windows 的 MachineGuid：重装系统才变，换硬件不变。
@@ -35,6 +38,7 @@ def machine_guid() -> str:
             encoding="utf-8",
             errors="replace",
             timeout=10,
+            creationflags=_CREATE_NO_WINDOW,
         )
         for line in (out.stdout or "").splitlines():
             if "MachineGuid" in line:

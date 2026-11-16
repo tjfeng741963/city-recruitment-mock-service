@@ -11,8 +11,12 @@
 from __future__ import annotations
 
 import ctypes
+import sys
 import time
 from ctypes import wintypes as wt
+
+# pythonw 拉起时没有控制台，tasklist 会自己新建一个黑窗口；见 autopilot.py 的说明。
+_CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -144,6 +148,7 @@ def _wxwork_pids() -> list[int]:
         text=True,
         encoding="gbk",
         errors="ignore",
+        creationflags=_CREATE_NO_WINDOW,
     ).stdout
     pids = []
     for line in out.splitlines():
