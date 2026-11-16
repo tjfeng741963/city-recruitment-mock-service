@@ -58,6 +58,16 @@
   .tag.none{background:var(--ok-soft);color:var(--ok)}
   .doc .params{margin-top:10px;font-size:12px;color:var(--muted)}
   .doc .params code{font-family:var(--mono);background:#eef2f8;padding:1px 6px;border-radius:4px;color:var(--ink)}
+  .doc-body{max-height:44vh;overflow:auto;padding:0 22px 18px;background:var(--panel)}
+  .doc-body h3{margin:16px 0 6px;font-size:11px;font-weight:600;letter-spacing:.03em;color:var(--faint)}
+  .doc-body table{width:100%;border-collapse:collapse;font-size:12px}
+  .doc-body th{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);color:var(--faint);font-weight:600;white-space:nowrap}
+  .doc-body td{padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top;line-height:1.55}
+  .doc-body td.fname{font-family:var(--mono);white-space:nowrap;color:var(--ink)}
+  .doc-body td.ftype{font-family:var(--mono);white-space:nowrap;color:var(--faint)}
+  .doc-body td.freq{white-space:nowrap;color:var(--warn)}
+  .doc-body .example{margin:0;padding:9px 11px;border:1px solid var(--line);border-radius:var(--radius);background:var(--bg);font-family:var(--mono);font-size:11px;line-height:1.6;white-space:pre-wrap;word-break:break-word;max-height:180px;overflow:auto;color:#2b3546}
+  .doc-body ul{margin:6px 0 0;padding-left:18px;font-size:12px;line-height:1.7;color:var(--muted)}
 
   .work{flex:1;display:flex;overflow:hidden}
   .work-left{flex:1;min-width:0;display:flex;flex-direction:column;border-right:1px solid var(--line);overflow:auto}
@@ -375,10 +385,10 @@
         var method = el("span", "ep-m", endpoint.method);
         method.style.color = METHOD_COLOR[endpoint.method] || "#6b7688";
         item.append(method, el("span", "ep-p", endpoint.url.replace("/api/v1", "")));
-        if (state.current && state.current.method === endpoint.method && state.current.url === endpoint.url) {
+        if (state.current && endpointKey(state.current) === endpointKey(endpoint)) {
           item.classList.add("is-active");
         }
-        item.title = endpoint.summary;
+        item.title = endpoint.purpose || "";
         item.addEventListener("click", function () { selectEndpoint(endpoint); });
         body.append(item);
       });
@@ -408,6 +418,35 @@
     }
   }
 
+  function endpointKey(endpoint) {
+    return endpoint.key || (endpoint.method + " " + endpoint.url);
+  }
+
+  function fieldTable(title, rows, withWhere) {
+    if (!rows || !rows.length) return null;
+    var wrap = el("div");
+    wrap.append(el("h3", null, title));
+    var table = el("table");
+    var thead = el("thead");
+    var head = el("tr");
+    var columns = withWhere ? ["位置", "字段", "类型", "必填", "说明"] : ["字段", "类型", "说明"];
+    columns.forEach(function (name) { head.append(el("th", null, name)); });
+    thead.append(head);
+    var tbody = el("tbody");
+    rows.forEach(function (field) {
+      var row = el("tr");
+      if (withWhere) row.append(el("td", "ftype", field.where || ""));
+      row.append(el("td", "fname", field.name));
+      row.append(el("td", "ftype", field.type));
+      if (withWhere) row.append(el("td", "freq", field.required ? "是" : ""));
+      row.append(el("td", null, field.desc));
+      tbody.append(row);
+    });
+    table.append(thead, tbody);
+    wrap.append(table);
+    return wrap;
+  }
+
   function selectEndpoint(endpoint) {
     state.current = endpoint;
     state.params = {};
@@ -421,13 +460,40 @@
     var doc = $("doc");
     doc.innerHTML = "";
     doc.append(el("h2", null, endpoint.url));
-    doc.append(el("p", "summary", endpoint.summary));
+    doc.append(el("p", "summary", endpoint.purpose || endpoint.summary || ""));
+
     var tags = el("div", "tags");
     tags.append(el("span", "tag", endpoint.method));
     tags.append(el("span", "tag " + endpoint.auth, AUTH_LABEL[endpoint.auth] || endpoint.auth));
-    if (endpoint.params) tags.append(el("span", "tag", "参数：" + endpoint.params));
+    var paramCount = (endpoint.pathParams || []).length + (endpoint.queryParams || []).length + (endpoint.bodyFields || []).length;
+    if (paramCount) tags.append(el("span", "tag", "参数 " + paramCount + " 项"));
     doc.append(tags);
 
+    var docBody = el("div", "doc-body");
+
+    var params = [];
+    (endpoint.pathParams || []).forEach(function (field) { params.push(Object.assign({ where: "路径" }, field)); });
+    (endpoint.queryParams || []).forEach(function (field) { params.push(Object.assign({ where: "查询" }, field)); });
+    (endpoint.bodyFields || []).forEach(function (field) { params.push(Object.assign({ where: "请求体" }, field)); });
+    var paramsTable = fieldTable("参数", params, true);
+    if (paramsTable) docBody.append(paramsTable);
+
+    var responseTable = fieldTable("返回", endpoint.responseFields, false);
+    if (responseTable) docBody.append(responseTable);
+
+    if (endpoint.response) {
+      docBody.append(el("h3", null, "返回示例"));
+      docBody.append(el("pre", "example", JSON.stringify(endpoint.response, null, 2)));
+    }
+
+    if (endpoint.notes && endpoint.notes.length) {
+      docBody.append(el("h3", null, "注意事项"));
+      var list = el("ul");
+      endpoint.notes.forEach(function (note) { list.append(el("li", null, note)); });
+      docBody.append(list);
+    }
+
+    doc.append(docBody);
     renderParams();
     renderTree($("search").value);
   }
