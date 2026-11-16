@@ -1142,6 +1142,12 @@ async def review_loop(
         # 会把新基地卡片或工资改成面试邀约；必填资料提示也不能改成面试材料。
         # 知识库直答也只做媒体白名单清理；不能因历史重复而改成无关邀约。
         # 代码渲染的内容清理媒体后原样发送。
+        #
+        # 但「跳过审核」这件事必须留痕：灰度复盘时看到一条答错的卡片，
+        # 要能立刻分清是「审核放行了」还是「这类内容压根不走审核」。
+        result.trace.setdefault("review", []).append(
+            {"stage": "bypass", "reason": f"source={result.source or '(空)'} 由代码渲染，不经模型审核"}
+        )
         return result
     reviewer = build_reviewer()
     if reviewer is None:
