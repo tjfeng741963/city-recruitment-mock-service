@@ -160,7 +160,9 @@ export function serializeCandidate(row: Row): Row {
 const DEFAULT_EVENT_RULES = [
   { event: "disqualified", description: "不符合条件", keywords: ["后续再聊 ", "暂时安排不了"], match_mode: "any", action: "mark_disqualified", once_per_session: true },
   { event: "invited", description: "邀约成功", keywords: ["报名成功", "面试日期"], match_mode: "any", action: "mark_invited", once_per_session: true },
-  { event: "checked_in", description: "签到成功（跟进版）", keywords: ["那就祝您面试顺利", "请准时到本公司面试"], match_mode: "any", action: "mark_checked_in", once_per_session: true },
+  // checked_in 不在默认规则里，理由见 shared/event-rules.ts：签到不能靠
+  // 「我们发出去的话」推断——面试通知里就带「请准时到本公司面试」，
+  // 一发通知客户就被标成已签到（2026-11-15 实测）。签到走人工标记接口。
   { event: "pending_invite", description: "待邀约", keywords: ["到时候联系", "再联系我", "有需要联系我就行"], match_mode: "any", action: "mark_pending_invite", once_per_session: true },
 ];
 const EMPTY_TIMEOUT = { enabled: false, interval_seconds: 300, max_count: 3, scripts: [] as string[] };

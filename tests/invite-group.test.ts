@@ -110,7 +110,19 @@ describe("invite group send on candidate registration", () => {
     });
     expect(pushed.json()).toMatchObject({ invite_group: "skipped" });
     expect(app.db.prepare("SELECT COUNT(*) AS n FROM bridge_commands").get()).toMatchObject({ n: 0 });
-    // 关闭与未配置现在分开记：运营要能分清「我没打开」还是「我打开了但没配群」
+    // 默认是「开启」的（2026-11-15 修正：配好群却忘了点开关不再静默失败）。
+    // 没配群名也没配 Webhook 时落到「未配置邀约群」，仍然不发。
+    expect(app.db.prepare("SELECT status,error FROM invite_group_sends").get()).toMatchObject({ status: "skipped", error: "未配置邀约群（群名或 Webhook 地址）" });
+  });
+
+  it("does not send when the operator explicitly disables the group", async () => {
+    await configure({ enabled: false, group_name: "内部邀约群", device_code: "pc-invite-01", city_abbr: { 深圳: "深" } });
+    const pushed = await pushProfile({
+      stage: "booked", interview_agreed: true, name: "谢子鑫", phone: "18077352958",
+      interview_date: "2026-11-09", city: "深圳", factory_name: "深圳地铁安检",
+    });
+    expect(pushed.json()).toMatchObject({ invite_group: "skipped" });
+    expect(app.db.prepare("SELECT COUNT(*) AS n FROM bridge_commands").get()).toMatchObject({ n: 0 });
     expect(app.db.prepare("SELECT status,error FROM invite_group_sends").get()).toMatchObject({ status: "skipped", error: "未启用自动发群" });
   });
 
