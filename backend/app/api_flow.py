@@ -49,11 +49,13 @@ from .services.flow_engine import (
     FlowResult,
     absorb_profile,
     distinct_places,
+    device_intro_followup,
     enter_info_result,
     extract_city,
     interview_window_of,
     jobs_for_city,
     pin_position,
+    select_position_by_place,
     send_info_parts,
     set_position_scripts,
     set_remote_cities,
@@ -117,7 +119,7 @@ class FlowAnswerOut(BaseModel):
 
 
 class GreetIn(BaseModel):
-    """新好友首句：不问方向，按设备绑定的板块直接发岗位卡（11-13 与 HR 对齐）。"""
+    """新好友开场：本号招聘介绍优先，其次是岗位/通用首句及默认开场。"""
 
     session_key: str = Field(min_length=1, max_length=64)
     device_code: str = Field(default="", max_length=64)
@@ -316,7 +318,12 @@ async def flow_answer(
     # 所以必须先在这里占位，否则非 KB 阶段一走就是 UnboundLocalError。
     faq_hit: Any | None = None
 
-    if stage_before in _KB_STAGES:
+    if stage_before == STAGE_ASK_CITY and slots.get("device_intro_sent"):
+        # Only an explicit customer base selection pins a multi-base introduction.
+        if select_position_by_place(slots, payload.text):
+            slots["interview_offer_sent"] = True
+
+    if stage_before in _KB_STAGES or (stage_before == STAGE_ASK_CITY and slots.get("device_intro_sent")):
         city_hint_for_kb = (
             str(slots.get("city") or "")
             or extract_city(payload.text)
@@ -443,7 +450,10 @@ async def flow_answer(
     media_material = kb_answer or ""
     device_material_used = False
 
-    if position_script and str(position_script.get("content") or "").strip():
+    intro_result = device_intro_followup(state, payload.text, kb_answer)
+    if intro_result is not None:
+        result = intro_result
+    elif position_script and str(position_script.get("content") or "").strip():
         # 岗位话术命中：整段按运营台词直发（占位符由代码替换、媒体标记原样保留），
         # 这轮一次模型都不调——工价/年龄/地点一个字都不许被改写。
         # 状态推进仍走确定性规则：发过卡 + 进 ask_interview。
@@ -673,7 +683,7 @@ async def flow_answer(
 async def flow_greet(
     payload: GreetIn, session: SessionDep, _: ServiceOrUser
 ) -> GreetOut:
-    """新好友首句：优先岗位配置，再用通用欢迎语，未配置时沿用岗位开场。
+    """新好友开场：本号招聘介绍 → 岗位首句 → 通用欢迎语 → 默认开场。
 
     固定欢迎语按独占一行的 --- 分条，不需要客户先发问题，也不调用模型。
     没有可用话术且岗位前提不足时返回 skipped=True，由客户端沿用原兜底。
@@ -699,6 +709,38 @@ async def flow_greet(
     sent_value = existing_slots.get("scripted_sent")
     scripted_sent = dict(sent_value) if isinstance(sent_value, dict) else {}
 
+    try:
+        intro = pick_script(await fetch_scripts(device_code), "greet", city)
+    except Exception:  # noqa: BLE001
+        intro = None
+
+    async def device_welcome(jobs: list[dict[str, Any]]) -> GreetOut | None:
+        if not intro or scripted_sent.get("greet"):
+            return None
+        # Keep only facts shared by all bases of the same factory. Different wages,
+        # addresses and requirements must not silently come from jobs[0].
+        common: dict[str, Any] = {}
+        if jobs and len({str(j.get("factory_name") or "") for j in jobs}) == 1:
+            common = {key: value for key, value in jobs[0].items()
+                      if isinstance(value, (str, int, float)) and not isinstance(value, bool)
+                      and all(j.get(key) == value for j in jobs)}
+        parts = render_welcome_parts(str(intro.get("content") or ""), common, str(common.get("interview_time") or ""))
+        if not parts:
+            return None
+        slots = {**existing_slots, "city": city, "vertical_id": vertical_id,
+                 "device_intro_sent": True, "scripted_sent": {**scripted_sent, "greet": True}}
+        pin_position(slots, common)
+        selected = len(jobs) == 1 and bool(slots.get("position_id"))
+        slots["interview_offer_sent"] = selected
+        stage = STAGE_SEND_INFO if selected else STAGE_ASK_CITY
+        await store.append_events(session, payload.session_key, [
+            (store.EVENT_STAGE, {"to": stage}),
+            *store.diff_slots(existing_slots, slots),
+            (store.EVENT_REPLY, {"text": "\n".join(parts), "parts": parts, "source": "device_intro"}),
+        ])
+        return GreetOut(reply="\n".join(parts), parts=parts, stage=stage,
+                        skipped=False, detail="本企微号的固定招聘介绍")
+
     async def configured_welcome(job: dict[str, Any]) -> GreetOut | None:
         if scripted_sent.get("greet"):
             return None
@@ -720,7 +762,7 @@ async def flow_greet(
     # 没绑板块：不知道该发哪套卡。不做「按城市兜底」——那等于自己猜品类，
     # 而业务上不存在综合号（一个微信号只做一个板块）。交回上层发问句。
     if not vertical_code:
-        welcome = await configured_welcome({})
+        welcome = await device_welcome([]) or await configured_welcome({})
         if welcome:
             return welcome
         return GreetOut(
@@ -732,7 +774,7 @@ async def flow_greet(
 
     # 地铁号没绑城市：先问城市（这一步沿用现有话术，不问方向）
     if vertical_code == "subway" and not city:
-        welcome = await configured_welcome({})
+        welcome = await device_welcome([]) or await configured_welcome({})
         if welcome:
             return welcome
         return GreetOut(
@@ -759,7 +801,7 @@ async def flow_greet(
             jobs = scoped
 
     if not jobs:
-        welcome = await configured_welcome({})
+        welcome = await device_welcome([]) or await configured_welcome({})
         if welcome:
             return welcome
         # 板块没岗位数据时不瞎编，交回上层走「帮你问问」
@@ -769,6 +811,10 @@ async def flow_greet(
             skipped=True,
             detail=f"板块 {vertical_code or '(未绑定)'} 没有在招岗位",
         )
+
+    welcome = await device_welcome(jobs)
+    if welcome:
+        return welcome
 
     set_remote_jobs({city: jobs})
 

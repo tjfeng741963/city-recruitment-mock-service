@@ -1917,6 +1917,39 @@ def _job_fact_answer(slots: dict[str, Any], text: str) -> str:
     return ""
 
 
+def device_intro_followup(state: dict[str, Any], text: str, kb_answer: str | None = None) -> FlowResult | None:
+    """A device introduction is not a selection of the first interview base."""
+    slots = state.get("slots") or {}
+    if state.get("stage") != STAGE_ASK_CITY or not slots.get("device_intro_sent"):
+        return None
+    city = extract_city(text)
+    if city and city != str(slots.get("city") or ""):
+        return None  # Explicit city changes keep the existing flow.
+    _absorb(slots, text, strict_name=True)
+    places = distinct_places(slots)
+    choice = (f"面试基地有：{'、'.join(places)}，你去哪个基地方便？" if places
+              else "你在哪个城市？我帮你确认对应的岗位和面试安排。")
+    selected = bool(slots.get("position_id")) and bool(slots.get("interview_offer_sent"))
+    if looks_like_question(text) or kb_answer:
+        job_fact = _job_fact_answer(slots, text)
+        fact = job_fact or kb_answer
+        target = STAGE_SEND_INFO if selected else STAGE_ASK_CITY
+        if fact:
+            return FlowResult(reply="", parts=[fact], stage=target, slots=slots, source="fact" if job_fact else "kb")
+        return FlowResult(reply="", parts=["这个要求我再确认一下。", choice], stage=target,
+                          slots=slots, unknown_question=text)
+    if selected:
+        job = slots.get("job_snapshot") or {}
+        parts = [f"面试基地：{job['place']}"] if job.get("place") else []
+        if job.get("interview_time"):
+            parts.append(f"面试时间：{job['interview_time']}")
+        parts.append("你哪天方便过来面试？")
+        return FlowResult(reply="", parts=parts, stage=STAGE_ASK_INTERVIEW, slots=slots, source="fact")
+    if not slots.get("city") and not places:
+        return None
+    return FlowResult(reply="", parts=[choice], stage=STAGE_ASK_CITY, slots=slots, source="fact")
+
+
 def _answer_side_question(
     state: dict[str, Any],
     stage: str,

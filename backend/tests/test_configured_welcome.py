@@ -20,6 +20,7 @@ def welcome(monkeypatch):
     jobs = [{"position_id": 7, "factory_name": "测试工厂", "city": "广州", "wage_text": "本岗工资"}]
     monkeypatch.setattr("app.api_flow.fetch_device_meta", AsyncMock(side_effect=lambda _: dict(meta)))
     monkeypatch.setattr("app.api_flow.fetch_position_scripts", AsyncMock(side_effect=lambda _: list(scripts)))
+    monkeypatch.setattr("app.api_flow.fetch_scripts", AsyncMock(return_value=[]))
     lookup = AsyncMock(side_effect=lambda *a, **kw: list(jobs))
     monkeypatch.setattr("app.api_flow.lookup_jobs", lookup)
     provider = AsyncMock(side_effect=AssertionError("固定欢迎语不能调模型"))

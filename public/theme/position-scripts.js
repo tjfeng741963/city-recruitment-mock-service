@@ -262,8 +262,9 @@
   async function openDrawer(position) {
     styles();
     if (document.querySelector(".rk-ps-mask")) return; // 只允许开一个
-    const general = Number(position.id) === 0;
-    const stages = general ? STAGES.filter((stage) => stage.key === "greet") : STAGES;
+    const device = String(position.device_code || "");
+    const general = !device && Number(position.id) === 0;
+    const stages = general || device ? STAGES.filter((stage) => stage.key === "greet") : STAGES;
 
     const mask = document.createElement("div");
     mask.className = "rk-ps-mask";
@@ -291,7 +292,7 @@
     head.className = "rk-ps-head";
     const titles = document.createElement("div");
     const h2 = document.createElement("h2");
-    h2.textContent = general ? "通用欢迎语" : "话术配置";
+    h2.textContent = device ? "加好友招聘介绍" : general ? "通用欢迎语" : "话术配置";
     const sub = document.createElement("p");
     sub.textContent = `${position.position_name || "岗位"}${position.store_name ? ` · ${position.store_name}` : ""}${position.city_name ? ` · ${position.city_name}` : ""}`;
     titles.append(h2, sub);
@@ -473,7 +474,9 @@
 
       const hint = document.createElement("p");
       hint.className = "rk-ps-stage";
-      hint.textContent = general
+      hint.textContent = device
+        ? "只发给添加这个企微号的新客户。可填写工作内容、时间、福利和面试要求；请与此号绑定工厂及岗位资料保持一致。多个基地先写共通信息，客户选择后再确认具体安排。"
+        : general
         ? "适用于未配置岗位专属首句的所有设备。请使用通用招呼和询问地点，避免写某家工厂的工资或承诺。"
         : `第 ${stages.indexOf(stage) + 1} 个时点 / 共 ${stages.length} 个 · ${stage.hint}`;
       fragment.append(hint);
@@ -509,7 +512,7 @@
         phList.append(button);
       }
       ph.append(phTitle, phList);
-      if (!general) fragment.append(ph);
+      if (!general && !device) fragment.append(ph);
 
       const titleField = document.createElement("div");
       titleField.className = "rk-ps-field";
@@ -570,12 +573,14 @@
         split.textContent = "插入分条";
         split.addEventListener("click", () => insertAtCursor(area, "\n---\n"));
         tools.append(split);
-        if (general) {
+        if (general || device) {
           const example = document.createElement("button");
           example.type = "button";
           example.textContent = "填入测试文案";
           example.addEventListener("click", () => {
-            area.value = "你好，欢迎咨询招聘岗位。\n---\n我先帮你了解一下。\n---\n请问你现在在哪个城市？";
+            area.value = device
+              ? "你好，先发你一份招聘介绍。\n---\n工作内容：以岗位安排为准（测试文案）。\n工作时间：以岗位排班为准（测试文案）。\n---\n岗位福利：以岗位说明为准（测试文案）。\n面试要求：请先了解岗位要求（测试文案）。\n---\n你在哪个城市？哪个面试基地比较方便？"
+              : "你好，欢迎咨询招聘岗位。\n---\n我先帮你了解一下。\n---\n请问你现在在哪个城市？";
             area.dispatchEvent(new Event("input", { bubbles: true }));
           });
           tools.append(example);
@@ -632,12 +637,14 @@
 
       tools.append(upload, select, file, progress);
       mediaField.append(mediaLabel, chips, tools);
+      mediaField.hidden = Boolean(device);
       fragment.append(mediaField);
 
       const note = document.createElement("p");
       note.className = "rk-ps-note";
       note.textContent = "媒体标记会以【图片:文件名】【视频:文件名】的形式写进正文，客户端解析后连带文件一起发；"
         + "文件本体放在服务端媒体库（/api/v1/media），单文件上限 20MB。";
+      note.hidden = Boolean(device);
       fragment.append(note);
 
       error = document.createElement("p");
@@ -648,7 +655,7 @@
       body.replaceChildren(fragment);
       renderChips();
       // 媒体库是异步的，晚到时再补选项，不影响先编辑文字。
-      mediaLibrary().then((items) => {
+      if (!device) mediaLibrary().then((items) => {
         for (const item of items) {
           const option = document.createElement("option");
           option.value = item.name;
@@ -724,10 +731,11 @@
             const asset = mediaCache.items.find((item) => item.name === name);
             media.push({ name, kind: asset ? asset.kind : (/\.(mp4|mov|m4v|webm|avi)$/i.test(name) ? "video" : "image") });
           }
-          const saved = await api("/api/v1/position-scripts", {
+          const saved = await api(device ? "/api/v1/agent/device-scripts" : "/api/v1/position-scripts", {
             method: "POST",
             body: JSON.stringify({
               position_id: Number(position.id),
+              ...(device ? { device_code: device, city: "" } : {}),
               stage: key,
               title: draft.title,
               content: draft.content,
@@ -739,11 +747,13 @@
           draft.saved = true;
           draft.media = Array.isArray(saved.media) ? saved.media.map((item) => ({ name: String(item.name), kind: String(item.kind) })) : media;
           // 同步「全部话术」缓存，按钮上的 N/5 立刻变，不用等下一次重渲染。
-          scriptCache.ok = true;
-          scriptCache.at = Date.now();
-          scriptCache.items = scriptCache.items
-            .filter((row) => !(Number(row.position_id) === Number(position.id) && String(row.stage) === key))
-            .concat([{ ...saved, position_id: Number(position.id), stage: key }]);
+          if (!device) {
+            scriptCache.ok = true;
+            scriptCache.at = Date.now();
+            scriptCache.items = scriptCache.items
+              .filter((row) => !(Number(row.position_id) === Number(position.id) && String(row.stage) === key))
+              .concat([{ ...saved, position_id: Number(position.id), stage: key }]);
+          }
         }
         dirty.clear();
         close();
@@ -758,7 +768,9 @@
     });
 
     try {
-      const result = await api(`/api/v1/position-scripts?position_id=${encodeURIComponent(position.id)}`);
+      const result = await api(device
+        ? `/api/v1/agent/device-scripts?device_code=${encodeURIComponent(device)}&stage=greet`
+        : `/api/v1/position-scripts?position_id=${encodeURIComponent(position.id)}`);
       for (const row of Array.isArray(result.items) ? result.items : []) {
         const draft = drafts.get(String(row.stage));
         if (!draft) continue; // 后端以后加了新时点：不认识就忽略，别把它写回丢掉
@@ -799,10 +811,13 @@
 
   // ── 装饰当前页 ──
   let decorating = false;
+  let deviceCache = { at: 0, items: [] };
 
   async function decorate() {
-    if (!LIST_PATH.test(location.pathname)) {
+    const devicePage = /^\/agent-devices\/?$/.test(location.pathname);
+    if (!LIST_PATH.test(location.pathname) && !devicePage) {
       document.querySelector(".rk-ps-welcome-bar")?.remove();
+      document.querySelector(".rk-ps-device-bar")?.remove();
       return;
     }
     if (decorating) return;
@@ -823,6 +838,47 @@
           if (caught.status === 403) return;
         }
       }
+      if (devicePage) {
+        document.querySelector(".rk-ps-welcome-bar:not(.rk-ps-device-bar)")?.remove();
+        const table = document.querySelector(".el-table");
+        if (!table || document.querySelector(".rk-ps-device-bar")) return;
+        if (Date.now() - deviceCache.at > 60_000) {
+          const result = await api("/api/v1/agent/devices");
+          deviceCache = { at: Date.now(), items: result.items || [] };
+        }
+        styles();
+        const bar = document.createElement("div");
+        bar.className = "rk-ps-welcome-bar rk-ps-device-bar";
+        const select = document.createElement("select");
+        select.setAttribute("aria-label", "选择企微对应的坐席设备");
+        const empty = document.createElement("option");
+        empty.textContent = "选择企微对应的坐席设备…";
+        empty.value = "";
+        select.append(empty);
+        for (const item of deviceCache.items) {
+          if (!item.device_code) continue;
+          const option = document.createElement("option");
+          option.value = String(item.device_code);
+          const factories = (item.factories || []).map((factory) => factory.name || factory.factory_name).filter(Boolean).join("、");
+          option.textContent = `${item.name || item.device_name || item.device_code}（${item.device_code}）${factories ? " · " + factories : ""}`;
+          select.append(option);
+        }
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "rk-ps-btn";
+        button.textContent = "加好友招聘介绍";
+        button.disabled = true;
+        select.addEventListener("change", () => { button.disabled = !select.value; });
+        button.addEventListener("click", () => {
+          const current = deviceCache.items.find((item) => String(item.device_code) === select.value);
+          if (current) openDrawer({ id: 0, device_code: current.device_code,
+            position_name: `${current.name || current.device_name || current.device_code}（${current.device_code}）` });
+        });
+        bar.append(select, button, document.createTextNode("每个企微号分别配置，首次加好友后分条发送。"));
+        table.before(bar);
+        return;
+      }
+      document.querySelector(".rk-ps-device-bar")?.remove();
       const table = document.querySelector(".dashboard .bd-table, .bd-table");
       if (table && !document.querySelector(".rk-ps-welcome-bar")) {
         styles();
