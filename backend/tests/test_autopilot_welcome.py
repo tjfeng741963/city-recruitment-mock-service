@@ -1,6 +1,7 @@
 """Exercise the existing orchestrator; every desktop input API is mocked."""
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from tests.agent_loader import load_autopilot, load_reply_store
@@ -57,6 +58,29 @@ def test_empty_new_contact_record_sends_configured_parts_and_persists_first_cont
     again.core_send.send.assert_not_called()
 
 
+def test_later_welcome_parts_use_same_open_chat_fast_path(tmp_path, monkeypatch):
+    agent, store = setup_agent(tmp_path, monkeypatch)
+    calls = []
+    win_api = SimpleNamespace(
+        __name__="wecom_io_core.win",
+        wxwork_alive=lambda: True,
+        find_window=lambda: {"hwnd": 7},
+        ensure_foreground=lambda hwnd, tries=4: True,
+        hotkey=lambda *keys: calls.append(("hotkey", keys)),
+        tap=lambda key: calls.append(("tap", key)),
+        set_clipboard=lambda text: calls.append(("clipboard", text)),
+        release_modifiers=lambda: None,
+    )
+    agent.core_send.win = win_api
+    agent.core_send._wait_visible = lambda *args: None
+    agent.core_send.verify_input_box = lambda text, retries=5: (True, "synthetic input ok")
+    result = agent._send_welcome_part_fast(store, "第二段", lambda msg: calls.append(("log", msg)))
+    assert result == {"ok": True, "conversation_id": "", "detail": "已发送（同一会话快速续发）"}
+    assert ("hotkey", ("ctrl", "f")) not in calls
+    assert ("tap", "enter") in calls
+    assert ("clipboard", "第二段") in calls
+
+
 def test_offline_and_dry_run_do_not_send_greeting_or_mutate_server_state(tmp_path, monkeypatch):
     agent, store = setup_agent(tmp_path, monkeypatch)
     agent.scan(store, CFG)
@@ -67,3 +91,19 @@ def test_offline_and_dry_run_do_not_send_greeting_or_mutate_server_state(tmp_pat
     agent.core_send.send.assert_not_called()
     assert not agent.GREET_STATE.exists()
     assert agent.rlog.pending()[0]["status"] == "pending"
+
+
+def test_question_arriving_during_welcome_waits_until_all_parts_are_sent(tmp_path, monkeypatch):
+    agent, store = setup_agent(tmp_path, monkeypatch)
+    agent.scan(store, CFG)
+    agent.rlog.record_incoming({"id": 2, "conv_id": "S:test", "conv_name": "专用测试联系人",
+                                "text": "工资多少", "type": 2, "time": 101})
+    assert agent.drain(store, CFG)["sent"] == 1
+    assert [call.args[2] for call in agent.core_send.send.call_args_list] == PARTS
+    pending = agent.rlog.pending()
+    assert len(pending) == 1
+    assert pending[0]["message_id"] == "2"
+    assert pending[0]["in_text"] == "工资多少"
+    agent._brain.reply.return_value = {"ok": True, "reply": "本厂工资", "scene": "知识库"}
+    assert agent.drain(store, CFG)["sent"] == 1
+    assert agent._brain.reply.call_args.args[0] == "工资多少"
