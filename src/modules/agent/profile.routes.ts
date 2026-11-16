@@ -315,6 +315,12 @@ export async function registerProfileRoutes(app: FastifyInstance, db: DatabaseSy
           interviewDate: merged.interview_date,
           name: merged.name,
           phone: merged.phone,
+          // 「整理好的信息」：岗位/厂名/面试时段/地点一起发，群里不用再回查。
+          // 8090 把 job_title、interview_place 放在 profile 里（profileJson 留有留痕）。
+          jobTitle: asText(profileJson.job_title),
+          factoryName: merged.factory_name,
+          interviewTime: merged.interview_time,
+          interviewPlace: asText(profileJson.interview_place),
         },
         {
           // bridge 通道的 sendMessage 会阻塞等设备回执（最长 30 秒），而名单发群

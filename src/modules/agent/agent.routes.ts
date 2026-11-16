@@ -407,10 +407,19 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     const payload = {
       enabled: body.enabled === true,
       group_name: String(body.group_name ?? "").trim(),
+      // 群会话真实 id（R:xxx）。客户端按群名搜索定位、按 contact_id 校验落点，
+      // 缺了它回执永远对不上；填了就必须是群会话前缀，否则明确拒绝。
+      conv_id: String(body.conv_id ?? "").trim(),
       device_code: String(body.device_code ?? "").trim(),
       city_abbr: body.city_abbr && typeof body.city_abbr === "object" && !Array.isArray(body.city_abbr) ? body.city_abbr : {},
       webhook_url: webhookUrl,
     };
+    if (payload.conv_id && !payload.conv_id.startsWith("R:")) {
+      return reply.code(422).send({ detail: "群会话 ID 无效：应以 R: 开头（企微群聊 id）" });
+    }
+    if (payload.conv_id && !payload.group_name) {
+      return reply.code(422).send({ detail: "配置群会话 ID 时必须同时填群名：客户端靠群名搜索定位会话" });
+    }
     db.prepare(`INSERT INTO agent_configs(kind,recruiter_id,value_json,updated_at) VALUES ('invite_group','global',?,CURRENT_TIMESTAMP)
       ON CONFLICT(kind,recruiter_id) DO UPDATE SET value_json=excluded.value_json,updated_at=CURRENT_TIMESTAMP`)
       .run(JSON.stringify(payload));

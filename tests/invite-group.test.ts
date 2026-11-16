@@ -76,23 +76,32 @@ describe("invite group send on candidate registration", () => {
   });
 
   it("sends the registered candidate to the configured group", async () => {
-    await configure({ enabled: true, group_name: "内部邀约群", device_code: "pc-invite-01", city_abbr: { 深圳: "深" } });
+    await configure({
+      enabled: true, group_name: "内部邀约群", conv_id: "R:1970325309996590",
+      device_code: "pc-invite-01", city_abbr: { 深圳: "深" },
+    });
     const pushed = await pushProfile({
       stage: "booked", interview_agreed: true, name: "谢子鑫", phone: "18077352958",
       interview_date: "2026-11-09", interview_time: "09:00", city: "深圳", factory_name: "深圳地铁安检",
+      job_title: "安检员", interview_place: "冠宇商务中心2楼224",
     });
     expect(pushed.statusCode).toBe(200);
     expect(pushed.json()).toMatchObject({ recruit_status: "invited", invite_group: "sent" });
 
+    // 落点必须是真实群 conv_id；nickname 用群名，客户端靠它搜索会话。
     const command = await app.inject({ method: "POST", url: "/api/v1/bridge/devices/pc-invite-01/claim", headers: device });
-    expect(command.json().command).toMatchObject({ contact_id: "R:内部邀约群", nickname: "内部邀约群", content: "深11/9 谢子鑫 18077352958" });
+    const content = "深11/9 谢子鑫 18077352958 深圳地铁安检 安检员 09:00 冠宇商务中心2楼224";
+    expect(command.json().command).toMatchObject({ contact_id: "R:1970325309996590", nickname: "内部邀约群", content });
 
     const sends = await app.inject({ method: "GET", url: "/api/v1/agent/invite-group/sends", headers: admin });
-    expect(sends.json().items[0]).toMatchObject({ group_name: "内部邀约群", content: "深11/9 谢子鑫 18077352958", status: "sent" });
+    expect(sends.json().items[0]).toMatchObject({ group_name: "内部邀约群", content, status: "sent" });
   });
 
   it("does not send twice for the same candidate and interview date", async () => {
-    await configure({ enabled: true, group_name: "内部邀约群", device_code: "pc-invite-01", city_abbr: { 深圳: "深" } });
+    await configure({
+      enabled: true, group_name: "内部邀约群", conv_id: "R:1970325309996590",
+      device_code: "pc-invite-01", city_abbr: { 深圳: "深" },
+    });
     const profile = {
       stage: "booked", interview_agreed: true, name: "谢子鑫", phone: "18077352958",
       interview_date: "2026-11-09", city: "深圳", factory_name: "深圳地铁安检",
@@ -100,7 +109,7 @@ describe("invite group send on candidate registration", () => {
     await pushProfile(profile);
     await pushProfile(profile);
     expect(app.db.prepare("SELECT COUNT(*) AS n FROM invite_group_sends").get()).toMatchObject({ n: 1 });
-    expect(app.db.prepare("SELECT COUNT(*) AS n FROM bridge_commands WHERE contact_id='R:内部邀约群'").get()).toMatchObject({ n: 1 });
+    expect(app.db.prepare("SELECT COUNT(*) AS n FROM bridge_commands WHERE contact_id='R:1970325309996590'").get()).toMatchObject({ n: 1 });
   });
 
   it("records a skip instead of sending when the group is not configured", async () => {
@@ -111,8 +120,15 @@ describe("invite group send on candidate registration", () => {
     expect(pushed.json()).toMatchObject({ invite_group: "skipped" });
     expect(app.db.prepare("SELECT COUNT(*) AS n FROM bridge_commands").get()).toMatchObject({ n: 0 });
     // 默认是「开启」的（2026-11-15 修正：配好群却忘了点开关不再静默失败）。
-    // 没配群名也没配 Webhook 时落到「未配置邀约群」，仍然不发。
-    expect(app.db.prepare("SELECT status,error FROM invite_group_sends").get()).toMatchObject({ status: "skipped", error: "未配置邀约群（群名或 Webhook 地址）" });
+    // 没配群会话 ID / 群名 / Webhook 时落到「未配置邀约群」，仍然不发。
+    expect(app.db.prepare("SELECT status,error FROM invite_group_sends").get()).toMatchObject({ status: "skipped", error: "未配置邀约群（群会话 ID / 群名 / Webhook 地址）" });
+  });
+
+  it("rejects a group conv id that is not a group chat", async () => {
+    const rejected = await configure({ enabled: true, group_name: "内部邀约群", conv_id: "S:wxid_a" });
+    expect(rejected.statusCode).toBe(422);
+    const missingName = await configure({ enabled: true, conv_id: "R:1970325309996590" });
+    expect(missingName.statusCode).toBe(422);
   });
 
   it("does not send when the operator explicitly disables the group", async () => {

@@ -15,8 +15,17 @@ import type { DatabaseSync } from "node:sqlite";
 
 export interface InviteGroupConfig {
   enabled: boolean;
-  /** 群名，客户端把它输进企微搜索框定位会话 */
+  /** 群名，客户端把它输进企微搜索框定位会话；必须与企微里的群名一字不差 */
   groupName: string;
+  /**
+   * 群会话的真实 conv_id（`R:` 前缀），例如 `R:1970325309996590`。
+   *
+   * 为什么必须有它：客户端是靠**群名**搜索定位会话的，发送后回读校验却按
+   * contact_id 比对落点。以前写的是 `R:<群名>`，那是凭空造的 id，永远比不中，
+   * 于是每条都被记成「已发送但回读失败」。填了真实 conv_id 之后，落点校验
+   * 才成立，群消息的回执也能正常推进 bridge_commands。
+   */
+  convId: string;
   /** 用哪台设备发（空 = 用候选人所在设备） */
   deviceCode: string;
   /** 城市名 → 简写映射，如 {"深圳":"深","东莞":"万"} */
@@ -37,6 +46,7 @@ export interface InviteGroupConfig {
 export const DEFAULT_INVITE_GROUP_CONFIG: InviteGroupConfig = {
   enabled: false,
   groupName: "",
+  convId: "",
   deviceCode: "",
   cityAbbr: {},
   webhookUrl: "",
@@ -68,6 +78,7 @@ export function readInviteGroupConfig(db: DatabaseSync): InviteGroupConfig {
     // 时下面会落到「未配置邀约群」，所以打开默认值不会误发。
     enabled: raw.enabled !== false,
     groupName: String(raw.group_name ?? "").trim(),
+    convId: String(raw.conv_id ?? "").trim(),
     deviceCode: String(raw.device_code ?? "").trim(),
     cityAbbr,
     webhookUrl: String(raw.webhook_url ?? "").trim(),
@@ -109,6 +120,38 @@ export interface InviteGroupSendInput {
   interviewDate: string;
   name: string;
   phone: string;
+  /** 以下为「整理好的信息」，有就补在名单行后面，没有就省略 */
+  jobTitle?: string;
+  factoryName?: string;
+  interviewTime?: string;
+  interviewPlace?: string;
+  district?: string;
+}
+
+/**
+ * 一整条要发进群的消息：名单行 + 补充信息，全部单行空格分隔。
+ *
+ * 为什么坚持单行：客户端是「粘贴 + 回车」发送，多行文本在企微输入框里
+ * 会产生换行占位，回车是否一次发出取决于输入框状态，多行会显著提高
+ * 发半截/发不出去的概率。单行没有这个风险，群里也一眼能看完。
+ *
+ * 补充字段按「岗位 · 厂名 · 面试时间 · 地点」顺序拼，空值跳过——
+ * 宁可少写一项，也不要在群里出现 `地点：` 这种空标签。
+ */
+export function buildInviteMessage(input: {
+  city: string; interviewDate: string; name: string; phone: string;
+  cityAbbr: Record<string, string>;
+  jobTitle?: string; factoryName?: string; interviewTime?: string; interviewPlace?: string; district?: string;
+}): string {
+  const line = buildInviteLine(input);
+  if (!line) return "";
+  const extras = [input.factoryName, input.jobTitle, input.interviewTime, input.interviewPlace]
+    .map(value => String(value ?? "").trim())
+    .filter(Boolean);
+  // 去重：厂名与岗位经常是「深圳地铁安检 安检员」，重复出现同一个词没意义
+  const unique: string[] = [];
+  for (const value of extras) if (!unique.includes(value)) unique.push(value);
+  return unique.length ? `${line} ${unique.join(" ")}` : line;
 }
 
 export interface InviteGroupSendResult {
@@ -161,12 +204,18 @@ export const defaultWebhookSender: InviteGroupWebhookSender = async (url, conten
 };
 
 /**
- * 把一行名单发到内部邀约群，并落一条发送记录。
+ * 把一条名单发到内部邀约群，并落一条发送记录。
  *
- * 幂等：同一位候选人在同一面试日期只发一次（幂等键带了 event id 与日期）。
- * 群会话按「群名」登记进 bridge_contacts（contact_id = `R:<群名>`，
- * 客户端约定 `R:` 前缀表示群聊），nickname 用群名，因为客户端是靠昵称
- * 输进企微搜索框定位会话的。
+ * 通道优先级（2026-11-16 改）：
+ *   ① 配了群会话 conv_id（`R:` 前缀）→ 走客户端键鼠直发，和给客户发消息
+ *      完全同一条链路（bridge enqueue → 客户端 claim → 搜索群名 → 粘贴回车）。
+ *      客户明确要求「直接发，不用 bot」，所以这一条优先。
+ *   ② 没配 conv_id 但配了合法群机器人 Webhook → 后端直接 POST。
+ *   ③ 都没有 → 记 skipped，不假装发过。
+ *
+ * 幂等分两层：
+ *   - 发送前查同一幂等键是否已 sent，已发过就直接返回，不重复入队（防刷屏）；
+ *   - 落库用 ON CONFLICT upsert，同一人同一天只有一行记录。
  */
 export async function sendInviteGroupLine(
   db: DatabaseSync,
@@ -178,9 +227,14 @@ export async function sendInviteGroupLine(
   },
 ): Promise<InviteGroupSendResult> {
   const config = readInviteGroupConfig(db);
-  const content = buildInviteLine({ city: input.city, interviewDate: input.interviewDate, name: input.name, phone: input.phone, cityAbbr: config.cityAbbr });
+  const content = buildInviteMessage({
+    city: input.city, interviewDate: input.interviewDate, name: input.name, phone: input.phone,
+    cityAbbr: config.cityAbbr,
+    jobTitle: input.jobTitle, factoryName: input.factoryName,
+    interviewTime: input.interviewTime, interviewPlace: input.interviewPlace,
+  });
 
-  // 幂等键：候选人 + 面试日期。改期会生成新的一行，同一天重复推送不会刷屏。
+  // 幂等键：候选人 + 面试日期。改期会生成新的一行；同一人同一天重复推送不会刷屏。
   const idempotencyKey = `invite-group:${input.deviceCode}:${input.candidateEventId}:${String(input.interviewDate).trim()}`;
   const record = (status: string, error = "") => {
     db.prepare(`INSERT INTO invite_group_sends(device_code,customer_id,candidate_event_id,group_name,content,idempotency_key,status,error)
@@ -197,11 +251,46 @@ export async function sendInviteGroupLine(
     record("skipped", "未启用自动发群");
     return { status: "skipped", content, reason: "未启用自动发群" };
   }
-  // 两条通道二选一：配了合法 Webhook 就走机器人（不依赖客户端），
-  // 否则退回客户端发群。两边都没有可用配置时明确跳过，不假装发过。
+  // 已经发成功过就不再入队。以前只在落库层做 upsert，发送前不查，
+  // 结果档案每次推送都把同一个人再发一遍（webhook 通道无回执，刷屏最明显）。
+  const previous = db.prepare("SELECT status FROM invite_group_sends WHERE idempotency_key=?").get(idempotencyKey) as { status: string } | undefined;
+  if (previous?.status === "sent") return { status: "sent", content, reason: "已发送过，跳过重复发送" };
+
+  const convId = config.convId.trim();
+  if (convId && !/^R:/.test(convId)) {
+    // 填了但不是群会话 id：明确失败，不要猜。
+    record("failed", `群会话 ID 无效：应以 R: 开头，实际是 ${convId.slice(0, 20)}`);
+    return { status: "failed", content, reason: "群会话 ID 无效" };
+  }
+
+  if (convId) {
+    if (!config.groupName) {
+      // 客户端靠群名搜索定位会话，没有群名就发不出去，提前拦住。
+      record("failed", "已配置群会话 ID 但缺群名：客户端靠群名搜索定位会话");
+      return { status: "failed", content, reason: "缺群名" };
+    }
+    const deviceCode = config.deviceCode || input.deviceCode;
+    // 群会话登记：contact_id 用真实群 id，nickname 用群名（客户端搜索用）。
+    // 以前这里是 `R:<群名>`，凭空造的 id，客户端回读校验永远比不中。
+    const groupCustomerId = ensureGroupConversation(db, deviceCode, convId, config.groupName);
+    try {
+      const sent = await deps.send({ deviceCode, customerId: groupCustomerId, content, idempotencyKey });
+      if (!sent.success) {
+        record("failed", sent.error ?? "发送失败");
+        return { status: "failed", content, reason: sent.error };
+      }
+      record("sent");
+      return { status: "sent", content };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      record("failed", message);
+      return { status: "failed", content, reason: message };
+    }
+  }
+
   const useWebhook = isAllowedWebhookUrl(config.webhookUrl);
-  if (!useWebhook && !config.groupName) {
-    record("skipped", "未配置邀约群（群名或 Webhook 地址）");
+  if (!useWebhook && !config.webhookUrl) {
+    record("skipped", "未配置邀约群（群会话 ID / 群名 / Webhook 地址）");
     return { status: "skipped", content, reason: "未配置邀约群" };
   }
   if (config.webhookUrl && !useWebhook) {
@@ -211,44 +300,41 @@ export async function sendInviteGroupLine(
     return { status: "failed", content, reason: "Webhook 地址无效" };
   }
 
-  if (useWebhook) {
-    const sender = deps.webhook ?? defaultWebhookSender;
-    const sent = await sender(config.webhookUrl, content);
-    if (!sent.success) {
-      record("failed", sent.error ?? "Webhook 发送失败");
-      return { status: "failed", content, reason: sent.error };
-    }
-    record("sent", "");
-    return { status: "sent", content };
+  const sender = deps.webhook ?? defaultWebhookSender;
+  const sent = await sender(config.webhookUrl, content);
+  if (!sent.success) {
+    record("failed", sent.error ?? "Webhook 发送失败");
+    return { status: "failed", content, reason: sent.error };
   }
-
-  const deviceCode = config.deviceCode || input.deviceCode;
-  const groupContact = `R:${config.groupName}`;
-  // 群会话登记：已存在就复用，不会因为重复发送插出多条会话
-  const contactStore = db.prepare("SELECT customer_id FROM bridge_contacts WHERE device_code=? AND contact_id=?").get(deviceCode, groupContact) as { customer_id: number } | undefined;
-  let groupCustomerId = contactStore?.customer_id;
-  if (!groupCustomerId) {
-    groupCustomerId = Number((db.prepare(`SELECT MAX(value)+1 AS id FROM (
-      SELECT COALESCE(MAX(customer_id),0) value FROM agent_conversations UNION ALL
-      SELECT COALESCE(MAX(customer_id),0) FROM bridge_contacts UNION ALL SELECT 0)`)
-      .get() as { id: number }).id);
-    db.prepare("INSERT OR IGNORE INTO bridge_contacts(device_code,contact_id,customer_id,nickname) VALUES (?,?,?,?)")
-      .run(deviceCode, groupContact, groupCustomerId, config.groupName);
-    db.prepare("INSERT OR IGNORE INTO agent_conversations(device_code,customer_id,nickname,external_conversation_id) VALUES (?,?,?,?)")
-      .run(deviceCode, groupCustomerId, config.groupName, groupContact);
-  }
-
-  try {
-    const sent = await deps.send({ deviceCode, customerId: groupCustomerId, content, idempotencyKey });
-    if (!sent.success) {
-      record("failed", sent.error ?? "发送失败");
-      return { status: "failed", content, reason: sent.error };
-    }
-    record("sent");
-    return { status: "sent", content };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    record("failed", message);
-    return { status: "failed", content, reason: message };
-  }
+  record("sent", "");
+  return { status: "sent", content };
 }
+
+/**
+ * 取（或建）群里那条会话，返回它在 4222 侧的 customer_id。
+ *
+ * bridge_commands 只认 customer_id，客户端认 nickname（搜索框输入）和
+ * contact_id（发送后落点校验），三者必须指向同一个群，所以这里一次登记齐。
+ */
+function ensureGroupConversation(db: DatabaseSync, deviceCode: string, convId: string, groupName: string): number {
+  const existing = db.prepare("SELECT customer_id FROM bridge_contacts WHERE device_code=? AND contact_id=?")
+    .get(deviceCode, convId) as { customer_id: number } | undefined;
+  if (existing?.customer_id) {
+    // 群名可能被改过：以最新配置为准更新昵称，否则客户端搜索会落空。
+    db.prepare("UPDATE bridge_contacts SET nickname=? WHERE device_code=? AND contact_id=? AND nickname<>?")
+      .run(groupName, deviceCode, convId, groupName);
+    db.prepare("UPDATE agent_conversations SET nickname=? WHERE device_code=? AND customer_id=? AND nickname<>?")
+      .run(groupName, deviceCode, existing.customer_id, groupName);
+    return existing.customer_id;
+  }
+  const groupCustomerId = Number((db.prepare(`SELECT MAX(value)+1 AS id FROM (
+    SELECT COALESCE(MAX(customer_id),0) value FROM agent_conversations UNION ALL
+    SELECT COALESCE(MAX(customer_id),0) FROM bridge_contacts UNION ALL SELECT 0)`)
+    .get() as { id: number }).id);
+  db.prepare("INSERT OR IGNORE INTO bridge_contacts(device_code,contact_id,customer_id,nickname) VALUES (?,?,?,?)")
+    .run(deviceCode, convId, groupCustomerId, groupName);
+  db.prepare("INSERT OR IGNORE INTO agent_conversations(device_code,customer_id,nickname,external_conversation_id) VALUES (?,?,?,?)")
+    .run(deviceCode, groupCustomerId, groupName, convId);
+  return groupCustomerId;
+}
+
