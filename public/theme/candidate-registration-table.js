@@ -65,6 +65,36 @@ async function remindCandidate(row) {
   }
 }
 
+/**
+ * 人工标记「已签到 / 不符合」。
+ *
+ * 为什么必须有这个按钮：2026-11-16 把 checked_in 从默认事件规则里删掉了
+ * （面试通知里带「请准时到本公司面试」，一发通知就把客户标成已签到，
+ * 而他第二天才来）。删掉之后，这个编译版页面**没有任何打标记的入口**，
+ * 「已签到」标签页会永远为空。签到是客户到场的事实，只能人来确认。
+ */
+async function markCandidate(row, status, label) {
+  const token = localStorage.getItem("token") || "";
+  const id = row?.id;
+  if (!id) return;
+  if (!window.confirm(`把「${row.nickname || row.name || "该候选人"}」标记为「${label}」？`)) return;
+  try {
+    const response = await fetch(`/api/v1/agent/candidates/${id}/mark`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ status }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      window.alert(body?.detail || "标记失败");
+      return;
+    }
+    window.alert(`已标记为「${label}」，刷新后生效`);
+  } catch (error) {
+    window.alert(`标记失败：${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 /** 在候选人表格上补齐 OA 字段列（原生 Element Plus 列，不动 bundle）。 */
 export function addRegistrationColumn(node, createVNode, withCtx) {
   if (!node || typeof node !== "object") return;
@@ -124,6 +154,18 @@ export function addRegistrationColumn(node, createVNode, withCtx) {
               class: "candidate-remind-btn",
               onClick: () => remindCandidate(row),
             }, "提醒到场"),
+          ]),
+        }));
+      }
+      // 已签到：唯一的人工入口（自动判定已删除，理由见 markCandidate 注释）
+      if (!existing.has("candidate-checkin")) {
+        added.push(makeColumn("candidate-checkin", { label: "签到", width: 90 }, {
+          default: withCtx(({ row }) => [
+            createVNode("button", {
+              type: "button",
+              class: "candidate-checkin-btn",
+              onClick: () => markCandidate(row, "checked_in", "已签到"),
+            }, "标记签到"),
           ]),
         }));
       }
