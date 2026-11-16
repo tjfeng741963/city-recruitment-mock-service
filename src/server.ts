@@ -1,6 +1,6 @@
 import Fastify, { type FastifyError } from "fastify";
 import fastifyStatic from "@fastify/static";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { DatabaseSync } from "node:sqlite";
@@ -155,8 +155,14 @@ export function buildServer() {
     prefix: "/uploads/",
     decorateReply: false,
   });
-  registerAuthRoutes(app, auth);
-  registerCoreRoutes(app, db);
+  // 开发调试站：独立页面（自己的布局与路由），不挂在后台 Vue 里。
+  // 直接读文件返回，不走 SPA fallback——它和后台是两套前端。
+  app.get("/dev", async (_request, reply) => {
+    const file = path.join(config.frontendDir(), "dev.html");
+    return reply.type("text/html; charset=utf-8").send(readFileSync(file));
+  });
+
+  registerAuthRoutes(app, auth);  registerCoreRoutes(app, db);
   // knowledge 的旧契约先由兼容层接管（读写 kb_faq，AI 实际回复用的表），
   // 这样 registerResourceRoutes 里的 knowledge 会跳过，不会重复注册。
   // 关掉兼容层（REA_KB_COMPAT=off）就回落到旧表 knowledge_items。

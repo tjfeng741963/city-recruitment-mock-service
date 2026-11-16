@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>开发调试 · 城市招聘</title>
+<style>
+  :root{
+    --bg:#f5f7fb; --panel:#ffffff; --line:#e2e8f1; --line-strong:#c8d2e0;
+    --ink:#1b2432; --muted:#6b7688; --faint:#93a0b3;
+    --accent:#185fa5; --accent-soft:#e8f0fa;
+    --ok:#0f6e56; --ok-soft:#e6f4ef; --warn:#854f0b; --warn-soft:#fbf1e2; --err:#a32d2d; --err-soft:#fbeaea;
+    --radius:8px; --mono:ui-monospace,Menlo,Consolas,"Courier New",monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.6 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+  button,input,select,textarea{font:inherit;color:inherit}
+  header{display:flex;align-items:center;gap:24px;height:56px;padding:0 20px;background:var(--panel);border-bottom:1px solid var(--line)}
+  .brand{font-size:15px;font-weight:600;letter-spacing:-.01em}
+  .brand small{margin-left:8px;font-size:12px;font-weight:400;color:var(--faint)}
+  nav{display:flex;gap:4px}
+  nav button{height:32px;padding:0 14px;border:0;border-radius:999px;background:transparent;color:var(--muted);cursor:pointer;font-size:13px}
+  nav button:hover{background:#eef2f8;color:var(--ink)}
+  nav button.is-active{background:var(--accent-soft);color:var(--accent);font-weight:600}
+  .who{margin-left:auto;display:flex;align-items:center;gap:10px;font-size:12px;color:var(--muted)}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--err)}
+  .dot.on{background:var(--ok)}
+  .who button{height:28px;padding:0 12px;border:1px solid var(--line-strong);border-radius:999px;background:var(--panel);cursor:pointer;font-size:12px}
+  .who button:hover{border-color:var(--accent);color:var(--accent)}
+  main{height:calc(100% - 56px);overflow:hidden}
+  .view{height:100%;display:flex;overflow:hidden}
+
+  aside{flex:0 0 300px;display:flex;flex-direction:column;background:var(--panel);border-right:1px solid var(--line);overflow:hidden}
+  .search{padding:12px;border-bottom:1px solid var(--line)}
+  .search input{width:100%;height:34px;padding:0 11px;border:1px solid var(--line-strong);border-radius:var(--radius);background:var(--bg)}
+  .search input:focus{outline:0;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+  .tree{flex:1;overflow:auto;padding:10px 8px 24px}
+  .group{margin-bottom:10px}
+  .group-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;color:var(--muted)}
+  .group-head:hover{background:#f0f4fa}
+  .group-count{font-weight:400;color:var(--faint)}
+  .group-body{padding:2px 0 4px}
+  .ep{display:flex;gap:8px;align-items:center;width:100%;padding:6px 8px;border:0;border-radius:6px;background:transparent;cursor:pointer;text-align:left}
+  .ep:hover{background:#f0f4fa}
+  .ep.is-active{background:var(--accent-soft)}
+  .ep-m{flex:0 0 auto;min-width:42px;font-family:var(--mono);font-size:10px;font-weight:700}
+  .ep-p{flex:1;min-width:0;font-family:var(--mono);font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  article{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
+  .doc{padding:18px 22px 14px;border-bottom:1px solid var(--line);background:var(--panel)}
+  .doc h2{margin:0;font-size:16px;font-weight:600}
+  .doc .summary{margin:6px 0 0;font-size:13px;color:var(--muted)}
+  .tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+  .tag{padding:1px 9px;border-radius:999px;font-size:11px;background:#eef2f8;color:var(--muted)}
+  .tag.admin{background:var(--warn-soft);color:var(--warn)}
+  .tag.device{background:var(--accent-soft);color:var(--accent)}
+  .tag.none{background:var(--ok-soft);color:var(--ok)}
+  .doc .params{margin-top:10px;font-size:12px;color:var(--muted)}
+  .doc .params code{font-family:var(--mono);background:#eef2f8;padding:1px 6px;border-radius:4px;color:var(--ink)}
+
+  .work{flex:1;display:flex;overflow:hidden}
+  .work-left{flex:1;min-width:0;display:flex;flex-direction:column;border-right:1px solid var(--line);overflow:auto}
+  .req{padding:14px 22px;background:var(--panel);border-bottom:1px solid var(--line)}
+  .url-row{display:flex;gap:8px}
+  .url-row select{height:36px;padding:0 8px;border:1px solid var(--line-strong);border-radius:var(--radius);background:var(--panel);font-family:var(--mono);font-size:12px}
+  .url-row input{flex:1;height:36px;padding:0 11px;border:1px solid var(--line-strong);border-radius:var(--radius);background:var(--panel);font-family:var(--mono);font-size:12px}
+  .url-row button{height:36px;padding:0 20px;border:0;border-radius:999px;background:var(--accent);color:#fff;font-weight:600;cursor:pointer}
+  .url-row button:hover{filter:brightness(1.06)}
+  .url-row button:disabled{opacity:.6;cursor:not-allowed}
+  .params-row{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px}
+  .param{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
+  .param input{width:130px;height:30px;padding:0 8px;border:1px solid var(--line-strong);border-radius:6px;background:var(--panel);font-family:var(--mono);font-size:12px}
+  .body-box{margin-top:12px}
+  .body-box label{display:block;margin-bottom:5px;font-size:12px;color:var(--faint)}
+  .body-box textarea{width:100%;min-height:130px;max-height:280px;resize:vertical;padding:10px 12px;border:1px solid var(--line-strong);border-radius:var(--radius);background:var(--panel);font-family:var(--mono);font-size:12px;line-height:1.6}
+  .body-box textarea:focus{outline:0;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+  .resp{flex:1;display:flex;flex-direction:column;min-height:0;background:var(--panel)}
+  .resp-bar{display:flex;align-items:center;gap:14px;padding:9px 22px;border-bottom:1px solid var(--line);font-size:12px;color:var(--faint)}
+  .code{font-family:var(--mono);font-weight:700;font-size:12.5px}
+  .code.ok{color:var(--ok)} .code.warn{color:var(--warn)} .code.err{color:var(--err)}
+  .out{flex:1;margin:0;padding:14px 22px;overflow:auto;font-family:var(--mono);font-size:11.5px;line-height:1.65;white-space:pre-wrap;word-break:break-word;color:#2b3546}
+
+  .agent-left{flex:0 0 340px;overflow:auto;padding:16px;border-right:1px solid var(--line);background:var(--panel)}
+  .agent-left h3{margin:0 0 6px;font-size:11px;font-weight:600;letter-spacing:.03em;color:var(--faint)}
+  .sec{margin-bottom:18px}
+  .kv{display:grid;grid-template-columns:62px 1fr;gap:4px 8px;font-size:12.5px}
+  .kv dt{color:var(--faint)} .kv dd{margin:0;word-break:break-word}
+  .pre{margin:0;padding:9px 10px;border:1px solid var(--line);border-radius:var(--radius);background:var(--bg);font-family:var(--mono);font-size:11px;line-height:1.6;white-space:pre-wrap;word-break:break-word;max-height:200px;overflow:auto;color:#2b3546}
+  .empty{font-size:12px;color:var(--faint)}
+  .seq{display:flex;flex-direction:column;gap:6px}
+  .seq-item{display:flex;gap:8px;padding:7px 9px;border:1px solid var(--line);border-radius:var(--radius);font-size:12px}
+  .seq-no{flex:0 0 auto;width:20px;height:20px;border-radius:999px;background:var(--accent-soft);color:var(--accent);font-weight:600;text-align:center;line-height:20px;font-size:11px}
+  .seq-body{flex:1;min-width:0;word-break:break-word;white-space:pre-wrap}
+  .seq-body.media{font-family:var(--mono);font-size:11px;color:var(--accent)}
+
+  .agent-right{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--bg)}
+  .thread{flex:1;overflow:auto;padding:18px 20px}
+  .msg{display:flex;margin-bottom:10px}
+  .msg.agent{justify-content:flex-end}
+  .bubble{max-width:78%;padding:9px 12px;border-radius:10px;font-size:13px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
+  .msg.customer .bubble{background:var(--panel);border:1px solid var(--line)}
+  .msg.agent .bubble{background:var(--accent-soft)}
+  .meta{margin-top:4px;font-size:11px;color:var(--faint);text-align:right}
+  .composer{border-top:1px solid var(--line);background:var(--panel);padding:12px 14px;display:flex;gap:10px;align-items:flex-end}
+  .composer textarea{flex:1;min-height:66px;max-height:160px;resize:vertical;padding:9px 12px;border:1px solid var(--line-strong);border-radius:var(--radius);font-size:13px;line-height:1.6}
+  .composer .acts{display:flex;flex-direction:column;gap:8px}
+  .composer button{height:32px;padding:0 14px;border:1px solid var(--line-strong);border-radius:999px;background:var(--panel);cursor:pointer;font-size:13px;white-space:nowrap}
+  .composer button.primary{border:0;background:var(--accent);color:#fff;font-weight:600}
+  .composer button:disabled{opacity:.55;cursor:not-allowed}
+  .flag{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
+  .raw{margin:0;padding:10px 14px;border-top:1px solid var(--line);background:#fbfcfe;font-family:var(--mono);font-size:11px;line-height:1.55;white-space:pre-wrap;word-break:break-word;max-height:170px;overflow:auto;color:#2b3546}
+
+  .overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(18,28,52,.35);z-index:50}
+  .card{width:min(400px,90vw);padding:22px;border-radius:12px;background:var(--panel);box-shadow:0 24px 60px -24px rgba(20,40,90,.45)}
+  .card h2{margin:0 0 4px;font-size:17px}
+  .card p{margin:0 0 14px;font-size:12.5px;color:var(--muted)}
+  .card label{display:block;margin-bottom:10px;font-size:12px;color:var(--faint)}
+  .card input{width:100%;height:36px;margin-top:4px;padding:0 11px;border:1px solid var(--line-strong);border-radius:var(--radius)}
+  .card button{width:100%;height:38px;border:0;border-radius:999px;background:var(--accent);color:#fff;font-weight:600;cursor:pointer}
+  .card .err{margin-top:10px;font-size:12.5px;color:var(--err)}
+  .toasts{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);display:flex;flex-direction:column;gap:8px;z-index:60;pointer-events:none}
+  .toast{padding:9px 14px;border-radius:var(--radius);background:rgba(23,28,38,.94);color:#fff;font-size:13px}
+  .toast.error{background:rgba(163,45,45,.96)}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">开发调试 <small>接口目录 · Agent 对话</small></div>
+  <nav>
+    <button data-view="api" class="is-active">接口目录</button>
+    <button data-view="agent">Agent 对话</button>
+  </nav>
+  <div class="who">
+    <span class="dot" id="dot"></span>
+    <span id="who-text">未登录</span>
+    <button id="login-btn" type="button">登录</button>
+  </div>
+</header>
+
+<main>
+  <section class="view" id="view-api">
+    <aside>
+      <div class="search"><input id="search" placeholder="搜接口，例如 agent、kb-faqs、opening" /></div>
+      <div class="tree" id="tree"></div>
+    </aside>
+    <article>
+      <div class="doc" id="doc">
+        <h2>选一个接口</h2>
+        <p class="summary">左边按分类列出全部接口，点一条看它是干什么的，右侧可以直接发请求。</p>
+      </div>
+      <div class="work">
+        <div class="work-left">
+          <div class="req">
+            <div class="url-row">
+              <select id="method">
+                <option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option>
+              </select>
+              <input id="url" placeholder="/api/v1/..." />
+              <button id="send" type="button">发送</button>
+            </div>
+            <div class="params-row" id="params"></div>
+            <div class="body-box" id="body-box">
+              <label>请求体（JSON）</label>
+              <textarea id="body" placeholder='{"position_id":1}'></textarea>
+            </div>
+          </div>
+          <div class="resp">
+            <div class="resp-bar" id="resp-bar"><span>还没有请求</span></div>
+            <pre class="out" id="out">选中接口后点「发送」。</pre>
+          </div>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <section class="view" id="view-agent" hidden>
+    <div class="agent-left">
+      <div class="sec">
+        <h3>岗位</h3>
+        <select id="pos" style="width:100%;height:34px;border:1px solid var(--line-strong);border-radius:8px;padding:0 8px;background:#fff"></select>
+      </div>
+      <div class="sec">
+        <h3>岗位事实（模型唯一允许引用的数字）</h3>
+        <div id="ctx-facts"></div>
+      </div>
+      <div class="sec">
+        <h3>人设</h3>
+        <div id="ctx-persona"></div>
+      </div>
+      <div class="sec">
+        <h3>开场</h3>
+        <div id="ctx-opening"></div>
+      </div>
+      <div class="sec">
+        <h3>模型</h3>
+        <div id="ctx-llm" class="empty"></div>
+      </div>
+    </div>
+    <div class="agent-right">
+      <div class="thread" id="thread"></div>
+      <pre class="raw" id="raw" hidden></pre>
+      <div class="composer">
+        <textarea id="msg" placeholder="输入一句客户会说的话，例如：多少钱一小时？"></textarea>
+        <div class="acts">
+          <label class="flag"><input type="checkbox" id="dry" /> 只看 prompt</label>
+          <button class="primary" id="chat-send" type="button">发送</button>
+          <button id="chat-clear" type="button">清空</button>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div class="overlay" id="login" hidden>
+  <form class="card" id="login-form">
+    <h2>登录</h2>
+    <p>用后台账号登录，token 存在本机 localStorage，和后台共用。</p>
+    <label>账号<input id="login-user" value="local-admin" autocomplete="username" /></label>
+    <label>密码<input id="login-pass" type="password" autocomplete="current-password" /></label>
+    <button type="submit">登录</button>
+    <div class="err" id="login-err" hidden></div>
+  </form>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  var TOKEN_KEY = "token";
+  var METHOD_COLOR = { GET: "#185fa5", POST: "#0f6e56", PUT: "#854f0b", PATCH: "#854f0b", DELETE: "#a32d2d" };
+  var AUTH_LABEL = { admin: "需要管理员", user: "需要登录", device: "设备/服务令牌", none: "无需登录" };
+  var BODY_TEMPLATES = {
+    "POST /api/v1/agent/chat": { position_id: 1, text: "多少钱一小时", history: [], dry: true },
+    "PUT /api/v1/agent-persona": { position_id: 1, content: "你是陈姐，在广东做工厂招工十几年……" },
+    "POST /api/v1/agent-opening": { position_id: 1, kind: "text", content: "你好，我们这边在招普工", delay_ms: 2000 },
+    "PUT /api/v1/agent-opening/:id": { content: "改过的正文", delay_ms: 2000 },
+    "POST /api/v1/agent-opening/reorder": { position_id: 1, ids: [2, 1] },
+    "POST /api/v1/agent/opening/log": { session_key: "S:10001", device_code: "pc-win-01", position_id: 1, seq: 1, kind: "text", status: "sent" },
+    "POST /api/v1/auth/login": { username: "local-admin", password: "local-demo-only" }
+  };
+
+  var state = { catalog: null, current: null, params: {}, history: [], positionId: 0, busy: false };
+
+  function $(id) { return document.getElementById(id); }
+  function el(tag, cls, text) {
+    var node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined) node.textContent = String(text);
+    return node;
+  }
+  function toast(text, tone) {
+    var box = el("div", "toast" + (tone === "error" ? " error" : ""), text);
+    $("toasts").append(box);
+    setTimeout(function () { box.remove(); }, 2800);
+  }
+
+  function readToken() {
+    try {
+      var raw = localStorage.getItem(TOKEN_KEY) || "";
+      var value = String(raw).trim();
+      if (value.length > 1 && value.charAt(0) === '"' && value.charAt(value.length - 1) === '"') {
+        try { return JSON.parse(value); } catch (e) { return value.slice(1, -1); }
+      }
+      return value;
+    } catch (e) { return ""; }
+  }
+
+  function setToken(value) {
+    localStorage.setItem(TOKEN_KEY, value);
+    paintWho();
+  }
+
+  function paintWho() {
+    var token = readToken();
+    $("dot").className = "dot" + (token ? " on" : "");
+    $("who-text").textContent = token ? "已登录（token 已就绪）" : "未登录";
+    $("login-btn").textContent = token ? "重新登录" : "登录";
+  }
+
+  async function api(method, path, body) {
+    var headers = { accept: "application/json" };
+    var token = readToken();
+    if (token) headers.authorization = "Bearer " + token;
+    if (body !== undefined) headers["content-type"] = "application/json";
+    var response = await fetch(path, {
+      method: method,
+      headers: headers,
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+    var raw = await response.text();
+    var data = null;
+    if (raw) { try { data = JSON.parse(raw); } catch (e) { data = { detail: raw }; } }
+    if (!response.ok) {
+      var error = new Error((data && data.detail) || ("HTTP " + response.status));
+      error.status = response.status;
+      throw error;
+    }
+    return data;
+  }
+
+  // ── 登录 ──
+  $("login-btn").addEventListener("click", function () { $("login").hidden = false; });
+  $("login-form").addEventListener("submit", async function (event) {
+    event.preventDefault();
+    $("login-err").hidden = true;
+    try {
+      var result = await fetch("/api/v1/auth/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ username: $("login-user").value, password: $("login-pass").value })
+      }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); });
+      if (!result.ok) throw new Error(result.data.detail || "登录失败");
+      setToken(result.data.access_token);
+      $("login").hidden = true;
+      toast("登录成功");
+      loadCatalog().catch(function (e) { toast(e.message, "error"); });
+      loadAgent().catch(function () {});
+    } catch (error) {
+      $("login-err").hidden = false;
+      $("login-err").textContent = error.message;
+    }
+  });
+
+  // ── 视图切换 ──
+  var viewButtons = document.querySelectorAll("nav button");
+  Array.prototype.forEach.call(viewButtons, function (button) {
+    button.addEventListener("click", function () {
+      Array.prototype.forEach.call(viewButtons, function (b) { b.classList.toggle("is-active", b === button); });
+      var view = button.getAttribute("data-view");
+      $("view-api").hidden = view !== "api";
+      $("view-agent").hidden = view !== "agent";
+      if (view === "agent" && !$("pos").options.length) loadAgent().catch(function () {});
+    });
+  });
+
+  // ── 接口目录 ──
+  function renderTree(filter) {
+    var tree = $("tree");
+    tree.innerHTML = "";
+    if (!state.catalog) return;
+    var keyword = String(filter || "").trim().toLowerCase();
+    var groups = state.catalog.groups.slice();
+    if (keyword) {
+      groups = groups.map(function (group) {
+        return {
+          group: group.group,
+          note: group.note,
+          endpoints: group.endpoints.filter(function (item) {
+            return (item.url + " " + item.summary).toLowerCase().indexOf(keyword) >= 0;
+          })
+        };
+      }).filter(function (group) { return group.endpoints.length; });
+    }
+
+    if (!groups.length) {
+      tree.append(el("div", "empty", "没有匹配的接口"));
+      return;
+    }
+
+    groups.forEach(function (group) {
+      var wrap = el("div", "group");
+      var head = el("div", "group-head");
+      head.append(el("span", null, group.group));
+      head.append(el("span", "group-count", group.endpoints.length + " 个"));
+      var body = el("div", "group-body");
+      head.addEventListener("click", function () { body.hidden = !body.hidden; });
+      wrap.append(head, body);
+
+      group.endpoints.forEach(function (endpoint) {
+        var item = el("button", "ep");
+        item.type = "button";
+        var method = el("span", "ep-m", endpoint.method);
+        method.style.color = METHOD_COLOR[endpoint.method] || "#6b7688";
+        item.append(method, el("span", "ep-p", endpoint.url.replace("/api/v1", "")));
+        if (state.current && state.current.method === endpoint.method && state.current.url === endpoint.url) {
+          item.classList.add("is-active");
+        }
+        item.title = endpoint.summary;
+        item.addEventListener("click", function () { selectEndpoint(endpoint); });
+        body.append(item);
+      });
+      tree.append(wrap);
+    });
+
+    if (state.catalog.unclassified.length) {
+      var extra = el("div", "group");
+      var head2 = el("div", "group-head");
+      head2.append(el("span", null, "未归类（代码里有、目录没写）"));
+      head2.append(el("span", "group-count", state.catalog.unclassified.length + " 个"));
+      var body2 = el("div", "group-body");
+      head2.addEventListener("click", function () { body2.hidden = !body2.hidden; });
+      extra.append(head2, body2);
+      state.catalog.unclassified.forEach(function (route) {
+        var item = el("button", "ep");
+        item.type = "button";
+        var method = el("span", "ep-m", route.method);
+        method.style.color = METHOD_COLOR[route.method] || "#6b7688";
+        item.append(method, el("span", "ep-p", route.url.replace("/api/v1", "")));
+        item.addEventListener("click", function () {
+          selectEndpoint({ method: route.method, url: route.url, summary: "这个接口还没写说明，先按参数自己试。", auth: "admin" });
+        });
+        body2.append(item);
+      });
+      tree.append(extra);
+    }
+  }
+
+  function selectEndpoint(endpoint) {
+    state.current = endpoint;
+    state.params = {};
+    $("method").value = endpoint.method;
+    $("url").value = endpoint.url;
+    $("body").value = endpoint.body ? JSON.stringify(endpoint.body, null, 2) : "";
+    $("body-box").hidden = endpoint.method === "GET";
+    $("resp-bar").innerHTML = "<span>点「发送」执行这次请求</span>";
+    $("out").textContent = "（还没有响应）";
+
+    var doc = $("doc");
+    doc.innerHTML = "";
+    doc.append(el("h2", null, endpoint.url));
+    doc.append(el("p", "summary", endpoint.summary));
+    var tags = el("div", "tags");
+    tags.append(el("span", "tag", endpoint.method));
+    tags.append(el("span", "tag " + endpoint.auth, AUTH_LABEL[endpoint.auth] || endpoint.auth));
+    if (endpoint.params) tags.append(el("span", "tag", "参数：" + endpoint.params));
+    doc.append(tags);
+
+    renderParams();
+    renderTree($("search").value);
+  }
+
+  function renderParams() {
+    var box = $("params");
+    box.innerHTML = "";
+    var names = [];
+    var pattern = /:([A-Za-z_][A-Za-z0-9_]*)/g;
+    var match = pattern.exec($("url").value);
+    while (match) { if (names.indexOf(match[1]) < 0) names.push(match[1]); match = pattern.exec($("url").value); }
+    if (!names.length) { box.append(el("span", "param", "这个接口没有路径参数")); return; }
+    names.forEach(function (name) {
+      var field = el("label", "param");
+      field.append(document.createTextNode(":" + name));
+      var input = el("input");
+      input.placeholder = name === "id" ? "数字 id" : name;
+      input.addEventListener("input", function () { state.params[name] = input.value.trim(); });
+      field.append(input);
+      box.append(field);
+    });
+  }
+
+  function finalUrl() {
+    var value = $("url").value.trim();
+    Object.keys(state.params).forEach(function (name) {
+      if (state.params[name]) value = value.split(":" + name).join(encodeURIComponent(state.params[name]));
+    });
+    return value;
+  }
+
+  $("url").addEventListener("input", renderParams);
+  $("method").addEventListener("change", function () { $("body-box").hidden = $("method").value === "GET"; });
+  $("search").addEventListener("input", function () { renderTree($("search").value); });
+
+  $("send").addEventListener("click", async function () {
+    var target = finalUrl();
+    if (/:([A-Za-z_][A-Za-z0-9_]*)/.test(target)) { toast("还有 :参数 没填", "error"); return; }
+    if ($("method").value === "DELETE" && !window.confirm("确定发 DELETE " + target + " ？会真的删数据。")) return;
+
+    var headers = { accept: "application/json" };
+    var token = readToken();
+    if (token) headers.authorization = "Bearer " + token;
+    var payload;
+    if ($("method").value !== "GET" && $("body").value.trim()) {
+      headers["content-type"] = "application/json";
+      payload = $("body").value.trim();
+    }
+
+    $("send").disabled = true;
+    $("send").textContent = "发送中…";
+    var started = performance.now();
+    try {
+      var response = await fetch(target, { method: $("method").value, headers: headers, body: payload });
+      var elapsed = Math.round(performance.now() - started);
+      var text = await response.text();
+      var bar = $("resp-bar");
+      bar.innerHTML = "";
+      var cls = response.ok ? "ok" : (response.status >= 500 ? "err" : "warn");
+      bar.append(el("span", "code " + cls, response.status + " " + response.statusText));
+      bar.append(el("span", null, elapsed + " ms"));
+      bar.append(el("span", null, text.length + " 字节"));
+      var pretty = text;
+      try { pretty = JSON.stringify(JSON.parse(text), null, 2); } catch (e) { /* 非 JSON 原样 */ }
+      $("out").textContent = pretty || "(空响应)";
+    } catch (error) {
+      $("resp-bar").innerHTML = "";
+      $("resp-bar").append(el("span", "code err", "请求失败"));
+      $("out").textContent = String(error && error.message ? error.message : error);
+    } finally {
+      $("send").disabled = false;
+      $("send").textContent = "发送";
+    }
+  });
+
+  async function loadCatalog() {
+    var data = await api("GET", "/api/v1/debug/catalog");
+    state.catalog = data;
+    renderTree($("search").value);
+    var first = data.groups[0] && data.groups[0].endpoints[0];
+    if (first) selectEndpoint(first);
+  }
+
+  // ── Agent 对话 ──
+  async function loadAgent() {
+    if (!$("pos").options.length) {
+      var list = await api("GET", "/api/v1/service-positions?page=1&page_size=1000");
+      (list.items || []).forEach(function (item) {
+        var option = el("option", null, (item.position_name || "未命名") + (item.store_name ? " · " + item.store_name : ""));
+        option.value = String(item.id);
+        $("pos").append(option);
+      });
+      $("pos").addEventListener("change", function () {
+        loadContext(Number($("pos").value)).catch(function (e) { toast(e.message, "error"); });
+      });
+    }
+    if ($("pos").options.length) await loadContext(Number($("pos").value));
+  }
+
+  function renderContext(context) {
+    $("ctx-facts").innerHTML = "";
+    $("ctx-persona").innerHTML = "";
+    $("ctx-opening").innerHTML = "";
+    if (!context) return;
+
+    var facts = Object.entries(context.facts || {});
+    if (!facts.length) {
+      $("ctx-facts").append(el("div", "empty", "这个岗位 data_json 是空的，模型拿不到工价。"));
+    } else {
+      var dl = el("dl", "kv");
+      facts.forEach(function (pair) { dl.append(el("dt", null, pair[0]), el("dd", null, pair[1])); });
+      $("ctx-facts").append(dl);
+    }
+
+    if (String(context.persona || "").trim()) {
+      $("ctx-persona").append(el("pre", "pre", context.persona));
+    } else {
+      $("ctx-persona").append(el("div", "empty", "还没配人设，模型按默认身份说话。"));
+    }
+
+    if (!(context.opening || []).length) {
+      $("ctx-opening").append(el("div", "empty", "没有开场条目。"));
+    } else {
+      var list = el("div", "seq");
+      context.opening.forEach(function (item) {
+        var row = el("div", "seq-item");
+        row.append(el("div", "seq-no", item.seq));
+        var body = el("div", "seq-body" + (item.kind === "text" ? "" : " media"));
+        body.textContent = item.kind === "text" ? item.content : (item.kind + " · " + (item.media_name || "(未选素材)"));
+        row.append(body);
+        list.append(row);
+      });
+      $("ctx-opening").append(list);
+    }
+
+    $("ctx-llm").textContent = context.llm && context.llm.configured
+      ? context.llm.model + " · 已配置 key"
+      : ((context.llm && context.llm.model) || "deepseek-chat") + " · 没配 AGENT_LLM_API_KEY，只能看 prompt";
+  }
+
+  async function loadContext(positionId) {
+    state.positionId = positionId;
+    state.history = [];
+    $("thread").innerHTML = "";
+    $("raw").hidden = true;
+    if (!positionId) return;
+    var context = await api("GET", "/api/v1/agent/context?position_id=" + positionId);
+    renderContext(context);
+  }
+
+  function bubble(role, text, note) {
+    var row = el("div", "msg " + role);
+    var wrap = el("div");
+    wrap.append(el("div", "bubble", text));
+    if (note) wrap.append(el("div", "meta", note));
+    row.append(wrap);
+    $("thread").append(row);
+    $("thread").scrollTop = $("thread").scrollHeight;
+  }
+
+  $("chat-clear").addEventListener("click", function () {
+    state.history = [];
+    $("thread").innerHTML = "";
+    $("raw").hidden = true;
+  });
+
+  $("chat-send").addEventListener("click", async function () {
+    if (state.busy) return;
+    var value = $("msg").value.trim();
+    if (!value) return;
+    if (!state.positionId) { toast("先选岗位", "error"); return; }
+
+    state.busy = true;
+    $("chat-send").disabled = true;
+    $("chat-send").textContent = "调用中…";
+    bubble("customer", value, new Date().toLocaleTimeString());
+    $("msg").value = "";
+
+    try {
+      var result = await api("POST", "/api/v1/agent/chat", {
+        position_id: state.positionId,
+        text: value,
+        history: state.history.slice(),
+        dry: $("dry").checked
+      });
+      $("raw").hidden = false;
+      $("raw").textContent = JSON.stringify(result, null, 2);
+
+      if (result.dry) {
+        bubble("agent", "dry 模式：没调模型，下面是这一轮会发出去的 messages。");
+      } else if (result.ok) {
+        var lines = [];
+        (result.reply.messages || []).forEach(function (item) {
+          if (item.type === "text") { bubble("agent", item.content, (result.model || "") + " · " + result.latency_ms + "ms"); lines.push(item.content); }
+          else { bubble("agent", "[" + item.type + "] " + item.name, "媒体"); lines.push("[" + item.type + "] " + item.name); }
+        });
+        state.history.push({ role: "customer", text: value });
+        state.history.push({ role: "agent", text: lines.join("\n") });
+      } else {
+        bubble("agent", "调用失败：" + (result.error || "未知原因"));
+      }
+    } catch (error) {
+      bubble("agent", "请求失败：" + error.message);
+      toast(error.message, "error");
+    } finally {
+      state.busy = false;
+      $("chat-send").disabled = false;
+      $("chat-send").textContent = "发送";
+    }
+  });
+
+  // ── 启动 ──
+  paintWho();
+  if (!readToken()) {
+    $("login").hidden = false;
+  } else {
+    loadCatalog().catch(function (error) {
+      if (error.status === 401) { $("login").hidden = false; return; }
+      toast("目录读取失败：" + error.message, "error");
+    });
+  }
+})();
+</script>
+</body>
+</html>
