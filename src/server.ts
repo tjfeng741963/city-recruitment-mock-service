@@ -34,6 +34,7 @@ import { registerKbPublishRoutes } from "./modules/agent/kb-publish.routes.js";
 import { registerPositionScriptRoutes } from "./modules/agent/position-scripts.routes.js";
 import { registerAgentPersonaRoutes } from "./modules/agent/agent-persona.routes.js";
 import { registerAgentChatRoutes } from "./modules/agent/agent-chat.routes.js";
+import { registerApiDebugRoutes } from "./modules/agent/api-debug.routes.js";
 import { registerFollowupRoutes } from "./modules/agent/followup.js";
 import { EventBus, createStreamNotifier } from "./modules/messaging/stream-events.js";
 import { registerWeComRoutes } from "./modules/wecom/wecom.routes.js";
@@ -123,11 +124,18 @@ export function buildServer() {
 
   // Collect every registered API route so the not-found handler can tell a
   // wrong method (405) apart from an unknown path (404), as the target does.
+  // 同一份收集结果也给接口调试台用：新增路由不用改前端，页面自动多一行。
   const routePatterns: RoutePattern[] = [];
+  const routeCatalog: Array<{ method: string; url: string }> = [];
   app.addHook("onRoute", (route) => {
     if (!route.url.startsWith("/api/")) return;
     const methods = Array.isArray(route.method) ? route.method : [route.method];
-    for (const method of methods) routePatterns.push({ method, regex: toRegex(route.url) });
+    for (const method of methods) {
+      routePatterns.push({ method, regex: toRegex(route.url) });
+      if (method !== "HEAD" && method !== "OPTIONS") {
+        routeCatalog.push({ method, url: route.url });
+      }
+    }
   });
 
   // Fastify validates route schemas with Ajv and reports 400. The target reports
@@ -178,6 +186,8 @@ export function buildServer() {
   registerAgentPersonaRoutes(app, db);
   // Agent 会话 + 调试台：开场清单、开场回执、一轮对话（人设 + 事实 + 历史）
   registerAgentChatRoutes(app, db);
+  // 接口调试台的后端：把 onRoute 收集到的真实路由原样吐出来
+  registerApiDebugRoutes(app, routeCatalog);
   registerPositionFactoryRoutes(app, db);
   registerFollowupRoutes(app, db);
   registerWeComRoutes(app, db);

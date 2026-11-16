@@ -16,7 +16,8 @@
     "seed": "tsx src/db/seed.ts",
     "test": "vitest run",
     "check:migrations": "node scripts/check-migrations.mjs",
-    "verify": "tsx scripts/run-scenario.ts"
+    "verify": "tsx scripts/run-scenario.ts",
+    "check:api": "node scripts/check-api-doc.mjs"
   },
   "dependencies": {
     "@fastify/multipart": "^9.2.1",

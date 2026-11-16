@@ -52,6 +52,9 @@ jobs:
       - name: Check migration numbers
         run: node scripts/check-migrations.mjs
 
+      - name: Check API doc matches routes
+        run: node scripts/check-api-doc.mjs
+
       - name: Typecheck backend
         run: npx tsc --noEmit
 

@@ -34,6 +34,7 @@
 ```bash
 npm ci
 node scripts/check-migrations.mjs
+node scripts/check-api-doc.mjs
 npx tsc --noEmit
 npx vitest run --testTimeout=20000
 ```
@@ -45,6 +46,7 @@ npx vitest run --testTimeout=20000
 - 改动较大或不确定时，推到新分支开 PR，等 PR 检查变绿再合并；小改动可以直接推 `main`，但推了就会上线。
 - 禁止 force push `main`，禁止改写已推送的历史。
 - 新功能、bug 修复要带测试，测试放 `tests/`。
+- **改接口必须同步 `docs/API-接口清单.md`。** 人设 / 开场 / Agent 会话这三组接口有脚本守着：`npm run check:api` 会把文档标记区块里的接口和真实注册的路由做双向比对，代码加了接口没写文档、或文档写了代码里没有，都会让 CI 红。接口调试台（侧栏「接口调试」）的列表是自动从 `GET /api/v1/debug/routes` 读的，不用手动维护。
 - 推完去 GitHub Actions 看 `test-and-deploy` 是否全绿；红了要立刻修或回滚，不要放着。
 
 ## 绝对不能提交的东西
