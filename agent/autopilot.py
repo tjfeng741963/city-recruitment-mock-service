@@ -147,6 +147,12 @@ REPORT_INTERVAL = 30.0                       # 心跳/上报间隔（按时间�
 REPORT_MAX_MESSAGES = 50                     # 单次上报最多条数
 REPORT_FIRST_WINDOW = 24 * 3600              # 首次没有游标时只补最近 24 小时
 
+# 加好友固定介绍是独立阶段：首段用完整流程定位会话，后续段留在同一已打开
+# 的会话里发送，避免每段重新搜索。客户中途发来的问题保留在 pending，整组
+# 介绍确认完成后才进入知识库阶段。
+WELCOME_PART_DELAY = 1.1
+WELCOME_SCAN_INTERVAL = 3.0
+
 # 最近一次发送错误，随心跳上报（契约里截断 200 字）
 _last_error = ""
 # 上一次"因掉线暂停发送"的日志时间，避免每轮刷屏
@@ -1327,6 +1333,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             _last_reply_at = time.time()
             result = {"ok": False, "detail": "未发送"}
             start_part = welcome_delivery['next_part'] if welcome_delivery else 0
+            welcome_fast_ready = False
             for idx in range(start_part, len(parts)):
                 raw_part = parts[idx]
                 try:
@@ -1354,7 +1361,11 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     log(f'    {message}')
 
                 if body:
-                    result = core_send.send(
+                    fast_result = (
+                        _send_welcome_part_fast(store, body, send_log)
+                        if welcome_delivery and welcome_fast_ready else None
+                    )
+                    result = fast_result if fast_result is not None else core_send.send(
                         store, name, body,
                         expect_id=cid if str(cid).startswith(("S:", "R:")) else "",
                         verify_db=True,
@@ -1375,6 +1386,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                             result = {'ok': False, 'detail': '首句发送结果待人工核对'}
                             break
                         _last_reply_at = time.time()
+                        welcome_fast_ready = True
                 else:
                     result = {"ok": True, "detail": "纯媒体段，无文本"}
                 for kind, mname in medias:
@@ -1393,7 +1405,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 if welcome_delivery:
                     rlog.confirm_welcome_part(cid, idx)
                 if idx < len(parts) - 1:
-                    time.sleep(2.0)
+                    time.sleep(WELCOME_PART_DELAY)
             detail_text = str(result.get("detail") or "")
             if not welcome_delivery and result["ok"] and "回读失败" in detail_text:
                 # 回车已按但回读解密库确认不了落点：结果不明。不能记 sent
@@ -1462,6 +1474,64 @@ def _outbound_snapshot(store: Store, contact_id: str) -> dict[str, str] | None:
         }
     except Exception:  # noqa: BLE001
         return None
+
+
+def _send_welcome_part_fast(store: Store, text: str, log_fn) -> dict | None:
+    """Send a later fixed-introduction part in the already open conversation.
+
+    The first part uses the frozen full sender, which searches and verifies the
+    destination.  Once that succeeds, the input focus is already in that same
+    conversation; repeating Ctrl+F for every part was the source of the 25s
+    fallback delay observed in production.  This helper reuses only the
+    existing sender actions (paste, input verification, Enter) and never
+    changes the frozen IO modules or adds a new mouse/keyboard action.
+
+    ``None`` means the test double or an older client has no compatible fast
+    path; the caller must use the established full sender in that case.
+    """
+    win_api = getattr(core_send, "win", None)
+    if getattr(win_api, "__name__", "") != "wecom_io_core.win":
+        return None
+    try:
+        if not win_api.wxwork_alive():
+            return {"ok": False, "conversation_id": "", "detail": "企业微信已退出，固定介绍暂停"}
+        target = win_api.find_window()
+        if not target:
+            return {"ok": False, "conversation_id": "", "detail": "没找到企业微信窗口，固定介绍暂停"}
+        hwnd = target["hwnd"]
+        if not win_api.ensure_foreground(hwnd, tries=4):
+            return {"ok": False, "conversation_id": "", "detail": "固定介绍续发抢不到前台"}
+        visible_error = core_send._wait_visible(hwnd, "固定介绍续发前")
+        if visible_error:
+            return {"ok": False, "conversation_id": "", "detail": visible_error}
+
+        # Enter after the previous part leaves the same chat input active. Clear
+        # and verify exactly as the frozen sender does, without searching again.
+        win_api.hotkey("ctrl", "a")
+        win_api.tap("delete")
+        win_api.set_clipboard(text)
+        win_api.hotkey("ctrl", "v")
+        time.sleep(0.3)
+        passed, hint = core_send.verify_input_box(text, retries=5)
+        if not passed:
+            return {"ok": False, "conversation_id": "", "detail": f"固定介绍续发输入框校验：{hint}"}
+        visible_error = core_send._wait_visible(hwnd, "固定介绍续发发送前")
+        if visible_error:
+            return {"ok": False, "conversation_id": "", "detail": visible_error}
+        win_api.tap("enter")
+        time.sleep(0.4)
+        log_fn(f"步骤4 已回车发送（同一会话快速续发，{hint}）")
+        try:
+            store.refresh()
+        except Exception:
+            pass
+        return {"ok": True, "conversation_id": "", "detail": "已发送（同一会话快速续发）"}
+    except Exception as exc:  # noqa: BLE001
+        try:
+            win_api.release_modifiers()
+        except Exception:
+            pass
+        return {"ok": False, "conversation_id": "", "detail": f"固定介绍续发异常：{type(exc).__name__}: {exc}"}
 
 
 def flush_manual_receipts(bridge, *, force: bool = False) -> bool:
@@ -2087,6 +2157,12 @@ def main() -> int:
     if remote_client is not None:
         remote = remote_cfg.RemoteConfig(remote_client, log_fn=log)
         remote.sync(cfg)
+        # Fixed introductions are triggered by the first local friend-added
+        # record. A 20s bridge poll made that stage start too late; keep the
+        # flow client responsive while retaining any more aggressive setting.
+        if str((cfg.get("brain") or {}).get("mode") or "") == "flow" and cfg.get("interval", 0) > WELCOME_SCAN_INTERVAL:
+            cfg["interval"] = WELCOME_SCAN_INTERVAL
+            log(f"[首句] flow 触发轮询已收紧为 {WELCOME_SCAN_INTERVAL:g}s")
         if reporter is not None:
             reporter.remote_config = remote
 
