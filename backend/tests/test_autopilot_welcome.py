@@ -107,3 +107,23 @@ def test_question_arriving_during_welcome_waits_until_all_parts_are_sent(tmp_pat
     agent._brain.reply.return_value = {"ok": True, "reply": "本厂工资", "scene": "知识库"}
     assert agent.drain(store, CFG)["sent"] == 1
     assert agent._brain.reply.call_args.args[0] == "工资多少"
+
+
+def test_flow_welcome_interval_is_capped_after_remote_refresh(tmp_path, monkeypatch):
+    agent = load_autopilot()
+
+    cfg = {"brain": {"mode": "flow"}, "interval": 20.0}
+    assert agent._enforce_flow_welcome_interval(cfg) is True
+    assert cfg["interval"] == agent.WELCOME_SCAN_INTERVAL == 3.0
+
+    # Reapplying the guard is what happens after each bridge heartbeat. Once
+    # capped, it must be a no-op and leave the short interval in place.
+    assert agent._enforce_flow_welcome_interval(cfg) is False
+    assert cfg["interval"] == 3.0
+
+
+def test_non_flow_interval_is_not_changed(tmp_path, monkeypatch):
+    agent = load_autopilot()
+    cfg = {"brain": {"mode": "kb"}, "interval": 20.0}
+    assert agent._enforce_flow_welcome_interval(cfg) is False
+    assert cfg["interval"] == 20.0

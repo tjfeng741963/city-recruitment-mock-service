@@ -153,6 +153,31 @@ REPORT_FIRST_WINDOW = 24 * 3600              # 首次没有游标时只补最近
 WELCOME_PART_DELAY = 1.1
 WELCOME_SCAN_INTERVAL = 3.0
 
+
+def _enforce_flow_welcome_interval(cfg: dict) -> bool:
+    """Keep new-contact flow polling responsive after every config refresh.
+
+    The device bridge defaults to a 20-second polling interval for ordinary
+    auto-replies. A flow-mode client must use the shorter interval because a
+    newly accepted contact is represented by a local notice record. Remote
+    config is refreshed on every heartbeat, so applying this only at startup
+    is insufficient: the next refresh would restore the general 20-second
+    value. This guard changes scheduling only; it does not add desktop input
+    events or alter the frozen sender actions.
+    """
+    brain = cfg.get("brain") or {}
+    if str(brain.get("mode") or "") != "flow":
+        return False
+    try:
+        interval = float(cfg.get("interval"))
+    except (TypeError, ValueError):
+        return False
+    if interval <= WELCOME_SCAN_INTERVAL:
+        return False
+    cfg["interval"] = WELCOME_SCAN_INTERVAL
+    log(f"[首句] flow 触发轮询已收紧为 {WELCOME_SCAN_INTERVAL:g}s")
+    return True
+
 # 最近一次发送错误，随心跳上报（契约里截断 200 字）
 _last_error = ""
 # 上一次"因掉线暂停发送"的日志时间，避免每轮刷屏
@@ -581,6 +606,9 @@ class Reporter:
         try:
             if self.remote_config is not None:
                 self.remote_config.sync(self.cfg)
+                # Remote refreshes re-apply the general device interval. Keep
+                # flow-mode first-contact detection at its responsive cap.
+                _enforce_flow_welcome_interval(self.cfg)
                 # brain_mode 变了要重建 Brain：Brain 在启动时构造一次，
                 # 只改 cfg["brain"]["mode"] 不会切换行为。
                 if "brain_mode" in getattr(self.remote_config, "last_changed", []):
@@ -2157,14 +2185,12 @@ def main() -> int:
     if remote_client is not None:
         remote = remote_cfg.RemoteConfig(remote_client, log_fn=log)
         remote.sync(cfg)
-        # Fixed introductions are triggered by the first local friend-added
-        # record. A 20s bridge poll made that stage start too late; keep the
-        # flow client responsive while retaining any more aggressive setting.
-        if str((cfg.get("brain") or {}).get("mode") or "") == "flow" and cfg.get("interval", 0) > WELCOME_SCAN_INTERVAL:
-            cfg["interval"] = WELCOME_SCAN_INTERVAL
-            log(f"[首句] flow 触发轮询已收紧为 {WELCOME_SCAN_INTERVAL:g}s")
         if reporter is not None:
             reporter.remote_config = remote
+
+    # Apply the cap both with and without a bridge. Without this call a local
+    # flow config could still inherit the general 20-second interval.
+    _enforce_flow_welcome_interval(cfg)
 
     # 登录二维码上传器：企微掉登录时把扫码窗截图送到服务端，网页上就能扫。
     # 机器在云端，没人看得到那块屏幕——这是唯一能让用户自己扫码的路径。
