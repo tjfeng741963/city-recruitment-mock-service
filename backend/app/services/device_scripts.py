@@ -293,6 +293,15 @@ def pick_script(scripts: list[dict[str, Any]], stage: str, city: str) -> dict[st
     return None
 
 
+def render_welcome_parts(content: str, job: dict[str, Any], window: str = INTERVIEW_WINDOW) -> list[str]:
+    """Only a standalone --- splits welcome messages; ordinary newlines stay in one bubble.
+
+    Split the configured template before rendering, so job facts cannot inject extra bubbles.
+    """
+    parts = re.split(r"(?m)^[ \t]*---[ \t]*\r?$", str(content or ""))
+    return [text for part in parts if (text := render_script(part, job, window).strip())]
+
+
 def render_script(content: str, job: dict[str, Any], window: str = INTERVIEW_WINDOW) -> str:
     """占位符由代码替换（岗位数据为空就替换成空串，绝不把 {{x}} 发给客户）。
 
@@ -333,6 +342,7 @@ __all__ = [
     "pick_script",
     "pick_position_script",
     "render_script",
+    "render_welcome_parts",
     "clear_cache",
     "DEFAULT_CONFIG_URL",
     "TIMEOUT",

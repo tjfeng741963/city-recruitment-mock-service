@@ -36,6 +36,7 @@ from .services.device_scripts import (
     pick_position_script,
     pick_script,
     render_script,
+    render_welcome_parts,
 )
 from .services.flow_engine import (
     SCRIPT_STAGE_GREET,
@@ -672,15 +673,10 @@ async def flow_answer(
 async def flow_greet(
     payload: GreetIn, session: SessionDep, _: ServiceOrUser
 ) -> GreetOut:
-    """新好友首句：直接发岗位卡，不先问「你想找怎样的工作」。
+    """新好友首句：优先岗位配置，再用通用欢迎语，未配置时沿用岗位开场。
 
-    业务前提（11-13 HR 对齐）：一个微信号只做一个板块，品类是账号层面定死的。
-    所以进来的人不需要先被问方向——直接把该板块的岗位甩过去。
-
-    两种情况不发卡，只发问句：
-      * 设备没绑板块（老数据 / 运营没配）→ 无法判断发哪套卡
-      * 地铁号没绑城市 → 不知道发哪个城市的安检岗，得先问城市
-    这两种都 `skipped=True` 并给出 detail，客户端据此决定要不要发问句。
+    固定欢迎语按独占一行的 --- 分条，不需要客户先发问题，也不调用模型。
+    没有可用话术且岗位前提不足时返回 skipped=True，由客户端沿用原兜底。
     """
     device_code = _resolve_device_code(payload.device_code)
     try:
@@ -693,9 +689,40 @@ async def flow_greet(
     factory_name = str(meta.get("factory_name") or "").strip()
     vertical_id = int(meta.get("vertical_id") or 0)
 
+    # 通用欢迎语不依赖岗位或客户先发消息；仍由原客户端发送链路投递。
+    try:
+        position_scripts = await fetch_position_scripts(device_code)
+    except Exception:  # noqa: BLE001
+        position_scripts = []
+    set_position_scripts(position_scripts)
+    existing_slots = dict((store.project(await store.load_events(session, payload.session_key)).get("slots") or {}))
+    sent_value = existing_slots.get("scripted_sent")
+    scripted_sent = dict(sent_value) if isinstance(sent_value, dict) else {}
+
+    async def configured_welcome(job: dict[str, Any]) -> GreetOut | None:
+        if scripted_sent.get("greet"):
+            return None
+        script = pick_position_script(position_scripts, int(job.get("position_id") or job.get("id") or 0), SCRIPT_STAGE_GREET)
+        if not script:
+            return None
+        parts = render_welcome_parts(str(script.get("content") or ""), job, interview_window_of(job))
+        if not parts:
+            return None
+        scripted_sent["greet"] = True
+        await store.append_events(session, payload.session_key, [
+            (store.EVENT_STAGE, {"to": STAGE_ASK_CITY}),
+            (store.EVENT_SLOT, {"key": "scripted_sent", "value": scripted_sent}),
+            (store.EVENT_REPLY, {"text": "\n".join(parts), "parts": parts, "source": "script"}),
+        ])
+        return GreetOut(reply="\n".join(parts), parts=parts, stage=STAGE_ASK_CITY,
+                        skipped=False, detail="后台配置的加好友首句")
+
     # 没绑板块：不知道该发哪套卡。不做「按城市兜底」——那等于自己猜品类，
     # 而业务上不存在综合号（一个微信号只做一个板块）。交回上层发问句。
     if not vertical_code:
+        welcome = await configured_welcome({})
+        if welcome:
+            return welcome
         return GreetOut(
             reply="",
             stage=STAGE_ASK_CITY,
@@ -705,6 +732,9 @@ async def flow_greet(
 
     # 地铁号没绑城市：先问城市（这一步沿用现有话术，不问方向）
     if vertical_code == "subway" and not city:
+        welcome = await configured_welcome({})
+        if welcome:
+            return welcome
         return GreetOut(
             reply="",
             stage=STAGE_ASK_CITY,
@@ -729,6 +759,9 @@ async def flow_greet(
             jobs = scoped
 
     if not jobs:
+        welcome = await configured_welcome({})
+        if welcome:
+            return welcome
         # 板块没岗位数据时不瞎编，交回上层走「帮你问问」
         return GreetOut(
             reply="",
@@ -738,26 +771,6 @@ async def flow_greet(
         )
 
     set_remote_jobs({city: jobs})
-
-    # 岗位级话术：greet（加好友首句）/ send_info 等时点命中即整段直发，不调模型
-    position_scripts: list[dict[str, Any]] = []
-    try:
-        position_scripts = await fetch_position_scripts(device_code)
-    except Exception:  # noqa: BLE001  话术拉不到就走默认岗位卡
-        position_scripts = []
-    set_position_scripts(position_scripts)
-
-    # 话术一次性（scripted_sent）：greet 整个会话只发一次。会话已有事件时
-    # 投影出旧 slots，greet 发过就不再命中（换回老行为发岗位卡）。
-    existing_slots: dict[str, Any] = {}
-    try:
-        existing_slots = dict((store.project(await store.load_events(session, payload.session_key)).get("slots") or {}))
-    except Exception:  # noqa: BLE001  投影失败按全新会话处理
-        existing_slots = {}
-    if isinstance(existing_slots.get("scripted_sent"), dict):
-        scripted_sent: dict[str, Any] = dict(existing_slots["scripted_sent"])
-    else:
-        scripted_sent = {}
 
     slots: dict[str, Any] = {
         **existing_slots,
@@ -772,46 +785,9 @@ async def flow_greet(
         pin_position(slots, card_job) or int(meta.get("position_id") or 0)
     )
 
-    # 首句话术：有岗位话术就用（有 position 匹配 position，没有用设备默认），
-    # 一条都没有则保持现有默认——用与 send_info 同一套渲染发岗位卡。
-    greet = None
-    if not scripted_sent.get("greet"):
-        greet = pick_position_script(
-            position_scripts, int(slots.get("position_id") or 0), SCRIPT_STAGE_GREET
-        )
-    greet_text = (
-        render_script(
-            str(greet.get("content") or ""), card_job, interview_window_of(card_job)
-        ).strip()
-        if greet
-        else ""
-    )
-    if greet_text:
-        # 配了「加好友首句」话术 → 只发话术（通常是先问城市），**不发岗位卡**。
-        # 2026-11-14 实测：刚加好友就收到一张卡，客户说「我想去南昌」时卡和城市
-        # 对不上。业务口径：加好友 → 问地点 → 拿到地点 → 发该厂硬编码岗位。
-        # 下一轮客户说了城市，走 ask_city 分支正常发卡（interview_offer_sent 不置位）。
-        # 占位符仍用该板块第一个岗位的数据渲染（{{factory}}/{{wage}} 不落空）。
-        # 话术一次性：greet 发过即记账，重复触发 greet 不再发同一句。
-        scripted_sent["greet"] = True
-        slots["scripted_sent"] = scripted_sent
-        parts = [greet_text]
-        await store.append_events(
-            session,
-            payload.session_key,
-            [
-                (store.EVENT_STAGE, {"to": STAGE_ASK_CITY}),
-                (store.EVENT_SLOT, {"key": "scripted_sent", "value": scripted_sent}),
-                (store.EVENT_REPLY, {"text": "\n".join(parts)}),
-            ],
-        )
-        return GreetOut(
-            reply="\n".join(parts),
-            parts=parts,
-            stage=STAGE_ASK_CITY,
-            skipped=False,
-            detail=f"greet 话术 · {vertical_code} · {len(jobs)} 个岗位",
-        )
+    welcome = await configured_welcome(card_job)
+    if welcome:
+        return welcome
 
     # 没配首句话术：一个工厂多个面试基地时先问去哪个基地，不直接甩卡。
     # 2026-11-15 实测：地铁号（陈村/竹料两个基地）加好友第一句就收到 jobs[0]

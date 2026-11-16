@@ -170,4 +170,37 @@ describe("position scripts", () => {
     const other = items.find((item) => item.position_id !== 1);
     if (other) expect(other.media).toEqual([]);
   });
+
+  it("saves, reads, updates and disables the general welcome without creating duplicate rows", async () => {
+    const content = "你好，欢迎咨询招聘岗位。\n---\n我先帮你了解一下。\n---\n请问你现在在哪个城市？";
+    const first = await post({ position_id: 0, stage: "greet", title: "测试欢迎语", content });
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).toMatchObject({ position_id: 0, stage: "greet", content, status: "enabled" });
+    const read = await app.inject({ method: "GET", url: "/api/v1/position-scripts?position_id=0", headers: admin });
+    expect(read.statusCode).toBe(200);
+    expect(read.json().items).toHaveLength(1);
+    expect(read.json().items[0].content).toBe(content);
+
+    const config = await configOf("local-device-001");
+    expect(config.json().position_scripts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ position_id: 0, stage: "greet", content }),
+    ]));
+    const updated = await post({ position_id: 0, stage: "greet", content: "新版欢迎语", status: "disabled" });
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json().id).toBe(first.json().id);
+    expect((await configOf("local-device-001")).json().position_scripts.some((row: { position_id: number }) => row.position_id === 0)).toBe(false);
+    const reread = await app.inject({ method: "GET", url: "/api/v1/position-scripts?position_id=0", headers: admin });
+    expect(reread.json().items).toHaveLength(1);
+    expect(reread.json().items[0]).toMatchObject({ content: "新版欢迎语", status: "disabled" });
+  });
+
+  it("restricts the general entry to explicit zero, welcome stage and nonblank enabled text", async () => {
+    for (const position_id of [null, false, "", -1, 0.5]) {
+      expect((await post({ position_id, stage: "greet", content: "欢迎" })).statusCode).toBe(422);
+    }
+    expect((await post({ position_id: 0, stage: "booked", content: "不能配置通用面试承诺" })).statusCode).toBe(422);
+    expect((await post({ position_id: 0, stage: "greet", content: "\n---\n " })).statusCode).toBe(422);
+    const denied = await app.inject({ method: "POST", url: "/api/v1/position-scripts", payload: { position_id: 0, stage: "greet", content: "欢迎" } });
+    expect(denied.statusCode).toBe(403);
+  });
 });

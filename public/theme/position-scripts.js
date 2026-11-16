@@ -29,7 +29,7 @@
 
   // 五个时点：顺序即业务顺序，key 是后端 SCRIPT_STAGES 白名单，不能改。
   const STAGES = [
-    { key: "greet", label: "加好友首句", hint: "刚加好友时发，目的是引导客户说出地点" },
+    { key: "greet", label: "加好友首句", hint: "客户端发现首次会话记录后发送；无需客户先提问，通常用于问地点" },
     { key: "send_info", label: "发岗位信息", hint: "拿到地点后发这个岗位的硬编码卡，可带图片/视频" },
     { key: "ask_interview", label: "问面试意向", hint: "岗位发完追问一句「这两天能来吗」" },
     { key: "booked", label: "面试地点", hint: "客户答应后发的固定地址与时间" },
@@ -122,6 +122,8 @@
       .rk-ps-progress{font-size:12px;color:var(--rk-accent)}
       .rk-ps-error{margin:10px 0 0;color:var(--rk-down);font-size:13px}
       .rk-ps-note{margin:12px 0 0;padding:8px 10px;border-left:2px solid var(--rk-border-strong);background:var(--rk-panel-2);color:var(--rk-ink-3);font-size:12px;line-height:1.65}
+      .rk-ps-welcome-bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:12px 0;font-size:12px;color:var(--rk-ink-3)}
+      .rk-ps-preview{white-space:pre-wrap;overflow-wrap:anywhere;padding:10px;border:1px solid var(--rk-border);border-radius:8px;margin:8px 0;color:var(--rk-ink-1)}
       .rk-ps-loading{padding:40px 0;text-align:center;color:var(--rk-ink-3);font-size:13px}
       .rk-ps-foot{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:12px 20px;border-top:1px solid var(--rk-border)}
       .rk-ps-foot button{min-height:32px;padding:0 16px;border:1px solid var(--rk-border-strong);border-radius:999px;background:var(--rk-bg);color:var(--rk-ink-1);cursor:pointer;font:inherit;font-size:13px}
@@ -194,7 +196,7 @@
   }
 
   const configuredStages = (positionId) => new Set(
-    scriptCache.items.filter((row) => Number(row.position_id) === Number(positionId)).map((row) => String(row.stage)),
+    scriptCache.items.filter((row) => Number(row.position_id) === Number(positionId) && row.status !== "disabled").map((row) => String(row.stage)),
   );
 
   // ── 行 → 岗位 ──
@@ -260,6 +262,8 @@
   async function openDrawer(position) {
     styles();
     if (document.querySelector(".rk-ps-mask")) return; // 只允许开一个
+    const general = Number(position.id) === 0;
+    const stages = general ? STAGES.filter((stage) => stage.key === "greet") : STAGES;
 
     const mask = document.createElement("div");
     mask.className = "rk-ps-mask";
@@ -287,7 +291,7 @@
     head.className = "rk-ps-head";
     const titles = document.createElement("div");
     const h2 = document.createElement("h2");
-    h2.textContent = "话术配置";
+    h2.textContent = general ? "通用欢迎语" : "话术配置";
     const sub = document.createElement("p");
     sub.textContent = `${position.position_name || "岗位"}${position.store_name ? ` · ${position.store_name}` : ""}${position.city_name ? ` · ${position.city_name}` : ""}`;
     titles.append(h2, sub);
@@ -326,7 +330,7 @@
     panel.append(head, tabs, body, foot);
 
     // 草稿：每个时点一份。key 固定五个，服务端缺的时点就是空草稿。
-    const drafts = new Map(STAGES.map((stage) => [stage.key, { id: 0, title: "", content: "", media: [], saved: false }]));
+    const drafts = new Map(stages.map((stage) => [stage.key, { id: 0, title: "", content: "", media: [], status: "enabled", saved: false }]));
     const dirty = new Set();
     let active = STAGES[0].key;
     let form = null; // 当前 tab 的 DOM 片段，切 tab 时整体换掉
@@ -463,14 +467,28 @@
 
     // 单个时点的表单。切 tab 时整体重建，草稿仍在 drafts 里，所以不会丢输入。
     function buildForm() {
-      const stage = STAGES.find((item) => item.key === active) || STAGES[0];
+      const stage = stages.find((item) => item.key === active) || stages[0];
       const draft = drafts.get(stage.key);
       const fragment = document.createElement("div");
 
       const hint = document.createElement("p");
       hint.className = "rk-ps-stage";
-      hint.textContent = `第 ${STAGES.indexOf(stage) + 1} 个时点 / 共 5 个 · ${stage.hint}`;
+      hint.textContent = general
+        ? "适用于未配置岗位专属首句的所有设备。请使用通用招呼和询问地点，避免写某家工厂的工资或承诺。"
+        : `第 ${stages.indexOf(stage) + 1} 个时点 / 共 ${stages.length} 个 · ${stage.hint}`;
       fragment.append(hint);
+
+      const enabledLabel = document.createElement("label");
+      enabledLabel.className = "rk-ps-stage";
+      const enabled = document.createElement("input");
+      enabled.type = "checkbox";
+      enabled.checked = draft.status !== "disabled";
+      enabled.addEventListener("change", () => {
+        draft.status = enabled.checked ? "enabled" : "disabled";
+        markDirty(stage.key);
+      });
+      enabledLabel.append(enabled, document.createTextNode(" 启用这条话术（停用后使用其他可用话术或默认开场）"));
+      fragment.append(enabledLabel);
 
       // 占位符条：点击插入到光标处。
       const ph = document.createElement("div");
@@ -491,7 +509,7 @@
         phList.append(button);
       }
       ph.append(phTitle, phList);
-      fragment.append(ph);
+      if (!general) fragment.append(ph);
 
       const titleField = document.createElement("div");
       titleField.className = "rk-ps-field";
@@ -517,20 +535,54 @@
       const contentLabel = document.createElement("label");
       contentLabel.textContent = "正文";
       const contentSmall = document.createElement("small");
-      contentSmall.textContent = "原样发给客户，支持换行";
+      contentSmall.textContent = stage.key === "greet" ? "普通换行仍是一条消息；单独一行 --- 分成下一条" : "原样发给客户，支持换行";
       contentLabel.append(contentSmall);
       const area = document.createElement("textarea");
       area.className = "rk-ps-area";
       area.spellcheck = false;
       area.placeholder = stage.key === "greet"
-        ? "例如：你好，我是{{factory}}的招聘负责人，请问你现在在哪个区？我看看哪个厂离你近。"
+        ? "你好，欢迎咨询招聘岗位。\n---\n我先帮你了解一下。\n---\n请问你现在在哪个城市？"
         : "在这里写这个时点要发的话…";
       area.value = draft.content;
       area.addEventListener("input", () => {
         draft.content = area.value;
         markDirty(stage.key);
+        renderPreview();
       });
       contentField.append(contentLabel, area);
+      const preview = document.createElement("div");
+      function renderPreview() {
+        preview.replaceChildren();
+        if (stage.key !== "greet") return;
+        const parts = draft.content.split(/^[ \t]*---[ \t]*\r?$/m).map((part) => part.trim()).filter(Boolean);
+        parts.forEach((part, index) => {
+          const bubble = document.createElement("div");
+          bubble.className = "rk-ps-preview";
+          bubble.textContent = `第 ${index + 1} 条\n${part}`;
+          preview.append(bubble);
+        });
+      }
+      if (stage.key === "greet") {
+        const tools = document.createElement("div");
+        tools.className = "rk-ps-tools";
+        const split = document.createElement("button");
+        split.type = "button";
+        split.textContent = "插入分条";
+        split.addEventListener("click", () => insertAtCursor(area, "\n---\n"));
+        tools.append(split);
+        if (general) {
+          const example = document.createElement("button");
+          example.type = "button";
+          example.textContent = "填入测试文案";
+          example.addEventListener("click", () => {
+            area.value = "你好，欢迎咨询招聘岗位。\n---\n我先帮你了解一下。\n---\n请问你现在在哪个城市？";
+            area.dispatchEvent(new Event("input", { bubbles: true }));
+          });
+          tools.append(example);
+        }
+        contentField.append(tools, preview);
+        renderPreview();
+      }
       fragment.append(contentField);
 
       const mediaField = document.createElement("div");
@@ -610,7 +662,7 @@
 
     function renderTabs() {
       tabs.replaceChildren();
-      for (const stage of STAGES) {
+      for (const stage of stages) {
         const button = document.createElement("button");
         button.type = "button";
         button.className = `rk-ps-tab${stage.key === active ? " is-active" : ""}`;
@@ -640,7 +692,7 @@
       save.textContent = "保存中…";
       // 只提交「有改动」或「填了但还没存过」的时点：服务端是 upsert，全量 POST 也能跑，
       // 但每次保存都重写五个 updated_at 会让下发端的 version 判定一直变，没必要。
-      const targets = STAGES.map((stage) => stage.key).filter((key) => {
+      const targets = stages.map((stage) => stage.key).filter((key) => {
         const draft = drafts.get(key);
         return dirty.has(key) || (!draft.saved && Boolean(draft.title.trim() || draft.content.trim() || draft.media.length));
       });
@@ -680,7 +732,7 @@
               title: draft.title,
               content: draft.content,
               media,
-              status: "enabled",
+              status: draft.status,
             }),
           });
           draft.id = Number(saved.id || 0);
@@ -713,6 +765,7 @@
         draft.id = Number(row.id || 0);
         draft.title = String(row.title || "");
         draft.content = String(row.content || "");
+        draft.status = row.status === "disabled" ? "disabled" : "enabled";
         draft.media = Array.isArray(row.media)
           ? row.media.map((item) => ({ name: String(item.name || ""), kind: String(item.kind === "video" ? "video" : "image") })).filter((item) => item.name)
           : [];
@@ -748,7 +801,10 @@
   let decorating = false;
 
   async function decorate() {
-    if (!LIST_PATH.test(location.pathname)) return;
+    if (!LIST_PATH.test(location.pathname)) {
+      document.querySelector(".rk-ps-welcome-bar")?.remove();
+      return;
+    }
     if (decorating) return;
     decorating = true;
     try {
@@ -757,8 +813,6 @@
       const scoped = [...document.querySelectorAll(".dashboard .bd-table .el-table__row")];
       const rows = (scoped.length ? scoped : [...document.querySelectorAll(".bd-table .el-table__row")])
         .filter((row) => !row.closest(".el-dialog"));
-      if (!rows.length) return;
-      const list = await positions();
       if (!scriptCache.ok) {
         // 先同步拿一次全量话术：既能显示「已配 N/5」，也能判断这个账号有没有权限。
         try {
@@ -769,6 +823,21 @@
           if (caught.status === 403) return;
         }
       }
+      const table = document.querySelector(".dashboard .bd-table, .bd-table");
+      if (table && !document.querySelector(".rk-ps-welcome-bar")) {
+        styles();
+        const bar = document.createElement("div");
+        bar.className = "rk-ps-welcome-bar";
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "rk-ps-btn";
+        button.textContent = "通用欢迎语";
+        button.addEventListener("click", () => openDrawer({ id: 0, position_name: "所有设备的默认加好友首句" }));
+        bar.append(button, document.createTextNode("岗位专属首句优先；可配置多条固定消息。"));
+        table.before(bar);
+      }
+      if (!rows.length) return;
+      const list = await positions();
       const used = new Set();
       for (const row of rows) {
         const position = positionOfRow(row, list, used);

@@ -105,8 +105,8 @@ export async function registerPositionScriptRoutes(app: FastifyInstance, db: Dat
     if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
     const raw = String(request.query.position_id ?? "").trim();
     const positionId = raw ? int(raw) : 0;
-    if (raw && positionId <= 0) return reply.code(422).send({ detail: "position_id must be a positive integer" });
-    const rows = (positionId
+    if (raw && (positionId < 0 || !Number.isSafeInteger(Number(raw)))) return reply.code(422).send({ detail: "position_id must be a nonnegative integer" });
+    const rows = (raw
       ? db.prepare("SELECT * FROM position_scripts WHERE position_id=? ORDER BY id").all(positionId)
       : db.prepare("SELECT * FROM position_scripts ORDER BY position_id, id").all()) as ScriptRow[];
     return { items: rows.map((row) => serializeScript(db, row)), total: rows.length };
@@ -116,17 +116,22 @@ export async function registerPositionScriptRoutes(app: FastifyInstance, db: Dat
     if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
     const body = request.body ?? {};
     const positionId = int(body.position_id);
-    if (positionId <= 0) return reply.code(422).send({ detail: "position_id is required" });
+    const general = body.position_id === 0 || body.position_id === "0";
+    if (!general && positionId <= 0) return reply.code(422).send({ detail: "position_id is required" });
     const stage = text(body.stage).trim();
     if (!SCRIPT_STAGES.has(stage)) {
       return reply.code(422).send({ detail: "stage must be one of greet, send_info, ask_interview, booked, unanswered" });
     }
-    if (!db.prepare("SELECT id FROM service_positions WHERE id=?").get(positionId)) {
+    if (general && stage !== "greet") return reply.code(422).send({ detail: "通用条目仅支持加好友首句" });
+    if (!general && !db.prepare("SELECT id FROM service_positions WHERE id=?").get(positionId)) {
       return reply.code(422).send({ detail: "position not found" });
     }
     const status = text(body.status).trim() || "enabled";
     if (!["enabled", "disabled"].includes(status)) {
       return reply.code(422).send({ detail: "status must be enabled or disabled" });
+    }
+    if (general && status === "enabled" && !text(body.content).split(/^[ \t]*---[ \t]*\r?$/m).some((part) => part.trim())) {
+      return reply.code(422).send({ detail: "请填写至少一条欢迎语" });
     }
     // media 只保留 {name,kind}，sha256 由 media_assets 提供，不接受客户端自报。
     const media = parseMediaRefs(body.media).map((ref) => ({ name: ref.name, kind: ref.kind }));

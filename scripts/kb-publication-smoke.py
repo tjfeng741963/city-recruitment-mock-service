@@ -114,6 +114,23 @@ def exercise(run_dir, checks, ready=None):
         passed("disable-and-audited-rollback-runtime")
         history = req(n, "/api/v1/kb-publish/history", auth=na)
         require(len(history["items"]) == 4, "Unexpected publication history")
+        # Console save → device config → actual reply service, without a customer message.
+        welcome_parts = ["你好，欢迎咨询招聘岗位。", "我先帮你了解一下。", "请问你现在在哪个城市？"]
+        welcome_content = "\n---\n".join(welcome_parts)
+        saved = req(n, "/api/v1/position-scripts", {"position_id": 0, "stage": "greet", "title": "临时测试欢迎语", "content": welcome_content}, na)
+        reread = req(n, "/api/v1/position-scripts?position_id=0", auth=na)["items"]
+        require(len(reread) == 1 and reread[0]["content"] == welcome_content, "Welcome save/readback mismatch")
+        req(n, "/api/v1/agent/devices", {"device_code": "isolated-welcome", "device_name": "隔离欢迎语测试", "vertical_id": category["id"]}, na)
+        cfg = req(n, "/api/v1/bridge/devices/isolated-welcome/config", auth={"X-Profile-Token": token})
+        require(any(row["position_id"] == 0 and row["content"] == welcome_content for row in cfg["position_scripts"]), "Welcome not distributed")
+        greeting = req(p, "/api/v1/flow/greet", {"session_key": "isolated-welcome-session", "device_code": "isolated-welcome"}, pa)
+        require(greeting["parts"] == welcome_parts and not greeting["skipped"], "Runtime did not use configured welcome parts")
+        state = req(p, "/api/v1/flow/state?session_key=isolated-welcome-session", auth=pa)
+        require(state["turns"] == 0 and state["slots"]["scripted_sent"]["greet"], "Welcome fabricated a customer message or lost bookkeeping")
+        disabled = req(n, "/api/v1/position-scripts", {"position_id": 0, "stage": "greet", "content": welcome_content, "status": "disabled"}, na)
+        require(disabled["id"] == saved["id"], "Welcome update inserted duplicate row")
+        require(not any(row["position_id"] == 0 for row in req(n, "/api/v1/bridge/devices/isolated-welcome/config", auth={"X-Profile-Token": token})["position_scripts"]), "Disabled welcome still distributed")
+        passed("configured-welcome-save-device-runtime-parts-and-disable")
         if ready:
             ready({"node_url": n, "python_url": p, "username": "local-admin", "password": services.password})
     finally:
