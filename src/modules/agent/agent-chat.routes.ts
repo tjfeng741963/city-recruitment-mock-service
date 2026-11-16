@@ -1,6 +1,9 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
-import { complete, llmConfig, parseJsonObject, type ChatMessage } from "./agent-llm.js";
+import { authorizeProfileRequest } from "./profile.routes.js";
+import { isValidDeviceToken } from "./position-scripts.routes.js";
+import { complete, llmConfig, parseJsonObject } from "./agent-llm.js";
+import { buildOrchestration, guardMoney, guardScript, parseScripts } from "./agent-orchestrator.js";
 
 /**
  * Agent 会话接口 + 调试台的后端（迁移 038 的消费侧）。
@@ -20,29 +23,6 @@ import { complete, llmConfig, parseJsonObject, type ChatMessage } from "./agent-
  */
 
 const ADMIN_REQUIRED = { detail: "Admin access required" } as const;
-
-/** 事实卡里允许出现的键。顺序即 prompt 里的展示顺序。 */
-const FACT_LABELS: Array<[string, string]> = [
-  ["city", "城市"],
-  ["factory_name", "厂名"],
-  ["job_title", "岗位"],
-  ["wage_text", "工价"],
-  ["hours_text", "班次"],
-  ["age_text", "年龄要求"],
-  ["welfare_text", "吃住"],
-  ["place", "面试地点"],
-  ["interview_time", "面试时间"],
-];
-
-const OUTPUT_SPEC = `# 输出格式（必须是 JSON，不要代码块，不要解释）
-{"messages":[{"type":"text","content":"发给客户的一句话"}],"capture":{"name":"","phone":"","city":"","day":""},"handoff":false,"done":false}
-
-# 硬规则
-- 只能使用上面「岗位事实」里的数字，事实里没有的工价/年龄/费用一个字都不许说
-- 不确定的事说「这个我确认一下」，不要编
-- 需要发图片或视频时，type 填 image / video，name 填素材文件名；没有素材就不要输出
-- 客户明确说不来了 → handoff=false、done=true，回一句客气收尾
-- 姓名只填客户明确说出的 2-4 个汉字；手机号必须 11 位，没给就留空串`;
 
 type PositionRow = {
   id: number;
@@ -122,18 +102,15 @@ function buildFacts(row: PositionRow | undefined): Record<string, string> {
     welfare_text: text(data.welfare_text),
     place: text(data.place),
     interview_time: text(data.interview_time),
+    height_text: text(data.height_text),
+    tattoo_policy: text(data.tattoo_policy),
+    cert_text: text(data.cert_text),
+    job_content: text(data.job_content),
   };
   // 空值不出现：prompt 里「工价：」后面空着比不写更容易让模型以为「没有限制」
   return Object.fromEntries(
     Object.entries(merged).filter(([, value]) => String(value || "").trim()),
   );
-}
-
-function factsText(facts: Record<string, string>): string {
-  const lines = FACT_LABELS.filter(([key]) => facts[key]).map(
-    ([key, label]) => `- ${label}：${facts[key]}`,
-  );
-  return lines.length ? lines.join("\n") : "（这个岗位还没有填事实，任何数字都不要说）";
 }
 
 function openingOf(db: DatabaseSync, positionId: number) {
@@ -151,61 +128,6 @@ function personaOf(db: DatabaseSync, positionId: number): string {
     .prepare("SELECT content FROM agent_persona WHERE position_id=? AND status='enabled'")
     .get(positionId) as { content: string } | undefined;
   return String(row?.content ?? "");
-}
-
-/** 组装这一轮的完整 messages：system(人设 + 事实 + 输出格式) + 历史 + 当前这句。 */
-function buildMessages(
-  persona: string,
-  facts: Record<string, string>,
-  history: Array<{ role: string; text: string }>,
-  input: string,
-): ChatMessage[] {
-  const system = [
-    persona.trim() || "你是一家劳务中介的招聘顾问。",
-    "",
-    "# 岗位事实（这一轮唯一允许使用的数字来源）",
-    factsText(facts),
-    "",
-    OUTPUT_SPEC,
-  ].join("\n");
-
-  const messages: ChatMessage[] = [{ role: "system", content: system }];
-  for (const item of history) {
-    const content = text(item.text).trim();
-    if (!content) continue;
-    messages.push({
-      role: String(item.role) === "agent" ? "assistant" : "user",
-      content,
-    });
-  }
-  messages.push({ role: "user", content: input });
-  return messages;
-}
-
-/** 金额护栏：回复里出现的钱数必须能在事实里找到，否则整条判失败。 */
-function checkMoney(messages: unknown, facts: Record<string, string>): string | null {
-  const chunks: string[] = [];
-  if (Array.isArray(messages)) {
-    for (const item of messages) {
-      if (item && typeof item === "object" && text((item as { type?: string }).type) === "text") {
-        chunks.push(text((item as { content?: string }).content));
-      }
-    }
-  }
-  const prose = chunks.join("\n");
-  const allowed = Object.values(facts).join(" ").replace(/\s+/g, "");
-  const patterns = [/(\d+(?:\.\d+)?)\s*元/g, /(\d+(?:\.\d+)?)\s*\/\s*(?:小时|时|天|月|班)/g];
-  for (const pattern of patterns) {
-    let match = pattern.exec(prose);
-    while (match) {
-      const number = match[1];
-      if (!allowed.includes(number)) {
-        return `回复里的「${match[0]}」不在岗位事实里`;
-      }
-      match = pattern.exec(prose);
-    }
-  }
-  return null;
 }
 
 /** 输出结构校验：messages 必须是非空数组，每条 type 合法。 */
@@ -244,6 +166,7 @@ function normalizeReply(parsed: Record<string, unknown>) {
     },
     handoff: Boolean(parsed.handoff),
     done: Boolean(parsed.done),
+    script_used: typeof parsed.script_used === "string" ? parsed.script_used : null,
   };
 }
 
@@ -282,15 +205,24 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         persona,
         facts,
         opening,
+        scripts: parseScripts(persona).map((script) => ({
+          id: script.id,
+          title: script.title,
+          lines: script.content.split(/\n+/).filter(Boolean).length,
+        })),
         llm: { model: llmConfig().model, configured: Boolean(llmConfig().apiKey) },
       };
     },
   );
 
   // ── 客户端：开场清单 + 人设 ────────────────────────────────────
+  // 鉴权与媒体下载同一套：X-Profile-Token（服务间）或设备 Bearer token。
   app.get<{ Querystring: { device_code?: string } }>(
     "/api/v1/agent/opening",
     async (request, reply) => {
+      if (!authorizeProfileRequest(request) && !isValidDeviceToken(db, request)) {
+        return reply.code(403).send({ detail: "Not authenticated" });
+      }
       const deviceCode = text(request.query.device_code).trim();
       if (!deviceCode) return reply.code(422).send({ detail: "device_code is required" });
       const positionId = positionOfDevice(db, deviceCode);
@@ -315,6 +247,9 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
   app.post<{ Body: Record<string, unknown> }>(
     "/api/v1/agent/opening/log",
     async (request, reply) => {
+      if (!authorizeProfileRequest(request) && !isValidDeviceToken(db, request)) {
+        return reply.code(403).send({ detail: "Not authenticated" });
+      }
       const body = request.body ?? {};
       const sessionKey = text(body.session_key).trim();
       if (!sessionKey) return reply.code(422).send({ detail: "session_key is required" });
@@ -359,11 +294,20 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       : [];
     const persona = personaOf(db, positionId);
     const facts = buildFacts(row);
-    const messages = buildMessages(persona, facts, history, input);
+    // 编排：system(人设+事实+话术库+规则) + 全量历史 + 当前这句（DeepSeek 无状态多轮拼接）
+    const { messages, scripts } = buildOrchestration({ persona, facts, history, input });
 
-    // dry：只回拼好的 prompt，不调模型。调试台用它确认「人设 + 事实」有没有喂对。
+    // dry：只回拼好的 prompt，不调模型。调试台用它确认「人设 + 事实 + 话术库」有没有喂对。
     if (body.dry === true) {
-      return { ok: true, dry: true, messages, facts, persona, position_id: positionId };
+      return {
+        ok: true,
+        dry: true,
+        messages,
+        facts,
+        persona,
+        position_id: positionId,
+        scripts: scripts.map((script) => ({ id: script.id, title: script.title })),
+      };
     }
 
     try {
@@ -382,7 +326,11 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         };
       }
 
-      const moneyIssue = checkMoney(replyPayload.messages, facts);
+      // 话术护栏：模型说用了某类话术但输出跑偏 → 整条替换回运营原文
+      const scriptGuard = guardScript(replyPayload.messages, (parsed as Record<string, unknown>).script_used, scripts);
+      replyPayload.messages = scriptGuard.messages;
+
+      const moneyIssue = guardMoney(replyPayload.messages, facts);
       return {
         ok: !moneyIssue,
         error: moneyIssue || undefined,
@@ -391,6 +339,11 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         model: result.model,
         usage: result.usage,
         latency_ms: result.latency_ms,
+        script_used: typeof (parsed as Record<string, unknown>).script_used === "string"
+          ? (parsed as Record<string, unknown>).script_used
+          : null,
+        script_replaced: scriptGuard.replaced,
+        scripts: scripts.map((script) => script.id + " " + script.title),
         messages,
       };
     } catch (error) {
@@ -400,6 +353,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         error: failure.message,
         code: failure.code || "",
         messages,
+        scripts: scripts.map((script) => script.id + " " + script.title),
       };
     }
   });

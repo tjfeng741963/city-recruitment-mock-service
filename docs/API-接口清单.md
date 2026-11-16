@@ -88,10 +88,10 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |---|---|---|---|
-| GET | `/api/v1/agent/context?position_id=:id` | admin | 调试台用：事实 / 人设 / 开场 / 模型是否配置 |
-| GET | `/api/v1/agent/opening?device_code=:code` | 无需登录 | 客户端用：该设备绑的岗位 + 开场清单 + 人设 |
-| POST | `/api/v1/agent/opening/log` | 无需登录 | 客户端逐条回执：`{session_key,device_code,position_id,seq,kind,status,error}` |
-| POST | `/api/v1/agent/chat` | admin | 一轮对话，body `{position_id,text,history,dry}` |
+| GET | `/api/v1/agent/context?position_id=:id` | admin | 调试台用：事实 / 人设 / 开场 / 话术库 / 模型是否配置 |
+| GET | `/api/v1/agent/opening?device_code=:code` | 设备令牌或服务令牌 | 客户端用：该设备绑的岗位 + 开场清单 + 人设 |
+| POST | `/api/v1/agent/opening/log` | 设备令牌或服务令牌 | 客户端逐条回执：`{session_key,device_code,position_id,seq,kind,status,error}` |
+| POST | `/api/v1/agent/chat` | admin | 一轮受控对话，body `{position_id,text,history,dry}` |
 
 <!-- api-check:end -->
 
@@ -113,9 +113,12 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
   "reply": {
     "messages": [{ "type": "text", "content": "22 一小时，包吃包住" }],
     "capture": { "name": "张三", "phone": "13800138000", "city": "", "day": "" },
+    "script_used": "S2",
     "handoff": false,
     "done": false
   },
+  "script_replaced": false,
+  "scripts": ["S1 外宿人员嫌弃面试地址远", "S2 工资待遇不清晰/嫌低", "..."],
   "raw": "模型原文",
   "model": "deepseek-chat",
   "usage": { "prompt_tokens": 620, "completion_tokens": 48, "total_tokens": 668 },
@@ -123,6 +126,12 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
   "messages": [{ "role": "system", "content": "……" }]
 }
 ```
+
+**受控编排（2026-11-17 起）**：system = 人设（话术段落剥离）+ 岗位事实 +
+话术库（人设里 `[S1 标题]` 格式的段落）+ 输出规范。模型声明 `script_used`
+命中某类话术时，输出必须来自该类原文；跑偏会被 `guardScript` 整条替换回
+原文（`script_replaced=true`），原文比模型的转述更可信。多轮对话按 DeepSeek
+无状态 API 的约定：每轮把上一轮 assistant 输出 append 回 messages 末尾。
 
 失败时统一是 `{"ok": false, "error": "原因", "code": "no_api_key"}`，
 HTTP 仍是 200——调用方按 `ok` 判断，不要按状态码。
@@ -167,4 +176,5 @@ HTTP 仍是 200——调用方按 `ok` 判断，不要按状态码。
 
 | 日期 | 改动 |
 |---|---|
+| 2026-11-17 | Agent 会话重构为受控编排（agent-orchestrator.ts）：话术库注入 + script_used 声明 + 原文比对护栏；agent/opening 与 opening/log 改为设备令牌或服务令牌鉴权 |
 | 2026-11-16 | 新建：人设 / 开场 CRUD、Agent 会话四个接口、素材接口 |

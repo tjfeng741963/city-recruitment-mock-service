@@ -70,7 +70,7 @@ function serializeScript(db: DatabaseSync, row: ScriptRow) {
 }
 
 /** 设备 token：库里存 sha256(token)，反查设备编码后还要确认设备没被停用。 */
-function isValidDeviceToken(db: DatabaseSync, request: FastifyRequest): boolean {
+export function isValidDeviceToken(db: DatabaseSync, request: FastifyRequest): boolean {
   const token = (request.headers.authorization ?? "").replace(/^Bearer /, "").trim();
   if (!token) return false;
   const hash = createHash("sha256").update(token).digest("hex");

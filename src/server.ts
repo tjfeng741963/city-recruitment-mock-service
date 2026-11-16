@@ -59,6 +59,9 @@ const DEVICE_TOKEN_ROUTES = new Set(["heartbeat", "claim", "receipts", "inbound"
     // 媒体下载由设备 token 或 X-Profile-Token 鉴权（路由内校验），
     // 因此这里的 Bearer 不能当用户 JWT 解析，否则设备 token 会被判 401。
     "GET /api/v1/agent/media/:name",
+    // 开场清单与回执也是设备调的：设备令牌在路由内校验（与媒体下载同一套）。
+    "GET /api/v1/agent/opening",
+    "POST /api/v1/agent/opening/log",
   ]));
 const PUBLIC_ROUTES = new Set([
   "POST /api/v1/auth/login",

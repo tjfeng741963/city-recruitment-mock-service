@@ -91,17 +91,22 @@ export function seedDatabase(db: DatabaseSync): void {
     db.prepare("INSERT OR IGNORE INTO users(username,password_hash,role,recruiter_type) VALUES (?,?,?,?)")
       .run(user.username, hashPassword(password), user.role, user.recruiter_type);
   }
-  const cities = [
-    { id: 1, city_name: "广州", province: "广东", districts: ["天河区", "白云区", "番禺区"] },
-    { id: 2, city_name: "深圳", province: "广东", districts: ["南山区", "宝安区", "龙华区"] },
-    { id: 3, city_name: "东莞", province: "广东", districts: ["南城区", "长安镇", "虎门镇"] },
-  ];
-  for (const city of cities) {
-    db.prepare("INSERT OR IGNORE INTO cities(id,city_name,province,data_json) VALUES (?,?,?,?)")
-      .run(city.id, city.city_name, city.province, JSON.stringify({ districts: city.districts }));
+  // 示例城市只在空库时播种：运营清掉示例配置重建自己的岗位后，
+  // 每次启动不能再把广州/东莞塞回来，city_links 的外键也会因为城市不存在而失败。
+  const cityCount = (db.prepare("SELECT COUNT(*) AS n FROM cities").get() as { n: number }).n;
+  if (Number(cityCount) === 0) {
+    const cities = [
+      { id: 1, city_name: "广州", province: "广东", districts: ["天河区", "白云区", "番禺区"] },
+      { id: 2, city_name: "深圳", province: "广东", districts: ["南山区", "宝安区", "龙华区"] },
+      { id: 3, city_name: "东莞", province: "广东", districts: ["南城区", "长安镇", "虎门镇"] },
+    ];
+    for (const city of cities) {
+      db.prepare("INSERT OR IGNORE INTO cities(id,city_name,province,data_json) VALUES (?,?,?,?)")
+        .run(city.id, city.city_name, city.province, JSON.stringify({ districts: city.districts }));
+    }
+    db.prepare("INSERT OR IGNORE INTO city_links(city_id,linked_city_id) VALUES (1,2)").run();
+    db.prepare("INSERT OR IGNORE INTO city_links(city_id,linked_city_id) VALUES (2,3)").run();
   }
-  db.prepare("INSERT OR IGNORE INTO city_links(city_id,linked_city_id) VALUES (1,2)").run();
-  db.prepare("INSERT OR IGNORE INTO city_links(city_id,linked_city_id) VALUES (2,3)").run();
 
   const insertActivationStrategy = db.prepare("INSERT OR IGNORE INTO activation_strategy_rules(code,enabled,config_json) VALUES (?,?,?)");
   for (const strategy of ACTIVATION_STRATEGY_DEFAULTS) insertActivationStrategy.run(strategy.code, strategy.enabled ? 1 : 0, JSON.stringify(strategy.config));
