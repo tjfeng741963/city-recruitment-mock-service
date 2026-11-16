@@ -26,9 +26,18 @@ describe("event rule matching", () => {
   });
 
   it("takes the first matching rule as the winner", () => {
-    const hit = firstMatchingRule(FALLBACK_EVENT_RULES, "好的，那就祝您面试顺利，记得带身份证");
-    expect(hit).toMatchObject({ event: "checked_in", matchedKeyword: "那就祝您面试顺利" });
+    const hit = firstMatchingRule(FALLBACK_EVENT_RULES, "好嘞，报名成功，明天面试日期是 11/9");
+    expect(hit).toMatchObject({ event: "invited", matchedKeyword: "报名成功" });
     expect(firstMatchingRule(FALLBACK_EVENT_RULES, "你在哪个城市")).toBeNull();
+  });
+
+  it("never infers check-in from our own interview notice", () => {
+    // 2026-11-15 实测事故：面试通知里带「请准时到本公司面试」，一发通知
+    // 客户就被标成「已签到」（STATUS_RANK 只升不降，跳上去退不回来）。
+    // 签到必须有真实到场信号，默认规则里不再有 checked_in。
+    expect(FALLBACK_EVENT_RULES.some((rule) => rule.event === "checked_in")).toBe(false);
+    expect(firstMatchingRule(FALLBACK_EVENT_RULES, "请准时到本公司面试，带好身份证")).toBeNull();
+    expect(firstMatchingRule(FALLBACK_EVENT_RULES, "好的，那就祝您面试顺利")).toBeNull();
   });
 });
 
@@ -76,13 +85,13 @@ describe("event rule tagging end to end", () => {
     expect(before).toBeDefined();
     const result = applyEventRule(app.db, {
       deviceCode: "local-device-001", customerId: 700001,
-      outboundText: "好的，那就祝您面试顺利，到了给我发个消息",
+      outboundText: "好嘞，报名成功，明天面试日期是 11/9，到了联系我",
     });
-    expect(result).toMatchObject({ event: "checked_in", applied: true });
-    expect(conversation()?.recruit_status).toBe("checked_in");
-    const events = app.db.prepare("SELECT event_type,status FROM candidate_events WHERE device_code='local-device-001' AND customer_id='700001' AND event_type='checked_in'").all() as Array<{ event_type: string; status: string }>;
+    expect(result).toMatchObject({ event: "invited", applied: true });
+    expect(conversation()?.recruit_status).toBe("invited");
+    const events = app.db.prepare("SELECT event_type,status FROM candidate_events WHERE device_code='local-device-001' AND customer_id='700001' AND event_type='invited'").all() as Array<{ event_type: string; status: string }>;
     expect(events).toHaveLength(1);
-    expect(events[0].event_type).toBe("checked_in");
+    expect(events[0].event_type).toBe("invited");
   });
 
   it("does not downgrade a more advanced status and keeps disqualified terminal", () => {
@@ -104,10 +113,10 @@ describe("event rule tagging end to end", () => {
   });
 
   it("tags the same event only once per conversation", () => {
-    const input = { deviceCode: "local-device-001", customerId: 700001, outboundText: "好的，那就祝您面试顺利" };
+    const input = { deviceCode: "local-device-001", customerId: 700001, outboundText: "好嘞，报名成功" };
     expect(applyEventRule(app.db, input)).toMatchObject({ applied: true });
     expect(applyEventRule(app.db, input)).toMatchObject({ applied: false, reason: "本会话已打过该标签" });
-    expect(app.db.prepare("SELECT COUNT(*) AS n FROM candidate_events WHERE event_type='checked_in' AND device_code='local-device-001'").get()).toMatchObject({ n: 1 });
+    expect(app.db.prepare("SELECT COUNT(*) AS n FROM candidate_events WHERE event_type='invited' AND device_code='local-device-001'").get()).toMatchObject({ n: 1 });
   });
 
   it("leaves the conversation untouched when nothing matches", () => {

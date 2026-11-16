@@ -62,7 +62,11 @@ export function readInviteGroupConfig(db: DatabaseSync): InviteGroupConfig {
     if (key && value) cityAbbr[key] = value;
   }
   return {
-    enabled: raw.enabled === true,
+    // 默认开启：只有运营明确关掉（enabled:false）才不发。
+    // 以前是 `=== true`，配好群名/Webhook 但没点那个开关就一直记「未启用」，
+    // 运营以为发了、实际一条没发（2026-11-15 实测点③）。没配群名和 Webhook
+    // 时下面会落到「未配置邀约群」，所以打开默认值不会误发。
+    enabled: raw.enabled !== false,
     groupName: String(raw.group_name ?? "").trim(),
     deviceCode: String(raw.device_code ?? "").trim(),
     cityAbbr,

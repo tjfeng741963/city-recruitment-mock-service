@@ -31,7 +31,12 @@ export interface EventRule {
 export const FALLBACK_EVENT_RULES: EventRule[] = [
   { event: "disqualified", description: "不符合条件", keywords: ["后续再聊", "暂时安排不了"], matchMode: "any", oncePerSession: true },
   { event: "invited", description: "邀约成功", keywords: ["报名成功", "面试日期"], matchMode: "any", oncePerSession: true },
-  { event: "checked_in", description: "签到成功", keywords: ["那就祝您面试顺利", "请准时到本公司面试"], matchMode: "any", oncePerSession: true },
+  // checked_in 故意不在默认规则里：签到是「客户真的到场」才成立的事实，而我们唯一
+  // 能匹配的是自己发出去的话。原关键词「那就祝您面试顺利」「请准时到本公司面试」
+  // 恰好出现在面试通知模板里，运营一发通知，这个人立刻从「报名成功」跳到「已签到」
+  // ——而他明天才来（2026-11-15 实测；STATUS_RANK 只升不降，跳上去就退不回来）。
+  // 现在签到只能人工标记：POST /api/v1/agent/candidates/:id/mark {status:"checked_in"}。
+  // 运营仍可在「回复规则」里自己加 checked_in 规则，那是明确的自主决定。
   { event: "pending_invite", description: "待邀约", keywords: ["到时候联系", "再联系我", "有需要联系我就行"], matchMode: "any", oncePerSession: true },
 ];
 
