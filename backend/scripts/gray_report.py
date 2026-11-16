@@ -91,6 +91,25 @@ def _suspect_reasons(reply: dict[str, Any]) -> list[str]:
     status = str(trace.get("recruit_status") or "")
     if status == "disqualified":
         reasons.append("已标记不合适")
+
+    # 模型调用层面的可疑：灰度里最关键的一类证据。
+    # 「没调模型」和「调了但失败」是两种完全不同的 bug，必须分开报。
+    llm = trace.get("llm")
+    if isinstance(llm, list):
+        if not llm:
+            reasons.append("本轮未调用模型（代码渲染/确定性兜底）")
+        else:
+            failed = [call for call in llm if isinstance(call, dict) and not call.get("ok")]
+            if failed:
+                error = str(failed[0].get("error") or "")[:120]
+                reasons.append(f"模型调用失败 {len(failed)}/{len(llm)} 次：{error}")
+            slow = [
+                call
+                for call in llm
+                if isinstance(call, dict) and int(call.get("ms") or 0) > 10_000
+            ]
+            if slow:
+                reasons.append(f"模型响应慢：{slow[0].get('ms')}ms")
     return reasons
 
 
@@ -193,6 +212,27 @@ def print_timeline(sessions: list[dict[str, Any]], only_suspects: bool) -> None:
                             trace.get("kb_entry_id") or "-",
                         )
                     )
+                    llm = trace.get("llm")
+                    if isinstance(llm, list):
+                        if not llm:
+                            lines.append("      >>> 模型：本轮未调用")
+                        for index, call in enumerate(llm, start=1):
+                            if not isinstance(call, dict):
+                                continue
+                            tokens = call.get("tokens") or {}
+                            lines.append(
+                                "      >>> 模型#{} {} ok={} {}ms tokens={} 尝试{}次{}".format(
+                                    index,
+                                    call.get("model") or "?",
+                                    call.get("ok"),
+                                    call.get("ms"),
+                                    tokens.get("total_tokens", "-"),
+                                    call.get("attempts"),
+                                    f" 错误：{str(call.get('error'))[:80]}"
+                                    if call.get("error")
+                                    else "",
+                                )
+                            )
         if lines:
             print(f"── 会话 {session['session_key']} ──")
             print("\n".join(lines))
@@ -207,7 +247,9 @@ def write_csv(sessions: list[dict[str, Any]], path: str) -> int:
         writer.writerow(
             [
                 "会话", "时间", "客户原话", "我们回的", "来源",
-                "阶段变化", "知识库条目", "可疑原因", "人工判定", "应为",
+                "阶段变化", "知识库条目", "可疑原因",
+                "模型调用次数", "模型", "耗时ms", "token", "模型失败原因",
+                "人工判定", "应为",
             ]
         )
         for session in sessions:
@@ -219,6 +261,16 @@ def write_csv(sessions: list[dict[str, Any]], path: str) -> int:
                 if event["type"] != "reply":
                     continue
                 trace = event.get("trace") or {}
+                llm = trace.get("llm") if isinstance(trace.get("llm"), list) else []
+                calls = [call for call in llm if isinstance(call, dict)]
+                models = ",".join(str(call.get("model") or "?") for call in calls)
+                total_ms = sum(int(call.get("ms") or 0) for call in calls)
+                tokens = sum(
+                    int((call.get("tokens") or {}).get("total_tokens") or 0) for call in calls
+                )
+                errors = "；".join(
+                    str(call.get("error"))[:120] for call in calls if call.get("error")
+                )
                 writer.writerow(
                     [
                         session["session_key"],
@@ -229,6 +281,11 @@ def write_csv(sessions: list[dict[str, Any]], path: str) -> int:
                         f"{trace.get('stage_from') or ''}→{trace.get('stage_to') or ''}",
                         trace.get("kb_entry_id") or "",
                         "；".join(event.get("suspects") or []),
+                        len(calls),          # 0 = 本轮一次模型都没调
+                        models,
+                        total_ms,
+                        tokens,
+                        errors,
                         "",  # 人工判定：对 / 错 / 词不达意
                         "",  # 应为
                     ]
