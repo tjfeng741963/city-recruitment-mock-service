@@ -8,6 +8,8 @@
     failed   发送失败（保留 error，重启后可以补发）
     skipped  不该发（系统会话 / 搜索不到会话名）
     held     知识库失败/非文本，待人工检查后显式重新入队
+    unknown  回车已按但回读解密库确认不了落点：结果不明。不自动重发
+             （重发可能重复打扰客户），由 --retry-held 人工重新入队
 
 所有查询都以 message_id 做幂等键，重复扫描不会重复回复。
 """
@@ -136,6 +138,24 @@ def mark_failed(message_id: str, error: str, scene: str = "", reply_text: str = 
         con.close()
 
 
+def mark_unknown(message_id: str, error: str, scene: str = "", reply_text: str = "") -> None:
+    """回车已按但回读确认不了：结果不明。
+
+    不能记 sent（可能静默丢失），也不能记 failed（下一轮自动补发会把
+    可能已经发出的内容再发一遍）。unknown 不参与自动补发，等人工核对。
+    """
+    con = _conn()
+    try:
+        con.execute(
+            "UPDATE reply_log SET status='unknown', error=?, scene=?, reply_text=?, "
+            "replied_at=? WHERE message_id=?",
+            (str(error)[:500], scene, reply_text, time.time(), str(message_id)),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
 def mark_skipped(message_id: str, reason: str) -> None:
     con = _conn()
     try:
@@ -163,7 +183,12 @@ def mark_held(message_id: str, reason: str) -> None:
 def retry_held() -> int:
     con = _conn()
     try:
-        cur = con.execute("UPDATE reply_log SET status='pending', error=NULL, replied_at=NULL WHERE status='held'")
+        # held（知识库失败）与 unknown（回读未确认）都不参与自动补发，
+        # 都靠这条命令显式重新入队；人工决定重发前先核对企微里有没有发出去。
+        cur = con.execute(
+            "UPDATE reply_log SET status='pending', error=NULL, replied_at=NULL "
+            "WHERE status IN ('held','unknown')"
+        )
         con.commit()
         return cur.rowcount
     finally:

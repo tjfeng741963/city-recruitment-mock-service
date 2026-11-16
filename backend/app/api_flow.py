@@ -102,6 +102,9 @@ class FlowAnswerIn(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
     # 推档案给 4222 时用来定位会话；老客户端不传也能跑（走 external_conversation_id）
     device_code: str = Field(default="", max_length=64)
+    # 客户端本地聊天记录（最近几轮双方对话，agent/autopilot.build_dialogue 的输出）。
+    # 老客户端不传：为空时服务端仍用事件投影构建上下文（向后兼容）。
+    history: list[dict[str, str]] = Field(default_factory=list, max_length=40)
 
 
 class FlowAnswerOut(BaseModel):
@@ -437,7 +440,11 @@ async def flow_answer(
 
     # 每客户一个标准智能体上下文（AgentSession）：从事件日志投影最近轮次
     # （客户/我方逐轮累积，含话术与卡片），传给 A（决策 Prompt）与 B（审核查重）
-    transcript = agent_session.surface(agent_session.build_transcript(events))
+    # 客户端带了聊天记录就以它为准（服务端投影缺人工/补发轮次，见
+    # agent_session.merge_client_history）；老客户端不带 → 仍用事件投影。
+    transcript = agent_session.merge_client_history(
+        agent_session.build_transcript(events), payload.history
+    )
     provider = build_provider()
     media_material = kb_answer or ""
     device_material_used = False
