@@ -38,7 +38,11 @@ def load_autopilot():
         patch.object(ctypes, "WinDLL", MagicMock(), create=True),
     ):
         _load_module("client")
-        return _load_module("autopilot")
+        module = _load_module("autopilot")
+        # Hosted Windows CI is not an interactive client desktop. Every test
+        # controls the read-only probe explicitly; never query its real session.
+        module.desktop_send_ready = MagicMock(return_value=(True, ''))
+        return module
 
 
 def load_reply_store(path: Path):

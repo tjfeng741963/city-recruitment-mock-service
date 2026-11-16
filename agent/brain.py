@@ -162,8 +162,8 @@ class Brain:
         （岗位图/视频以【图片:x】/【视频:x】标记放在 parts 里）。
         返回结构与 /flow/answer 一致，调用方可以复用同一条发送链路。
 
-        失败一律 ok=False，由调用方退回 /flow/answer（见 autopilot.drain），
-        绝不在这里抛异常：首句是增强，不能让它卡住整条消息。
+        失败一律 ok=False；调用方持久化并暂停本会话首句，避免生成失败后
+        直接推进普通问答。HTTP 成功仅表示取到文案，不表示发给客户成功。
         """
         key = (session_key or "unknown")[:64]
         payload: dict[str, Any] = {"session_key": key}

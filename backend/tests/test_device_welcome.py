@@ -95,6 +95,56 @@ async def test_single_job_intro_pins_snapshot_for_immediate_questions(admin_clie
     assert PARTS[0] not in body["reply"]
 
 
+async def test_real_flow_api_welcome_survives_client_failure_and_answers_queued_wage(
+        admin_client, setup_intro, tmp_path, monkeypatch):
+    """Actual FastAPI/auth/state/Brain; only transport and desktop input isolated."""
+    import asyncio
+    import time
+    import httpx
+    from tests.agent_loader import _load_module
+    from tests.test_autopilot_welcome import CFG, setup_agent
+    from tests.test_welcome_recovery import UNSENT, confirmed_sender, incoming, restarted
+
+    setup_intro[1].pop()  # One synthetic job: wage 210/day.
+    agent, store = setup_agent(tmp_path, monkeypatch)
+    brain = _load_module('brain').Brain('http://test', mode='flow', device_code='intro-a')
+    brain._client.close()
+    loop, calls = asyncio.get_running_loop(), []
+    def dispatch(request):
+        calls.append(request.url.path)
+        response = asyncio.run_coroutine_threadsafe(admin_client.request(
+            request.method, request.url.path, content=request.content, headers=dict(request.headers)), loop).result(timeout=15)
+        return httpx.Response(response.status_code, content=response.content, headers=dict(response.headers), request=request)
+    brain._client = httpx.Client(transport=httpx.MockTransport(dispatch))
+    brain._token = admin_client.headers['Authorization'].removeprefix('Bearer ')
+    brain._token_at = time.time()
+    agent._brain = brain
+    monkeypatch.setattr(agent, '_observe_lead', lambda *args: None)
+    try:
+        agent.scan(store, CFG)
+        agent.core_send.send.return_value = UNSENT
+        assert (await asyncio.to_thread(agent.drain, store, CFG))['failed'] == 1
+        assert agent.rlog.welcome('S:test')['parts'] == PARTS
+        state = (await admin_client.get('/api/v1/flow/state', params={'session_key': 'S:test'})).json()
+        assert state['slots']['scripted_sent']['greet']  # Server already advanced.
+        setup_intro[2][0]['content'] = '后台已修改的新文案，不应替换待发送原文'
+        incoming(agent)
+
+        again = restarted(agent, store, monkeypatch)
+        again._brain = brain
+        monkeypatch.setattr(again, '_observe_lead', lambda *args: None)
+        assert (await asyncio.to_thread(again.drain, store, CFG))['sent'] == 1
+        assert [m['text'] for m in store.outbox] == PARTS
+        assert calls.count('/api/v1/flow/greet') == 1
+        confirmed_sender(again, store)
+        assert (await asyncio.to_thread(again.drain, store, CFG))['sent'] == 1
+        assert store.outbox[-1]['text'] == '工价：210/天'
+        assert calls.count('/api/v1/flow/answer') == 1
+        assert again.rlog.welcome('S:test')['state'] == 'sent'
+    finally:
+        brain._client.close()
+
+
 async def test_base_selection_keeps_customer_provided_contact_without_implicitly_booking(admin_client, setup_intro):
     key, _ = await start(admin_client)
     body = await answer(admin_client, key, "我叫张三，13800138000，去乙基地")

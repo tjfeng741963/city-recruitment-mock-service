@@ -20,6 +20,18 @@ def setup_agent(tmp_path, monkeypatch):
     agent._last_reply_at = 0
     agent.core_send.send.return_value = {"ok": True, "detail": "mocked only"}
     store = MagicMock()
+    store.self_id.return_value = 'test'
+    outbox = []
+    store.outbox = outbox
+    store.messages.side_effect = lambda *args, **kwargs: list(outbox)
+
+    def send(*args, **kwargs):
+        result = agent.core_send.send.return_value
+        if result.get('ok'):
+            outbox.append({'id': f'out-{len(outbox)}', 'sender_id': 'test', 'text': args[2]})
+        return result
+
+    agent.core_send.send.side_effect = send
     store.recent.return_value = [{"id": 1, "conv_id": "S:test", "conv_name": "专用测试联系人", "text": "", "type": 1011, "time": 100, "is_self": False}]
     return agent, store
 
