@@ -835,6 +835,30 @@ def split_script_sections(text: str) -> list[str]:
     return [section for section in sections if section.strip()]
 
 
+def split_by_section_heads(text: str) -> list[str]:
+    """只按行首【标题】切，**不按空行切**。
+
+    给「模型组织的回复」用：模型经常把运营素材里的【用人要求】【上班时间】
+    【工资待遇】塞进一条回复里，得拆开发；但模型自己的正文也会用空行分段，
+    按空行切会把正常回复拆成碎片。标题明确出现 2 个以上才动手。
+    """
+    raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not raw:
+        return []
+    sections: list[str] = []
+    current: list[str] = []
+    for line in raw.split("\n"):
+        if _starts_section(line) and current and any(_starts_section(x) for x in current):
+            sections.append("\n".join(current).strip())
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        sections.append("\n".join(current).strip())
+    sections = [section for section in sections if section.strip()]
+    return sections if len(sections) > 1 else [raw]
+
+
 def send_info_parts(
     slots: dict[str, Any], when: datetime | None = None, now: datetime | None = None
 ) -> list[str]:

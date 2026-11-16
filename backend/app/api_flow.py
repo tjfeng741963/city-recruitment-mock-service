@@ -57,6 +57,7 @@ from .services.flow_engine import (
     set_position_scripts,
     set_remote_cities,
     set_remote_jobs,
+    split_by_section_heads,
 )
 from .services.job_lookup import lookup_cities, lookup_jobs, vertical_hint_of
 from .services.flow_llm import a_step, review_loop
@@ -552,6 +553,13 @@ async def flow_answer(
             result.parts = [result.reply]
         # 回声兜底、KB 补媒体/重复答复都发生在审核之后，落库前再统一校验。
         result.parts = filter_parts(result.parts or [result.reply], allowed_media) or ["这个我确认一下，稍后回你"]
+        # 分段收口：模型组织的回复常把运营素材里的【用人要求】【上班时间】
+        # 【工资待遇】塞进同一条，客户看到的是一条糊在一起的长消息
+        # （2026-11-15 线上实测）。只按行首【标题】拆、不按空行拆——
+        # 模型自己的正文也用空行分段，按空行切会把正常回复拆碎。
+        # 标题不足 2 个时原样返回，不做任何改动。
+        if len(result.parts) == 1:
+            result.parts = split_by_section_heads(result.parts[0])
         result.reply = "\n".join(result.parts)
         # 灰度复盘用的诊断：这条回复是谁生成的、走了哪一步、命中了哪条知识库、
         # 审核动过没有、兜底触发过没有。追加字段不影响回放——project() 只读 text。

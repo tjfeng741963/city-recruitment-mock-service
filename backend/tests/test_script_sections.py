@@ -22,6 +22,7 @@ from app.services.flow_engine import (
     new_state,
     set_position_scripts,
     set_remote_jobs,
+    split_by_section_heads,
     split_script_sections,
     step,
 )
@@ -92,6 +93,37 @@ def test_media_marker_stays_inside_its_section() -> None:
 def test_empty_input_returns_nothing() -> None:
     assert split_script_sections("") == []
     assert split_script_sections("   \n\n  ") == []
+
+
+# ── 模型回复的分段收口 ──────────────────────────────────────────
+# 设备级话术会作为素材交给模型组织，模型会把三段塞进同一条回复里。
+# 收口只认行首【标题】，且至少 2 个标题才动手。
+
+
+def test_section_heads_split_model_reply() -> None:
+    parts = split_by_section_heads("【用人要求】18-45岁\n【上班时间】长白班\n【工资待遇】18元/小时")
+    assert parts == ["【用人要求】18-45岁", "【上班时间】长白班", "【工资待遇】18元/小时"]
+
+
+def test_section_heads_do_not_split_ordinary_prose() -> None:
+    """模型自己的正文也用空行分段——按空行拆会把正常回复拆碎。"""
+    text = "深圳这边有岗，工价18元/小时。\n\n这周就能面试，你方便吗？"
+    assert split_by_section_heads(text) == [text]
+
+
+def test_section_heads_single_header_stays_whole() -> None:
+    text = "【岗位信息】工价18元/小时，包吃住"
+    assert split_by_section_heads(text) == [text]
+
+
+def test_section_heads_keep_media_marker_with_its_section() -> None:
+    parts = split_by_section_heads("【岗位信息】工价18元\n【图片:厂门.jpg】\n【上班时间】长白班")
+    assert parts == ["【岗位信息】工价18元\n【图片:厂门.jpg】", "【上班时间】长白班"]
+
+
+def test_section_heads_empty_input() -> None:
+    assert split_by_section_heads("") == []
+    assert split_by_section_heads("  \n ") == []
 
 
 def test_send_info_script_goes_out_as_separate_messages() -> None:
