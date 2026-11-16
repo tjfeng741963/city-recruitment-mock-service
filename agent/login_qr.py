@@ -32,6 +32,9 @@ from datetime import datetime, timedelta, timezone
 # 上传间隔（秒）。二维码 2 分钟刷新一次，30 秒既能看到新码也不会刷屏。
 PUSH_INTERVAL = 30.0
 
+# pythonw 拉起时没有控制台，tasklist 会自己新建一个黑窗口；见 autopilot.py 的说明。
+_CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+
 # 缩小比例：登录窗原始约 380x520；高 DPI 下可能到 760x1040，
 # 缩到 6 成仍是二维码可扫的清晰度，体积却降到三分之一。
 SCALE = 0.6
@@ -56,6 +59,7 @@ def _wxwork_pids() -> set[int]:
         out = subprocess.run(
             ["tasklist", "/FI", "IMAGENAME eq WXWork.exe", "/FO", "CSV", "/NH"],
             capture_output=True, text=True, encoding="gbk", errors="ignore", timeout=10,
+            creationflags=_CREATE_NO_WINDOW,
         ).stdout
     except Exception:  # noqa: BLE001
         return set()

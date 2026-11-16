@@ -44,6 +44,9 @@ import time
 # 同一状态两次提醒的最小间隔（秒）。30 秒一轮自检 → 120 秒 = 最多每 4 轮响一次。
 COOLDOWN = 120.0
 
+# pythonw 拉起时没有控制台，tasklist 会自己新建一个黑窗口；见 autopilot.py 的说明。
+_CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+
 # 先按标题找（企微主窗口标题就是「企业微信」），老版本/国际版可能叫 WeCom。
 WINDOW_TITLES = ("企业微信", "WeCom")
 
@@ -120,6 +123,7 @@ def _pids_via_tasklist() -> set[int]:
             encoding="gbk",
             errors="ignore",
             timeout=10,
+            creationflags=_CREATE_NO_WINDOW,
         ).stdout
     except Exception:  # noqa: BLE001
         return set()

@@ -50,6 +50,23 @@ from urllib.error import HTTPError
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
+# 计划任务用 pythonw.exe 拉起本进程，进程本身没有控制台。此时 subprocess 启动
+# tasklist / python.exe 这类控制台程序，Windows 会为每个子进程新建一个控制台窗口
+# ——屏幕上就是「隔一会儿跳一下的黑窗口」（每轮自检闪一次）。CREATE_NO_WINDOW
+# 让子进程继承「无控制台」，不再弹窗；非 Windows 平台取 0，参数无效但无害。
+_CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+
+LOG_DIR = ROOT / "logs"
+LOG_PATH = LOG_DIR / "run.log"
+
+# pythonw.exe 启动时没有控制台，sys.stdout / sys.stderr 是 None：print、reconfigure
+# 都会抛异常。2026-11-16 实测这样跑一轮日志就全丢、drain 循环还会被日志异常打断。
+# 统一兜底成空写入器，真正的日志由 log() 直接落文件。
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
 from wecom_io_core import win  # noqa: E402
 
 win.set_dpi_aware()
@@ -106,6 +123,10 @@ DEFAULTS = {
 }
 
 _last_reply_at = 0.0
+# 连续发送失败计数（自动回复 drain 用）。失败也消耗冷却，且连续失败把间隔
+# 拉长到最多 4 倍：2026-11-16 实测失败"零成本"立即重试下一个会话，3 秒内
+# 对企微连做 3 次键鼠发送，正是触发风控掉登录的操作模式。
+_consecutive_send_failures = 0
 
 # ── 人工指令（4222 控制台主动发消息）────────────────────────────────────────
 # 主循环里与自动回复串行执行（同一个线程），共享 _last_reply_at 冷却，
@@ -154,6 +175,14 @@ _user32 = ctypes.WinDLL("user32", use_last_error=True)
 
 def log(msg: str) -> None:
     text = f"[{time.strftime('%H:%M:%S')}] {msg}"
+    # 直接落文件：客户端现在由 pythonw 无窗口启动（不再有 run.cmd 的 >> 重定向），
+    # 只靠 stdout 的话日志会整个消失，出问题时没有任何现场可查。
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(LOG_PATH, "a", encoding="utf-8", errors="replace") as fh:
+            fh.write(text + "\n")
+    except Exception:  # noqa: BLE001 日志写不进去也绝不能中断业务
+        pass
     try:
         print(text, flush=True)
     except UnicodeEncodeError:
@@ -161,6 +190,8 @@ def log(msg: str) -> None:
         # 循环被日志异常打断，机器静默半天。降级输出，日志绝不能中断业务
         enc = sys.stdout.encoding or "gbk"
         print(text.encode(enc, "replace").decode(enc, "replace"), flush=True)
+    except Exception:  # noqa: BLE001 无控制台（pythonw）时 stdout 不可写，忽略
+        pass
 
 
 def wal_signature(data_dir: Path) -> tuple:
@@ -216,6 +247,7 @@ def _wxwork_pids() -> set[int]:
             encoding="gbk",
             errors="ignore",
             timeout=10,
+            creationflags=_CREATE_NO_WINDOW,
         ).stdout
     except Exception:  # noqa: BLE001
         return set()
@@ -1043,8 +1075,8 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
     `wecom_state != "online"` 时**一条都不发**，直接返回：
     窗口被隐藏/退回登录页还继续点，就是 11-02 被强退的原因。
     """
-    global _last_reply_at, _last_error, _last_block_log
-    stats = {"sent": 0, "failed": 0, "skipped": 0, "merged": 0, "blocked": 0}
+    global _last_reply_at, _last_error, _last_block_log, _consecutive_send_failures
+    stats = {"sent": 0, "failed": 0, "skipped": 0, "merged": 0, "blocked": 0, "unknown": 0}
     # 每轮读一次首句记录；drain 是单线程的，一轮内新增的会话就地写回
     greeted = _load_greeted()
 
@@ -1206,7 +1238,14 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 elif not hint:
                     res = {"ok": False, "detail": f"消息没有文本（type={it['in_type']}）"}
                 elif _brain is not None:
-                    res = _brain.reply(hint, build_history(store, cid), session_key=cid)
+                    # dialogue 一并带上：服务端投影缺人工/补发轮次，
+                    # 客户端本地库才是完整聊天记录（2026-11-16）。
+                    res = _brain.reply(
+                        hint,
+                        build_history(store, cid),
+                        session_key=cid,
+                        dialogue=build_dialogue(store, cid),
+                    )
                 # 流程走完（已约到面试）后不再自动回复，这条消息记为跳过
                 if res.get("skip"):
                     if not dry:
@@ -1239,7 +1278,10 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             text, scene = pick_reply(cid, cfg)
             parts = [text]
 
-        wait = cfg["cooldown"] - (time.time() - _last_reply_at)
+        # 冷却按“距上次企微键鼠操作”计算，与成败无关（见 _consecutive_send_failures
+        # 处的注释）；连续失败再把间隔拉长，最多 4 倍 cooldown。
+        backoff = 1 + min(_consecutive_send_failures, 3)
+        wait = cfg["cooldown"] * backoff - (time.time() - _last_reply_at)
         if wait > 0:
             time.sleep(wait)
 
@@ -1280,6 +1322,9 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             # 多段回复（parts）逐条发送，段间隔 2 秒防折叠/限流；任何一段失败即止。
             # 每段先剥离【图片:x】/【视频:x】标记：剩余文本照常走键鼠发送，
             # 文本发出后媒体逐个粘贴；媒体任何异常不影响文本已发状态。
+            # 冷却在按键前更新：无论成败，这次键鼠操作都算数——失败不再
+            # "零成本"立即打下一个会话（2026-11-16 掉登录事故的操作模式）。
+            _last_reply_at = time.time()
             result = {"ok": False, "detail": "未发送"}
             start_part = welcome_delivery['next_part'] if welcome_delivery else 0
             for idx in range(start_part, len(parts)):
@@ -1349,13 +1394,24 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     rlog.confirm_welcome_part(cid, idx)
                 if idx < len(parts) - 1:
                     time.sleep(2.0)
-            if result["ok"]:
+            detail_text = str(result.get("detail") or "")
+            if not welcome_delivery and result["ok"] and "回读失败" in detail_text:
+                # 回车已按但回读解密库确认不了落点：结果不明。不能记 sent
+                #（可能静默丢失），也不能记 failed（下轮自动补发可能重复发送）。
+                # 记 unknown 不参与自动补发，--retry-held 由人工核对后重新入队。
+                rlog.mark_unknown(mid, detail_text, scene, text)
+                _last_error = detail_text[:200]
+                _consecutive_send_failures += 1
+                stats["unknown"] += 1
+                log("    回读未确认：按 unknown 记账，不自动重发，待人工核对（--retry-held 可重新入队）")
+            elif result["ok"]:
                 if welcome_delivery:
                     greeted.add(cid)
                     _save_greeted(greeted)
                 else:
                     rlog.mark_sent(mid, scene, text)
                 _last_reply_at = time.time()
+                _consecutive_send_failures = 0
                 _last_error = ""
                 stats["sent"] += 1
                 log(f"    已发送：{result['detail']}")
@@ -1367,6 +1423,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 if not welcome_delivery:
                     rlog.mark_failed(mid, result["detail"], scene, text)
                 _last_error = str(result["detail"])[:200]
+                _consecutive_send_failures += 1
                 stats["failed"] += 1
                 log(f"    发送失败：{result['detail']}")
         except Exception as exc:  # noqa: BLE001
@@ -1375,6 +1432,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             else:
                 rlog.mark_failed(mid, f"{type(exc).__name__}: {exc}", scene, text)
             _last_error = f"{type(exc).__name__}: {exc}"[:200]
+            _consecutive_send_failures += 1
             stats["failed"] += 1
             log(f"    发送异常：{type(exc).__name__}: {exc}")
             traceback.print_exc(limit=2)
@@ -1594,6 +1652,9 @@ def pump_commands(
     before = _outbound_snapshot(store, contact_id)
     if stop_if_lease_invalid():
         return stats
+    # 与自动回复同一口径：按键前更新冷却，失败也算一次企微操作，
+    # 不给"失败后立即重试/下一条"留零成本通道。
+    _last_reply_at = time.time()
     try:
         result = core_send.send(
             store, name, content,
@@ -1913,7 +1974,7 @@ def main() -> int:
     ap.add_argument("--dry", action="store_true", help="只登记不发送")
     ap.add_argument("--list", action="store_true", help="打印回复历史")
     ap.add_argument("--reset", action="store_true", help="把待发/失败的条目全部作废")
-    ap.add_argument("--retry-held", action="store_true", help="将知识库暂停记录重新入队后退出，不发送")
+    ap.add_argument("--retry-held", action="store_true", help="把普通 held/unknown 记录重新入队；未完成首句需先核对")
     ap.add_argument('--resolve-welcome', help='停客户端、核对实际消息后，处理此会话暂停的首句；本次不发送')
     ap.add_argument('--confirmed-parts', type=int, help='与 --resolve-welcome 配合，人工核实已收到的连续段数')
     ap.add_argument("--flush-receipts", action="store_true", help="仅补传人工回执后退出，不操作企微")
@@ -1977,7 +2038,7 @@ def main() -> int:
     _brain = build_brain(cfg, log)
 
     if args.retry_held:
-        log(f"知识库暂停记录重新入队：{rlog.retry_held()} 条；本次未发送")
+        log(f"held/unknown 记录重新入队：{rlog.retry_held()} 条；本次未发送")
         return 0
 
     if args.list:

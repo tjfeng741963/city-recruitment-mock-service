@@ -334,3 +334,39 @@ def test_media_failure_after_confirmed_text_does_not_replay_the_text(tmp_path, m
     again.drain(store, CFG)
     again.core_send.send.assert_not_called()
     again.core_send.paste_media.assert_not_called()
+
+
+def test_unknown_retry_cannot_bypass_an_unfinished_welcome(tmp_path, monkeypatch):
+    agent, store = setup_agent(tmp_path, monkeypatch)
+    agent.scan(store, CFG)
+    agent.core_send.send.side_effect = None
+    agent.drain(store, CFG)
+    agent.rlog.mark_unknown('1', 'synthetic ordinary unknown marker')
+    assert agent.rlog.retry_held() == 0
+    assert agent.rlog.welcome('S:test')['state'] == 'held'
+
+
+def test_confirmed_welcome_accepts_stable_id_despite_inner_readback_failure(tmp_path, monkeypatch):
+    agent, store = setup_agent(tmp_path, monkeypatch)
+    agent.scan(store, CFG)
+    original_send = agent.core_send.send.side_effect
+    def send(*args, **kwargs):
+        result = original_send(*args, **kwargs)
+        return {**result, 'detail': '已发送但回读失败：synthetic inner snapshot error'}
+    agent.core_send.send.side_effect = send
+    stats = agent.drain(store, CFG)
+    assert stats['sent'] == 1 and stats['unknown'] == 0
+    assert agent.rlog.welcome('S:test')['state'] == 'sent'
+    assert agent._load_greeted() == {'S:test'}
+
+
+def test_failed_welcome_retains_main_send_backoff(tmp_path, monkeypatch):
+    agent, store = setup_agent(tmp_path, monkeypatch)
+    agent.scan(store, CFG)
+    agent.core_send.send.side_effect = None
+    agent.core_send.send.return_value = UNSENT
+    agent._consecutive_send_failures = 0
+    assert agent.drain(store, CFG)['failed'] == 1
+    assert agent._last_reply_at > 0
+    assert agent._consecutive_send_failures == 1
+    assert agent.rlog.welcome('S:test')['state'] == 'ready'

@@ -18,7 +18,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import Delivery
+from ..models import ChannelAccount, Conversation, Delivery
 
 UTC = timezone.utc
 
@@ -193,13 +193,23 @@ async def claim_batch(session: AsyncSession, limit: int = 20) -> list[int]:
     """挑出可以尝试投递的 delivery id（queued 且 next_attempt_at 已到点）。
 
     返回的是候选，不是已抢占的：抢占在 `WeComKfSender.send()` 里做。
+
+    通道过滤（2026-11-16 整合）：只领企微客服 API（wecom_kf）通道的投递。
+    键鼠通道（wxwork_local）的投递由 GET /agent/commands 消费——过去 outbox
+    会把它们也挑出来，交给 KF sender 后在 service_state 校验处必然报错并标
+    FAILED，等于把本该键鼠发送的指令悄悄判死。
     """
     now = utcnow()
     stmt = (
         select(Delivery.id)
+        .join(Conversation, Conversation.id == Delivery.conversation_id)
+        .join(ChannelAccount, ChannelAccount.id == Conversation.channel_account_id)
         .where(
             Delivery.status == QUEUED,
             or_(Delivery.next_attempt_at.is_(None), Delivery.next_attempt_at <= now),
+            # 冻结契约：backend/app/channels/wecom_kf/sync.py 的 CHANNEL_TYPE。
+            # 不直接 import 是为了防循环依赖，值变了 CI 测试会拦。
+            ChannelAccount.channel_type == "wecom_kf",
         )
         .order_by(Delivery.id)
         .limit(limit)

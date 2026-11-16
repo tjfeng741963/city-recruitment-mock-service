@@ -87,10 +87,25 @@ class Brain:
         return {"Authorization": f"Bearer {self._token}"} if self._token else {}
 
     # ── 流程模式（状态机在 backend）────────────────────────
-    def _reply_flow(self, text: str, session_key: str) -> dict[str, Any]:
+    def _reply_flow(
+        self, text: str, session_key: str, dialogue: list[dict] | None = None
+    ) -> dict[str, Any]:
         """调 /api/v1/flow/answer。session_key 用企微会话 ID，状态存在服务端。"""
         key = (session_key or "unknown")[:64]
         payload = {"session_key": key, "text": text[:2000]}
+        # 带上最近几轮双方对话：服务端投影只有经 flow 的轮次，键鼠人工发送、
+        # 补发都不在里面；客户端本地 message.db 才是聊天真相（2026-11-16）。
+        if dialogue:
+            rows = [
+                {
+                    "role": "agent" if str(d.get("role")) == "agent" else "customer",
+                    "text": str(d.get("text") or "")[:500],
+                }
+                for d in dialogue[-self.history_limit * 2 :]
+                if str(d.get("text") or "").strip()
+            ]
+            if rows:
+                payload["history"] = rows
         if self.device_code:
             # 必须带：服务端据此取设备元信息（城市/板块/厂名/岗位口径）与设备话术，
             # 不带就回退到 FLOW_PROFILE_DEVICE，多设备部署会静默串用别台设备的配置。
@@ -223,11 +238,15 @@ class Brain:
         text: str,
         history: list[str] | None = None,
         session_key: str = "",
+        dialogue: list[dict] | None = None,
     ) -> dict[str, Any]:
         """返回 {ok, reply, source, detail}。失败时 ok=False，由调用方暂停。
 
         mode=flow 时多返回一个 skip=True：流程已经走完（约到面试），
         这条消息不需要再回，调用方应记为跳过而不是发空消息。
+        dialogue：最近几轮**双方**对话（build_dialogue 的输出），flow 模式
+        会随请求带给服务端当上下文——服务端投影只有经 flow 转发的轮次，
+        键鼠人工回复/补发都不在里面，客户端本地库才是聊天真相。
         """
         if self.mode == "fixed":
             return {"ok": False, "reply": "", "source": "fixed", "detail": "mode=fixed"}
@@ -237,7 +256,7 @@ class Brain:
             return {"ok": False, "reply": "", "source": "empty", "detail": "客户消息为空"}
 
         if self.mode == "flow":
-            return self._reply_flow(text, session_key)
+            return self._reply_flow(text, session_key, dialogue=dialogue)
 
         payload = {
             "text": text[:2000],

@@ -84,3 +84,31 @@ def transcript_lines(transcript: list[dict[str, str]]) -> str:
         f"{'客户' if item['role'] == 'user' else '你'}：{item['content']}"
         for item in transcript
     )
+
+
+def merge_client_history(
+    server_transcript: list[dict[str, str]],
+    client_history: list[dict[str, str]] | None,
+    limit: int | None = None,
+) -> list[dict[str, str]]:
+    """客户端带了聊天记录就以它为准，否则退回服务端事件投影。
+
+    为什么客户端优先：服务端投影只含经 /flow/answer 转发的轮次，键鼠人工
+    回复、失败补发、多段回复的后半段都不在 events 里；客户端本地
+    message.db 才是聊天真相（2026-11-16 客户要求「按聊天记录的流程回复」）。
+
+    客户端格式 {"role": customer|agent, "text": ...}，这里统一成服务端的
+    user/assistant + content，坏行（空文本/未知角色）直接丢弃。
+    纯函数，可单测。
+    """
+    rows: list[dict[str, str]] = []
+    role_map = {"customer": "user", "user": "user", "agent": "assistant", "assistant": "assistant"}
+    for item in client_history or []:
+        text = str(item.get("text") or "").strip()
+        role = role_map.get(str(item.get("role") or ""))
+        if not text or role is None:
+            continue
+        rows.append({"role": role, "content": text[:500]})
+    if not rows:
+        return list(server_transcript)
+    return surface(rows, limit)

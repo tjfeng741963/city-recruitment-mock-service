@@ -21,6 +21,10 @@ from pathlib import Path
 
 DATA_ROOT = Path.home() / "Documents" / "WXWork"
 
+# pythonw 拉起时没有控制台，子进程（解密工具 python.exe）会各弹一个黑窗口；
+# 见 autopilot.py 同名常量的说明。
+_CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+
 # 只保留可读字符，其余（protobuf 长度前缀、控制字节）丢弃
 _PRINTABLE = re.compile(
     r"[\u4e00-\u9fff\u3000-\u303f\uff00-\uffefA-Za-z0-9"
@@ -114,7 +118,10 @@ def decrypt_snapshot(data_dir: Path, out_dir: Path, tool_path: Path, timeout: in
         str(timeout),
         "--base-only",
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    proc = subprocess.run(
+        cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        creationflags=_CREATE_NO_WINDOW,
+    )
     if not (out_dir / "message.db").is_file():
         detail = (proc.stderr or proc.stdout or "").strip()[:400]
         raise RuntimeError(f"解密失败：{detail}")
