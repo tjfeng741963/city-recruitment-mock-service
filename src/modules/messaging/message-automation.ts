@@ -42,7 +42,17 @@ export class MessageAutomationService {
     private readonly dify: DifyProvider,
     private readonly channel: MessageChannelProvider,
     private readonly notifier: StreamNotifier = NOOP_NOTIFIER,
+    // 单引擎整合（2026-11-16）：部署没配 REA_DIFY_PROVIDER 时由装配点传 true。
+    // Dify 用不上——工厂会静默回落到 Mock，它的"回复"是本地占位文案，绝不
+    // 能发给真实客户。observeOnly 时服务端只记录不生成，执行权归客户端
+    // drain()；设备忘了开 observe_only 也不再存在双引擎风险。只放在装配点
+    // 判断（而不是 handleInbound 里读 env），直连构造注入引擎的调用方不受影响。
+    private readonly options: { observeOnly?: boolean } = {},
   ) {}
+
+  private get observeOnly(): boolean {
+    return this.options.observeOnly === true;
+  }
 
   async handleInbound(input: IncomingMessage): Promise<InboundMessageResult> {
     const now = new Date().toISOString();
@@ -83,6 +93,11 @@ export class MessageAutomationService {
     // bridge_commands，会出现两套引擎都回客户的生产事故，所以必须在
     // recordEvent/createDelivery/Dify/渠道入队之前返回。
     if (deviceData.observe_only === true) {
+      return { status: "processed", event_id: input.eventId, reply_status: "observe_only" };
+    }
+
+    // 单引擎整合（2026-11-16）：见构造函数 options.observeOnly 的注释。
+    if (this.observeOnly) {
       return { status: "processed", event_id: input.eventId, reply_status: "observe_only" };
     }
 

@@ -40,7 +40,9 @@ function matchesRegisterKey(supplied: string, expected: string): boolean {
 export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSync, notifier: StreamNotifier = NOOP_NOTIFIER): DeviceBridgeStore {
   const store = new DeviceBridgeStore(db, Date.now, notifier);
   const events = new MessageEventService(db, { webhookSecret: process.env.REA_WEBHOOK_SECRET ?? "local-webhook-secret" });
-  const automation = new MessageAutomationService(db, events, createDifyProvider(), createMessageChannelProvider(undefined, db), notifier);
+  // Dify 用不上时宁可不回也不能把 Mock 文案发给真实客户（2026-11-16 整合）：
+  // 部署没配 REA_DIFY_PROVIDER → 服务端只记录不生成，执行权归客户端 drain()。
+  const automation = new MessageAutomationService(db, events, createDifyProvider(), createMessageChannelProvider(undefined, db), notifier, { observeOnly: !process.env.REA_DIFY_PROVIDER });
 
   // 免登录自注册：客户端首次启动时用共享密钥换 bridge_token。
   // 幂等：同一台机器重复注册只是换发 token（旧 token 立即失效），

@@ -23,7 +23,7 @@ export async function registerActivationRoutes(app: FastifyInstance, db: Databas
   const activationJobs = new ActivationJobService(db, jobStore, jobClock, difyProvider, messageEvents, channel);
   const jobExecutor = new JobExecutor();
   activationJobs.registerExecutors(jobExecutor);
-  const messageAutomation = new MessageAutomationService(db, messageEvents, difyProvider, channel);
+  const messageAutomation = new MessageAutomationService(db, messageEvents, difyProvider, channel, undefined, { observeOnly: !process.env.REA_DIFY_PROVIDER });
   if (process.env.REA_SCHEDULER_ENABLED === "true") {
     let running: Promise<unknown> | null = null;
     const timer = setInterval(() => {

@@ -177,7 +177,7 @@ async function processInbox(db: DatabaseSync, config: ReturnType<typeof readWeCo
   // 该设备自己配置的 dify_url/dify_key，所以企微这条线换成这个工厂后就自动吃到设备级配置。
   const dify = createDifyProvider();
   const channel = createMessageChannelProvider(undefined, db);
-  const automation = new MessageAutomationService(db, events, dify, channel);
+  const automation = new MessageAutomationService(db, events, dify, channel, undefined, { observeOnly: !process.env.REA_DIFY_PROVIDER });
   const rows = db.prepare("SELECT msgid,customer_id,payload_json FROM wecom_inbox WHERE status='queued' AND next_attempt_at<=? ORDER BY created_at LIMIT 50").all(Date.now()) as Array<{ msgid: string; customer_id: number; payload_json: string }>;
   // 企微面对的是真实客户。Dify 没真正接上时宁可不回，也不能把 Mock 文本发出去。
   // 消息留在 queued，配好后下一次同步会自动补回。
