@@ -33,7 +33,7 @@ describe("candidate table columns", () => {
     addRegistrationColumn(root, create, context);
     const columns = table.children.default();
     const labels = columns.map((column: { props?: { label?: string } }) => column.props?.label).filter(Boolean);
-    expect(labels).toEqual(expect.arrayContaining(["面试时间", "省/市/区", "登记摘要", "客户状态", "提醒到场"]));
+    expect(labels).toEqual(expect.arrayContaining(["面试时间", "省/市/区", "登记摘要", "客户状态", "提醒到场", "签到"]));
     expect(columns[columns.length - 1]).toBe(action);
   });
 
