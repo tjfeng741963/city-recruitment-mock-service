@@ -32,6 +32,7 @@ import { registerUnknownQuestionRoutes } from "./modules/agent/unknown-questions
 import { registerKbV3Routes } from "./modules/agent/kb-v3.routes.js";
 import { registerKbPublishRoutes } from "./modules/agent/kb-publish.routes.js";
 import { registerPositionScriptRoutes } from "./modules/agent/position-scripts.routes.js";
+import { registerAgentPersonaRoutes } from "./modules/agent/agent-persona.routes.js";
 import { registerFollowupRoutes } from "./modules/agent/followup.js";
 import { EventBus, createStreamNotifier } from "./modules/messaging/stream-events.js";
 import { registerWeComRoutes } from "./modules/wecom/wecom.routes.js";
@@ -172,6 +173,8 @@ export function buildServer() {
   registerKbPublishRoutes(app, db);
   // 岗位话术 + 媒体资源库（迁移 030/031）：后台配置 + 设备端媒体下载
   registerPositionScriptRoutes(app, db);
+  // 岗位人设 + 开场条目（迁移 038）：一个岗位一份人设、一组有序开场
+  registerAgentPersonaRoutes(app, db);
   registerPositionFactoryRoutes(app, db);
   registerFollowupRoutes(app, db);
   registerWeComRoutes(app, db);
