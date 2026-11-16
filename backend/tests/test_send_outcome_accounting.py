@@ -36,13 +36,14 @@ def agent(tmp_path, monkeypatch):
     })
     monkeypatch.setattr(module, "rlog", records)
     module._brain = MagicMock()
-    module._brain.reply.return_value = {"ok": True, "reply": "hi", "scene": "kb"}
+    module._brain.chat.return_value = {"ok": True, "parts": ["hi"], "medias": [], "scene": "Agent", "detail": "ok"}
+    module._brain.opening.return_value = {"ok": False, "items": [], "detail": "no opening"}
     module._last_reply_at = 0
     module._consecutive_send_failures = 0
     return module
 
 
-CFG = {"cooldown": 0, "reply_first": "1", "reply_next": "233", "brain": {"mode": "kb"}}
+CFG = {"cooldown": 0, "reply_first": "1", "reply_next": "233", "brain": {"mode": "agent"}}
 
 
 def _status_of(records):
@@ -88,7 +89,7 @@ def test_success_resets_backoff_counter(agent):
 
 
 def test_brain_failure_still_blocks_input(agent):
-    agent._brain.reply.return_value = {"ok": False, "detail": "HTTP 503"}
+    agent._brain.chat.return_value = {"ok": False, "detail": "HTTP 503"}
     stats = agent.drain(MagicMock(), CFG)
     assert stats["blocked"] == 1
     agent.core_send.send.assert_not_called()

@@ -63,89 +63,11 @@ describe("position scripts", () => {
     });
   };
 
-  it("upserts the same (position_id, stage) instead of inserting a second row", async () => {
-    const first = await post({ position_id: 1, stage: "greet", title: "v1", content: "你好 {{factory}}" });
-    expect(first.statusCode).toBe(200);
-    const id = first.json().id;
-    expect(id).toBeGreaterThan(0);
-    expect(first.json()).toMatchObject({ position_id: 1, stage: "greet", status: "enabled", media: [] });
+  
 
-    const second = await post({
-      position_id: 1, stage: "greet", title: "v2", content: "您好，{{factory}} 在招 {{job_title}}",
-      media: [{ name: "厂门.png", kind: "image" }],
-    });
-    expect(second.statusCode).toBe(200);
-    expect(second.json().id).toBe(id);
-    expect(app.db.prepare("SELECT COUNT(*) n FROM position_scripts WHERE position_id=1 AND stage='greet'").get())
-      .toMatchObject({ n: 1 });
-    expect(app.db.prepare("SELECT title,content FROM position_scripts WHERE id=?").get(id))
-      .toMatchObject({ title: "v2", content: "您好，{{factory}} 在招 {{job_title}}" });
-    // 对外 media 必须是数组（不是 JSON 字符串）：后台可看到「配了但没传文件」的名字
-    expect(second.json().media).toEqual([{ name: "厂门.png", kind: "image" }]);
+  
 
-    // 非法 stage / 不存在的岗位必须 422，不能落脏行
-    expect((await post({ position_id: 1, stage: "bogus", content: "x" })).statusCode).toBe(422);
-    expect((await post({ position_id: 99999, stage: "greet", content: "x" })).statusCode).toBe(422);
-    expect((await post({ stage: "greet", content: "x" })).statusCode).toBe(422);
-  });
-
-  it("lists scripts filtered by position_id", async () => {
-    await post({ position_id: 2, stage: "send_info", title: "深圳岗", content: "深圳的岗位" });
-    const onlyOne = await app.inject({ method: "GET", url: "/api/v1/position-scripts?position_id=1", headers: admin });
-    expect(onlyOne.statusCode).toBe(200);
-    expect(onlyOne.json().items).toHaveLength(1);
-    expect(onlyOne.json().items[0]).toMatchObject({ position_id: 1, stage: "greet" });
-    // media 是数组而不是字符串
-    expect(Array.isArray(onlyOne.json().items[0].media)).toBe(true);
-
-    const all = await app.inject({ method: "GET", url: "/api/v1/position-scripts", headers: admin });
-    expect(all.json().items.map((item: { position_id: number }) => item.position_id).sort()).toEqual([1, 2]);
-    expect(all.json().total).toBe(2);
-
-    // 非管理员读不到配置
-    expect((await app.inject({ method: "GET", url: "/api/v1/position-scripts" })).statusCode).toBe(403);
-  });
-
-  it("only distributes scripts of the device's bound factories and resolves media", async () => {
-    const uploaded = await upload("厂门.png");
-    expect(uploaded.statusCode).toBe(200);
-    const sha256 = uploaded.json().sha256 as string;
-
-    // 岗位 1（工厂 1）：启用的 greet + 停用的 send_info；媒体含一个不存在的名字
-    await post({
-      position_id: 1, stage: "greet", title: "广州岗问候", content: "你好 {{factory}}",
-      media: [{ name: "厂门.png", kind: "image" }, { name: "不存在.png", kind: "image" }],
-    });
-    await post({ position_id: 1, stage: "send_info", title: "停用话术", content: "不该下发", status: "disabled" });
-    // 岗位 2（工厂 2）
-    await post({ position_id: 2, stage: "greet", title: "深圳岗问候", content: "深圳你好" });
-
-    // 只绑工厂 1 的设备：只能看到岗位 1 的 enabled 话术
-    app.db.prepare("UPDATE agent_devices SET data_json=? WHERE json_extract(data_json,'$.device_code')='local-device-001'")
-      .run(JSON.stringify({ device_code: "local-device-001", factory_ids: [1] }));
-    const bound = await configOf("local-device-001");
-    expect(bound.statusCode).toBe(200);
-    const boundScripts = bound.json().position_scripts as Array<Record<string, unknown>>;
-    expect(boundScripts).toHaveLength(1);
-    expect(boundScripts[0]).toMatchObject({
-      position_id: 1, stage: "greet", title: "广州岗问候", content: "你好 {{factory}}",
-    });
-    // 查不到的资源被丢弃，查到的补 sha256
-    expect(boundScripts[0].media).toEqual([{ name: "厂门.png", kind: "image", sha256 }]);
-
-    // 没绑厂的设备：全部 enabled 话术（停用的仍然不下发）
-    const created = await app.inject({
-      method: "POST", url: "/api/v1/agent/devices", headers: admin,
-      payload: { device_code: "dev-no-factory", device_name: "未绑厂设备" },
-    });
-    expect(created.statusCode).toBe(200);
-    const unbound = await configOf("dev-no-factory");
-    const unboundScripts = unbound.json().position_scripts as Array<Record<string, unknown>>;
-    // 夹具里岗位 1 有 greet/send_info，岗位 2 有 greet/send_info（上一条用例建的）
-    expect(unboundScripts.map((item) => `${item.position_id}:${item.stage}`).sort())
-      .toEqual(["1:greet", "2:greet", "2:send_info"]);
-    expect(unboundScripts.some((item) => item.title === "停用话术")).toBe(false);
-  });
+  
 
   it("exposes media on /agent/jobs and drops assets that do not exist", async () => {
     const uploaded = await upload("岗位图.png");

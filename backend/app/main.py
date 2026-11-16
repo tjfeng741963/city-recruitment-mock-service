@@ -12,16 +12,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from .api_v1 import router as api_v1
 from .api_v1_conversations import router as conversations_router
 from .api_agent import router as agent_router
-from .api_kb import router as api_kb_router
-from .api_kb_publish import router as api_kb_publish_router
-from .api_lead import router as lead_router
-from .api_lead_board import router as lead_board_router
-from .api_flow import router as flow_router
-from .api_webhook import router as webhook_router
+from .ws.hub import router as ws_router
 from .db import init_db, seed_admin
 from . import instance
 from .settings import settings
-from .ws.hub import router as ws_router
 
 
 @asynccontextmanager
@@ -132,13 +126,10 @@ app.add_middleware(
 app.include_router(api_v1)
 app.include_router(conversations_router)
 app.include_router(agent_router)
-app.include_router(api_kb_router)
-app.include_router(api_kb_publish_router)
-app.include_router(webhook_router)
-app.include_router(lead_router)
-app.include_router(lead_board_router)
-app.include_router(flow_router)
 app.include_router(ws_router)
+# 2026-11-17 废弃摘除：kb / kb_publish / lead / lead_board / flow / webhook
+# 六组路由已不再注册（客户端回复链路切到 4222 的 Agent 会话）。
+# 模块文件暂留在代码库里，等确认无回滚需求后整体删除。
 
 
 @app.get("/healthz", tags=["ops"])

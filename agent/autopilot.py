@@ -58,6 +58,10 @@ _CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 LOG_DIR = ROOT / "logs"
 LOG_PATH = LOG_DIR / "run.log"
+# 单文件 20MB，保留 5 份（run.log.1 .. run.log.5），总上限约 120MB。
+LOG_MAX_BYTES = int(os.environ.get("AGENT_LOG_MAX_BYTES", 20 * 1024 * 1024))
+LOG_BACKUP_COUNT = max(1, int(os.environ.get("AGENT_LOG_BACKUPS", 5)))
+_log_lock = threading.Lock()
 
 # pythonw.exe 启动时没有控制台，sys.stdout / sys.stderr 是 None：print、reconfigure
 # 都会抛异常。2026-11-16 实测这样跑一轮日志就全丢、drain 循环还会被日志异常打断。
@@ -173,14 +177,92 @@ WECOM_STATE_TEXT = {
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
 
 
-def log(msg: str) -> None:
-    text = f"[{time.strftime('%H:%M:%S')}] {msg}"
+_PHONE_RE = re.compile(r"(?<!\d)(1[3-9]\d{9})(?!\d)")
+_ID_RE = re.compile(r"(?<!\d)(\d{17}[\dXx])(?!\d)")
+_SENSITIVE_FIELDS = {"content", "text", "reply_text", "preview", "reason", "error", "detail"}
+_SCOPE_PREFIXES = (
+    ("[心跳]", "heartbeat"),
+    ("[桥接]", "bridge"),
+    ("[上报]", "ingest"),
+    ("[指令]", "manual"),
+    ("[回执]", "manual"),
+    ("[自检]", "wecom"),
+    ("[媒体]", "media"),
+    ("[远端配置]", "config"),
+    ("[brain]", "flow"),
+    ("[flow]", "flow"),
+    ("[kb]", "flow"),
+    ("[首句]", "flow"),
+    ("[线索]", "leads"),
+)
+
+
+def _redact_text(text: str, limit: int | None = None) -> str:
+    """日志里的客户内容先打码；limit 用于截断，避免整段回复落盘。"""
+    out = _PHONE_RE.sub(lambda m: f"{m.group(1)[:3]}****{m.group(1)[-4:]}", text or "")
+    out = _ID_RE.sub(lambda m: f"{m.group(1)[:4]}**********{m.group(1)[-4:]}", out)
+    if limit is not None and len(out) > limit:
+        return out[:limit] + f"…({len(out)}字)"
+    return out
+
+
+def _infer_level(msg: str) -> str:
+    if "Traceback" in msg:
+        return "error"
+    if any(word in msg for word in ("异常", "失败", "错误", "冲突", "超时", "拒绝", "中止")):
+        return "warning"
+    return "info"
+
+
+def _infer_scope(msg: str) -> str:
+    for prefix, scope in _SCOPE_PREFIXES:
+        if msg.startswith(prefix) or f" {prefix}" in msg:
+            return scope
+    return ""
+
+
+def _rotate_log_locked() -> None:
+    """调用方已持有 _log_lock；失败绝不抛，日志不能影响业务。"""
+    try:
+        for index in range(LOG_BACKUP_COUNT - 1, 0, -1):
+            src = LOG_PATH.with_name(f"{LOG_PATH.name}.{index}")
+            dst = LOG_PATH.with_name(f"{LOG_PATH.name}.{index + 1}")
+            if src.exists():
+                os.replace(src, dst)
+        if LOG_PATH.exists():
+            os.replace(LOG_PATH, LOG_PATH.with_name(f"{LOG_PATH.name}.1"))
+    except OSError:
+        pass
+
+
+def log(msg: str, *, level: str | None = None, scope: str | None = None, **fields: object) -> None:
+    """结构化运行日志：日期 + 级别 + 模块 + 关联字段；单文件轮转。
+
+    `level/scope` 不传时按文案推断，保持现有 100+ 个调用点不用改。
+    """
+    message = _redact_text(str(msg))
+    level = (level or _infer_level(message)).lower()
+    scope = scope if scope is not None else _infer_scope(message)
+    parts = [f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]", f"[{level.upper()}]"]
+    if scope:
+        parts.append(f"[{scope}]")
+    parts.append(message)
+    for key, value in fields.items():
+        if value is None or value == "":
+            continue
+        rendered = _redact_text(str(value), 200) if key in _SENSITIVE_FIELDS else str(value)
+        parts.append(f"{key}={rendered}")
+    text = " ".join(parts)
+
     # 直接落文件：客户端现在由 pythonw 无窗口启动（不再有 run.cmd 的 >> 重定向），
     # 只靠 stdout 的话日志会整个消失，出问题时没有任何现场可查。
     try:
-        LOG_DIR.mkdir(parents=True, exist_ok=True)
-        with open(LOG_PATH, "a", encoding="utf-8", errors="replace") as fh:
-            fh.write(text + "\n")
+        with _log_lock:
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+            if LOG_PATH.exists() and LOG_PATH.stat().st_size >= LOG_MAX_BYTES:
+                _rotate_log_locked()
+            with open(LOG_PATH, "a", encoding="utf-8", errors="replace") as fh:
+                fh.write(text + "\n")
     except Exception:  # noqa: BLE001 日志写不进去也绝不能中断业务
         pass
     try:
@@ -827,34 +909,35 @@ _brain = None  # 由 main() 注入；None 表示用固定文本
 
 
 def build_brain(cfg: dict, log_fn=print):
-    """按 cfg["brain"] 构造回复来源；mode 不是 kb/flow 或没配 base_url 时返回 None。
+    """按 cfg["brain"] 构造回复来源。只有 mode=agent 一种：直连 4222 的受控编排。
 
-    抽成函数是为了支持网页远程切换：心跳周期检测到 brain_mode 变化后，
-    重新调用本函数替换全局 _brain，不必重启客户端。
+    鉴权用的是 bridge_token（与心跳同一份设备令牌），接口在 4222：
+    GET /api/v1/agent/opening、POST /api/v1/agent/chat。旧的 kb/flow 模式已废弃。
     """
     bcfg = cfg.get("brain") or {}
-    if bcfg.get("mode") in ("kb", "flow") and bcfg.get("base_url"):
-        import brain as brain_mod
-
-        instance = brain_mod.Brain(
-            bcfg["base_url"],
-            bcfg.get("username", ""),
-            bcfg.get("password", ""),
-            timeout=float(bcfg.get("timeout") or 20),
-            history_limit=int(bcfg.get("history_limit") or 6),
-            mode=str(bcfg.get("mode")),
-            # 设备身份随请求带给服务端：少了它，服务端只能按 FLOW_PROFILE_DEVICE
-            # 取设备口径，多设备部署会静默串用别台设备的城市/板块/话术。
-            device_code=str(cfg.get("device_code") or ""),
-        )
-        label = "知识库" if bcfg.get("mode") == "kb" else "流程编排"
+    mode = str(bcfg.get("mode") or "agent")
+    if mode != "agent":
+        log_fn(f"回复来源：固定文本（brain.mode={bcfg.get('mode')!r}，只有 agent 一种有效模式）")
+        return None
+    base = (cfg.get("bridge_server") or "").strip()
+    token = (cfg.get("bridge_token") or "").strip()
+    code = resolve_device_code(cfg)
+    if not base or not token:
         log_fn(
-            f"回复来源：{label} {bcfg['base_url']}"
-            f"（device_code={cfg.get('device_code') or '未配置'}，失败暂停，待人工处理）"
+            "回复来源：固定文本（config.json 缺 bridge_server / bridge_token，"
+            "agent 模式要用设备令牌调 4222）"
         )
-        return instance
-    log_fn(f"回复来源：固定文本（brain.mode={bcfg.get('mode')!r}）")
-    return None
+        return None
+    import brain as brain_mod
+
+    instance = brain_mod.Brain(
+        base,
+        code,
+        token,
+        timeout=float(bcfg.get("timeout") or 45),
+    )
+    log_fn(f"回复来源：Agent 会话 {base}（device_code={code or '未配置'}，失败暂停待人工）")
+    return instance
 
 
 def _load_greeted() -> set[str]:
@@ -966,38 +1049,6 @@ def build_dialogue(store: Store, conv_id: str, limit: int = 12) -> list[dict]:
     return out[-limit:]
 
 
-def _observe_lead(store: Store, conv_id: str, name: str, message_id: str, log) -> None:
-    """发完消息后让后端判定谈单状态。
-
-    三条硬约束：
-    1. 群聊不判（`R:` 开头），只做单聊；
-    2. 任何异常都吞掉，绝不影响发送结果；
-    3. 不做任何键鼠动作，只发一个 HTTP 请求。
-    """
-    if _brain is None or conv_id.startswith("R:"):
-        return
-    try:
-        dialogue = build_dialogue(store, conv_id)
-        if not dialogue:
-            return
-        res = _brain.observe_lead(
-            conv_id,
-            store.self_id(),
-            dialogue,
-            nickname=name or "",
-            last_message_id=str(message_id or ""),
-        )
-        if not res.get("ok"):
-            log(f"    [线索] 未判定：{res.get('detail')}")
-        elif res.get("changed"):
-            log(
-                f"    [线索] {res.get('from_stage')} → {res.get('stage')}"
-                f"（{res.get('reason')}）"
-            )
-    except Exception as exc:  # noqa: BLE001
-        log(f"    [线索] 异常（忽略）：{type(exc).__name__}: {exc}")
-
-
 def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "online") -> dict:
     """按消息时间正序处理 pending + failed。
 
@@ -1056,7 +1107,9 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         mid = it["message_id"]
         cid = it["conv_id"]
         name = it["conv_name"] or ""
+        trace = it.get("trace_id") or ""
         preview = (it["in_text"] or "").strip()[:20].replace("\n", " ") or f"[type={it['in_type']}]"
+        agent_medias: list[tuple[str, str]] = []
 
         if is_system_conv(cid, name):
             if not dry:
@@ -1091,73 +1144,93 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             log(f"跳过 {cid}：会话没有可搜索的名字")
             continue
 
-        if _brain is not None or (cfg.get("brain") or {}).get("mode") in ("kb", "flow"):
+        if _brain is not None:
             hint = (it["in_text"] or "").strip()
-            res = {"ok": False, "detail": "知识库未初始化"}
+            agent_medias: list[tuple[str, str]] = []
+            res = {"ok": False, "detail": "Agent 未初始化"}
             try:
-                # ── 加好友首句 ────────────────────────────────────────
-                # 只在「该会话第一次出现消息」时走 /flow/greet。为什么不靠
-                # hint 判断首次：加好友会插入 type=1011 的空文本记录，首句恰恰
-                # 常常没有可回复的文本；所以"是否首次"必须用会话维度判断。
-                # DRY-RUN 不发请求：greet 会在服务端推进 stage，干跑不该改状态。
-                greeted_now = False
-                if (
-                    not dry
-                    and _brain is not None
-                    and str(getattr(_brain, "mode", "")) == "flow"
-                    and _is_first_contact(cid, greeted)
-                ):
-                    gres: dict = {}
-                    try:
-                        gres = _brain.greet(cid)
-                    except Exception as exc:  # noqa: BLE001
-                        gres = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
-                    if gres.get("ok"):
-                        # 只有成功才落盘：失败说明服务端没走到阶段，下条消息重试首句，
-                        # 而不是永久退化成一个不带招呼的普通回复。
+                # ── 开场：新会话按序播一遍 ────────────────────────────
+                # 只在「该会话第一次出现消息」时拉开场清单。为什么不靠 hint：
+                # 加好友会插入 type=1011 的空文本记录，首句常常没有文本；
+                # 所以"是否首次"用会话维度判断（与旧 greet 同一思路）。
+                # 文本真发，图片/视频只占位（当前阶段媒体不真实发送），
+                # 每条都上报回执，失败的条目记 failed 继续往下。
+                if not dry and _is_first_contact(cid, greeted):
+                    ores = _brain.opening()
+                    if ores.get("ok") and ores.get("items"):
+                        sent_items = 0
+                        for item in ores["items"]:
+                            backoff = 1 + min(_consecutive_send_failures, 3)
+                            wait = cfg["cooldown"] * backoff - (time.time() - _last_reply_at)
+                            if wait > 0:
+                                time.sleep(wait)
+                            seq, kind = int(item["seq"]), str(item["kind"])
+                            fake_id = f"opening:{cid}:{seq}"
+                            if kind == "text" and (item["content"] or "").strip():
+                                _last_reply_at = time.time()
+                                result = core_send.send(
+                                    store, name, item["content"],
+                                    expect_id=cid if str(cid).startswith(("S:", "R:")) else "",
+                                    verify_db=True,
+                                    log=lambda s: log(f"    {s}"),
+                                )
+                                if result["ok"]:
+                                    rlog.mark_sent(fake_id, "开场", str(item["content"]))
+                                    _brain.log_receipt(cid, seq, kind, "sent")
+                                    sent_items += 1
+                                    log(f"    [开场 {seq}/{len(ores['items'])}] 已发送", scope="send")
+                                else:
+                                    rlog.mark_failed(fake_id, result["detail"], "开场")
+                                    _brain.log_receipt(cid, seq, kind, "failed", result["detail"])
+                                    _consecutive_send_failures += 1
+                                    log(f"    [开场 {seq}] 发送失败：{result['detail']}", level="warning")
+                            else:
+                                # 媒体占位：当前阶段不真实发送，只上报
+                                rlog.mark_sent(fake_id, "开场-媒体占位", f"{kind}:{item['media_name']}")
+                                _brain.log_receipt(cid, seq, kind, "skipped", "媒体占位不真实发送")
+                                log(f"    [开场 {seq}] {kind}:{item['media_name']} 占位跳过", scope="send")
                         greeted.add(cid)
                         _save_greeted(greeted)
-                        res = gres
-                        greeted_now = True
+                        log(f"[开场] {name} 播完 {sent_items}/{len(ores['items'])} 条文本，之后进入 Agent 对话")
                     else:
-                        log(f"    [首句] 失败（{gres.get('detail')}），退回 /flow/answer")
-                if greeted_now:
-                    pass
-                elif not hint:
+                        log(f"    [开场] 没取到清单（{ores.get('detail')}），直接进对话")
+                if not hint and not dry:
                     res = {"ok": False, "detail": f"消息没有文本（type={it['in_type']}）"}
-                elif _brain is not None:
-                    # dialogue 一并带上：服务端投影缺人工/补发轮次，
-                    # 客户端本地库才是完整聊天记录（2026-11-16）。
-                    res = _brain.reply(
-                        hint,
-                        build_history(store, cid),
-                        session_key=cid,
-                        dialogue=build_dialogue(store, cid),
-                    )
-                # 流程走完（已约到面试）后不再自动回复，这条消息记为跳过
+                elif hint:
+                    # dialogue 全量带上：服务端无状态，历史每轮都要拼回去
+                    res = _brain.chat(hint, build_dialogue(store, cid, limit=500))
+                    agent_medias = res.get("medias") or []
                 if res.get("skip"):
                     if not dry:
                         rlog.mark_skipped(mid, res.get("detail") or "流程已结束")
                     stats["skipped"] += 1
-                    log(f"    [flow] {res.get('detail') or '流程已结束，不再回复'}")
+                    log(f"    [flow] {res.get('detail') or '流程已结束，不再回复'}",
+                        scope="flow", message_id=mid, trace_id=trace)
                     continue
                 text = res.get("reply")
                 if not res.get("ok") or not isinstance(text, str) or not text.strip():
-                    raise ValueError(res.get("detail") or "知识库返回空回复")
-                text, scene = text.strip(), res.get("scene") or "知识库"
-                # 流程可返回多段（先岗位信息再邀约），逐条分开发
+                    # brain 返回的可能只有 parts（新接口形状），取第一条当 text
+                    fallback_parts = [str(p).strip() for p in (res.get("parts") or []) if str(p).strip()]
+                    if res.get("ok") and fallback_parts:
+                        text = fallback_parts[0]
+                    else:
+                        raise ValueError(res.get("detail") or "Agent 返回空回复")
+                text, scene = text.strip(), res.get("scene") or "Agent"
+                # Agent 可能返回多条文本（先答问题再推进），逐条分开发
                 raw_parts = res.get("parts") or []
                 parts = [str(p).strip() for p in raw_parts if str(p).strip()]
                 if len(parts) < 2:
                     parts = [text]
-                log(f"    [brain] {res.get('detail', '')}")
+                log(f"    [brain] {res.get('detail', '')}",
+                    scope="flow", message_id=mid, trace_id=trace)
             except Exception as exc:  # noqa: BLE001
-                reason = f"知识库暂停，待人工处理：{type(exc).__name__}: {exc}"
+                reason = f"Agent 暂停，待人工处理：{type(exc).__name__}: {exc}"
                 if not dry:
                     rlog.mark_held(mid, reason)
                     _last_error = reason[:200]
                 stats["blocked"] += 1
-                log(f"    [brain] {reason}")
+                log(f"    [brain] {reason}", level="warning",
+                    scope="flow", message_id=mid, trace_id=trace)
                 continue
         else:
             text, scene = pick_reply(cid, cfg)
@@ -1170,7 +1243,10 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         if wait > 0:
             time.sleep(wait)
 
-        log(f"[{scene}] {name} ← {preview!r} → {text!r}")
+        log(
+            f"[{scene}] {name} ← {_redact_text(preview)!r} → {_redact_text(text, 200)!r}",
+            scope="send", message_id=mid, trace_id=trace,
+        )
         if dry:
             # DRY-RUN 也走一遍标记解析，上线前核对素材是否就位
             for raw in parts:
@@ -1195,9 +1271,11 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             rlog.mark_failed(mid, "剪贴板被占用超过 15 秒", scene, text)
             _last_error = "剪贴板被占用超过 15 秒"
             stats["failed"] += 1
-            log("    跳过：剪贴板被占用（向日葵同步？）")
+            log("    跳过：剪贴板被占用（向日葵同步？）", level="warning",
+                scope="send", message_id=mid, trace_id=trace)
             continue
 
+        send_started = time.time()
         try:
             # 打开回读：verify_db=False 时只要按了回车就记 sent，发没发出去不知道
             # （2026-11-07 实测：reply_log 记 sent，企微库里根本没有这条消息）。
@@ -1219,7 +1297,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                         store, name, body,
                         expect_id=cid if str(cid).startswith(("S:", "R:")) else "",
                         verify_db=True,
-                        log=lambda s: log(f"    {s}"),
+                        log=lambda s: log(f"    {s}", scope="send", message_id=mid, trace_id=trace),
                     )
                     if not result["ok"]:
                         break
@@ -1228,14 +1306,18 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 for kind, mname in medias:
                     try:
                         ok_m, detail_m = core_send.paste_media(
-                            mname, log=lambda s: log(f"    {s}")
+                            mname, log=lambda s: log(f"    {s}", scope="media", message_id=mid, trace_id=trace)
                         )
                         log(f"    [媒体] {kind}:{mname} "
-                            f"{'成功' if ok_m else '失败'}：{detail_m}")
+                            f"{'成功' if ok_m else '失败'}：{detail_m}",
+                            level="info" if ok_m else "warning",
+                            scope="media", message_id=mid, trace_id=trace)
                     except Exception as exc:  # noqa: BLE001
-                        log(f"    [媒体] {kind}:{mname} 异常（忽略）：{type(exc).__name__}: {exc}")
+                        log(f"    [媒体] {kind}:{mname} 异常（忽略）：{type(exc).__name__}: {exc}",
+                            level="warning", scope="media", message_id=mid, trace_id=trace)
                 if idx < len(parts) - 1:
                     time.sleep(2.0)
+            duration_ms = int((time.time() - send_started) * 1000)
             detail_text = str(result.get("detail") or "")
             if result["ok"] and "回读失败" in detail_text:
                 # 回车已按但回读解密库确认不了落点：结果不明。不能记 sent
@@ -1245,29 +1327,36 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 _last_error = detail_text[:200]
                 _consecutive_send_failures += 1
                 stats["unknown"] += 1
-                log("    回读未确认：按 unknown 记账，不自动重发，待人工核对（--retry-held 可重新入队）")
+                log("    回读未确认：按 unknown 记账，不自动重发，待人工核对（--retry-held 可重新入队）",
+                    level="warning", scope="send", message_id=mid, trace_id=trace,
+                    duration_ms=duration_ms)
             elif result["ok"]:
-                rlog.mark_sent(mid, scene, text)
+                rlog.mark_sent(mid, scene, text, duration_ms=duration_ms)
                 _consecutive_send_failures = 0
                 _last_error = ""
                 stats["sent"] += 1
-                log(f"    已发送：{result['detail']}")
+                log(f"    已发送：{result['detail']}", scope="send",
+                    message_id=mid, trace_id=trace, duration_ms=duration_ms)
 
-                # 发完再判定谈单状态：绝不阻塞发送，也绝不影响发送结果
-                if _brain is not None:
-                    _observe_lead(store, cid, name, mid, log)
+                # Agent 模式的媒体占位：不真实发送，只记日志。
+                # 真正发图/视频要等瘦客户端媒体任务上线（见 docs/设计-瘦客户端）。
+                for kind, mname in agent_medias:
+                    log(f"    [媒体占位] {kind}:{mname} → 当前阶段不真实发送，仅记录",
+                        scope="media", message_id=mid, trace_id=trace)
             else:
                 rlog.mark_failed(mid, result["detail"], scene, text)
                 _last_error = str(result["detail"])[:200]
                 _consecutive_send_failures += 1
                 stats["failed"] += 1
-                log(f"    发送失败：{result['detail']}")
+                log(f"    发送失败：{result['detail']}", level="warning", scope="send",
+                    message_id=mid, trace_id=trace, duration_ms=duration_ms)
         except Exception as exc:  # noqa: BLE001
             rlog.mark_failed(mid, f"{type(exc).__name__}: {exc}", scene, text)
             _last_error = f"{type(exc).__name__}: {exc}"[:200]
             _consecutive_send_failures += 1
             stats["failed"] += 1
-            log(f"    发送异常：{type(exc).__name__}: {exc}")
+            log(f"    发送异常：{type(exc).__name__}: {exc}", level="error", scope="send",
+                message_id=mid, trace_id=trace)
             traceback.print_exc(limit=2)
 
     return stats
@@ -1314,18 +1403,20 @@ def flush_manual_receipts(bridge, *, force: bool = False) -> bool:
                 if response.get("ok") is not True:
                     raise ValueError("Receipt response did not acknowledge success")
                 rlog.mark_manual_receipt(server, device, item["command_id"], item["lease_token"], "acked")
-                log(f"[回执] #{item['command_id'][:8]} {item['status']} 已确认")
+                log(f"[回执] #{item['command_id'][:8]} {item['status']} 已确认",
+                    scope="manual", command_id=item["command_id"])
             except HTTPError as exc:
                 if exc.code in (409, 422):
                     rlog.mark_manual_receipt(server, device, item["command_id"], item["lease_token"], "rejected", f"HTTP {exc.code}; manual review required")
                     _last_error = f"回执冲突待核对：#{item['command_id'][:8]} HTTP {exc.code}"
-                    log(f"[回执] {_last_error}")
+                    log(f"[回执] {_last_error}", level="warning",
+                        scope="manual", command_id=item["command_id"])
                     continue
                 raise
         return not bool(rlog.pending_manual_receipts(server, device, limit=1))
     except Exception as exc:  # noqa: BLE001
         _last_error = f"回执未确认：{agent_client.describe_error(exc)}"[:200]
-        log(f"[回执] {_last_error}；保留记录，稍后只补传回执")
+        log(f"[回执] {_last_error}；保留记录，稍后只补传回执", level="warning", scope="manual")
         return False
 
 
@@ -1380,22 +1471,26 @@ def pump_commands(
     name = (command.get("nickname") or "").strip()
     if not cmd_id or not lease:
         return stats
+
+    def mlog(msg: str, *, level: str | None = None, **fields: object) -> None:
+        log(msg, level=level, scope="manual", command_id=cmd_id, **fields)
+
     try:
         if not rlog.begin_manual_command(bridge.base_url, bridge.device_code, cmd_id, lease):
-            log(f"[指令] #{cmd_id[:8]} 已有执行记录，本轮不再发送")
+            mlog(f"[指令] #{cmd_id[:8]} 已有执行记录，本轮不再发送")
             return stats
     except Exception as exc:  # noqa: BLE001
         _last_error = f"人工指令记录写盘失败：{type(exc).__name__}"[:200]
-        log(f"[指令] {_last_error}；停止该条发送")
+        mlog(f"[指令] {_last_error}；停止该条发送", level="warning")
         stats["failed"] += 1
         return stats
-    log(f"[指令] 人工发送 #{cmd_id[:8]} → {name or '(无昵称)'}：{content[:30]!r}")
+    mlog(f"[指令] 人工发送 #{cmd_id[:8]} → {name or '(无昵称)'}：{_redact_text(content, 30)!r}")
 
     def receipt(status: str, message_id: str = "") -> None:
         try:
             rlog.finish_manual_command(bridge.base_url, bridge.device_code, cmd_id, lease, status, message_id)
         except Exception as exc:  # noqa: BLE001
-            log(f"    回执 {status} 写盘失败，保留 unknown：{type(exc).__name__}")
+            mlog(f"    回执 {status} 写盘失败，保留 unknown：{type(exc).__name__}", level="warning")
             return
         flush_manual_receipts(bridge, force=True)
 
@@ -1409,7 +1504,7 @@ def pump_commands(
         if valid:
             return False
         _last_error = "人工指令租约已过期或无效，停止发送并保留 unknown，请人工核对"
-        log(f"    {_last_error}")
+        mlog(f"    {_last_error}", level="warning")
         receipt("unknown")
         stats["failed"] += 1
         return True
@@ -1419,7 +1514,7 @@ def pump_commands(
         return stats
 
     if not content or not name:
-        log("    跳过：指令缺少昵称或内容")
+        mlog("    跳过：指令缺少昵称或内容", level="warning")
         receipt("failed")
         stats["failed"] += 1
         return stats
@@ -1429,18 +1524,18 @@ def pump_commands(
     contact_id = str(command.get("contact_id") or "")
     names = _session_names(store)
     if is_system_conv(contact_id, name):
-        log(f"    拒绝发送：{name} 是系统/官方会话，人工发送不允许")
+        mlog(f"    拒绝发送：{name} 是系统/官方会话，人工发送不允许", level="warning")
         receipt("failed")
         stats["failed"] += 1
         return stats
     if names and name not in names:
-        log(f"    拒绝发送：{name} 不在企微会话列表，避免搜索落空后发错人")
+        mlog(f"    拒绝发送：{name} 不在企微会话列表，避免搜索落空后发错人", level="warning")
         receipt("failed")
         stats["failed"] += 1
         return stats
     if not names:
         # 读不到会话列表就无法确认落点，宁可失败也不能盲发。
-        log("    拒绝发送：读不到企微会话列表，无法确认目标会话")
+        mlog("    拒绝发送：读不到企微会话列表，无法确认目标会话", level="warning")
         receipt("failed")
         stats["failed"] += 1
         return stats
@@ -1454,15 +1549,17 @@ def pump_commands(
         content, cmd_medias = content, []
     if not content and cmd_medias:
         # 纯媒体指令：没有文本可供回读确认落点，贴完媒体后回执 unknown 待人工核对
-        log("    纯媒体指令（无文本），贴完媒体后需人工核对落点")
+        mlog("    纯媒体指令（无文本），贴完媒体后需人工核对落点", level="warning")
         for kind, mname in cmd_medias:
             try:
                 ok_m, detail_m = core_send.paste_media(
-                    mname, log=lambda s: log(f"    {s}")
+                    mname, log=lambda s: mlog(f"    {s}")
                 )
-                log(f"    [媒体] {kind}:{mname} {'成功' if ok_m else '失败'}：{detail_m}")
+                mlog(f"    [媒体] {kind}:{mname} {'成功' if ok_m else '失败'}：{detail_m}",
+                     level="info" if ok_m else "warning")
             except Exception as exc:  # noqa: BLE001
-                log(f"    [媒体] {kind}:{mname} 异常（忽略）：{type(exc).__name__}: {exc}")
+                mlog(f"    [媒体] {kind}:{mname} 异常（忽略）：{type(exc).__name__}: {exc}",
+                     level="warning")
         receipt("unknown")
         stats["failed"] += 1
         return stats
@@ -1477,7 +1574,7 @@ def pump_commands(
         return stats
     if not clipboard_ready:
         _last_error = "剪贴板被占用超过 15 秒"
-        log("    失败：剪贴板被占用（向日葵同步？）")
+        mlog("    失败：剪贴板被占用（向日葵同步？）", level="warning")
         receipt("failed")
         stats["failed"] += 1
         return stats
@@ -1488,6 +1585,7 @@ def pump_commands(
     # 与自动回复同一口径：按键前更新冷却，失败也算一次企微操作，
     # 不给"失败后立即重试/下一条"留零成本通道。
     _last_reply_at = time.time()
+    manual_started = time.time()
     try:
         result = core_send.send(
             store, name, content,
@@ -1495,11 +1593,11 @@ def pump_commands(
             # 自动回复仍用 verify_db=False（core 里 rowid 兼容问题）。
             expect_id=contact_id if contact_id.startswith(("S:", "R:")) else "",
             verify_db=True,
-            log=lambda s: log(f"    {s}"),
+            log=lambda s: mlog(f"    {s}"),
         )
     except Exception as exc:  # noqa: BLE001
         _last_error = f"{type(exc).__name__}: {exc}"[:200]
-        log(f"    发送异常：{type(exc).__name__}: {exc}")
+        mlog(f"    发送异常：{type(exc).__name__}: {exc}", level="error")
         traceback.print_exc(limit=2)
         receipt("unknown")
         stats["failed"] += 1
@@ -1510,12 +1608,14 @@ def pump_commands(
         for kind, mname in cmd_medias:
             try:
                 ok_m, detail_m = core_send.paste_media(
-                    mname, log=lambda s: log(f"    {s}")
+                    mname, log=lambda s: mlog(f"    {s}")
                 )
-                log(f"    [媒体] {kind}:{mname} {'成功' if ok_m else '失败'}：{detail_m}")
+                mlog(f"    [媒体] {kind}:{mname} {'成功' if ok_m else '失败'}：{detail_m}",
+                     level="info" if ok_m else "warning")
             except Exception as exc:  # noqa: BLE001
-                log(f"    [媒体] {kind}:{mname} 异常（忽略）：{type(exc).__name__}: {exc}")
+                mlog(f"    [媒体] {kind}:{mname} 异常（忽略）：{type(exc).__name__}: {exc}", level="warning")
         _last_reply_at = time.time()
+        manual_duration = int((time.time() - manual_started) * 1000)
         after = _outbound_snapshot(store, contact_id)
         normalized = content.replace("\r\n", "\n").replace("\r", "\n").strip()
         candidates = [mid for mid, text in (after or {}).items()
@@ -1525,17 +1625,20 @@ def pump_commands(
         if (observed_cid and observed_cid != contact_id) or before is None or after is None or len(candidates) != 1:
             _last_error = "人工发送未找到目标会话中唯一的新消息 ID，请核对实际落点，勿直接重发"
             stats["failed"] += 1
-            log(f"    {_last_error}")
+            mlog(f"    {_last_error}", level="warning", duration_ms=manual_duration)
             receipt("unknown")
             return stats
         _last_error = ""
         stats["sent"] += 1
-        log("    已发送：目标会话中唯一的新消息 ID 已确认")
-        receipt("succeeded", f"{contact_id}:{candidates[0]}")
+        message_id = f"{contact_id}:{candidates[0]}"
+        mlog("    已发送：目标会话中唯一的新消息 ID 已确认",
+             message_id=message_id, duration_ms=manual_duration)
+        receipt("succeeded", message_id)
     else:
         _last_error = str(result.get("detail"))[:200]
         stats["failed"] += 1
-        log(f"    发送失败：{result.get('detail')}")
+        mlog(f"    发送失败：{result.get('detail')}", level="warning",
+             duration_ms=int((time.time() - manual_started) * 1000))
         receipt("unknown" if result.get("conversation_id") else "failed")
     return stats
 

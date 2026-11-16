@@ -10,6 +10,11 @@ from unittest.mock import MagicMock, patch
 
 AGENT_DIR = Path(__file__).resolve().parents[2] / "agent"
 
+# brain.py 与 autopilot 同目录，build_brain 里 `import brain` 需要 agent 目录
+# 在 sys.path 上；worker 子进程里 main() 也会走到，所以这里永久插入不恢复。
+if str(AGENT_DIR) not in sys.path:
+    sys.path.insert(0, str(AGENT_DIR))
+
 
 def _load_module(name: str):
     spec = importlib.util.spec_from_file_location(name, AGENT_DIR / f"{name}.py")
@@ -37,6 +42,9 @@ def load_autopilot():
         patch.object(sys, "path", list(sys.path)),
         patch.object(ctypes, "WinDLL", MagicMock(), create=True),
     ):
+        # brain.py 与 autopilot 同目录（agent/），build_brain 里 `import brain`
+        # 需要 agent 目录在 sys.path 上。
+        sys.path.insert(0, str(AGENT_DIR))
         _load_module("client")
         return _load_module("autopilot")
 

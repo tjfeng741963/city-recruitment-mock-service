@@ -45,10 +45,13 @@ def run(folder: Path, phase: str):
 
         def answer(*args, **kwargs):
             events["brain_calls"] += 1
-            return {"ok": False, "detail": "synthetic KB unavailable"} if phase == "hold" else {"ok": True, "reply": "recovered KB answer"}
+            if phase == "hold":
+                return {"ok": False, "detail": "synthetic agent unavailable"}
+            return {"ok": True, "reply": "recovered agent answer", "parts": ["recovered agent answer"], "medias": [], "detail": "ok"}
 
-        agent._brain.reply.side_effect = answer
-        result["stats"] = agent.drain(store, {"cooldown": 0, "reply_first": "1", "reply_next": "233", "brain": {"mode": "kb"}})
+        agent._brain.chat.side_effect = answer
+        agent._brain.opening.return_value = {"ok": False, "items": [], "detail": "no opening"}
+        result["stats"] = agent.drain(store, {"cooldown": 0, "reply_first": "1", "reply_next": "233", "brain": {"mode": "agent"}})
     elif phase == "retry-held":
         sys.argv = ["autopilot.py", "--retry-held"]
         result["exit_code"] = agent.main()

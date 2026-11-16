@@ -176,5 +176,6 @@ HTTP 仍是 200——调用方按 `ok` 判断，不要按状态码。
 
 | 日期 | 改动 |
 |---|---|
+| 2026-11-17 | 删除旧「岗位话术 5 时点」接口（GET/POST/DELETE /api/v1/position-scripts）；8090 摘除 kb / kb_publish / lead / lead_board / flow / webhook 六组废弃路由；客户端 brain 切到 4222 的 agent/opening + agent/chat |
 | 2026-11-17 | Agent 会话重构为受控编排（agent-orchestrator.ts）：话术库注入 + script_used 声明 + 原文比对护栏；agent/opening 与 opening/log 改为设备令牌或服务令牌鉴权 |
 | 2026-11-16 | 新建：人设 / 开场 CRUD、Agent 会话四个接口、素材接口 |
