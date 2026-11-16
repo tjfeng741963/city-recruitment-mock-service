@@ -8,7 +8,6 @@
   // 契约：docs/知识库方案-流程驱动-20261113.md §配置层
   const TAG = "[kb-console]";
   const TOKEN_KEY = "token";
-  const ENTRY_ID = "rk-kb-entry";
 
   const TABS = [
     { key: "vertical", label: "品类", hint: "工厂 / 地铁 / 白领…一个品类一套话术" },
@@ -111,12 +110,8 @@
     var head = el("header", "rk-kb-head");
     var titleBox = el("div", "rk-kb-title");
     titleBox.appendChild(el("h2", null, "知识库配置"));
-    titleBox.appendChild(el("p", "rk-kb-sub", "先把品类、区域、招工方配清楚，客户问「包吃住吗」才不会串厂。"));
+    titleBox.appendChild(el("p", "rk-kb-sub", "品类、区域、招工方、场景问答都在这配。客户问「包吃住吗」时，答案按招工方和岗位逐级收窄，不会串厂。"));
     head.appendChild(titleBox);
-    var close = el("button", "rk-kb-close", "关闭");
-    close.type = "button";
-    close.addEventListener("click", function () { togglePanel(false); });
-    head.appendChild(close);
     sheet.appendChild(head);
 
     var body = el("div", "rk-kb-body");
@@ -157,12 +152,9 @@
     var node = ensurePanel();
     state.open = open === undefined ? !state.open : !!open;
     node.hidden = !state.open;
-    document.documentElement.classList.toggle("rk-kb-locked", state.open);
-    if (state.open) {
-      switchTab(state.tab);
-      var close = node.querySelector(".rk-kb-close");
-      if (close) close.focus();
-    }
+    // 页面模式：面板自己占满主内容区，不锁 body 滚动、不给关闭按钮。
+    // 关不关由路由决定（离开 /knowledge 才关），不靠用户点 X。
+    if (state.open) switchTab(state.tab);
   }
 
   function switchTab(key) {
@@ -775,18 +767,46 @@
   }
 
   // --------------------------------------------------------------- 入口 --
-  function mountEntry() {
-    var sidebar = document.querySelector(".sidebar");
-    if (!sidebar) return;
-    if (document.getElementById(ENTRY_ID)) return;
-    var menu = sidebar.querySelector(".sidebar-menu") || sidebar;
-    var entry = el("button", "rk-kb-entry");
-    entry.id = ENTRY_ID;
-    entry.type = "button";
-    entry.appendChild(el("span", "rk-kb-entry-dot"));
-    entry.appendChild(el("span", "rk-kb-entry-label", "知识库配置"));
-    entry.addEventListener("click", function () { togglePanel(true); });
-    menu.appendChild(entry);
+  // 侧栏「知识管理」下原来是「知识库」+「未知问题」两项，都属于旧知识库
+  // （knowledge_items / unknown_questions）。这一版收成一个「知识库配置」：
+  //   - 「知识库」就地改名，路由仍是 /knowledge，Vue 的旧页面被本面板盖住；
+  //   - 「未知问题」隐藏（display:none，不删节点：节点归 Vue，remove 会让 patch 报错）。
+  // 面板改成页面：占满主内容区，侧栏照常可点；Esc 不再关——关掉就是一张空白页。
+  var MENU_LABEL = "知识库配置";
+  var HIDE_LABEL = "未知问题";
+  var CONSOLE_PATH = "/knowledge";
+  var lastPath = null;
+
+  function syncMenu() {
+    var items = document.querySelectorAll(".sidebar-menu .el-menu-item");
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i];
+      var span = item.querySelector(":scope > span");
+      if (!span) continue;
+      var label = span.textContent.trim();
+      if (label === "知识库" && item.dataset.rkKbEntry !== "1") {
+        item.dataset.rkKbEntry = "1";
+        span.textContent = MENU_LABEL;
+        if (item.dataset.rkLabel) item.dataset.rkLabel = MENU_LABEL;
+        continue;
+      }
+      if (label === HIDE_LABEL && item.dataset.rkKbHidden !== "1") {
+        item.dataset.rkKbHidden = "1";
+        item.style.display = "none";
+      }
+    }
+  }
+
+  // 只在路径变化时动，避免 DOM 观察器把「开关面板」自己触发的变更再吃一遍。
+  function syncRoute() {
+    var path = location.pathname.replace(/\/+$/, "") || "/";
+    if (path === lastPath) return;
+    lastPath = path;
+    if (path === CONSOLE_PATH) {
+      if (!state.open) togglePanel(true);
+    } else if (state.open) {
+      togglePanel(false);
+    }
   }
 
   function injectStyle() {
@@ -794,17 +814,11 @@
     var style = document.createElement("style");
     style.id = "rk-kb-style";
     style.textContent = [
-      "html.rk-kb-locked,html.rk-kb-locked body{overflow:hidden}",
-      ".rk-kb-entry{display:flex;align-items:center;gap:10px;width:100%;height:40px;margin-top:auto;margin-bottom:8px;padding:0 14px;border:0;border-radius:var(--gl-r-control);background:transparent;color:var(--rk-ink-2);font:inherit;font-size:13px;cursor:pointer;text-align:left;transition:background .18s var(--rk-ease-standard),color .18s var(--rk-ease-standard)}",
-      ".rk-kb-entry:hover{background:rgba(31,41,64,.05);color:var(--rk-ink-1)}",
-      ".rk-kb-entry.is-active{background:rgba(255,255,255,.94);color:var(--rk-accent);box-shadow:0 1px 2px rgba(20,40,90,.06),0 6px 16px -8px rgba(11,87,208,.4)}",
-      ".rk-kb-entry-dot{width:7px;height:7px;border-radius:50%;background:var(--rk-accent);box-shadow:0 0 0 3px var(--rk-accent-soft);flex-shrink:0}",
-      ".rk-nav-collapsed .rk-kb-entry{justify-content:center;padding:0}",
-      ".rk-nav-collapsed .rk-kb-entry-label{display:none}",
-      ".rk-kb-overlay{position:fixed;inset:0;z-index:3000;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(18,28,52,.26);backdrop-filter:blur(6px) saturate(1.2);-webkit-backdrop-filter:blur(6px) saturate(1.2)}",
+      ".rk-kb-overlay{position:fixed;top:0;right:0;bottom:0;left:236px;z-index:2000;display:flex;background:var(--rk-bg)}",
+      "html.rk-nav-collapsed .rk-kb-overlay{left:76px}",
       ".rk-kb-overlay[hidden]{display:none}",
-      ".rk-kb-sheet{position:relative;display:flex;flex-direction:column;width:min(1180px,100%);max-height:100%;border:1px solid var(--gl-edge);border-radius:var(--gl-r-shell);background:linear-gradient(180deg,rgba(255,255,255,.94),rgba(250,252,255,.86));backdrop-filter:var(--gl-blur);-webkit-backdrop-filter:var(--gl-blur);box-shadow:var(--gl-shadow-float);overflow:hidden;font-family:var(--rk-font);color:var(--rk-ink-1)}",
-      ".rk-kb-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:22px 26px 16px}",
+      ".rk-kb-sheet{display:flex;flex-direction:column;width:100%;height:100%;background:var(--rk-bg);overflow:hidden;font-family:var(--rk-font);color:var(--rk-ink-1)}",
+      ".rk-kb-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:24px 32px 18px}",
       ".rk-kb-title h2{margin:0;font-size:19px;letter-spacing:-.01em}",
       ".rk-kb-sub{margin:4px 0 0;font-size:13px;color:var(--rk-ink-3)}",
       ".rk-kb-close,.rk-kb-ghost{border:1px solid var(--rk-border-strong);background:transparent;color:var(--rk-ink-2);border-radius:999px;padding:7px 16px;font:inherit;font-size:13px;cursor:pointer}",
@@ -847,23 +861,28 @@
       ".rk-kb-input.is-optional{opacity:.92}",
       ".rk-kb-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:6px}",
       ".rk-kb-error{margin:0;font-size:12.5px;color:var(--rk-down)}",
-      "@media (max-width:820px){.rk-kb-body{flex-direction:column}.rk-kb-rail{width:100%;display:flex;gap:8px;overflow-x:auto;border-right:0;border-bottom:1px solid var(--rk-border)}.rk-kb-tab{min-width:150px}}",
+      "@media (max-width:820px){.rk-kb-overlay{left:0}.rk-kb-body{flex-direction:column}.rk-kb-rail{width:100%;display:flex;gap:8px;overflow-x:auto;border-right:0;border-bottom:1px solid var(--rk-border)}.rk-kb-tab{min-width:150px}}",
     ].join("\n");
     document.head.appendChild(style);
   }
 
   function start() {
     injectStyle();
-    mountEntry();
-    // Vue 重建侧栏时把入口补回去；面板不重建，避免打断正在填的表单。
+    safe(syncMenu, "sync menu");
+    syncRoute();
+    // Vue 重建侧栏 / 路由切换后补一次。rAF 节流，避免一次变更风暴里反复跑。
+    var frame = 0;
     new MutationObserver(function () {
-      if (!document.getElementById(ENTRY_ID)) safe(mountEntry, "mount entry");
+      if (frame) return;
+      frame = requestAnimationFrame(function () {
+        frame = 0;
+        safe(syncMenu, "sync menu");
+        safe(syncRoute, "sync route");
+      });
     }).observe(document.body, { childList: true, subtree: true });
-    document.addEventListener("keydown", function (event) {
-      if (event.key !== "Escape" || !state.open) return;
-      var modal = panel && panel.querySelector(".rk-kb-modal");
-      if (modal) modal.remove();
-      else togglePanel(false);
+    window.addEventListener("popstate", function () {
+      lastPath = null;
+      syncRoute();
     });
     log("ready");
   }
