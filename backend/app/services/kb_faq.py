@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy import or_, select
@@ -61,7 +61,11 @@ class FaqHit:
     answer: str
     media: list[str]
     scope_level: str
-    tier: str  # employer | city | vertical | global
+    tier: str  # position | employer | city | vertical | global
+    # 本层候选与打分（按分数倒序，最多前 3 条）。
+    # 灰度复盘要能回答「库里明明有这条，为什么没选它」——只记最终命中不够。
+    # 放最后并给默认值，避免破坏测试里现有的位置参数构造。
+    candidates: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _loads(raw: str | None) -> list[str]:
@@ -202,6 +206,9 @@ async def lookup(
         )
         rows = (await session.execute(stmt)).scalars().all()
         best: tuple[int, KbFaq] | None = None
+        # 本层所有命中关键词的条目与分数。只记最终选中的那条不够——
+        # 灰度里最常见的问题是「库里明明有更合适的，为什么没选它」。
+        scored: list[tuple[int, KbFaq]] = []
         for row in rows:
             score = match_keywords(text, _loads(row.keywords))
             if not score:
@@ -213,12 +220,24 @@ async def lookup(
                 fact_fields={*_PLACEHOLDER_KEYS, *_PLACEHOLDER_KEYS.values()},
             ):
                 continue
+            scored.append((score, row))
             if best is None or score > best[0] or (
                 score == best[0] and int(row.priority or 0) > int(best[1].priority or 0)
             ):
                 best = (score, row)
         if best:
             row = best[1]
+            # 只留摘要：候选的完整答案可能很长，且复盘时看的是「哪条、多少分」。
+            top = sorted(scored, key=lambda pair: (-pair[0], int(pair[1].id)))[:3]
+            candidates = [
+                {
+                    "id": int(candidate.id),
+                    "score": int(score),
+                    "question": str(candidate.question or "")[:80],
+                    "picked": int(candidate.id) == int(row.id),
+                }
+                for score, candidate in top
+            ]
             return FaqHit(
                 id=int(row.id),
                 question=str(row.question or ""),
@@ -226,6 +245,7 @@ async def lookup(
                 media=_loads(row.media),
                 scope_level=str(row.scope_level or "global"),
                 tier=tier_name,
+                candidates=candidates,
             )
     return None
 
