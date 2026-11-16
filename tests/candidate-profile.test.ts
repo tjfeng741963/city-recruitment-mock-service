@@ -165,6 +165,29 @@ describe("candidate profile api", () => {
     expect(invitedEvents.count).toBe(1);
   });
 
+  it("fills province by looking up the city instead of guessing", async () => {
+    // OA 第 7 项要「省/市/区」。8090 只在客户说「XX省」时抽得到省，
+    // 说「广东深圳」时 province 是空——实测如此。城市是准的，按城市反查补齐。
+    // 先从库里清掉省：反查只在 province 为空时生效，已有值绝不覆盖。
+    app.db.prepare("UPDATE agent_conversations SET province='' WHERE device_code=? AND customer_id=?").run("local-device-001", "700001");
+
+    const response = await app.inject({
+      method: "POST", url: "/api/v1/agent/profile", headers: headers(),
+      payload: { device_code: "local-device-001", customer_id: "700001", profile: { city: "深圳", district: "宝安区" } },
+    });
+    expect(response.statusCode).toBe(200);
+    const read = await profileOf("device_code=local-device-001&customer_id=700001");
+    expect(read.json()).toMatchObject({ city: "深圳", province: "广东", district: "宝安区" });
+
+    // 城市不在 cities 表里：留空，绝不猜一个省填上去
+    app.db.prepare("UPDATE agent_conversations SET province='' WHERE device_code=? AND customer_id=?").run("local-device-001", "700001");
+    await app.inject({
+      method: "POST", url: "/api/v1/agent/profile", headers: headers(),
+      payload: { device_code: "local-device-001", customer_id: "700001", profile: { city: "不存在的城市" } },
+    });
+    expect((await profileOf("device_code=local-device-001&customer_id=700001")).json()).toMatchObject({ province: "" });
+  });
+
   it("answers 404 instead of creating a conversation for an unknown candidate", async () => {
     const before = (app.db.prepare("SELECT COUNT(*) count FROM agent_conversations").get() as { count: number }).count;
     const response = await app.inject({ method: "POST", url: "/api/v1/agent/profile", headers: headers(), payload: { device_code: "local-device-001", customer_id: "999999", profile: { name: "不存在" } } });

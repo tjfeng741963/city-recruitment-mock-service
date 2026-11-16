@@ -188,6 +188,17 @@ export async function registerProfileRoutes(app: FastifyInstance, db: DatabaseSy
     for (const field of COLUMN_FIELDS) {
       if (has(field)) merged[field] = asText(profile[field]).trim();
     }
+    // 省字段兜底（OA 第 7 项要「省/市/区」）。8090 只在客户说「XX省」时抽得到省，
+    // 说「广东深圳」「深圳」时 province 是空——实测「我叫谢子鑫 18077352958
+    // 广东深圳」抽出来 province=None。城市是准的，按城市反查 cities.province 补齐；
+    // 查不到就留空，绝不猜一个省填上去。
+    if (!merged.province && merged.city) {
+      const bareCity = merged.city.replace(/市$/, "");
+      const cityRow = db.prepare(
+        "SELECT province FROM cities WHERE city_name=? OR city_name=? LIMIT 1",
+      ).get(merged.city, bareCity) as { province: string } | undefined;
+      if (cityRow?.province) merged.province = String(cityRow.province).trim();
+    }
     // 备注：契约里 8090 送的是 notes，前端读的是 remark 列，这里映射一次。
     let remark = conversation.remark ?? "";
     if (has("remark")) remark = asText(profile.remark);
