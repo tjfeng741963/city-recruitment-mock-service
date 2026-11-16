@@ -41,6 +41,15 @@ class Settings(BaseSettings):
     llm_model: str = "doubao-pro-32k"
     llm_timeout: float = 30.0
 
+    # 模型调用留痕（灰度诊断）。开启后每轮把 prompt 与模型原始返回写进
+    # flow_events 的 reply 事件 trace.llm 里，用来复盘「AI 为什么这么答」。
+    #
+    # 隐私：prompt 与返回里含客户原话。这个开关只决定要不要记正文——
+    # 关掉后仍记录模型名/耗时/token/成败/失败原因，只是不留文本。
+    # 生产按需开启，数据留存期限应与客户约定一致。
+    llm_trace_enabled: bool = True
+    llm_trace_max_chars: int = 2000
+
     # 服务间调用令牌：Node 侧自动回复链路没有用户身份，
     # 带 X-Service-Token 直连 /api/v1/kb/*。留空表示关闭这条路径。
     kb_service_token: str = ""

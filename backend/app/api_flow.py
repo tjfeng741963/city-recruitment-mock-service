@@ -61,7 +61,7 @@ from .services.flow_engine import (
 )
 from .services.job_lookup import lookup_cities, lookup_jobs, vertical_hint_of
 from .services.flow_llm import a_step, review_loop
-from .services.llm_provider import build_provider
+from .services.llm_provider import begin_llm_trace, build_provider, collect_llm_trace
 from .services.media_guard import filter_parts, markers_from_refs, markers_in
 
 _warned_no_device = False
@@ -161,6 +161,9 @@ async def _load_graph_for(session, device_code: str, meta: dict) -> dict:
 async def flow_answer(
     payload: FlowAnswerIn, session: SessionDep, _: ServiceOrUser
 ) -> FlowAnswerOut:
+    # 模型调用留痕的起点：本轮所有 complete() 调用都会被记进这个收集器，
+    # 落库时并进 reply 事件的 trace.llm。必须每请求重置，避免串到下一轮。
+    begin_llm_trace()
     events = await store.load_events(session, payload.session_key)
     state = store.project(events)
     before = dict(state.get("slots") or {})
@@ -221,6 +224,9 @@ async def flow_answer(
                 ),
             ],
         )
+        # 这条路径在 build_provider 之前就返回，本轮不会有模型调用；
+        # 仍显式清空收集器，避免残留串到下一个请求。
+        collect_llm_trace()
         return FlowAnswerOut(
             reply=closing,
             parts=[closing],
@@ -581,6 +587,10 @@ async def flow_answer(
                 "echo_guarded": echo_guarded,
                 "kb_natural_rewrite": bool(kb_repeat and kb_entry_id),
                 "media_appended": len(missing_markers),
+                # 模型调用明细：A 生成、B 审核、知识库改写三处的每次调用都在这里。
+                # 空数组 = 这一轮一次模型都没调（走的是代码渲染或确定性兜底），
+                # 这本身就是关键信息：能立刻分清「模型答错了」和「根本没调模型」。
+                "llm": collect_llm_trace(),
             }
         )
         # parts 一并落库：回放时能看出「那轮其实发了两条」
