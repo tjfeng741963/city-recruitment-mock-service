@@ -886,6 +886,9 @@ def _is_first_contact(cid: str, seen: set[str]) -> bool:
        "升级前就在聊"的老会话：它们从没进过 greeted 集合，但明显已经打过招呼，
        不能当新好友再发一遍首句；命中时顺手补登记，后面不再反复查库。
     """
+    delivery = rlog.welcome(cid)
+    if delivery and delivery['state'] in ('sent', 'cancelled'):
+        return False
     if cid in seen:
         return False
     try:
@@ -998,6 +1001,71 @@ def _observe_lead(store: Store, conv_id: str, name: str, message_id: str, log) -
         log(f"    [线索] 异常（忽略）：{type(exc).__name__}: {exc}")
 
 
+def _windows_desktop_status() -> tuple[bool, str]:
+    """Read session/input-desktop state only; never switch or unlock a desktop."""
+    try:
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        wts = ctypes.WinDLL('wtsapi32', use_last_error=True)
+        user = ctypes.WinDLL('user32', use_last_error=True)
+        kernel.GetCurrentProcessId.restype = wt.DWORD
+        kernel.ProcessIdToSessionId.argtypes = [wt.DWORD, ctypes.POINTER(wt.DWORD)]
+        kernel.ProcessIdToSessionId.restype = wt.BOOL
+        session = wt.DWORD()
+        if not kernel.ProcessIdToSessionId(kernel.GetCurrentProcessId(), ctypes.byref(session)):
+            return False, '无法确认客户端桌面会话'
+        wts.WTSQuerySessionInformationW.argtypes = [wt.HANDLE, wt.DWORD, ctypes.c_int,
+                                                  ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wt.DWORD)]
+        wts.WTSQuerySessionInformationW.restype = wt.BOOL
+        wts.WTSFreeMemory.argtypes = [ctypes.c_void_p]
+        buffer, size = ctypes.c_void_p(), wt.DWORD()
+        if not wts.WTSQuerySessionInformationW(None, session.value, 8, ctypes.byref(buffer), ctypes.byref(size)):
+            return False, '无法读取 RDP/桌面连接状态'
+        try:
+            if not buffer.value or size.value < ctypes.sizeof(ctypes.c_int):
+                return False, '桌面连接状态无效'
+            if ctypes.cast(buffer, ctypes.POINTER(ctypes.c_int)).contents.value != 0:
+                return False, '客户端桌面会话未连接（RDP 已断开），待恢复后继续'
+        finally:
+            wts.WTSFreeMemory(buffer)
+        user.OpenInputDesktop.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+        user.OpenInputDesktop.restype = wt.HANDLE
+        user.CloseDesktop.argtypes = [wt.HANDLE]
+        user.GetUserObjectInformationW.argtypes = [wt.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                                                   wt.DWORD, ctypes.POINTER(wt.DWORD)]
+        user.GetUserObjectInformationW.restype = wt.BOOL
+        desktop = user.OpenInputDesktop(0, False, 1)  # DESKTOP_READOBJECTS, no switch rights.
+        if not desktop:
+            return False, '输入桌面不可读，可能已锁屏；待恢复后继续'
+        try:
+            name, needed = ctypes.create_unicode_buffer(256), wt.DWORD()
+            if not user.GetUserObjectInformationW(desktop, 2, name, ctypes.sizeof(name), ctypes.byref(needed)):
+                return False, '无法确认输入桌面'
+            if name.value.casefold() != 'default':
+                return False, '当前是锁屏或安全桌面，待恢复后继续'
+        finally:
+            user.CloseDesktop(desktop)
+        return True, ''
+    except Exception as exc:  # noqa: BLE001
+        return False, f'桌面自检失败：{type(exc).__name__}'
+
+
+def desktop_send_ready() -> tuple[bool, str]:
+    return _windows_desktop_status() if sys.platform == 'win32' else (True, '')
+
+
+def _welcome_trigger_is_notice(item: dict) -> bool:
+    text = (item.get('in_text') or '').strip()
+    return not text or text == '我已经添加了你，现在我们可以开始聊天了。'
+
+
+def _welcome_definitely_unsent(result: dict, entered_send: bool) -> bool:
+    """Only known failures before Enter can resume without operator reconciliation."""
+    detail = str(result.get('detail') or '')
+    return (not result.get('ok') and not result.get('conversation_id') and not entered_send and
+            detail.startswith(('会话名或内容为空', '没找到企业微信窗口', '企业微信已退出，停止发送',
+                               '抢不到前台，已中止', '企微窗口持续隐藏', '输入框校验：')))
+
+
 def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "online") -> dict:
     """按消息时间正序处理 pending + failed。
 
@@ -1024,7 +1092,20 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             )
         return stats
 
+    if not dry:
+        rlog.recover_welcomes()
+        desktop_ready, reason = desktop_send_ready()
+        if not desktop_ready:
+            stats['blocked'] = len({item['message_id'] for item in
+                                    rlog.pending(include_failed=True) + rlog.active_welcomes()})
+            _last_error = reason[:200]
+            if time.time() - _last_block_log > 60:
+                _last_block_log = time.time()
+                log(f'[桌面] {reason}；本轮不请求首句、不发送，待发内容保留')
+            return stats
+
     items = rlog.pending(include_failed=True)
+    welcomes = {it['conv_id']: it for it in rlog.active_welcomes()}
     # 每个会话选一条作为回复目标：优先「有文本」的最新一条。
     # 企业微信在加好友、撤回、系统提示时会插入 type=1011 之类的空文本记录，
     # 它们时间更晚；若只按时间取最新，真正要回的文本就被挤掉，知识库拿到
@@ -1044,7 +1125,11 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             continue
         if int(it["msg_time"] or 0) >= int(cur["msg_time"] or 0):
             newest[cid] = it
+    for cid, item in welcomes.items():
+        newest[cid] = item
     for it in items:
+        if it['conv_id'] in welcomes:
+            continue  # A pending welcome owns its source; later questions stay queued.
         if newest[it["conv_id"]]["message_id"] != it["message_id"]:
             if not dry:
                 rlog.mark_skipped(it["message_id"], "同会话合并到最新一条")
@@ -1057,6 +1142,14 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         cid = it["conv_id"]
         name = it["conv_name"] or ""
         preview = (it["in_text"] or "").strip()[:20].replace("\n", " ") or f"[type={it['in_type']}]"
+        welcome_delivery = rlog.welcome(cid)
+        if welcome_delivery and welcome_delivery['state'] not in ('sent', 'cancelled'):
+            if welcome_delivery['state'] != 'ready':
+                stats['blocked'] += 1
+                _last_error = welcome_delivery['error'][:200]
+                continue
+        else:
+            welcome_delivery = None
 
         if is_system_conv(cid, name):
             if not dry:
@@ -1091,6 +1184,22 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             log(f"跳过 {cid}：会话没有可搜索的名字")
             continue
 
+        # A recovered welcome must not be sent from a different logged-in account,
+        # or after switching this device out of flow mode/target scope.
+        if welcome_delivery or (not dry and _brain is not None and str(getattr(_brain, 'mode', '')) == 'flow'
+                                and _is_first_contact(cid, greeted)):
+            try:
+                own_id = store.self_id()
+            except Exception:  # noqa: BLE001
+                own_id = ''
+            if (not isinstance(own_id, str) or not own_id or not cid.startswith('S:')
+                    or own_id not in cid[2:].split('_') or not match_target(
+                        {'conv_id': cid, 'conv_name': name}, cfg.get('target', 'all'))
+                    or _brain is None or str(getattr(_brain, 'mode', '')) != 'flow'):
+                stats['blocked'] += 1
+                _last_error = '首句账号、监听范围或流程模式不匹配，原文保留待核对'
+                continue
+
         if _brain is not None or (cfg.get("brain") or {}).get("mode") in ("kb", "flow"):
             hint = (it["in_text"] or "").strip()
             res = {"ok": False, "detail": "知识库未初始化"}
@@ -1101,26 +1210,29 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 # 常常没有可回复的文本；所以"是否首次"必须用会话维度判断。
                 # DRY-RUN 不发请求：greet 会在服务端推进 stage，干跑不该改状态。
                 greeted_now = False
-                if (
+                if welcome_delivery:
+                    res = {'ok': True, 'reply': welcome_delivery['reply_text'],
+                           'parts': welcome_delivery['parts'], 'scene': '首句', 'detail': '恢复已保存的首句及分段进度'}
+                    greeted_now = True
+                elif (
                     not dry
                     and _brain is not None
                     and str(getattr(_brain, "mode", "")) == "flow"
                     and _is_first_contact(cid, greeted)
                 ):
-                    gres: dict = {}
-                    try:
-                        gres = _brain.greet(cid)
-                    except Exception as exc:  # noqa: BLE001
-                        gres = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
-                    if gres.get("ok"):
-                        # 只有成功才落盘：失败说明服务端没走到阶段，下条消息重试首句，
-                        # 而不是永久退化成一个不带招呼的普通回复。
-                        greeted.add(cid)
-                        _save_greeted(greeted)
-                        res = gres
-                        greeted_now = True
-                    else:
-                        log(f"    [首句] 失败（{gres.get('detail')}），退回 /flow/answer")
+                    rlog.begin_welcome(cid, mid, _welcome_trigger_is_notice(it))
+                    welcome_delivery = rlog.welcome(cid)
+                    gres = _brain.greet(cid)
+                    if not gres.get('ok'):
+                        raise ValueError(gres.get('detail') or '首句生成失败，服务端结果待核对')
+                    welcome_text = str(gres.get('reply') or '').strip()
+                    welcome_parts = [str(p).strip() for p in (gres.get('parts') or []) if str(p).strip()]
+                    if len(welcome_parts) < 2:
+                        welcome_parts = [welcome_text]
+                    rlog.save_welcome(cid, welcome_text, welcome_parts)
+                    welcome_delivery = rlog.welcome(cid)
+                    res = gres
+                    greeted_now = True
                 if greeted_now:
                     pass
                 elif not hint:
@@ -1154,7 +1266,10 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             except Exception as exc:  # noqa: BLE001
                 reason = f"知识库暂停，待人工处理：{type(exc).__name__}: {exc}"
                 if not dry:
-                    rlog.mark_held(mid, reason)
+                    if welcome_delivery:
+                        rlog.fail_welcome(cid, reason, unknown=True)
+                    else:
+                        rlog.mark_held(mid, reason)
                     _last_error = reason[:200]
                 stats["blocked"] += 1
                 log(f"    [brain] {reason}")
@@ -1192,6 +1307,8 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
 
         # 按键之前先确认剪贴板可写，避免 Ctrl+F 打开搜索框后才卡住
         if not compat.wait_clipboard_writable(timeout=15):
+            if welcome_delivery:
+                rlog.fail_welcome(cid, '剪贴板被占用超过 15 秒', unknown=False)
             rlog.mark_failed(mid, "剪贴板被占用超过 15 秒", scene, text)
             _last_error = "剪贴板被占用超过 15 秒"
             stats["failed"] += 1
@@ -1209,20 +1326,55 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             # "零成本"立即打下一个会话（2026-11-16 掉登录事故的操作模式）。
             _last_reply_at = time.time()
             result = {"ok": False, "detail": "未发送"}
-            for idx, raw_part in enumerate(parts):
+            start_part = welcome_delivery['next_part'] if welcome_delivery else 0
+            for idx in range(start_part, len(parts)):
+                raw_part = parts[idx]
                 try:
                     body, medias = core_send.split_media_marks(raw_part)
                 except Exception:  # noqa: BLE001
                     body, medias = raw_part, []
+                entered_send = False
+                before = None
+                if welcome_delivery:
+                    if not body:
+                        rlog.fail_welcome(cid, '纯媒体首句无法确认目标会话；本轮不发送，需人工核对', unknown=True)
+                        result = {'ok': False, 'detail': '首句媒体目标待核对'}
+                        break
+                    before = _outbound_snapshot(store, cid)
+                    if before is None:
+                        rlog.fail_welcome(cid, '首句发送前读不到本账号的发件记录，原文保留待核对', unknown=True)
+                        result = {'ok': False, 'detail': '首句发件记录不可读'}
+                        break
+                    rlog.begin_welcome_part(cid, idx)
+
+                def send_log(message):
+                    nonlocal entered_send
+                    if '步骤4 已回车发送' in message:
+                        entered_send = True
+                    log(f'    {message}')
+
                 if body:
                     result = core_send.send(
                         store, name, body,
                         expect_id=cid if str(cid).startswith(("S:", "R:")) else "",
                         verify_db=True,
-                        log=lambda s: log(f"    {s}"),
+                        log=send_log,
                     )
                     if not result["ok"]:
+                        if welcome_delivery:
+                            rlog.fail_welcome(cid, str(result.get('detail') or '首句发送结果未知'),
+                                              unknown=not _welcome_definitely_unsent(result, entered_send))
                         break
+                    if welcome_delivery:
+                        after = _outbound_snapshot(store, cid)
+                        normalized = body.replace('\r\n', '\n').replace('\r', '\n').strip()
+                        candidates = [key for key, value in (after or {}).items()
+                                      if key not in before and value == normalized]
+                        if (after is None or len(candidates) != 1 or result.get('conversation_id') not in (None, '', cid)):
+                            rlog.fail_welcome(cid, '首句已尝试发送，但目标会话新消息 ID 未唯一确认；勿直接重发', unknown=True)
+                            result = {'ok': False, 'detail': '首句发送结果待人工核对'}
+                            break
+                        _last_reply_at = time.time()
                 else:
                     result = {"ok": True, "detail": "纯媒体段，无文本"}
                 for kind, mname in medias:
@@ -1232,12 +1384,18 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                         )
                         log(f"    [媒体] {kind}:{mname} "
                             f"{'成功' if ok_m else '失败'}：{detail_m}")
+                        if welcome_delivery and not ok_m:
+                            raise RuntimeError('首句媒体发送未完成；保留已发文字，核对后处理')
                     except Exception as exc:  # noqa: BLE001
                         log(f"    [媒体] {kind}:{mname} 异常（忽略）：{type(exc).__name__}: {exc}")
+                        if welcome_delivery:
+                            raise
+                if welcome_delivery:
+                    rlog.confirm_welcome_part(cid, idx)
                 if idx < len(parts) - 1:
                     time.sleep(2.0)
             detail_text = str(result.get("detail") or "")
-            if result["ok"] and "回读失败" in detail_text:
+            if not welcome_delivery and result["ok"] and "回读失败" in detail_text:
                 # 回车已按但回读解密库确认不了落点：结果不明。不能记 sent
                 #（可能静默丢失），也不能记 failed（下轮自动补发可能重复发送）。
                 # 记 unknown 不参与自动补发，--retry-held 由人工核对后重新入队。
@@ -1247,7 +1405,12 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 stats["unknown"] += 1
                 log("    回读未确认：按 unknown 记账，不自动重发，待人工核对（--retry-held 可重新入队）")
             elif result["ok"]:
-                rlog.mark_sent(mid, scene, text)
+                if welcome_delivery:
+                    greeted.add(cid)
+                    _save_greeted(greeted)
+                else:
+                    rlog.mark_sent(mid, scene, text)
+                _last_reply_at = time.time()
                 _consecutive_send_failures = 0
                 _last_error = ""
                 stats["sent"] += 1
@@ -1257,13 +1420,17 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 if _brain is not None:
                     _observe_lead(store, cid, name, mid, log)
             else:
-                rlog.mark_failed(mid, result["detail"], scene, text)
+                if not welcome_delivery:
+                    rlog.mark_failed(mid, result["detail"], scene, text)
                 _last_error = str(result["detail"])[:200]
                 _consecutive_send_failures += 1
                 stats["failed"] += 1
                 log(f"    发送失败：{result['detail']}")
         except Exception as exc:  # noqa: BLE001
-            rlog.mark_failed(mid, f"{type(exc).__name__}: {exc}", scene, text)
+            if welcome_delivery:
+                rlog.fail_welcome(cid, f'{type(exc).__name__}: {exc}', unknown=True)
+            else:
+                rlog.mark_failed(mid, f"{type(exc).__name__}: {exc}", scene, text)
             _last_error = f"{type(exc).__name__}: {exc}"[:200]
             _consecutive_send_failures += 1
             stats["failed"] += 1
@@ -1555,6 +1722,10 @@ def pump_safely(store: Store, cfg: dict, reporter: "Reporter | None", wecom_stat
 
 
 def print_history(limit: int = 20) -> None:
+    for item in rlog.welcome_history(limit):
+        count = len(json.loads(item['parts_json']))
+        print(f"首句 {item['conv_id']} {item['state']} {item['next_part']}/{count} "
+              f"{item['conv_name'] or ''} {item['error']}")
     manual = rlog.recent_manual_receipts(limit)
     if manual:
         print("人工回执（执行结果 / 上报状态）：")
@@ -1803,10 +1974,16 @@ def main() -> int:
     ap.add_argument("--dry", action="store_true", help="只登记不发送")
     ap.add_argument("--list", action="store_true", help="打印回复历史")
     ap.add_argument("--reset", action="store_true", help="把待发/失败的条目全部作废")
-    ap.add_argument("--retry-held", action="store_true", help="把 held/unknown 记录重新入队后退出，不发送")
+    ap.add_argument("--retry-held", action="store_true", help="把普通 held/unknown 记录重新入队；未完成首句需先核对")
+    ap.add_argument('--resolve-welcome', help='停客户端、核对实际消息后，处理此会话暂停的首句；本次不发送')
+    ap.add_argument('--confirmed-parts', type=int, help='与 --resolve-welcome 配合，人工核实已收到的连续段数')
     ap.add_argument("--flush-receipts", action="store_true", help="仅补传人工回执后退出，不操作企微")
     ap.add_argument("--device-code", default=argparse.SUPPRESS, help="设备编号，覆盖 config.json（心跳路径参数）")
     args = ap.parse_args()
+    if bool(args.resolve_welcome) != (args.confirmed_parts is not None):
+        ap.error('--resolve-welcome 与 --confirmed-parts 必须同时填写')
+    if args.resolve_welcome and (args.list or args.reset or args.retry_held or args.flush_receipts):
+        ap.error('首句核对不能与其他维护命令混用')
 
     # 单实例：只要这次运行会碰企微（发消息 / 抢前台），就必须过同一把锁。
     # 这些命令不发送、不按键鼠，允许并行：
@@ -1828,6 +2005,17 @@ def main() -> int:
     cfg = ensure_registration(cfg, ROOT / "config.json")
 
     rlog.init()
+    if args.resolve_welcome:
+        if cfg['dry_run']:
+            log('DRY-RUN，未修改首句记录')
+            return 0
+        try:
+            rlog.resolve_welcome(args.resolve_welcome, args.confirmed_parts)
+        except ValueError as exc:
+            log(f'首句核对失败：{exc}')
+            return 2
+        log('首句核对已保存；本次未初始化企微、未发送，启动客户端后只处理剩余段落')
+        return 0
     # 媒体目录每次启动确保存在（G2：C:\agent\media，不存在即创建）
     try:
         core_send.ensure_media_dir()
@@ -1874,6 +2062,7 @@ def main() -> int:
     store.refresh()
 
     if args.reset:
+        rlog.cancel_welcomes()
         n = 0
         for it in rlog.pending(include_failed=True, limit=5000):
             rlog.mark_skipped(it["message_id"], "手动 reset")

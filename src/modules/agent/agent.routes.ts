@@ -540,9 +540,13 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
   const deviceScriptsRoutes = "/api/v1/agent/device-scripts";
   const scriptField = (body: Record<string, unknown>, key: string, max: number) =>
     typeof body[key] === "string" && String(body[key]).length <= max ? String(body[key]) : "";
-  app.get<{ Querystring: Record<string, string> }>(deviceScriptsRoutes, async (request) => {
+  app.get<{ Querystring: Record<string, string> }>(deviceScriptsRoutes, async (request, reply) => {
     const filters: string[] = [];
     const args: string[] = [];
+    if (request.auth?.role !== "admin") {
+      if (request.query?.stage === "greet") return reply.code(403).send({ detail: "Admin access required" });
+      filters.push("stage <> 'greet'");
+    }
     for (const key of ["device_code", "stage", "city"] as const) {
       const value = (request.query?.[key] ?? "").trim();
       if (value) { filters.push(`${key}=?`); args.push(value); }
@@ -555,13 +559,24 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     const deviceCode = scriptField(body, "device_code", 64);
     if (!deviceCode) return reply.code(422).send({ detail: "device_code required" });
     const stage = scriptField(body, "stage", 64) || "send_info";
-    if (!["ask_city", "send_info", "ask_interview", "collect", "done"].includes(stage)) {
+    if (!["greet", "ask_city", "send_info", "ask_interview", "collect", "done"].includes(stage)) {
       return reply.code(422).send({ detail: "Invalid stage" });
     }
     const city = scriptField(body, "city", 64);
     const title = scriptField(body, "title", 200);
     const content = scriptField(body, "content", 20000);
     const status = body.status === "disabled" ? "disabled" : "enabled";
+    if (stage === "greet") {
+      if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin access required" });
+      if (typeof body.content !== "string" || body.content.length > 20000) return reply.code(422).send({ detail: "content must be text within 20000 characters" });
+      if (city) return reply.code(422).send({ detail: "每个企微号只配置一套招聘介绍，city 必须为空" });
+      if (!db.prepare("SELECT id FROM agent_devices WHERE json_extract(data_json,'$.device_code')=?").get(deviceCode)) {
+        return reply.code(422).send({ detail: "device not found" });
+      }
+      if (status === "enabled" && !content.split(/^[ \t]*---[ \t]*\r?$/m).some((part) => part.trim())) {
+        return reply.code(422).send({ detail: "请填写至少一条招聘介绍" });
+      }
+    }
     const now = new Date().toISOString();
     db.prepare(`INSERT INTO device_scripts(device_code,city,stage,title,content,status,created_at,updated_at)
       VALUES (?,?,?,?,?,?,?,?)
@@ -571,6 +586,8 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     return db.prepare("SELECT * FROM device_scripts WHERE device_code=? AND stage=? AND city=?").get(deviceCode, stage, city);
   });
   app.delete<{ Params: { id: string } }>(`${deviceScriptsRoutes}/:id`, async (request, reply) => {
+    const row = db.prepare("SELECT stage FROM device_scripts WHERE id=?").get(Number(request.params.id));
+    if (row?.stage === "greet" && request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin access required" });
     const result = db.prepare("DELETE FROM device_scripts WHERE id=?").run(Number(request.params.id));
     return result.changes ? { ok: true } : reply.code(404).send({ detail: "Not Found" });
   });

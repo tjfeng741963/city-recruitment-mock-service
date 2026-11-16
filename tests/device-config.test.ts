@@ -138,6 +138,43 @@ describe("device config distribution", () => {
     expect((await configOf("local-device-001")).statusCode).toBe(200);
   });
 
+  it("keeps recruitment introductions isolated per account and preserves updates and disabled text", async () => {
+    await app.inject({ method: "POST", url: "/api/v1/agent/devices", headers: admin,
+      payload: { device_code: "intro-b", device_name: "另一个企微号" } });
+    const post = (payload: object, headers = admin) => app.inject({ method: "POST", url: "/api/v1/agent/device-scripts", headers, payload });
+    const content = "本号工作内容\n---\n本号班次与福利\n---\n本号面试要求";
+    const first = await post({ device_code: "local-device-001", stage: "greet", content });
+    expect(first.statusCode).toBe(200);
+    await post({ device_code: "intro-b", stage: "greet", content: "另一企微号的招聘介绍" });
+    const config = await configOf("local-device-001");
+    expect(config.json().scripts).toEqual([expect.objectContaining({ stage: "greet", content })]);
+    const pair = await app.inject({ method: "POST", url: "/api/v1/bridge/devices/intro-b/pair", headers: admin });
+    const other = await configOf("intro-b", { authorization: `Bearer ${pair.json().device_token}` });
+    expect(other.json().scripts).toEqual([expect.objectContaining({ content: "另一企微号的招聘介绍" })]);
+    const updated = await post({ device_code: "local-device-001", stage: "greet", content: "已修改介绍", status: "disabled" });
+    expect(updated.json()).toMatchObject({ id: first.json().id, content: "已修改介绍", status: "disabled" });
+    expect((await configOf("local-device-001")).json().scripts).toEqual([]);
+    const reread = await app.inject({ method: "GET", url: "/api/v1/agent/device-scripts?device_code=local-device-001&stage=greet", headers: admin });
+    expect(reread.json().items).toEqual([expect.objectContaining({ content: "已修改介绍", status: "disabled" })]);
+    expect((await configOf("intro-b", { authorization: `Bearer ${pair.json().device_token}` })).json().scripts).toHaveLength(1);
+  });
+
+  it("validates per-account introductions and restricts editing to admins", async () => {
+    const post = (payload: object, headers = admin) => app.inject({ method: "POST", url: "/api/v1/agent/device-scripts", headers, payload });
+    const payload = { device_code: "local-device-001", stage: "greet", content: "工作介绍" };
+    expect((await post({ ...payload, device_code: "missing-device" })).statusCode).toBe(422);
+    expect((await post({ ...payload, city: "广州" })).statusCode).toBe(422);
+    expect((await post({ ...payload, content: "\n---\n " })).statusCode).toBe(422);
+    expect((await post({ ...payload, content: "x".repeat(20001) })).statusCode).toBe(422);
+    const login = await app.inject({ method: "POST", url: "/api/v1/auth/login", payload: { username: "local-recruiter", password: "local-demo-only" } });
+    const recruiter = { authorization: `Bearer ${login.json().access_token}` };
+    const saved = await post(payload);
+    expect((await post(payload, recruiter)).statusCode).toBe(403);
+    expect((await app.inject({ method: "GET", url: "/api/v1/agent/device-scripts?stage=greet", headers: recruiter })).statusCode).toBe(403);
+    expect((await app.inject({ method: "GET", url: "/api/v1/agent/device-scripts", headers: recruiter })).json().items).toEqual([]);
+    expect((await app.inject({ method: "DELETE", url: `/api/v1/agent/device-scripts/${saved.json().id}`, headers: recruiter })).statusCode).toBe(403);
+  });
+
   it("upserts device scripts by (device_code, stage, city) and supports list/delete", async () => {
     const post = (payload: object) => app.inject({ method: "POST", url: "/api/v1/agent/device-scripts", headers: admin, payload });
     const first = await post({ device_code: "local-device-001", stage: "send_info", city: "深圳", title: "v1", content: "第一版话术" });

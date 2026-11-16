@@ -114,6 +114,42 @@ def exercise(run_dir, checks, ready=None):
         passed("disable-and-audited-rollback-runtime")
         history = req(n, "/api/v1/kb-publish/history", auth=na)
         require(len(history["items"]) == 4, "Unexpected publication history")
+        # Console save → device config → actual reply service, without a customer message.
+        welcome_parts = ["你好，欢迎咨询招聘岗位。", "我先帮你了解一下。", "请问你现在在哪个城市？"]
+        welcome_content = "\n---\n".join(welcome_parts)
+        saved = req(n, "/api/v1/position-scripts", {"position_id": 0, "stage": "greet", "title": "临时测试欢迎语", "content": welcome_content}, na)
+        reread = req(n, "/api/v1/position-scripts?position_id=0", auth=na)["items"]
+        require(len(reread) == 1 and reread[0]["content"] == welcome_content, "Welcome save/readback mismatch")
+        req(n, "/api/v1/agent/devices", {"device_code": "isolated-welcome", "device_name": "隔离欢迎语测试", "vertical_id": category["id"]}, na)
+        cfg = req(n, "/api/v1/bridge/devices/isolated-welcome/config", auth={"X-Profile-Token": token})
+        require(any(row["position_id"] == 0 and row["content"] == welcome_content for row in cfg["position_scripts"]), "Welcome not distributed")
+        greeting = req(p, "/api/v1/flow/greet", {"session_key": "isolated-welcome-session", "device_code": "isolated-welcome"}, pa)
+        require(greeting["parts"] == welcome_parts and not greeting["skipped"], "Runtime did not use configured welcome parts")
+        state = req(p, "/api/v1/flow/state?session_key=isolated-welcome-session", auth=pa)
+        require(state["turns"] == 0 and state["slots"]["scripted_sent"]["greet"], "Welcome fabricated a customer message or lost bookkeeping")
+        disabled = req(n, "/api/v1/position-scripts", {"position_id": 0, "stage": "greet", "content": welcome_content, "status": "disabled"}, na)
+        require(disabled["id"] == saved["id"], "Welcome update inserted duplicate row")
+        require(not any(row["position_id"] == 0 for row in req(n, "/api/v1/bridge/devices/isolated-welcome/config", auth={"X-Profile-Token": token})["position_scripts"]), "Disabled welcome still distributed")
+        passed("configured-welcome-save-device-runtime-parts-and-disable")
+        # Each account has its own fixed recruitment introduction; general/position
+        # greetings cannot override it. No real device process exists in this harness.
+        intro_parts = ["工作内容：测试岗位说明", "工作时间：测试排班", "岗位福利与面试要求：测试说明"]
+        intro = req(n, "/api/v1/agent/device-scripts", {"device_code": "isolated-welcome", "stage": "greet", "content": "\n---\n".join(intro_parts)}, na)
+        req(n, "/api/v1/agent/devices", {"device_code": "isolated-other-intro", "device_name": "另一企微测试号", "vertical_id": category["id"]}, na)
+        other_parts = ["另一账号的工作介绍", "另一账号的面试要求"]
+        req(n, "/api/v1/agent/device-scripts", {"device_code": "isolated-other-intro", "stage": "greet", "content": "\n---\n".join(other_parts)}, na)
+        first = req(p, "/api/v1/flow/greet", {"session_key": "isolated-device-intro", "device_code": "isolated-other-intro"}, pa)
+        require(first["parts"] == other_parts, "Device introduction leaked across accounts or lost message order")
+        # isolated-welcome was cached earlier without greet. A fresh second device
+        # exercises runtime delivery; config readback checks the edited first device.
+        cfg = req(n, "/api/v1/bridge/devices/isolated-welcome/config", auth={"X-Profile-Token": token})
+        require(next(row for row in cfg["scripts"] if row["stage"] == "greet")["content"] == "\n---\n".join(intro_parts), "Device intro not distributed")
+        reread = req(n, "/api/v1/agent/device-scripts?device_code=isolated-welcome&stage=greet", auth=na)["items"]
+        require(len(reread) == 1 and reread[0]["id"] == intro["id"], "Per-device intro readback mismatch")
+        stopped_intro = req(n, "/api/v1/agent/device-scripts", {"device_code": "isolated-welcome", "stage": "greet", "content": "\n---\n".join(intro_parts), "status": "disabled"}, na)
+        require(stopped_intro["id"] == intro["id"], "Device intro update inserted duplicate row")
+        require(not any(row["stage"] == "greet" for row in req(n, "/api/v1/bridge/devices/isolated-welcome/config", auth={"X-Profile-Token": token})["scripts"]), "Disabled device intro distributed")
+        passed("per-account-recruitment-intro-isolation-readback-and-disable")
         if ready:
             ready({"node_url": n, "python_url": p, "username": "local-admin", "password": services.password})
     finally:
