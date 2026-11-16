@@ -10,8 +10,8 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from backend.app.api_flow import FlowAnswerIn
-from backend.app.services import agent_session
+from app.api_flow import FlowAnswerIn
+from app.services import agent_session
 
 SERVER = [
     {"role": "user", "content": "你好", "ts": "t1"},
