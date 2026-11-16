@@ -49,6 +49,9 @@ jobs:
         working-directory: frontend
         run: npm run build
 
+      - name: Check migration numbers
+        run: node scripts/check-migrations.mjs
+
       - name: Typecheck backend
         run: npx tsc --noEmit
 
@@ -74,8 +77,42 @@ jobs:
       - name: Run isolated HTTP acceptance
         run: python scripts/acceptance-smoke.py
 
+      - name: Verify FAQ publication over both HTTP services
+        run: python scripts/kb-publication-smoke.py
+
+  test-postgres-publication:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: kb_publish_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres-ci-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install backend dependencies
+        run: |
+          python -m pip install uv
+          uv pip install --system -r backend/pyproject.toml
+      - name: Verify actual PostgreSQL publication transactions
+        env:
+          PYTHONUTF8: "1"
+          KB_PUBLICATION_TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres-ci-only@127.0.0.1:5432/kb_publish_test
+        run: python scripts/kb-publication-postgres.py
+
   deploy:
-    needs: test
+    needs: [test, test-postgres-publication]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
@@ -102,16 +139,85 @@ jobs:
           case "$revision" in ''|*[!0-9a-f]*) exit 2;; esac
           cd /srv/apps/city-recruitment-mock-service/source
           git fetch origin main
+          # 服务器是测试环境、代码只应来自 git，所以这里直接丢弃本地改动。
+          # 2026-11-14 之前用 git checkout --detach，一旦服务器上有人手工改过
+          # 跟踪文件或留下未跟踪文件，checkout 会以 "would be overwritten" 中止，
+          # 导致部署连续失败、线上一直跑旧镜像。
+          #
+          # clean 的 -e 必须列全所有不进 git 的运行数据（.gitignore 里是 .env*）：
+          #   .env.production / .env.api  服务配置，删了容器起不来
+          #   data / node_modules         数据与构建缓存
+          # 2026-11-14 曾漏掉 .env.api，-x 直接把它删了，部署挂在
+          # "env file .../.env.api not found"。现在用 .env* 通配兜住全部。
+          #
+          # 先修属主：历史上 root 身份在宿主机上操作过（sudo git / root 容器写过
+          # bind mount），public/ 等路径归 root，deploy 用户无写权限，
+          # git reset 会以 "unable to unlink old 'public/index.html':
+          # Permission denied" 失败。deploy 在 docker 组里，借 root 容器改回来。
+          # data/ 与 node_modules 跳过：前者是应用用户的 SQLite 与备份，
+          # 改成 deploy 属主会让应用失去写权限；后者是构建缓存。
+          docker run --rm --user root --entrypoint sh -v "$PWD:/src" \
+            -e OWNER="$(id -u):$(id -g)" node:22.21.1-bookworm-slim \
+            -c 'cd /src && for f in * .[!.]*; do case "$f" in data|node_modules|.|..) continue;; esac; chown -R "$OWNER" "$f" 2>/dev/null || true; done'
+          git reset --hard HEAD >/dev/null 2>&1 || true
+          # -e 用 .env* 通配：.gitignore 里就是这一条，`.env.production`、`.env.api`
+          # 都是服务启动必需（漏一个 compose 就报 "env file not found"）。
+          git clean -fdx -e '.env*' -e data -e node_modules >/dev/null 2>&1 || true
           git checkout --detach "$revision"
+          # 核对：清理后工作区必须干净，否则宁可报错也不要带脏代码去 build
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "working tree still dirty after reset/clean:" >&2
+            git status --porcelain >&2
+            echo "hint: 上面列出的文件多半仍是 root 属主，手工 chown 后再部署" >&2
+            exit 1
+          fi
+          echo "deploying revision: $(git rev-parse --short HEAD) $(git log -1 --format=%s)"
+          # .env* 被误删时的自愈：2026-11-14 曾因 clean -x 删掉 .env.api，
+          # compose 直接报 "env file ... not found" 让整个部署失败。
+          # 旧容器还活着，它的 Config.Env 就是当时读进去的 APP_* 变量，
+          # 直接读回来重建成文件即可。读不到就明确失败，不猜数据库密码。
+          for envf in .env.production .env.api; do
+            if [ ! -f "$envf" ]; then
+              echo "WARN: $envf missing, trying to rebuild from running container" >&2
+              case "$envf" in
+                .env.api) cname=city-recruitment-api; prefix=APP_ ;;
+                *)        cname=city-recruitment-app; prefix=REA_ ;;
+              esac
+              docker inspect "$cname" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+                | grep -E "^${prefix}" > "$envf.tmp" || true
+              if [ -s "$envf.tmp" ]; then
+                mv "$envf.tmp" "$envf"
+                chmod 600 "$envf"
+                echo "rebuilt $envf ($(wc -l < "$envf") vars) from $cname" >&2
+              else
+                rm -f "$envf.tmp"
+                echo "FATAL: $envf missing and no running $cname to rebuild from; restore it manually" >&2
+                exit 1
+              fi
+            fi
+          done
           stamp=$(date +%Y%m%d-%H%M%S)
           cp -p .env.production ".env.production.pre-$revision-$stamp"
           # 备份用 VACUUM INTO 并校验表数：之前用 node:sqlite 的 backup() 产出过
           # 只有文件头、0 页的空壳，而 PRAGMA integrity_check 对空库仍返回 ok，
           # 部署脚本据此以为备份成功。现在用独立脚本，校验不过直接让部署失败。
           bak="data/app.sqlite.pre-$revision-$stamp.bak"
+          # data/ 归容器内应用用户（uid 1000）所有、权限 700，deploy 用户进不去，
+          # 所以备份容器必须用 root 才能读到 app.sqlite。
+          # 但产物会变成 root 属主，导致下次部署清理/轮转失败，
+          # 因此备份完把它 chown 回 app.sqlite 的属主（不硬编码 uid，随实际而定）。
           docker run --rm -v "$PWD/data:/data" -v "$PWD/scripts:/scripts:ro" \
             node:22.21.1-bookworm-slim \
             node /scripts/backup-sqlite.mjs /data/app.sqlite "/data/app.sqlite.pre-$revision-$stamp.bak"
+          # 用通配匹配刚生成的备份，不在 sh -c 里拼 $revision/$stamp——
+          # 单引号会阻止外层展开，内层又没有这两个变量，拼出来是 pre--.bak。
+          # 备份刚生成且文件名带 revision，通配只会命中它一个。
+          # 没有命中就显式失败：宁可部署报错，也不要留下 root 属主的备份文件。
+          docker run --rm -v "$PWD/data:/data" node:22.21.1-bookworm-slim \
+            sh -c 'set -- /data/app.sqlite.pre-'"$revision"'*.bak
+                   [ -e "$1" ] || { echo "backup file not found for $0" >&2; exit 1; }
+                   chown --reference=/data/app.sqlite "$1"
+                   echo "backup owner aligned: $(stat -c %U:%G "$1")"'
           docker compose -f docker-compose.production.yml build
           # 容器名固定（container_name），但历史上有人手工 docker run 起过同名容器、
           # 没有 compose 标签：compose 发现名字被占又不认作自己的，直接报
@@ -155,6 +261,79 @@ jobs:
             if [ "$i" -eq 45 ]; then
               echo "health check failed: api not healthy within 90s (status=$status)" >&2
               docker compose -f docker-compose.production.yml logs --tail 80 api >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          REMOTE
+
+      # ─────────────────────────────────────────────────────────────
+      # python-backend：systemd 托管、真正对外服务 8090 的那一份。
+      # 它不参与上面 source/ 的部署路径，历史上完全靠手工更新，
+      # 2026-11-14 曾因此落后 origin/main 61 个提交且压着未提交改动。
+      # 这里把它纳入流水线：暂停 → 修正属主 → 硬同步 → 依赖检查 →
+      # 重启 → 健康检查，失败自动回滚到上一个提交。
+      # ─────────────────────────────────────────────────────────────
+      - name: Deploy systemd backend
+        env:
+          SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes "$SSH_USER@$SSH_HOST" \
+            sh -s -- "$GITHUB_SHA" <<'REMOTE'
+          set -eu
+          revision=$1
+          case "$revision" in ''|*[!0-9a-f]*) exit 2;; esac
+          PB=/srv/apps/city-recruitment-mock-service/python-backend
+          cd "$PB"
+          old=$(git rev-parse HEAD)
+          echo "python-backend: $(git rev-parse --short "$old") -> $(echo "$revision" | cut -c1-7)"
+
+          # 属主修正：历史上有 root 属主的文件，deploy 没有免密 sudo 改不了，
+          # 借 root 容器改（与上面 source 部署同一手法）。
+          # .venv / .git / data 跳过：前者几万个文件，后者是运行数据。
+          docker run --rm --user root --entrypoint sh -v "$PB:/pb" \
+            -e OWNER="$(id -u):$(id -g)" node:22.21.1-bookworm-slim \
+            -c 'cd /pb && for f in * .[!.]*; do case "$f" in .venv|.git|data|.|..) continue;; esac; chown -R "$OWNER" "$f" 2>/dev/null || true; done'
+
+          git fetch origin main --quiet
+          git reset --hard "$revision" >/dev/null
+          # 干净才继续：带脏文件去重启等于跑未知代码
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "python-backend working tree dirty after reset:" >&2
+            git status --porcelain >&2
+            exit 1
+          fi
+
+          # 依赖没变就别动 venv（uv sync 会重算解析，慢且可能拉网）
+          if git diff --quiet "$old" "$revision" -- backend/pyproject.toml backend/uv.lock 2>/dev/null; then
+            echo "deps unchanged, skip sync"
+          else
+            echo "deps changed, syncing"
+            if command -v uv >/dev/null 2>&1; then
+              ( cd backend && uv sync --frozen )
+            else
+              echo "WARN: uv not on PATH, dependency sync skipped" >&2
+            fi
+          fi
+
+          # 版本没变就不重启，避免每次推送都无谓中断一次服务
+          if [ "$old" = "$revision" ]; then
+            echo "already at this revision, no restart"
+            exit 0
+          fi
+
+          sudo -n systemctl restart recruit-backend
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8090/healthz 2>/dev/null; then
+              echo "python-backend healthy at $(git rev-parse --short HEAD)"
+              exit 0
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "health check failed after 60s, rolling back to $(echo "$old" | cut -c1-7)" >&2
+              git reset --hard "$old" >/dev/null
+              sudo -n systemctl restart recruit-backend
+              echo "rolled back; deploy job fails so the problem is visible" >&2
               exit 1
             fi
             sleep 2

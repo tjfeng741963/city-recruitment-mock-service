@@ -178,9 +178,14 @@ def exercise(services: Services, checks: list[dict]) -> None:
     require(node(path + "/outbound", observed, nh)["created"] is True, "Outbound observation was not created")
     require(node(path + "/outbound", observed, nh)["created"] is False, "Outbound replay was not deduplicated")
     message_route = f"/api/v1/agent/messages?device_code={code}&customer_id={customer}"
-    require(len(node(message_route, headers=na)["items"]) == 2, "Bridge replay created extra bubbles")
+    # 未读要在拉消息之前读：拉消息本身是「打开会话 = 已读」的动作，会把 unread 清零。
+    # 这条断言要证明的是「出站观察不会把未读加一」，所以必须先取再读消息。
     conv = node(f"/api/v1/agent/conversations?device_code={code}", headers=na)["items"][0]
     require(conv["unread"] == 1, "Outbound observations changed unread count")
+    require(len(node(message_route, headers=na)["items"]) == 2, "Bridge replay created extra bubbles")
+    # 打开会话后必须落库已读，否则 15s 轮询会把红点读回来
+    conv_after = node(f"/api/v1/agent/conversations?device_code={code}", headers=na)["items"][0]
+    require(conv_after["unread"] == 0, "Opening a conversation did not mark it read")
     require(node(path + "/claim", {}, nh)["command"] is None, "Observe-only ingest generated an automatic command")
     passed("bridge-bidirectional-observation-without-automatic-send")
 

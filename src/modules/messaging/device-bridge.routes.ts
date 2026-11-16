@@ -9,6 +9,8 @@ import { MessageEventService } from "./message-events.js";
 import { createMessageChannelProvider } from "./message-channel-provider.js";
 import { NOOP_NOTIFIER, type StreamNotifier } from "./stream-events.js";
 import { createDifyProvider } from "../dify/create-provider.js";
+import { loadFactories, readDeviceFactoryIds } from "../../shared/device-factories.js";
+import { latestPositionScriptStamp, loadPositionScripts } from "../../shared/media-assets.js";
 
 type DeviceRequest = { Params: { code: string }; Body: Record<string, unknown> };
 const field = (body: Record<string, unknown>, key: string, max = 1000) => typeof body[key] === "string" && String(body[key]).length <= max ? String(body[key]) : "";
@@ -24,6 +26,10 @@ const DEVICE_CODE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 // 网页可远程切换的回复来源。fixed 表示不调后端、用本地固定文本。
 // 只在 data_json.brain_mode 命中枚举时下发，避免脏值覆盖客户端本地配置。
 const BRAIN_MODES = new Set(["kb", "flow", "fixed"]);
+
+// 岗位口径：subway 只推地铁/安检岗（2026-11-12 运营「暂时按地铁的来」），
+// all 不过滤。只在枚举内时下发，脏值不下发 → 客户端用空串跟随本地默认。
+const JOB_SCOPES = new Set(["subway", "all"]);
 
 function matchesRegisterKey(supplied: string, expected: string): boolean {
   const a = Buffer.from(supplied, "utf8");
@@ -98,8 +104,83 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
     try { params = JSON.parse(device.data_json || "{}") as Record<string, unknown>; } catch { params = {}; }
     const scripts = db.prepare("SELECT stage,city,title,content FROM device_scripts WHERE device_code=? AND status='enabled' ORDER BY id")
       .all(code) as Array<{ stage: string; city: string; title: string; content: string }>;
+    // 人工接管名单：客户端回复前查这里，命中就跳过（网页上点「接管」= 让 AI 别回）。
+    // 用 external_conversation_id 而不是 customer_id —— 客户端的会话标识是企微
+    // 会话 ID，落到库里就是这一列（见 DeviceBridgeStore.contact）。
+    const takeoverRows = db.prepare(
+      "SELECT external_conversation_id,updated_at FROM agent_conversations WHERE device_code=? AND takeover=1 AND external_conversation_id IS NOT NULL AND external_conversation_id<>''",
+    ).all(code) as Array<{ external_conversation_id: string; updated_at: string | null }>;
+    const takeoverSessions = takeoverRows.map((row) => row.external_conversation_id);
+    const takeoverUpdated = takeoverRows.reduce<string | null>(
+      (latest, row) => (stampOf(row.updated_at) > stampOf(latest) ? row.updated_at : latest),
+      null,
+    );
+    // 已流失名单：客户说「我不去了」后由 8090 标记（stage=gave_up →
+    // recruit_status=disqualified）。客户端命中就整轮不碰——不再发任何消息。
+    // 与接管名单分开下发：语义不同（接管可交还，流失要人工恢复）。
+    const abandonedRows = db.prepare(
+      "SELECT external_conversation_id,updated_at FROM agent_conversations WHERE device_code=? AND recruit_status='disqualified' AND external_conversation_id IS NOT NULL AND external_conversation_id<>''",
+    ).all(code) as Array<{ external_conversation_id: string; updated_at: string | null }>;
+    const abandonedSessions = abandonedRows.map((row) => row.external_conversation_id);
+    const abandonedUpdated = abandonedRows.reduce<string | null>(
+      (latest, row) => (stampOf(row.updated_at) > stampOf(latest) ? row.updated_at : latest),
+      null,
+    );
     const scriptUpdated = (db.prepare("SELECT MAX(updated_at) AS at FROM device_scripts WHERE device_code=?").get(code) as { at: string | null }).at;
-    const newer = stampOf(scriptUpdated) > stampOf(device.updated_at) ? (scriptUpdated ?? "") : (device.updated_at ?? "");
+    // 岗位话术也参与版本号：运营改了岗位话术，客户端必须重新拉配置才会换词。
+    const positionScriptUpdated = latestPositionScriptStamp(db);
+    const newer = [scriptUpdated, positionScriptUpdated, device.updated_at, takeoverUpdated, abandonedUpdated]
+      .reduce<string | null>((latest, value) => (stampOf(value) > stampOf(latest) ? (value ?? null) : latest), null) ?? "";
+    /**
+     * 招工方 id 兜底解析：设备只绑了厂名、没绑 employer_id 时，按厂名/别名反查。
+     *
+     * 为什么要兜底：客户真实资料里最有价值的问答（华荻要查纹身、利口福要健康证、
+     * 松下不查纹身）全部挂在 employer 作用域。设备没绑 employer_id，8090 的
+     * kb_faq.lookup 就直接跳过这一层落到 global，只能拿到 {welfare} 这类占位符——
+     * 而岗位数据里没有这些字段，渲染出来是空串，客户问了等于没答。
+     *
+     * 只读、只补值：data_json 里显式写了 employer_id 就以它为准，绝不覆盖。
+     */
+    const factoryName = typeof params.factory_name === "string" ? params.factory_name : "";
+    const resolveEmployerId = (): number => {
+      if (Number.isInteger(params.employer_id)) return Number(params.employer_id);
+      const name = factoryName.trim();
+      if (!name) return 0;
+      const byAlias = db.prepare(
+        `SELECT e.id AS id FROM employer_alias a JOIN employer e ON e.id = a.employer_id
+         WHERE a.alias = ? ORDER BY a.weight DESC, e.id LIMIT 1`,
+      ).get(name) as { id: number } | undefined;
+      if (byAlias) return Number(byAlias.id);
+      const byName = db.prepare(
+        "SELECT id FROM employer WHERE display_name = ? OR short_name = ? ORDER BY id LIMIT 1",
+      ).get(name, name) as { id: number } | undefined;
+      return byName ? Number(byName.id) : 0;
+    };
+    /**
+     * 设备 → 工厂「多选」绑定（契约 §6）：一个号可以同时接几个厂的单。
+     * 下发 id 列表给 8090 做 `sp.factory_id IN (...)` 过滤，厂名给客户端展示。
+     * 脏数据（非整数 / 重复 / 库里没有）在 readDeviceFactoryIds 里已经过滤干净。
+     */
+    const boundFactoryIds = readDeviceFactoryIds(db, params.factory_ids);
+    const boundFactories = loadFactories(db, boundFactoryIds).map((factory) => ({ id: factory.id, name: factory.name }));
+    /**
+     * 岗位话术（契约 §5）：只下发本设备已绑定工厂的岗位话术；没绑厂 = 通用设备，
+     * 下发全部 enabled 话术（否则新设备刚上线会一条话术都没有）。
+     * 每条 media 已按 media_assets 补齐 sha256，查不到的资源被丢弃。
+     */
+    const positionScripts = loadPositionScripts(db, boundFactoryIds);
+    /**
+     * employer_id 多厂口径：显式配了就以它为准；没配且绑了多个厂就回 0。
+     *
+     * 为什么要回 0：纹身/健康证/体检这类口径全挂在 employer 作用域，多厂设备如果
+     * 拿第一个厂的 employer_id 去查 KB，第二个厂的客户会被按第一个厂的规矩回答——
+     * 答错比不答更糟。回 0 让 8090 退回 global，至少不会串厂。
+     */
+    const employerIdForConfig = (): number => {
+      if (Number.isInteger(params.employer_id)) return Number(params.employer_id);
+      if (boundFactoryIds.length > 1) return 0;
+      return resolveEmployerId();
+    };
     return {
       version: newer,
       interval_seconds: positive(params.interval_seconds, 20),
@@ -108,16 +189,32 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
       // brain.mode 允许网页远程切换（kb 知识库 / flow 流程编排 / fixed 固定文本）。
       // 客户端检测到变化后会重建 Brain 实例；缺省或非法值不下发，保留客户端本地配置。
       ...(BRAIN_MODES.has(String(params.brain_mode)) ? { brain_mode: String(params.brain_mode) } : {}),
+      // 人工接管中的会话：客户端 drain 时跳过，避免人工和 AI 同时往一个客户发消息。
+      takeover_sessions: takeoverSessions,
+      // 已流失的会话：客户说「我不去了」，客户端整轮不碰，不再发任何消息。
+      abandoned_sessions: abandonedSessions,
       // 设备绑定的工厂/城市（契约 docs/对齐-设备工厂绑定与资料导入.md §1）：
       // 8090 拿去做知识库过滤，data_json 没绑就回空串 = 通用/不限。
-      factory_name: typeof params.factory_name === "string" ? params.factory_name : "",
+      factory_name: factoryName,
+      // 多厂绑定：factory_ids 供 8090 做岗位/知识库过滤，factories 供客户端展示。
+      // 没绑 = 两个都空，消费方按「不限」处理（与老字段 factory_name 空串同义）。
+      factory_ids: boundFactoryIds,
+      factories: boundFactories,
       city: typeof params.city === "string" ? params.city : "",
       // 知识库 v3：品类与招工方 id（docs/知识库方案-流程驱动-20261113.md §3.7）。
       // 绑了 id 就走 kb_faq 硬过滤（别家厂的问答不进候选集）；
       // 没绑回 0，8090 退回按 factory_name 匹配的旧路径。
       vertical_id: Number.isInteger(params.vertical_id) ? Number(params.vertical_id) : 0,
-      employer_id: Number.isInteger(params.employer_id) ? Number(params.employer_id) : 0,
+      // 显式值优先；单厂且只绑了厂名时按厂名/别名反查；多厂未显式配置回 0（见上）
+      employer_id: employerIdForConfig(),
+      // 岗位口径（2026-11-13）：subway = 只推地铁/安检岗，all = 不过滤，
+      // 空串 = 跟随 8090 的环境变量默认（FLOW_ONLY_SUBWAY，当前默认 1）。
+      // 放 data_json 里让运营在网页改，不必登服务器改环境变量重启。
+      ...(JOB_SCOPES.has(String(params.job_scope)) ? { job_scope: String(params.job_scope) } : {}),
       scripts,
+      // 岗位话术：按岗位配置一次、所有接这个岗位的设备共用（迁移 030）。
+      // 与 scripts（按设备+stage+城市）并存，客户端优先用岗位话术。
+      position_scripts: positionScripts,
     };
   });
   app.get<{ Params: { code: string } }>("/api/v1/bridge/devices/:code", async (req, reply) => {
@@ -183,6 +280,52 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
       return reply.code(result.reply_status === "failed" ? 502 : 200).send({ ...result, customer_id: customerId });
     });
   }
+  /**
+   * 登录二维码：云端机器上的企微掉登录后，把扫码窗截图送到网页，让用户用手机扫。
+   *
+   * 为什么必须服务端中转：机器在云端（134.175.40.31 这类专用机），扫码的人和
+   * 运营都看不到那块屏幕。没有这条路，每次风控掉线只能等现场有人去看屏幕。
+   *
+   * 鉴权：设备用桥接令牌（Bearer），网页用用户 JWT —— 两条独立的读写路径。
+   * 为什么不开成公开接口：二维码等同于登录凭证，拿到它就能顶替这个号登录。
+   */
+  app.post<{ Params: { code: string }; Body: Record<string, unknown> }>(
+    "/api/v1/bridge/devices/:code/login-qr",
+    async (req, reply) => {
+      const code = req.params.code;
+      const token = (req.headers.authorization ?? "").replace(/^Bearer /, "");
+      if (!store.authenticate(code, token)) return reply.code(401).send({ detail: "Invalid device token" });
+      if (!store.enabled(code)) return reply.code(403).send({ detail: "Device disabled" });
+      const body = req.body ?? {};
+      const image = typeof body.image_b64 === "string" ? body.image_b64 : "";
+      // 一张 400x560 的二维码 PNG base64 约 20-60KB；超过 2MB 说明客户端传的是
+      // 原始位图或整屏截图，直接拒绝，免得把 SQLite 撑爆。
+      if (!image || image.length > 2_000_000) {
+        return reply.code(422).send({ detail: "image_b64 required (max 2000000 chars)" });
+      }
+      const capturedAt = typeof body.captured_at === "string" && body.captured_at
+        ? body.captured_at
+        : new Date().toISOString();
+      store.saveLoginQr(
+        code,
+        image,
+        Number(body.width ?? 0) || 0,
+        Number(body.height ?? 0) || 0,
+        capturedAt,
+      );
+      return { ok: true };
+    },
+  );
+  app.delete<{ Params: { code: string } }>(
+    "/api/v1/bridge/devices/:code/login-qr",
+    async (req, reply) => {
+      const code = req.params.code;
+      const token = (req.headers.authorization ?? "").replace(/^Bearer /, "");
+      if (!store.authenticate(code, token)) return reply.code(401).send({ detail: "Invalid device token" });
+      store.clearLoginQr(code);
+      return { ok: true };
+    },
+  );
   // 返回 store 供 server.ts 挂 30s 掉线清扫定时器。
   return store;
 }

@@ -1,5 +1,6 @@
 import Fastify, { type FastifyError } from "fastify";
 import fastifyStatic from "@fastify/static";
+import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { DatabaseSync } from "node:sqlite";
@@ -13,8 +14,10 @@ import { registerAuthRoutes } from "./auth/auth.routes.js";
 import { AUTH_INVALID, AUTH_MISSING } from "./auth/rbac.js";
 import { collectValidationErrors, matchContract } from "./shared/request-contracts.js";
 import { registerCoreRoutes } from "./modules/core/core.routes.js";
+import { registerPositionFactoryRoutes } from "./modules/core/position-factory.routes.js";
 import { registerGenericRoutes } from "./modules/generic/generic.routes.js";
 import { registerResourceRoutes } from "./modules/resources/resource.routes.js";
+import { registerKnowledgeCompatRoutes } from "./modules/agent/knowledge-compat.routes.js";
 import { registerFileRoutes } from "./modules/files/file.routes.js";
 import { registerAgentRoutes } from "./modules/agent/agent.routes.js";
 import { registerActivationRoutes } from "./modules/activation/activation.routes.js";
@@ -27,6 +30,8 @@ import { registerProfileRoutes } from "./modules/agent/profile.routes.js";
 import { registerJobRoutes } from "./modules/agent/profile.routes.js";
 import { registerUnknownQuestionRoutes } from "./modules/agent/unknown-questions.routes.js";
 import { registerKbV3Routes } from "./modules/agent/kb-v3.routes.js";
+import { registerKbPublishRoutes } from "./modules/agent/kb-publish.routes.js";
+import { registerPositionScriptRoutes } from "./modules/agent/position-scripts.routes.js";
 import { registerFollowupRoutes } from "./modules/agent/followup.js";
 import { EventBus, createStreamNotifier } from "./modules/messaging/stream-events.js";
 import { registerWeComRoutes } from "./modules/wecom/wecom.routes.js";
@@ -42,7 +47,16 @@ declare module "fastify" {
  * with real payloads while every other contract returned 403.
  */
 const DEVICE_TOKEN_ROUTES = new Set(["heartbeat", "claim", "receipts", "inbound", "outbound"].map(action => `POST /api/v1/bridge/devices/:code/${action}`)
-  .concat(["GET /api/v1/bridge/devices/:code/config"]));
+  .concat([
+    "GET /api/v1/bridge/devices/:code/config",
+    // 登录二维码：设备用自己的桥接令牌上传/清除，路由内 authenticate() 校验，
+    // 不走用户 JWT（客户端没有登录态）。网页读取走用户鉴权的 /api/v1/agent/... 那侧。
+    "POST /api/v1/bridge/devices/:code/login-qr",
+    "DELETE /api/v1/bridge/devices/:code/login-qr",
+    // 媒体下载由设备 token 或 X-Profile-Token 鉴权（路由内校验），
+    // 因此这里的 Bearer 不能当用户 JWT 解析，否则设备 token 会被判 401。
+    "GET /api/v1/agent/media/:name",
+  ]));
 const PUBLIC_ROUTES = new Set([
   "POST /api/v1/auth/login",
   "GET /api/v1/agent/reminder-config",
@@ -55,6 +69,8 @@ const PUBLIC_ROUTES = new Set([
   "POST /api/v1/bridge/devices/:code/register",
   // 8090 服务间按城市查岗位（X-Profile-Token 自校验）。
   "GET /api/v1/agent/jobs",
+  // 8090 服务间取城市清单，用于识别客户说的地名（X-Profile-Token 自校验）。
+  "GET /api/v1/agent/cities",
   ...DEVICE_TOKEN_ROUTES,
   "GET /api/v1/channels/wecom-kf/callback",
   "POST /api/v1/channels/wecom-kf/callback",
@@ -120,8 +136,21 @@ export function buildServer() {
   });
 
   app.register(fastifyStatic, { root: config.frontendDir(), wildcard: false });
+  // 上传文件访问：/uploads/<文件>。与前端静态目录分开（前端在 frontendDir），
+  // 因为上传目录在可写卷上（线上 /data/uploads），且需要跨重启保留。
+  // @fastify/static 要求 root 必须已存在，否则启动即抛错，所以先建目录。
+  mkdirSync(config.uploadsDir(), { recursive: true });
+  app.register(fastifyStatic, {
+    root: config.uploadsDir(),
+    prefix: "/uploads/",
+    decorateReply: false,
+  });
   registerAuthRoutes(app, auth);
   registerCoreRoutes(app, db);
+  // knowledge 的旧契约先由兼容层接管（读写 kb_faq，AI 实际回复用的表），
+  // 这样 registerResourceRoutes 里的 knowledge 会跳过，不会重复注册。
+  // 关掉兼容层（REA_KB_COMPAT=off）就回落到旧表 knowledge_items。
+  registerKnowledgeCompatRoutes(app, db);
   registerResourceRoutes(app, db);
   registerFileRoutes(app, db);
   registerAgentRoutes(app, db, notifier);
@@ -140,6 +169,10 @@ export function buildServer() {
   registerUnknownQuestionRoutes(app, db);
   // 知识库 v3 配置接口：品类 / 位置树 / 招工方 / 场景问答 / 模板包
   registerKbV3Routes(app, db);
+  registerKbPublishRoutes(app, db);
+  // 岗位话术 + 媒体资源库（迁移 030/031）：后台配置 + 设备端媒体下载
+  registerPositionScriptRoutes(app, db);
+  registerPositionFactoryRoutes(app, db);
   registerFollowupRoutes(app, db);
   registerWeComRoutes(app, db);
   registerActivationRoutes(app, db);

@@ -10,6 +10,8 @@ import { NOOP_NOTIFIER, type StreamNotifier } from "../messaging/stream-events.j
 import { readWeComConfig } from "../wecom/wecom-config.js";
 import { deviceDifyConfig, HttpDifyProvider } from "../dify/dify-provider.js";
 import { listReminderTasks } from "./followup.js";
+import { loadFactories, parseDeviceData, readDeviceFactoryIds } from "../../shared/device-factories.js";
+import { isAllowedWebhookUrl, readInviteGroupConfig } from "../../shared/invite-group.js";
 
 export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync, notifier: StreamNotifier = NOOP_NOTIFIER) {
   const messageChannel = createMessageChannelProvider(undefined, db);
@@ -72,10 +74,64 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
   app.get<{ Querystring: { my?: string } }>("/api/v1/agent/devices", async (request) => {
     const rows = db.prepare("SELECT * FROM agent_devices ORDER BY id DESC").all() as Array<Record<string, unknown>>;
     const scope = getUserScope(db, request.auth!);
-    return { items: rows.map(serializeAgentDevice).filter((row) => canAccessDevice(scope, String(row.device_code ?? ""))) };
+    return {
+      // 过滤必须放在 serializeAgentDevice() 之后：表里没有 device_code 列，
+      // 它是 serialize 时从 data_json 里提出来的。直接过滤原始 row 会拿到
+      // undefined，把受限用户的设备列表整片滤空（CI 实测 expected [] 即此因）。
+      // serialize 的声明类型不含 device_code，故显式放宽为字典以通过 typecheck。
+      items: rows
+        .map((row) => {
+          // 设备 → 工厂多选绑定：每行带上 factory_ids 与厂名/城市，
+          // 后台设备列表直接回显多选结果，不用前端再逐台去拉 /factories。
+          const factoryIds = readDeviceFactoryIds(db, parseDeviceData(row.data_json).factory_ids);
+          const serialized = serializeAgentDevice(row) as Record<string, unknown>;
+          return { ...serialized, factory_ids: factoryIds, factories: loadFactories(db, factoryIds) };
+        })
+        // 过滤参数用显式断言：展开后的对象类型不带索引签名，
+        // 直接取 device_code 会报 TS2339（与运行时无关，纯粹是类型推断的坑）。
+        .filter((row) => canAccessDevice(scope, String((row as Record<string, unknown>).device_code ?? ""))),
+    };
   });
-  app.post<{ Body: Record<string, unknown> }>("/api/v1/agent/devices", async (request, reply) => { if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin required to create devices" }); const deviceName = String(request.body?.device_name ?? request.body?.name ?? "").trim() || `device-${Date.now()}`; return db.prepare("INSERT INTO agent_devices(device_name,status,data_json) VALUES (?,?,?) RETURNING *").get(deviceName, String(request.body?.status ?? "enabled"), JSON.stringify(request.body ?? {})); });
-  app.put<{ Params: { id: string }; Body: Record<string, unknown> }>("/api/v1/agent/devices/:id", async (request, reply) => { const id = Number(request.params.id); const row = db.prepare("SELECT data_json FROM agent_devices WHERE id=?").get(id) as { data_json: string } | undefined; const data = row ? JSON.parse(row.data_json || "{}") as Record<string, unknown> : {}; if (!row || !canAccessDevice(getUserScope(db, request.auth!), String(data.device_code ?? ""))) return reply.code(404).send({ detail: "设备不存在" }); const result = db.prepare("UPDATE agent_devices SET device_name=COALESCE(?,device_name),status=COALESCE(?,status),data_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(typeof request.body?.device_name === "string" ? request.body.device_name : null, typeof request.body?.status === "string" ? request.body.status : null, JSON.stringify({ ...data, ...(request.body ?? {}) }), id); return result.changes ? db.prepare("SELECT * FROM agent_devices WHERE id=?").get(id) : reply.code(404).send({ detail: "设备不存在" }); });
+  app.post<{ Body: Record<string, unknown> }>("/api/v1/agent/devices", async (request, reply) => {
+    if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin required to create devices" });
+    const deviceName = String(request.body?.device_name ?? request.body?.name ?? "").trim() || `device-${Date.now()}`;
+    // observe_only 默认 true：服务端 automation 只负责「记录 + 可选生成指令」，
+    // 真正能把消息发出去的是客户端键鼠。两者同时开 = 客户收到两条回复
+    // （同一会话状态被推进两次，左边一句右边一句），11-13 实机踩过。
+    // 与 /bridge/devices/:code/register 的自注册路径保持一致：那里也写 true。
+    // 只有调用方明确传 observe_only:false 时（企微官方客服 API 通道）才放行。
+    const data = { observe_only: true, ...(request.body ?? {}) } as Record<string, unknown>;
+    return db.prepare("INSERT INTO agent_devices(device_name,status,data_json) VALUES (?,?,?) RETURNING *")
+      .get(deviceName, String(request.body?.status ?? "enabled"), JSON.stringify(data));
+  });
+  app.put<{ Params: { id: string }; Body: Record<string, unknown> }>("/api/v1/agent/devices/:id", async (request, reply) => {
+    const id = Number(request.params.id);
+    const row = db.prepare("SELECT data_json FROM agent_devices WHERE id=?").get(id) as { data_json: string } | undefined;
+    const data = row ? (JSON.parse(row.data_json || "{}") as Record<string, unknown>) : {};
+    if (!row || !canAccessDevice(getUserScope(db, request.auth!), String(data.device_code ?? ""))) {
+      return reply.code(404).send({ detail: "设备不存在" });
+    }
+    const merged = { ...data, ...(request.body ?? {}) } as Record<string, unknown>;
+    // 设备 → 工厂多选绑定：本次提交了 factory_ids 就规范化后落库——
+    // 去重、丢掉非整数与库里不存在的 id（忽略而不是整单 422），空数组 = 不绑任何厂。
+    // 没提交这个键时保持原值，老客户端不受影响（与 vertical_id 的按需校验同一思路）。
+    if ("factory_ids" in (request.body ?? {})) {
+      merged.factory_ids = readDeviceFactoryIds(db, (request.body as Record<string, unknown>).factory_ids);
+    }
+    // 品类必填（2026-11-13 与 HR 对齐）：一个微信号只做一个板块，没有综合号。
+    // 只在本次请求显式提交了 vertical_id 时校验，避免老客户端改别的字段被挡。
+    if ("vertical_id" in (request.body ?? {})) {
+      const verticalId = Number(merged.vertical_id);
+      if (!Number.isInteger(verticalId) || verticalId <= 0) {
+        return reply.code(422).send({ detail: "vertical_id is required: 一个微信号只能属于一个板块" });
+      }
+      const exists = db.prepare("SELECT 1 AS ok FROM vertical WHERE id=? AND status<>'deleted'").get(verticalId);
+      if (!exists) return reply.code(422).send({ detail: "Unknown vertical_id" });
+    }
+    const result = db.prepare("UPDATE agent_devices SET device_name=COALESCE(?,device_name),status=COALESCE(?,status),data_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?")
+      .run(typeof request.body?.device_name === "string" ? request.body.device_name : null, typeof request.body?.status === "string" ? request.body.status : null, JSON.stringify(merged), id);
+    return result.changes ? db.prepare("SELECT * FROM agent_devices WHERE id=?").get(id) : reply.code(404).send({ detail: "设备不存在" });
+  });
   // The target 404s on a missing row; returning {success:false} with 200 is a
   // parity bug (verified: DELETE /agent/devices/999999 -> 404 "Device not found").
   app.delete<{ Params: { id: string } }>("/api/v1/agent/devices/:id", async (request, reply) => {
@@ -85,6 +141,24 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     if (!row || !canAccessDevice(getUserScope(db, request.auth!), String(data.device_code ?? ""))) return reply.code(404).send({ detail: "Device not found" });
     const result = db.prepare("DELETE FROM agent_devices WHERE id=?").run(id);
     return result.changes ? { success: true } : reply.code(404).send({ detail: "Device not found" });
+  });
+  // 登录二维码的网页读取口。设备用自己的桥接令牌 POST 上传（见 device-bridge.routes.ts），
+  // 网页这一侧用用户 JWT 读——二维码等同于登录凭证，拿到就能顶替这个号登录，不能公开。
+  app.get<{ Params: { code: string } }>("/api/v1/agent/devices/:code/login-qr", async (request, reply) => {
+    const code = String(request.params.code);
+    if (!canAccessDevice(getUserScope(db, request.auth!), code)) {
+      return reply.code(403).send({ detail: "Device scope required" });
+    }
+    const row = bridgeStore.loginQr(code);
+    if (!row) return { available: false };
+    return {
+      available: true,
+      // 直接给 data URL，前端 <img src> 拿来即用，不用再拼前缀
+      image: row.image_b64.startsWith("data:") ? row.image_b64 : `data:image/png;base64,${row.image_b64}`,
+      width: row.width,
+      height: row.height,
+      captured_at: row.captured_at,
+    };
   });
   // 本地新增，目标站契约里没有这条（7 轮 parity 快照均未抓到同类端点）——
   // 纯运维工具：管理员在后台填完某设备自己的 dify_url/dify_key 后，一键验证能否连上，
@@ -107,7 +181,17 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     const deviceCode = request.query.device_code ?? "";
     if (!canAccessDevice(getUserScope(db, request.auth!), deviceCode)) return reply.code(403).send({ detail: "Device scope required" });
     bridgeStore.expireClaims(deviceCode);
-    const rows = db.prepare("SELECT * FROM agent_messages WHERE device_code=? AND customer_id=? AND id>? ORDER BY created_at, id").all(deviceCode, Number(request.query.customer_id ?? 0), Number(request.query.after_id ?? 0)) as Array<Record<string, unknown>>;
+    const customerId = Number(request.query.customer_id ?? 0);
+    const rows = db.prepare("SELECT * FROM agent_messages WHERE device_code=? AND customer_id=? AND id>? ORDER BY created_at, id").all(deviceCode, customerId, Number(request.query.after_id ?? 0)) as Array<Record<string, unknown>>;
+    // 会话级已读：能拉到消息就说明运营正看着这个会话，未读必须落库清零。
+    //
+    // 之前只有整台设备的 clear-unread，没有会话级入口；前端点开会话时只把数组里的
+    // unread 改成 0，从不发请求，于是 15s 轮询 listConversations 又把库里的原值读回来，
+    // 红点灭而复现。这里挂在唯一必然发生的「打开会话」路径上，刷新和轮询都不会复活。
+    // 不动 updated_at：那列决定列表排序，清未读不该把会话顶到最前。
+    if (Number.isSafeInteger(customerId) && customerId > 0) {
+      db.prepare("UPDATE agent_conversations SET unread=0 WHERE device_code=? AND customer_id=? AND unread<>0").run(deviceCode, customerId);
+    }
     // 会话页按 role 决定气泡左右；agent_messages 只有 direction，这里补一层映射。
     return { items: rows.map((row) => ({ ...row, role: row.direction === "inbound" ? "customer" : "agent" })), takeover: false };
   });
@@ -205,19 +289,29 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
   });
   app.get<{ Querystring: { event_type?: string; page?: string; page_size?: string } }>("/api/v1/agent/candidates", async (request) => {
     const page = Math.max(1, Number(request.query.page) || 1), pageSize = Math.min(1000, Math.max(1, Number(request.query.page_size) || 50));
-    const scopeFilter = deviceConstraint(getUserScope(db, request.auth!), "device_code");
+    // 带 JOIN 时条件必须显式前缀：candidate_events 与 bridge_devices 都有
+    // device_code，不加 c. 会报 ambiguous column name（scoped 用户直接 500）。
+    const scopeFilter = deviceConstraint(getUserScope(db, request.auth!), "c.device_code");
     const conditions: string[] = [];
     const params: Array<string | number> = [];
-    if (request.query.event_type) { conditions.push("event_type=?"); params.push(request.query.event_type); }
+    if (request.query.event_type) { conditions.push("c.event_type=?"); params.push(request.query.event_type); }
     if (scopeFilter.sql) conditions.push(scopeFilter.sql.replace(/^ AND /, ""));
     params.push(...scopeFilter.values);
     const where = conditions.length ? ` WHERE ${conditions.join(" AND ")}` : "";
     // Target item has no data_json/updated_at, and does carry wechat_id
     // (stored inside data_json locally since the column doesn't exist).
     const COLUMNS = "id,device_code,customer_id,nickname,event_type,event_at,name,phone,interview_date,interview_time,factory_name,province,city,district,status,remind_count,disqualified_reason,created_at,data_json";
-    const rows = db.prepare(`SELECT ${COLUMNS} FROM candidate_events${where} ORDER BY id DESC LIMIT ? OFFSET ?`).all(...params, pageSize, (page - 1) * pageSize) as Array<Record<string, unknown>>;
+    // 归属账号 = 该设备登录的企微账号（bridge_devices.account_id）。
+    // 候选人表里没有这个字段，页面又必须显示「这条名单是从哪个账号发的」，
+    // 所以在查询里 join 出来；设备没上报过账号时回空串。
+    const rows = db.prepare(`SELECT c.${COLUMNS.split(",").join(",c.")},
+        COALESCE(b.account_id,'') AS account
+       FROM candidate_events c
+       LEFT JOIN bridge_devices b ON b.device_code = c.device_code
+       ${where}
+       ORDER BY c.id DESC LIMIT ? OFFSET ?`).all(...params, pageSize, (page - 1) * pageSize) as Array<Record<string, unknown>>;
     const items = rows.map(serializeCandidate);
-    const total = (db.prepare(`SELECT COUNT(*) count FROM candidate_events${where}`).get(...params) as { count: number }).count;
+    const total = (db.prepare(`SELECT COUNT(*) count FROM candidate_events c${where}`).get(...params) as { count: number }).count;
     return { items, total };
   });
   app.post<{ Body: Record<string, unknown> }>("/api/v1/agent/candidates", async (request, reply) => {
@@ -233,6 +327,103 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     const result = db.prepare("UPDATE candidate_events SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(request.body?.status ?? "marked", Number(request.params.id));
     return result.changes ? db.prepare("SELECT * FROM candidate_events WHERE id=?").get(Number(request.params.id)) : reply.code(404).send({ detail: "候选人不存在" });
   });
+  /**
+   * 候选人列表的「提醒到场」按钮。
+   *
+   * 过去页面只有 remind_count 的展示，没有任何点击入口；「回复规则 → 面试提醒」
+   * 里配的话术也没有读取方。这里用配置话术发一条，成功才累加 remind_count。
+   */
+  app.post<{ Params: { id: string } }>("/api/v1/agent/candidates/:id/remind", async (request, reply) => {
+    const id = Number(request.params.id);
+    const candidate = db.prepare(
+      "SELECT id, device_code, customer_id, interview_date, remind_count FROM candidate_events WHERE id=?",
+    ).get(id) as { id: number; device_code: string; customer_id: string; interview_date: string; remind_count: number } | undefined;
+    if (!candidate) return reply.code(404).send({ detail: "候选人不存在" });
+    if (!canAccessDevice(getUserScope(db, request.auth!), candidate.device_code)) return reply.code(403).send({ detail: "Device scope required" });
+
+    const customerId = Number(candidate.customer_id);
+    if (!Number.isSafeInteger(customerId)) return reply.code(422).send({ detail: "customer_id 无效" });
+
+    let script = "";
+    try {
+      const row = db.prepare("SELECT value_json FROM agent_configs WHERE kind='reminder' AND recruiter_id='global'").get() as { value_json: string } | undefined;
+      const parsed = row ? JSON.parse(row.value_json || "{}") as Record<string, unknown> : {};
+      script = String(parsed.script ?? "").trim();
+    } catch { script = ""; }
+    const content = script || "明天面试记得准时到哈，到了给我发个消息";
+    const remindCount = Number(candidate.remind_count ?? 0);
+
+    try {
+      const sent = await messageChannel.sendMessage({
+        deviceCode: candidate.device_code,
+        customerId,
+        content,
+        idempotencyKey: `remind:${candidate.device_code}:${candidate.customer_id}:${remindCount + 1}`,
+      });
+      if (!sent.success) return reply.code(502).send({ detail: sent.error ?? "发送失败" });
+      db.prepare("UPDATE candidate_events SET remind_count=remind_count+1,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(id);
+      return { success: true, remind_count: remindCount + 1, content };
+    } catch (error) {
+      return reply.code(502).send({ detail: error instanceof Error ? error.message : "发送失败" });
+    }
+  });
+
+  /**
+   * 内部邀约群配置（R1）。
+   *
+   * 客户给的格式是 `深11/9 谢子鑫 18077352958`，城市简写映射表还没给全，
+   * 所以做成可配置：运营在页面上填群名和映射，没配的城市取首字兜底。
+   */
+  // 群机器人 Webhook 里带 key，等同发送凭据：读回来时打码，只让运营知道「配过了」。
+  const maskWebhook = (url: string) => {
+    if (!url) return "";
+    try {
+      const parsed = new URL(url);
+      const key = parsed.searchParams.get("key") ?? "";
+      if (!key) return `${parsed.origin}${parsed.pathname}`;
+      parsed.searchParams.set("key", `${key.slice(0, 8)}****${key.slice(-4)}`);
+      return parsed.toString();
+    } catch { return "****"; }
+  };
+  app.get("/api/v1/agent/invite-group", async () => {
+    const config = readInviteGroupConfig(db);
+    return { ...config, webhookUrl: "", webhookConfigured: Boolean(config.webhookUrl), webhookPreview: maskWebhook(config.webhookUrl) };
+  });
+  app.put<{ Body: Record<string, unknown> }>("/api/v1/agent/invite-group", async (request, reply) => {
+    if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin access required" });
+    const body = request.body ?? {};
+    const current = readInviteGroupConfig(db);
+    // webhook_url 不传 = 保留原值（读回来是打码的，前端不能拿打码值覆盖真值）；
+    // 传空串 = 明确清除。地址必须先过白名单校验，否则后台会变成 SSRF 跳板。
+    const rawWebhook = body.webhook_url;
+    let webhookUrl = current.webhookUrl;
+    if (typeof rawWebhook === "string") {
+      const trimmed = rawWebhook.trim();
+      if (trimmed === "") webhookUrl = "";
+      else if (!isAllowedWebhookUrl(trimmed)) {
+        return reply.code(422).send({ detail: "Webhook 地址无效：只接受 https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..." });
+      } else webhookUrl = trimmed;
+    }
+    const payload = {
+      enabled: body.enabled === true,
+      group_name: String(body.group_name ?? "").trim(),
+      device_code: String(body.device_code ?? "").trim(),
+      city_abbr: body.city_abbr && typeof body.city_abbr === "object" && !Array.isArray(body.city_abbr) ? body.city_abbr : {},
+      webhook_url: webhookUrl,
+    };
+    db.prepare(`INSERT INTO agent_configs(kind,recruiter_id,value_json,updated_at) VALUES ('invite_group','global',?,CURRENT_TIMESTAMP)
+      ON CONFLICT(kind,recruiter_id) DO UPDATE SET value_json=excluded.value_json,updated_at=CURRENT_TIMESTAMP`)
+      .run(JSON.stringify(payload));
+    const saved = readInviteGroupConfig(db);
+    return { ...saved, webhookUrl: "", webhookConfigured: Boolean(saved.webhookUrl), webhookPreview: maskWebhook(saved.webhookUrl) };
+  });
+  // 发送记录：运营要能查「这条名单到底发出去了没有」
+  app.get<{ Querystring: { limit?: string } }>("/api/v1/agent/invite-group/sends", async (request) => {
+    const limit = Math.min(200, Math.max(1, Number(request.query.limit) || 50));
+    const rows = db.prepare("SELECT * FROM invite_group_sends ORDER BY id DESC LIMIT ?").all(limit) as Array<Record<string, unknown>>;
+    return { items: rows, total: rows.length };
+  });
+
   // Target item shape: id, account, customer_id, nickname, device_code, status,
   // created_at — updated_at is not exposed.
   app.get("/api/v1/agent/old-friends", async (request) => {
@@ -248,7 +439,7 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
       return reply.code(400).send({ detail: "device_code and customer_id are required" });
     }
     if (!canAccessDevice(getUserScope(db, request.auth!), String(body.device_code))) return reply.code(403).send({ detail: "Device scope required" });
-    const result = db.prepare("INSERT INTO old_friend_records(account,customer_id,nickname,device_code,status) VALUES (?,?,?,?,?)").run(String(body.account ?? ""), String(body.customer_id), String(body.nickname ?? ""), String(body.device_code), String(body.status ?? "released"));
+    const result = db.prepare("INSERT INTO old_friend_records(account,customer_id,nickname,device_code,status) VALUES (?,?,?,?,?)").run(String(body.account ?? ""), String(body.customer_id), String(body.nickname ?? ""), String(body.device_code), body.status === "released" ? "released" : "unreleased");
     return db.prepare("SELECT * FROM old_friend_records WHERE id=?").get(Number(result.lastInsertRowid));
   });
   app.put<{ Params: { id: string } }>("/api/v1/agent/old-friends/:id/release", async (request, reply) => {
@@ -260,7 +451,9 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
   app.put<{ Params: { id: string } }>("/api/v1/agent/old-friends/:id/unrelease", async (request, reply) => {
     const friend = db.prepare("SELECT device_code FROM old_friend_records WHERE id=?").get(Number(request.params.id)) as { device_code: string } | undefined;
     if (!friend || !canAccessDevice(getUserScope(db, request.auth!), friend.device_code)) return reply.code(404).send({ detail: "Old friend not found" });
-    const result = db.prepare("UPDATE old_friend_records SET status='active',updated_at=CURRENT_TIMESTAMP WHERE id=?").run(Number(request.params.id));
+    // 前端词表只有 released / unreleased（可聊 / 不可聊），写 'active' 会让行内
+    // 徽标与三个计数卡都对不上，所以这里必须用 unreleased。
+    const result = db.prepare("UPDATE old_friend_records SET status='unreleased',updated_at=CURRENT_TIMESTAMP WHERE id=?").run(Number(request.params.id));
     return result.changes ? { success: true } : reply.code(404).send({ detail: "Old friend not found" });
   });
   app.delete<{ Params: { id: string } }>("/api/v1/agent/old-friends/:id", async (request, reply) => {

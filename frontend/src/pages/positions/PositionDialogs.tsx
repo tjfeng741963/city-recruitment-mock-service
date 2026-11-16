@@ -1,8 +1,7 @@
 import { useState, type FormEvent, type ReactNode } from "react";
-import { positionsApi, type Position } from "../../api/admin";
+import { positionsApi, type Factory, type Position } from "../../api/admin";
 import { ApiError, type City } from "../../api/client";
-import { Alert, Button, Dialog, Input } from "@ui";
-import { UNGROUPED } from "./model";
+import { Alert, Button, Dialog, Input, Select } from "@ui";
 
 function FormDialog({
   id,
@@ -78,40 +77,73 @@ export function CreateCityDialog({ onClose, onCreated }: { onClose: () => void; 
 
 export function CreatePositionDialog({
   city,
-  stores,
+  factories,
+  onFactoryCreated,
   onClose,
   onCreated,
 }: {
   city: City;
-  stores: string[];
+  factories: Factory[];
+  onFactoryCreated: () => Promise<void>;
   onClose: () => void;
   onCreated: (position: Position) => void;
 }) {
   const [name, setName] = useState("");
-  const [store, setStore] = useState("");
-  const known = stores.filter((s) => s !== UNGROUPED);
+  const [factoryId, setFactoryId] = useState("");
+  const [newFactory, setNewFactory] = useState("");
+  const [creatingFactory, setCreatingFactory] = useState(false);
+  const [factoryError, setFactoryError] = useState<string | null>(null);
+
+  async function addFactory() {
+    const factoryName = newFactory.trim();
+    if (!factoryName) return;
+    setCreatingFactory(true);
+    setFactoryError(null);
+    try {
+      const factory = await positionsApi.createFactory(factoryName, city.id);
+      await onFactoryCreated();
+      setFactoryId(String(factory.id));
+      setNewFactory("");
+    } catch (err) {
+      setFactoryError(err instanceof ApiError ? err.detail : "厂区创建失败");
+    } finally {
+      setCreatingFactory(false);
+    }
+  }
+
+  const selected = factories.find((f) => String(f.id) === factoryId);
   return (
     <FormDialog
       id="ps-new-position"
       title={`在${city.city_name}新建岗位`}
-      description="先填名称和工厂，创建后进入编辑页填工价和要求。"
-      valid={Boolean(name.trim())}
+      description="先选厂区再填岗位名。AI 回答候选人时按厂区取岗位，没挂厂区的岗位不会被念出来。"
+      valid={Boolean(name.trim() && factoryId)}
       onClose={onClose}
-      onSubmit={async () => onCreated(await positionsApi.createPosition(name.trim(), store.trim(), city))}
+      onSubmit={async () => {
+        if (!selected) return;
+        await onCreated(await positionsApi.createPosition(name.trim(), selected.factory_name, city, selected.id));
+      }}
     >
       <Input id="ps-pos-name" label="岗位名称" placeholder="长白班普工" value={name} onChange={(e) => setName(e.target.value)} required autoFocus />
-      <Input
-        id="ps-pos-store"
-        label="工厂"
-        placeholder="富士康龙华"
-        helperText={known.length ? "可以选已有工厂，也可以填新的" : undefined}
-        list="ps-store-options"
-        value={store}
-        onChange={(e) => setStore(e.target.value)}
-      />
-      <datalist id="ps-store-options">
-        {known.map((s) => <option key={s} value={s} />)}
-      </datalist>
+      {factories.length ? (
+        <Select
+          id="ps-pos-factory"
+          label="厂区"
+          required
+          placeholder="先选厂区"
+          options={factories.map((f) => ({ value: String(f.id), label: f.factory_name }))}
+          value={factoryId}
+          onChange={(e) => setFactoryId(e.target.value)}
+        />
+      ) : (
+        <p className="ps-form-hint">{city.city_name}还没有厂区，先在下面建一个。</p>
+      )}
+      <div className="ui-row">
+        <Input id="ps-pos-new-factory" label={`在${city.city_name}新建厂区`} placeholder="富士康龙华" value={newFactory} onChange={(e) => setNewFactory(e.target.value)} />
+        <Button type="button" variant="secondary" size="sm" disabled={!newFactory.trim()} loading={creatingFactory} onClick={addFactory}>建厂区</Button>
+      </div>
+      {factoryError && <Alert tone="danger" title={factoryError} />}
     </FormDialog>
   );
 }
+

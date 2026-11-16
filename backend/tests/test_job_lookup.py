@@ -33,7 +33,7 @@ def _reset(monkeypatch) -> None:  # noqa: ANN001
 async def test_lookup_returns_remote_items(monkeypatch) -> None:  # noqa: ANN001
     calls: list[str] = []
 
-    async def fake_fetch(city: str, token: str, url: str) -> list[dict]:
+    async def fake_fetch(city: str, token: str, url: str, device_code: str = "") -> list[dict]:
         calls.append(city)
         assert token == TOKEN
         return JOBS
@@ -64,7 +64,7 @@ async def test_lookup_failure_returns_empty(monkeypatch) -> None:  # noqa: ANN00
 async def test_cache_hits_within_ttl(monkeypatch) -> None:  # noqa: ANN001
     calls: list[str] = []
 
-    async def fake_fetch(city: str, token: str, url: str) -> list[dict]:
+    async def fake_fetch(city: str, token: str, url: str, device_code: str = "") -> list[dict]:
         calls.append(city)
         return JOBS
 
@@ -109,3 +109,119 @@ async def test_request_carries_city_and_token(monkeypatch) -> None:  # noqa: ANN
     assert seen["url"].startswith("http://127.0.0.1:4222/api/v1/agent/jobs?")
     assert "city=%E6%B7%B1%E5%9C%B3" in seen["url"]
     assert seen["token"] == TOKEN
+
+
+# ── job_scope：按设备的岗位口径（网页可远程切换）────────────────────────────
+
+MIXED_JOBS = [
+    {
+        "factory_name": "广州地铁安检",
+        "job_title": "广州地铁安检 安全员",
+        "wage_text": "22 元/小时",
+        "hours_text": "8 小时",
+        "welfare_text": "包吃住",
+        "place": "体育西路站",
+    },
+    {
+        "factory_name": "观澜精密厂",
+        "job_title": "观澜精密厂 质检",
+        "wage_text": "23 元/小时",
+        "hours_text": "两班倒",
+        "welfare_text": "包吃包住",
+        "place": "观澜大道 88 号",
+    },
+]
+
+
+def _patch_items(monkeypatch, items):  # noqa: ANN001
+    async def fake_fetch(city: str, token: str, url: str, device_code: str = "") -> list[dict]:
+        return list(items)
+
+    monkeypatch.setattr(job_lookup, "_fetch_items", fake_fetch)
+
+
+async def test_only_subway_filters_factory_jobs(monkeypatch) -> None:  # noqa: ANN001
+    _patch_items(monkeypatch, MIXED_JOBS)
+    result = await job_lookup.lookup_jobs("广州", device_scope="subway")
+    assert [j["factory_name"] for j in result] == ["广州地铁安检"]
+
+
+async def test_all_scope_keeps_factory_jobs(monkeypatch) -> None:  # noqa: ANN001
+    _patch_items(monkeypatch, MIXED_JOBS)
+    result = await job_lookup.lookup_jobs("广州", device_scope="all")
+    assert [j["factory_name"] for j in result] == ["广州地铁安检", "观澜精密厂"]
+
+
+async def test_empty_scope_follows_env_default(monkeypatch) -> None:  # noqa: ANN001
+    _patch_items(monkeypatch, MIXED_JOBS)
+    monkeypatch.setenv("FLOW_ONLY_SUBWAY", "1")
+    assert len(await job_lookup.lookup_jobs("广州")) == 1
+    job_lookup.clear_cache()
+    monkeypatch.setenv("FLOW_ONLY_SUBWAY", "0")
+    assert len(await job_lookup.lookup_jobs("广州")) == 2
+
+
+async def test_subway_scope_falls_back_to_all_when_no_subway_jobs(monkeypatch) -> None:  # noqa: ANN001
+    # 防呆：关键词漏配时不能一条岗位都不推
+    _patch_items(monkeypatch, [MIXED_JOBS[1]])
+    result = await job_lookup.lookup_jobs("广州", device_scope="subway")
+    assert [j["factory_name"] for j in result] == ["观澜精密厂"]
+
+
+async def test_cache_is_keyed_by_scope(monkeypatch) -> None:  # noqa: ANN001
+    # 同一城市两种口径缓存必须分开，否则先查 subway 会把工厂岗漏给 all 号
+    _patch_items(monkeypatch, MIXED_JOBS)
+    assert len(await job_lookup.lookup_jobs("广州", device_scope="subway")) == 1
+    assert len(await job_lookup.lookup_jobs("广州", device_scope="all")) == 2
+
+
+# ── device_code：按设备绑定的工厂过滤（4222 侧执行，这里只透传）──────────────
+
+
+async def test_request_carries_device_code(monkeypatch) -> None:  # noqa: ANN001
+    """device_code 必须进查询参数：不然 4222 不知道按哪台设备的工厂过滤。"""
+    seen: dict = {}
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["params"] = dict(request.url.params)
+        return httpx.Response(200, json={"items": JOBS})
+
+    real_client = job_lookup.httpx.AsyncClient
+
+    def client_factory(**kwargs):  # noqa: ANN003
+        kwargs.pop("transport", None)
+        return real_client(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(job_lookup.httpx, "AsyncClient", client_factory)
+    items = await job_lookup.lookup_jobs("深圳", device_code="pc-win-01")
+    assert items == JOBS
+    assert seen["params"]["city"] == "深圳"
+    assert seen["params"]["device_code"] == "pc-win-01"
+
+    # 不传设备：查询参数里不该出现空串 device_code（老调用方向后兼容）
+    job_lookup.clear_cache()
+    await job_lookup.lookup_jobs("深圳")
+    assert "device_code" not in seen["params"]
+
+
+async def test_cache_is_keyed_by_device_code(monkeypatch) -> None:  # noqa: ANN001
+    """同城不同设备不能共用缓存：A 厂的岗不能缓存给 B 厂号。"""
+    per_device = {
+        "dev-a": [JOBS[0]],
+        "dev-b": [],
+    }
+    calls: list[tuple[str, str]] = []
+
+    async def fake_fetch(city: str, token: str, url: str, device_code: str = "") -> list[dict]:
+        calls.append((city, device_code))
+        return list(per_device.get(device_code, JOBS))
+
+    monkeypatch.setattr(job_lookup, "_fetch_items", fake_fetch)
+    assert await job_lookup.lookup_jobs("深圳", device_code="dev-a") == [JOBS[0]]
+    assert await job_lookup.lookup_jobs("深圳", device_code="dev-b") == []
+    # 再查一遍 dev-a：命中自己的缓存，不会拿到 dev-b 的空结果
+    assert await job_lookup.lookup_jobs("深圳", device_code="dev-a") == [JOBS[0]]
+    assert calls == [("深圳", "dev-a"), ("深圳", "dev-b")]
+

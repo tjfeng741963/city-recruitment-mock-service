@@ -16,9 +16,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models_kb import DEFAULT_TENANT_ID, KbEntry
+from .kb_policy import shared_answer_allowed
+from .question_topics import is_non_wage_cost_question, is_wage_keyword
 
-# 一条话术标题最多能带出多少条：库里会有几百条，全量扫也能接受，但留个上限防跑飞
-MAX_ENTRIES = 500
+# 一条话术标题最多能带出多少条：库里会有几百条，全量扫也能接受，但留个上限防跑飞。
+# 2026-11-15：存量已 534 条，原来上限 500 会让最后 34 条永远不参与匹配。
+MAX_ENTRIES = 2000
 
 # 标题切词时的分隔符：中文标题里常见「体检 / 住宿」「体检报销吗」这类写法
 _SPLIT = re.compile(r"[^\u4e00-\u9fa5A-Za-z0-9]+")
@@ -62,10 +65,17 @@ def keywords_of(title: str) -> list[str]:
     return seen
 
 
-def match(question: str, title: str) -> bool:
-    """客户问法里包含标题的任一关键词就算命中。"""
+def _matching_words(question: str, title: str) -> list[str]:
     text = question or ""
-    return any(word in text for word in keywords_of(title))
+    expense_question = is_non_wage_cost_question(text)
+    return [word for word in keywords_of(title) if word in text and not (
+        expense_question and is_wage_keyword(word)
+    )]
+
+
+def match(question: str, title: str) -> bool:
+    """按主题关键词匹配；具体费用问题不靠工资/多少钱命中旧话术。"""
+    return bool(_matching_words(question, title))
 
 
 async def lookup_entry(
@@ -73,6 +83,8 @@ async def lookup_entry(
     question: str,
     city: str | None = None,
     factory: str | None = None,
+    *,
+    require_factory: bool = False,
 ) -> dict[str, str] | None:
     """查一条话术。命中返回 {id,title,body}，未命中返回 None。
 
@@ -87,6 +99,9 @@ async def lookup_entry(
     - 双方都非空且互不包含 → 直接排除（别家的厂规发给本厂客户是事故）
     - 任一方为空 → 通配，无加权
     - city/factory 都为空 → 全部通配（原行为）
+
+    flow 接口传 require_factory=True：未知工厂时排除具名工厂条目，
+    不能把缺少上下文当成允许读取任意厂规。旧调用保持原签名语义。
     """
     text = (question or "").strip()
     if not text:
@@ -109,13 +124,19 @@ async def lookup_entry(
     for entry in rows:
         if not (entry.body or "").strip():
             continue
-        words = [w for w in keywords_of(entry.title) if w in text]
+        words = _matching_words(text, entry.title)
         if not words:
             continue
         entry_city = str(getattr(entry, "city", None) or "").strip()
         if entry_city and entry_city != city_hint:
             continue
         entry_factory = str(getattr(entry, "factory_name", None) or "").strip()
+        if require_factory and entry_factory and not factory_hint:
+            continue
+        if require_factory and not entry_factory and not shared_answer_allowed(
+            text, str(entry.body or ""), keywords=[str(entry.title or "")],
+        ):
+            continue
         if (
             entry_factory
             and factory_hint

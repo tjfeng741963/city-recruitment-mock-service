@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 from typing import Any
 
@@ -31,7 +32,12 @@ from .flow_engine import (
 )
 
 DEFAULT_URL = "http://127.0.0.1:4222/api/v1/agent/profile"
-DEFAULT_DEVICE = "pc-office-01"
+# 兜底设备：不写死具体机器名。
+# 原来硬编码 "pc-office-01"（一台已停用的办公机），线上 pc-win-01 的对话
+# 因此全部按那台机器的城市/板块/话术取数，2026-11-14 实测串台。
+# 现在默认空：未知设备就不猜——取不到元信息时按"通配"处理，
+# 宁可不过滤，也不要静默套用另一台设备的配置。
+DEFAULT_DEVICE = os.getenv("FLOW_PROFILE_DEVICE", "").strip()
 TIMEOUT = 3.0
 
 # 8090 的流程阶段 → 4222 的档案例 stage
@@ -47,9 +53,17 @@ _STAGE_MAP = {
 
 
 def _job_of(slots: dict[str, Any]) -> dict[str, str]:
+    snapshot = slots.get("job_snapshot")
+    if isinstance(snapshot, dict) and snapshot:
+        return snapshot
     jobs = jobs_for_city(str(slots.get("city") or ""))
     if not jobs:
         return {}
+    position_id = slots.get("position_id")
+    if position_id:
+        return next(
+            (job for job in jobs if str(job.get("position_id")) == str(position_id)), {}
+        )
     try:
         index = int(slots.get("job_index") or 0)
     except (TypeError, ValueError):
@@ -70,10 +84,12 @@ def _date_time(interview_at: Any) -> tuple[str, str]:
 
 
 def _stage(slots: dict[str, Any], stage: str, action: str | None) -> str:
+    if action in (ACTION_GAVE_UP, ACTION_HANDOFF) or slots.get("recruit_status") in (
+        "gave_up", "disqualified"
+    ):
+        return "gave_up"
     if action == ACTION_BOOK:
         return "booked"
-    if action in (ACTION_GAVE_UP, ACTION_HANDOFF):
-        return "gave_up"
     return _STAGE_MAP.get(str(stage or ""), "asking")
 
 
@@ -89,16 +105,22 @@ def build_profile(
     job = _job_of(slots)
     # 岗位字段统一为 4222 jobs 契约名：job_title 岗位（含工种）、factory_name 厂名
     title = str(job.get("job_title") or "")
-    factory = str(job.get("factory_name") or "") or (title.split(" ")[0] if title else "")
+    factory = str(job.get("factory_name") or "").strip()
+    if not factory and title:
+        # 厂名缺失时用「厂名 岗位」的前半截兜底：4222 判报名成功要求
+        # city+factory+name+phone 四件齐全，少了厂名这条已约线索在后台
+        # 直接看不到（实测会降成 stage=offered，不生成 invited 事件）。
+        factory = title.split(" ")[0].strip()
     interview_date, interview_time = _date_time(slots.get("interview_at"))
     # 默认窗口是「09:00-11:00」，比 interview_at 的整点更准，优先用它
     window = str(slots.get("interview_window") or "").strip() or interview_time
+    place = str(slots.get("interview_place") or job.get("place") or "").strip()
 
     fields = {
-        "name": str(slots.get("name") or ""),
-        "phone": str(slots.get("phone") or ""),
+        "name": str(slots.get("name") or "").strip(),
+        "phone": str(slots.get("phone") or "").strip(),
         "province": str(slots.get("province") or ""),
-        "city": str(slots.get("city") or ""),
+        "city": str(job.get("city") or slots.get("city") or "").strip(),
         "district": str(slots.get("district") or ""),
         "gender": str(slots.get("gender") or ""),
         "record": str(slots.get("record") or ""),
@@ -107,12 +129,24 @@ def build_profile(
         "factory_name": factory,
         "interview_date": interview_date,
         "interview_time": window,
+        # 面试地点：候选人页原来完全看不到，客户问「在哪个基地」客服要另查。
+        # 4222 现在没这一列时会忽略，落了 profile_json 也算留痕。
+        "interview_place": place,
         "notes": str(slots.get("notes") or ""),
     }
     profile: dict[str, Any] = {
         key: value for key, value in fields.items() if value not in ("", None)
     }
     profile["stage"] = _stage(slots, stage, action)
+    agreed = slots.get("interview_agreed") is True and profile["stage"] != "gave_up"
+    if isinstance(slots.get("interview_agreed"), bool) or profile["stage"] == "gave_up":
+        profile["interview_agreed"] = agreed
+    registration = [str(profile.get(key) or "").strip() for key in ("city", "factory_name", "name", "phone")]
+    if agreed and all(registration) and re.fullmatch(r"1[3-9][0-9]{9}", registration[-1]):
+        profile["registration_text"] = " ".join(registration)
+    elif profile["stage"] == "booked":
+        # done / book 动作不是资料与同意的替代，不能让旧状态触发提前建档。
+        profile["stage"] = "offered"
     return profile
 
 

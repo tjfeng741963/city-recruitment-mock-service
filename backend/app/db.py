@@ -13,6 +13,10 @@ from sqlalchemy.pool import NullPool
 from . import models_kb  # noqa: F401  导入即注册 kb_* / tenant 表到 Base.metadata
 from . import models_lead  # noqa: F401  导入即注册 leads / lead_events 表
 from . import models_flow  # noqa: F401  导入即注册 flow_events 表（会话日志）
+# 节点化编排表（flow_nodes / flow_edges）。建表只为让 8090 读得到；
+# 表为空时 load_graph 回空图，行为与改造前一致，所以可以不随启用一起上线。
+from . import models_flow_graph  # noqa: F401
+from . import models_kb_publish  # noqa: F401
 from .models import Base, User
 from .models_kb import Tenant
 from .security import hash_password
@@ -70,6 +74,10 @@ async def init_db() -> None:
         if dev_added:
             print(f"[db] devices 补列：{', '.join(dev_added)}")
     await seed_default_tenant()
+    async with SessionLocal() as session:
+        if await session.get(models_kb_publish.KbPublishState, 1) is None:
+            session.add(models_kb_publish.KbPublishState(id=1, generation=0))
+            await session.commit()
 
 
 async def seed_default_tenant() -> None:

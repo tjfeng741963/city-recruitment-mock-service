@@ -175,11 +175,9 @@ class TestNoCrossFactory:
         hit = await kb_faq.lookup(session, "包吃住吗", vertical_code="factory", employer_id=None)
         assert hit is None
 
-    async def test_global_answer_still_reachable(self, faq_db, session) -> None:
+    async def test_global_fixed_regular_policy_is_not_shared(self, faq_db, session) -> None:
         hit = await kb_faq.lookup(session, "多久能转正", vertical_code="factory", employer_id=11)
-        assert hit is not None
-        assert hit.tier == "global"
-        assert "3 个月" in hit.answer
+        assert hit is None
 
 
 class TestVerticalIsolation:

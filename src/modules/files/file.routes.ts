@@ -1,7 +1,12 @@
 import type { FastifyInstance } from "fastify";
 import multipart from "@fastify/multipart";
 import type { DatabaseSync } from "node:sqlite";
+import { createWriteStream } from "node:fs";
+import { mkdir } from "node:fs/promises";
+import path from "node:path";
+import { pipeline } from "node:stream/promises";
 import { buildWorkbook } from "../../shared/xlsx.js";
+import { config } from "../../config.js";
 
 const XLSX_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
@@ -68,7 +73,20 @@ export function registerFileRoutes(app: FastifyInstance, db: DatabaseSync) {
   for (const route of ["/api/v1/import-export/import", "/api/v1/import-export/factories/import", "/api/v1/import-export/service-positions/import", "/api/v1/service-positions/holidays-import", "/api/v1/service-positions/jingcai-import", "/api/v1/activation/scripts/import", "/api/v1/knowledge/batch/import"]) {
     app.post(route, async (request) => { const file = await request.file(); return { success: true, filename: file?.filename ?? null, total: 0, created: 0, updated: 0 }; });
   }
+  // 上传：真的落盘。之前只返回 `{url}` 从不写文件，导致「上传成功」但打开是 404，
+  // 而客户端发图/发视频依赖这些文件存在。落盘到 config.uploadsDir()
+  // （线上 = 容器内 /data/uploads，只有这个卷可写）。
+  // 文件名用「时间戳-随机-原名」避免同名覆盖；原名里的路径分隔符一律剥掉。
   for (const route of ["/api/v1/upload/image", "/api/v1/upload/video"]) {
-    app.post(route, async (request) => { const file = await request.file(); return { url: file ? `/uploads/${encodeURIComponent(file.filename)}` : "" }; });
+    app.post(route, async (request, reply) => {
+      const file = await request.file();
+      if (!file) return reply.code(422).send({ detail: "缺少文件" });
+      const dir = config.uploadsDir();
+      await mkdir(dir, { recursive: true });
+      const base = path.basename(file.filename || "upload").replace(/[\\/:*?"<>|]/g, "_");
+      const name = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${base}`;
+      await pipeline(file.file, createWriteStream(path.join(dir, name)));
+      return { url: `/uploads/${encodeURIComponent(name)}`, filename: file.filename ?? null };
+    });
   }
 }

@@ -1,7 +1,7 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { devicesApi, type DeviceDetail } from "../../api/admin";
 import { ApiError } from "../../api/client";
-import { Alert, Button, Dialog, Input } from "@ui";
+import { Alert, Button, Dialog, Input, Select } from "@ui";
 
 const CODE_PATTERN = /^[A-Za-z0-9_-]{3,64}$/;
 
@@ -79,15 +79,37 @@ export function BindDialog({ onClose, onCreated }: { onClose: () => void; onCrea
 export function LocationDialog({ device, onClose, onSaved }: { device: DeviceDetail; onClose: () => void; onSaved: () => void }) {
   const [factory, setFactory] = useState(device.factory_name ?? "");
   const [city, setCity] = useState(device.city ?? "");
+  const [verticalId, setVerticalId] = useState(String(device.vertical_id ?? ""));
+  const [verticals, setVerticals] = useState<Array<{ id: number; code: string; name: string }>>([]);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
+  // 品类来自 vertical 表（工厂/地铁/物流/RPO/日结）。一个微信号只做一个板块，
+  // 所以这里是必选——没有「综合号」，HR 明确说过大方向是定死的。
+  useEffect(() => {
+    let alive = true;
+    devicesApi
+      .verticals()
+      .then((res) => {
+        if (!alive) return;
+        setVerticals(
+          (res.items ?? []).map((v) => ({ id: Number(v.id), code: String(v.code), name: String(v.name) })),
+        );
+      })
+      .catch(() => { /* 拉不到列表时不阻塞，运营仍可保存其它字段 */ });
+    return () => { alive = false; };
+  }, []);
+
+  const selected = verticals.find((v) => String(v.id) === verticalId);
+  const verticalError = !verticalId ? "必须选择一个板块" : undefined;
+
   async function submit(e: FormEvent) {
     e.preventDefault();
+    if (!verticalId) return;
     setSaving(true);
     setError(null);
     try {
-      await devicesApi.saveLocation(device.id, factory.trim(), city.trim());
+      await devicesApi.saveLocation(device.id, factory.trim(), city.trim(), Number(verticalId));
       onSaved();
     } catch (err) {
       setError(err instanceof ApiError ? err.detail : "保存失败");
@@ -100,17 +122,34 @@ export function LocationDialog({ device, onClose, onSaved }: { device: DeviceDet
       open
       onClose={onClose}
       title={`「${device.name || device.device_code}」的账号定位`}
-      description="设置这个微信号服务的工厂和城市，设备端会据此过滤知识库。留空表示通用，不限工厂或城市。"
+      description="一个微信号只做一个板块。选定后，进线客户会直接收到该板块的岗位卡，不问方向。"
       footer={
         <>
           <Button variant="secondary" onClick={onClose}>取消</Button>
-          <Button type="submit" form="dv-location" loading={saving}>保存</Button>
+          <Button type="submit" form="dv-location" loading={saving} disabled={!verticalId}>保存</Button>
         </>
       }
     >
       <form id="dv-location" className="mod-form" onSubmit={submit}>
-        <Input id="dv-factory" label="所属工厂" placeholder="留空 = 通用" value={factory} onChange={(e) => setFactory(e.target.value)} />
-        <Input id="dv-city" label="服务城市" placeholder="留空 = 通用" value={city} onChange={(e) => setCity(e.target.value)} />
+        <Select
+          id="dv-vertical"
+          label="板块"
+          helperText="决定这个号推哪类岗位，改完约 30 秒生效"
+          value={verticalId}
+          onChange={(e) => setVerticalId(e.target.value)}
+          error={verticalError}
+          options={verticals.map((v) => ({ value: String(v.id), label: v.name }))}
+          placeholder="请选择"
+          required
+        />
+        <Input
+          id="dv-factory"
+          label={selected?.code === "subway" ? "线路/站点（可选）" : "所属工厂"}
+          placeholder={selected?.code === "subway" ? "留空 = 该城市全部" : "留空 = 该板块全部"}
+          value={factory}
+          onChange={(e) => setFactory(e.target.value)}
+        />
+        <Input id="dv-city" label="服务城市" placeholder="留空 = 不限城市" value={city} onChange={(e) => setCity(e.target.value)} />
         {error && <Alert tone="danger" title={error} />}
       </form>
     </Dialog>

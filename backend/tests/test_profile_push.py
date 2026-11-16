@@ -179,6 +179,7 @@ def test_interview_at_converts_to_date_and_time() -> None:
         "gender": "男",
         "record": "无",
         "interview_at": "2026-11-09T13:00:00+08:00",
+        "name": "张三", "phone": "13800138000", "interview_agreed": True,
     }
     profile = build_profile(slots, "done", "book_interview")
 
@@ -208,6 +209,7 @@ def test_province_flows_into_profile_and_payload() -> None:
         "district": "白云区",
         "interview_at": "2026-11-09T09:00:00+08:00",
         "interview_window": "09:00-11:00",
+        "name": "张三", "phone": "13800138000", "interview_agreed": True,
     }
     profile = build_profile(slots, "done", "book_interview")
 
@@ -222,6 +224,43 @@ def test_province_flows_into_profile_and_payload() -> None:
 
 def test_only_province_is_still_worth_pushing() -> None:
     assert profile_push.has_content(build_profile({"province": "广东省"})) is True
+
+
+@pytest.mark.parametrize("missing", ["interview_agreed", "name", "phone", "city"])
+def test_incomplete_profile_cannot_claim_booking(missing: str) -> None:
+    slots = {"city": "广州", "name": "张三", "phone": "13800138000", "interview_agreed": True}
+    slots.pop(missing)
+    profile = build_profile(slots, "done", "book_interview")
+    assert profile["stage"] != "booked"
+    assert "registration_text" not in profile
+
+
+def test_registration_uses_pinned_factory_snapshot_after_jobs_reorder() -> None:
+    slots = {
+        "city": "广州", "name": " 张三 ", "phone": "13800138000", "interview_agreed": True,
+        "position_id": 3, "job_index": 0, "record": "无",
+        "job_snapshot": {"factory_name": "已选工厂", "job_title": "已选工厂 质检"},
+    }
+    profile = build_profile(slots, "done", "book_interview")
+    assert profile["factory_name"] == "已选工厂"
+    assert profile["registration_text"] == "广州 已选工厂 张三 13800138000"
+    assert profile["interview_agreed"] is True
+    assert profile["record"] == "无"
+
+
+def test_unknown_pinned_position_never_uses_another_factory() -> None:
+    slots = {"city": "广州", "name": "张三", "phone": "13800138000", "interview_agreed": True, "position_id": 999}
+    profile = build_profile(slots, "done", "book_interview")
+    assert "factory_name" not in profile
+    assert "registration_text" not in profile
+    assert profile["stage"] != "booked"
+
+
+def test_withdrawal_revokes_consent_and_registration_summary() -> None:
+    slots = {"city": "广州", "name": "张三", "phone": "13800138000", "interview_agreed": True}
+    profile = build_profile(slots, "done", "gave_up")
+    assert profile["interview_agreed"] is False
+    assert "registration_text" not in profile
 
 
 class ScriptedProvider:

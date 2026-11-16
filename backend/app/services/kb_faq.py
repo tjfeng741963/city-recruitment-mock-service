@@ -34,6 +34,8 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models_kb import DEFAULT_TENANT_ID, Employer, KbFaq, Location, Vertical
+from .kb_policy import shared_answer_allowed
+from .question_topics import WAGE_KEYWORDS, is_non_wage_cost_question, is_wage_keyword
 
 # scope 从窄到宽的检索顺序
 SCOPE_ORDER = ("position", "employer", "city", "vertical", "global")
@@ -81,10 +83,60 @@ def looks_like_question(text: str) -> bool:
     return any(hint in value for hint in _QUESTION_HINTS)
 
 
+# 同义词组：把客户常见说法归到同一概念。
+#
+# 为什么需要：keywords 是运营手列的固定词表，客户说法千变万化——词表写
+# 「住宿」，客户说「宿舍」就漏答；写「工资」，客户说「一个月能拿多少」也漏。
+# 实测 030 导入的真实话术里，「宿舍」「几人间」「伙食」一个都不在词表里。
+#
+# 只收**无歧义的概念词**：「远」「多大」这类泛词不收，否则「宿舍多大」会误命中
+# 「年龄」。宁可少扩，不能错配——错配比漏答更糟（答错要赔钱，漏答只是不答）。
+_SYNONYM_GROUPS: tuple[tuple[str, ...], ...] = (
+    WAGE_KEYWORDS,
+    ("住宿", "宿舍", "包住", "住宿条件", "几人间"),
+    ("吃饭", "包吃", "伙食", "食堂", "管饭"),
+    ("社保", "五险", "一金", "保险", "缴纳"),
+    ("体检", "健康证", "查体"),
+    ("押金", "押钱", "中介费", "收费"),
+    ("转正", "正式工", "试用期", "实习"),
+    ("年龄", "多大年纪", "几岁", "岁数"),
+    ("纹身", "纹身要求", "刺青"),
+)
+
+
+def _synonyms_of(keyword: str) -> tuple[str, ...]:
+    """关键词所属的同义词组（含自身）。不在任何组里就只返回自身。"""
+    for group in _SYNONYM_GROUPS:
+        if keyword in group:
+            return group
+    return (keyword,)
+
+
 def match_keywords(question: str, keywords: list[str]) -> int:
-    """命中返回命中的总字数（用来在同 priority 内排序），不命中返回 0。"""
+    """命中返回分数（同 priority 内排序用），不命中返回 0。
+
+    两级计分，保证「客户原话直接命中词表」永远赢过「靠同义词猜的」：
+      1. 关键词原文出现在客户这句话里 → 按字数 ×2 计分
+      2. 原文没命中，但它的同义词有说法出现 → 按字数 ×1 计分
+    """
     text = question or ""
-    return sum(len(word) for word in keywords if word and word in text)
+    score = 0
+    expense_question = is_non_wage_cost_question(text)
+    for word in keywords:
+        if not word:
+            continue
+        # 具体费用优先，不能让“多少钱”同义扩展成工资，或因“从工资扣”
+        # 命中工资FAQ；体检/社保等主题关键词仍按正常作用域查找。
+        if expense_question and is_wage_keyword(word):
+            continue
+        if word in text:
+            score += len(word) * 2
+            continue
+        for alias in _synonyms_of(word):
+            if alias != word and alias in text:
+                score += len(alias)
+                break
+    return score
 
 
 def _vertical_id_subquery(vertical_code: str):
@@ -153,6 +205,13 @@ async def lookup(
         for row in rows:
             score = match_keywords(text, _loads(row.keywords))
             if not score:
+                continue
+            if tier_name not in {"position", "employer"} and not shared_answer_allowed(
+                text, str(row.answer or ""),
+                keywords=[str(row.question or ""), *_loads(row.keywords)],
+                media=_loads(row.media),
+                fact_fields={*_PLACEHOLDER_KEYS, *_PLACEHOLDER_KEYS.values()},
+            ):
                 continue
             if best is None or score > best[0] or (
                 score == best[0] and int(row.priority or 0) > int(best[1].priority or 0)

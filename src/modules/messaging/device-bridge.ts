@@ -89,12 +89,22 @@ export class DeviceBridgeStore {
     const device = this.status(code);
     if (!device) throw new BridgeError("Device not paired", 404);
     if (state === "online" && !accountId) throw new BridgeError("Logged-in account id is required", 422);
-    if (accountId && device.account_id && accountId !== device.account_id) throw new BridgeError("Device is bound to a different account");
+    // 绑定以客户端实时上报为准（2026-11-15 业务口径）。
+    // 原来「账号不一致就 409」把设备钉死在首次登录的账号上：客户端换号后
+    // 每次心跳都被拒（实测 Device is bound to a different account），
+    // 设备被判离线，看板/会话同步整段断流。现在改成跟随客户端并留一条
+    // 审计事件，运营仍能查到「这台设备什么时候换过号」。
+    const previousAccount = device.account_id ?? "";
+    const rebound = Boolean(accountId && previousAccount && accountId !== previousAccount);
     // status() 返回的是生效状态（超时的 online 已折算成 offline），所以这里
     // 的“变化”与路由层观察到的一致：设备重复上报同一状态时既不落流水也不推送。
     const changed = device.state !== state;
     this.db.prepare("UPDATE bridge_devices SET state=?,heartbeat_at=?,account_id=CASE WHEN ?<>'' THEN ? ELSE account_id END WHERE device_code=?")
       .run(state, this.now(), accountId, accountId, code);
+    if (rebound) {
+      this.db.prepare("INSERT INTO device_events(device_code,event_type,reason,created_at) VALUES (?,?,?,?)")
+        .run(code, "account_rebound", `${previousAccount}->${accountId}`, new Date(this.now()).toISOString());
+    }
     if (changed) {
       // 掉线事件流水：推送节流以它为基准，重启不丢。
       this.db.prepare("INSERT INTO device_events(device_code,event_type,reason,created_at) VALUES (?,?,?,?)")
@@ -144,6 +154,34 @@ export class DeviceBridgeStore {
     if (online) data.last_online = new Date(this.now()).toISOString();
     this.db.prepare("UPDATE agent_devices SET data_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(JSON.stringify(data), row.id);
   }
+
+  /**
+   * 保存企微登录二维码截图（每个设备只留最新一张）。
+   *
+   * 为什么按 device_code 覆盖而不是追加：二维码约 2 分钟刷新一次，历史帧对
+   * 扫码者毫无用处；一张 PNG base64 几百 KB，留着会让 SQLite 迅速膨胀。
+   */
+  saveLoginQr(code: string, imageB64: string, width: number, height: number, capturedAt: string): void {
+    if (!this.enabled(code)) throw new BridgeError("Enabled device not found", 404);
+    this.db.prepare(`INSERT INTO device_login_qr(device_code,image_b64,width,height,captured_at,updated_at)
+      VALUES (?,?,?,?,?,CURRENT_TIMESTAMP)
+      ON CONFLICT(device_code) DO UPDATE SET image_b64=excluded.image_b64,width=excluded.width,
+        height=excluded.height,captured_at=excluded.captured_at,updated_at=CURRENT_TIMESTAMP`)
+      .run(code, imageB64, Math.max(0, Math.trunc(width)), Math.max(0, Math.trunc(height)), capturedAt);
+  }
+
+  /** 读最新二维码；没有返回 null（网页据此显示「正在等设备上传」）。 */
+  loginQr(code: string): { image_b64: string; width: number; height: number; captured_at: string } | null {
+    const row = this.db.prepare("SELECT image_b64,width,height,captured_at FROM device_login_qr WHERE device_code=?")
+      .get(code) as { image_b64: string; width: number; height: number; captured_at: string } | undefined;
+    return row ?? null;
+  }
+
+  /** 登录恢复后清掉残留二维码，避免网页继续显示已经失效的旧图。 */
+  clearLoginQr(code: string): void {
+    this.db.prepare("DELETE FROM device_login_qr WHERE device_code=?").run(code);
+  }
+
   contact(code: string, contactId: string, nickname: string): number {
     const existing = this.db.prepare("SELECT customer_id FROM bridge_contacts WHERE device_code=? AND contact_id=?").get(code, contactId) as { customer_id: number } | undefined;
     if (existing) {

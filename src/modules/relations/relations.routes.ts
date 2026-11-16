@@ -27,7 +27,14 @@ export async function registerRelationRoutes(app: FastifyInstance, db: DatabaseS
     const visible = scope.isAdmin ? null : scope.cityIds;
     const constraint = visible ? visible.length ? ` WHERE c.id IN (${visible.map(() => "?").join(",")})` : " WHERE 1=0" : "";
     const values = visible ?? [];
-    const counts = db.prepare(`SELECT c.city_name AS city, COUNT(l.linked_city_id) AS count FROM cities c LEFT JOIN city_links l ON l.city_id = c.id${constraint} GROUP BY c.id ORDER BY c.city_name`).all(...values) as Array<{ city: string; count: number }>;
+    // 「岗位数」列显示该城在招岗位数。过去这里数的是 city_links 的行数，
+    // 列名写着「岗位数」却显示周边城市数量，而且重复行会把它放大。
+    const counts = db.prepare(
+      `SELECT c.city_name AS city,
+              (SELECT COUNT(*) FROM service_positions sp
+                WHERE sp.city_id = c.id AND sp.status='enabled') AS count
+         FROM cities c${constraint} ORDER BY c.city_name`,
+    ).all(...values) as Array<{ city: string; count: number }>;
     const cityRows = db.prepare(`SELECT city_name,data_json,id FROM cities${visible ? visible.length ? ` WHERE id IN (${visible.map(() => "?").join(",")})` : " WHERE 1=0" : ""}`).all(...values) as Array<{ id: number; city_name: string; data_json: string }>;
     const default_districts: Record<string, string[]> = {};
     for (const row of cityRows) {
@@ -53,14 +60,44 @@ export async function registerRelationRoutes(app: FastifyInstance, db: DatabaseS
     return serializeCityLinks({ districts, links });
   });
   // Target responds 201 {saved: n} — the count of links actually written.
-  app.post<{ Body: { city_id?: number; linked_city_ids?: number[] } }>("/api/v1/city-links/batch", async (request, reply) => {
-    const cityId = Number(request.body?.city_id ?? 0);
-    const linked = Array.isArray(request.body?.linked_city_ids) ? request.body.linked_city_ids : [];
+  app.post<{ Body: { city_id?: number; linked_city_ids?: number[]; links?: unknown } }>("/api/v1/city-links/batch", async (request, reply) => {
     const scope = userScope(request);
-    if (!canAccessCity(scope, cityId) || linked.some((id) => !canAccessCity(scope, Number(id)))) return reply.code(403).send({ detail: "无权设置该城市关联" });
-    db.prepare("DELETE FROM city_links WHERE city_id=?").run(cityId);
+    const byName = db.prepare("SELECT id FROM cities WHERE city_name=?");
+    const exists = db.prepare("SELECT id FROM cities WHERE id=?");
+    const plans: Array<{ cityId: number; targets: number[]; districts?: string[] }> = [];
+    if (!request.body || typeof request.body !== "object" || Array.isArray(request.body)) return reply.code(422).send({ detail: "城市配置格式错误" });
+    if (request.body && "links" in request.body) {
+      if (!Array.isArray(request.body.links)) return reply.code(422).send({ detail: "links 必须是城市配置列表" });
+      for (const value of request.body.links) {
+        if (!value || typeof value !== "object" || Array.isArray(value)) return reply.code(422).send({ detail: "城市配置格式错误" });
+        const row = value as Record<string, unknown>;
+        if (typeof row.source_city !== "string" || !Array.isArray(row.target_cities) || row.target_cities.some((name) => typeof name !== "string")) return reply.code(422).send({ detail: "请提供负责城市和周边城市列表" });
+        const source = byName.get(row.source_city) as { id: number } | undefined;
+        const targets = row.target_cities.map((name) => byName.get(name) as { id: number } | undefined);
+        if (!source || targets.some((target) => !target)) return reply.code(422).send({ detail: "城市不存在，请刷新页面后重试" });
+        if (row.districts !== undefined && (!Array.isArray(row.districts) || row.districts.some((district) => typeof district !== "string"))) return reply.code(422).send({ detail: "区域必须是区县名称列表" });
+        plans.push({ cityId: source.id, targets: [...new Set(targets.map((target) => target!.id))], ...(row.districts !== undefined ? { districts: [...new Set((row.districts as string[]).map((name) => name.trim()).filter(Boolean))] } : {}) });
+      }
+    } else {
+      const cityId = request.body?.city_id;
+      const targets = request.body?.linked_city_ids;
+      if (!Number.isSafeInteger(cityId) || !Array.isArray(targets) || targets.some((id) => !Number.isSafeInteger(id) || id <= 0)) return reply.code(422).send({ detail: "请提供城市编号和周边城市编号列表" });
+      if (!exists.get(cityId!) || targets.some((id) => !exists.get(id))) return reply.code(422).send({ detail: "城市不存在" });
+      plans.push({ cityId: cityId!, targets: [...new Set(targets)] });
+    }
+    // 先验证整批，再事务写入，避免末尾一行无权限时前面已被清空。
+    if (plans.some((plan) => !canAccessCity(scope, plan.cityId) || plan.targets.some((id) => !canAccessCity(scope, id)))) return reply.code(403).send({ detail: "无权设置该城市关联" });
+    if (plans.some((plan) => plan.targets.includes(plan.cityId)) || new Set(plans.map((plan) => plan.cityId)).size !== plans.length) return reply.code(422).send({ detail: "负责城市不能重复，也不能关联自身" });
     let saved = 0;
-    for (const linkedId of linked) saved += Number(db.prepare("INSERT OR IGNORE INTO city_links(city_id,linked_city_id) SELECT ?,id FROM cities WHERE id=?").run(cityId, Number(linkedId)).changes);
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const plan of plans) {
+        db.prepare("DELETE FROM city_links WHERE city_id=?").run(plan.cityId);
+        for (const target of plan.targets) saved += Number(db.prepare("INSERT INTO city_links(city_id,linked_city_id) VALUES (?,?)").run(plan.cityId, target).changes);
+        if (plan.districts !== undefined) db.prepare("UPDATE cities SET data_json=json_set(data_json,'$.districts',json(?)),updated_at=CURRENT_TIMESTAMP WHERE id=?").run(JSON.stringify(plan.districts), plan.cityId);
+      }
+      db.exec("COMMIT");
+    } catch (error) { db.exec("ROLLBACK"); throw error; }
     return reply.code(201).send({ saved });
   });
   app.get<{ Params: { id: string } }>("/api/v1/recruiters/:id/cities", async (request, reply) => {

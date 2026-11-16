@@ -34,6 +34,31 @@ export async function registerActivationRoutes(app: FastifyInstance, db: Databas
     }, 1000);
     app.addHook("onClose", async () => { clearInterval(timer); await running; });
   }
+  // 「激活自动跑」：activation_config.schedule_time 一直存在配置里，
+  // 但在此之前**没有任何代码读它** —— 运营在页面上设了时间也不会自动扫，
+  // 必须手动按「运行」。这里起一个每分钟一次的定时器，到点就跑一轮扫描。
+  //
+  // 只做扫描（生成待发/待审记录），不直接外发：auto_review 打开时生成的是
+  // pending_send，未打开是 pending_review，后者仍要人工批准——这是原有语义。
+  // 全局 paused 在 runScan 内部已经拦掉，这里不重复判断。
+  let lastScanDay = "";
+  const activationScanTimer = setInterval(() => {
+    const config = readActivationConfig();
+    const scheduleTime = String(config.schedule_time ?? "").trim();
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(scheduleTime)) return;
+    const now = new Date();
+    const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+    if (hhmm !== scheduleTime) return;
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    if (lastScanDay === today) return;   // 同一天只跑一次，进程重启后最多再跑一次
+    lastScanDay = today;
+    try { activationJobs.enqueueConfiguredScan(); } catch (error) {
+      app.log.error(error, "activation scheduled scan enqueue failed");
+    }
+  }, 60_000);
+  activationScanTimer.unref();
+  app.addHook("onClose", () => clearInterval(activationScanTimer));
+
   type RuntimeStrategy = Omit<ActivationStrategyDefinition, "config" | "enabled"> & Record<string, unknown> & { enabled: boolean };
   const readStrategyConfig = (code: ActivationStrategyCode) => {
     const definition = activationStrategyDefault(code) as ActivationStrategyDefinition;
@@ -114,6 +139,23 @@ export async function registerActivationRoutes(app: FastifyInstance, db: Databas
     const row = db.prepare("SELECT paused,schedule_time,freeze_days,auto_review FROM activation_config WHERE id=1").get() as { paused: number; schedule_time: string; freeze_days: number; auto_review: number };
     return { auto_review: Boolean(row.auto_review), freeze_days: row.freeze_days, paused: Boolean(row.paused), schedule_time: row.schedule_time };
   };
+  // 手填名单扫描（客户要求「激活可以自动跑也可以手动填名单」）。
+  // 只对给定客户跑策略判定，不扩散到全库；重复客户去重，空名单直接 422。
+  app.post<{ Body: { customer_ids?: unknown; strategy?: string } }>("/api/v1/activation/scan/manual", async (request, reply) => {
+    if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin access required" });
+    const raw = Array.isArray(request.body?.customer_ids) ? request.body.customer_ids : [];
+    // 粘贴名单常带重复与空格，这里先去重，接口返回的条数才是真实要扫的人数
+    const customerIds = Array.from(new Set(raw.map((id) => String(id ?? "").trim()).filter(Boolean)));
+    if (!customerIds.length) return reply.code(422).send({ detail: "customer_ids 不能为空" });
+    const strategy = typeof request.body?.strategy === "string" && isActivationStrategyCode(request.body.strategy) ? request.body.strategy : undefined;
+    if (request.body?.strategy && !strategy) return reply.code(422).send({ detail: "Unknown activation strategy" });
+    let job: { id: number };
+    try { job = activationJobs.enqueueManualScan(customerIds, strategy); }
+    catch (error) { return reply.code(422).send({ detail: error instanceof Error ? error.message : "名单无效" }); }
+    const result = await jobScheduler.runOnce(`manual-scan-${request.id}`, (claimed) => jobExecutor.execute(claimed));
+    return { job_id: job.id, customers: customerIds.length, result };
+  });
+
   app.get("/api/v1/activation/config", async () => readActivationConfig());
   app.put<{ Body: { paused?: boolean } }>("/api/v1/activation/config/paused", async (request, reply) => { if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin access required" }); db.prepare("UPDATE activation_config SET paused=?,updated_at=CURRENT_TIMESTAMP WHERE id=1").run(request.body?.paused ? 1 : 0); return readActivationConfig(); });
   for (const action of ["approve", "skip", "freeze", "run"] as const) {

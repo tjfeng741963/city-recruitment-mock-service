@@ -3,6 +3,7 @@ import { deviceDifyConfig, type DifyProvider } from "../dify/dify-provider.js";
 import type { MessageEventService } from "./message-events.js";
 import type { MessageChannelProvider } from "./message-channel-provider.js";
 import { NOOP_NOTIFIER, type StreamNotifier } from "./stream-events.js";
+import { applyEventRule } from "../../shared/event-rules.js";
 
 interface IncomingMessage {
   eventId: string;
@@ -30,7 +31,7 @@ interface DeliveryRow {
 export interface InboundMessageResult {
   status: "processed" | "duplicate";
   event_id: string;
-  reply_status: "simulated" | "sent" | "api_accepted" | "human_takeover" | "observe_only" | "failed" | "pending";
+  reply_status: "simulated" | "sent" | "api_accepted" | "human_takeover" | "observe_only" | "old_friend" | "failed" | "pending";
   error?: string;
 }
 
@@ -83,6 +84,17 @@ export class MessageAutomationService {
     // recordEvent/createDelivery/Dify/渠道入队之前返回。
     if (deviceData.observe_only === true) {
       return { status: "processed", event_id: input.eventId, reply_status: "observe_only" };
+    }
+
+    // 老友保护：运营在「老友管理」里标为不可聊（unreleased）的老客户，
+    // AI 不自动回复，只记录消息与未读，等人工处理。
+    // 过去这张表只有读写接口、没人消费，页面承诺的「不自动回复」从未生效。
+    // released = 运营手动放行，照常走自动回复。
+    const oldFriend = this.db.prepare(
+      "SELECT status FROM old_friend_records WHERE device_code=? AND CAST(customer_id AS TEXT)=? ORDER BY id DESC LIMIT 1",
+    ).get(input.deviceCode, String(input.customerId)) as { status: string } | undefined;
+    if (oldFriend && oldFriend.status !== "released") {
+      return { status: "processed", event_id: input.eventId, reply_status: "old_friend" };
     }
 
     const replyEventId = `${input.eventId}:reply`;
@@ -155,6 +167,22 @@ export class MessageAutomationService {
     this.db.prepare("UPDATE agent_conversations SET last_msg=?,last_msg_at=?,updated_at=? WHERE device_code=? AND customer_id=?")
       .run(reply, new Date().toISOString(), new Date().toISOString(), input.deviceCode, input.customerId);
     this.events.markDeliverySucceeded(delivery.id, sent.message_id);
+
+    // 回复规则打标签（客户要的「回复规则」）。
+    // 关键词命中的是**我们自己发出去的这句话**，不是客户说的——「报名成功」
+    // 「那就祝您面试顺利」都出现在 AI 的回复里，只在入站文本里找永远找不到。
+    // 所以判定挂在这里：回复已经发出、会话与出站消息都已落库之后。
+    // 打标签失败不影响已发出的消息，异常只吞掉。
+    try {
+      applyEventRule(this.db, {
+        deviceCode: input.deviceCode,
+        customerId: input.customerId,
+        outboundText: reply,
+      });
+    } catch (error) {
+      // 规则配置错了不能让客户收不到话，只记录
+      try { console.warn('[event-rules] tag failed', error instanceof Error ? error.message : String(error)); } catch { /* ignore */ }
+    }
 
     return { status: "processed", event_id: input.eventId, reply_status: sent.simulated ? "simulated" : sent.accepted ? 'api_accepted' : "sent" };
   }

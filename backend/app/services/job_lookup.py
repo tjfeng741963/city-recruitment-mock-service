@@ -15,11 +15,15 @@ from typing import Any
 import httpx
 
 DEFAULT_JOBS_URL = "http://127.0.0.1:4222/api/v1/agent/jobs"
+DEFAULT_CITIES_URL = "http://127.0.0.1:4222/api/v1/agent/cities"
 TIMEOUT = 3.0
 CACHE_TTL = 60.0
 
 # {city: (过期时刻 monotonic, items)}
 _cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+
+# 城市清单缓存：(过期时刻 monotonic, items)
+_cities_cache: tuple[float, list[dict[str, Any]]] | None = None
 
 
 def clear_cache() -> None:
@@ -27,11 +31,20 @@ def clear_cache() -> None:
     _cache.clear()
 
 
-async def _fetch_items(city: str, token: str, url: str) -> list[dict[str, Any]]:
-    """发一次真实请求。只在这层碰网络，测试 monkeypatch 这里。"""
+async def _fetch_items(
+    city: str, token: str, url: str, device_code: str = ""
+) -> list[dict[str, Any]]:
+    """发一次真实请求。只在这层碰网络，测试 monkeypatch 这里。
+
+    device_code 交给 4222 做「设备绑定工厂」过滤：同一城市不同设备绑的厂不同，
+    过滤必须在服务端做（那边才知道设备→工厂的绑定关系），这里只透传。
+    """
+    params: dict[str, str] = {"city": city}
+    if device_code:
+        params["device_code"] = device_code
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         resp = await client.get(
-            url, params={"city": city}, headers={"X-Profile-Token": token}
+            url, params=params, headers={"X-Profile-Token": token}
         )
         resp.raise_for_status()
         data = resp.json()
@@ -41,18 +54,70 @@ async def _fetch_items(city: str, token: str, url: str) -> list[dict[str, Any]]:
     return [item for item in items if isinstance(item, dict)]
 
 
-async def lookup_jobs(city: str, vertical_hint: str = "") -> list[dict[str, Any]]:
+
+
+async def _fetch_cities(token: str, url: str) -> list[dict[str, Any]]:
+    """城市清单。同样只在这一层碰网络。"""
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        resp = await client.get(url, headers={"X-Profile-Token": token})
+        resp.raise_for_status()
+        data = resp.json()
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)]
+
+
+async def lookup_cities() -> list[dict[str, Any]]:
+    """后台在招的城市与区县，给「客户说地名」这一步用。
+
+    过去城市识别是 flow_engine 里硬编码的广州/深圳/东莞，运营在后台新建北京
+    也认不出来，客户说「我要找北京的工作」直接被当成没说城市。这里改成读库。
+    任何失败都返回 []，上层退回硬编码别名，不至于一个字都识别不出。
+    """
+    global _cities_cache
+    now = time.monotonic()
+    if _cities_cache and now < _cities_cache[0]:
+        return _cities_cache[1]
+    token = os.getenv("FLOW_PROFILE_TOKEN", "").strip()
+    if not token:
+        return []
+    url = os.getenv("FLOW_CITIES_URL", DEFAULT_CITIES_URL)
+    try:
+        items = await _fetch_cities(token, url)
+    except Exception:  # noqa: BLE001  超时/4222 挂了/返回乱码：退回硬编码别名
+        items = []
+    _cities_cache = (time.monotonic() + CACHE_TTL, items)
+    return items
+
+
+async def lookup_jobs(
+    city: str,
+    vertical_hint: str = "",
+    device_scope: str = "",
+    device_code: str = "",
+) -> list[dict[str, Any]]:
+
     """按城市查岗位。任何失败都返回 []，由上层走「已记下，帮你问问」话术。
 
-    `vertical_hint` 是客户这轮明确说的品类（factory / subway）。2026-11-13 实测：
-    客户说「我是去工厂，不是去安检」，系统还在推地铁——因为下面的「只推地铁」
-    是全局开关，客户说什么都不影响。客户一开口说工厂，开关就不再生效。
+    品类口径优先级（2026-11-13 合并：设备绑定优先，客户用词兜底）：
+      1. device_scope —— 网页按设备下发的 job_scope（subway / all），最权威：
+         地铁号就是地铁号，不能因为客户随口说「工厂」就串味。
+      2. vertical_hint —— 客户这轮明确说的品类（factory / subway）。
+         2026-11-13 实测：客户说「我是去工厂，不是去安检」，系统还在推地铁。
+      3. 都没给 → 环境变量 FLOW_ONLY_SUBWAY 的阶段性默认。
+
+    device_code 透传给 4222：设备绑了哪几家工厂，那边只回那几家的岗位。
     """
     city = str(city or "").strip()
     if not city:
         return []
+    device_code = str(device_code or "").strip()
     hint = vertical_hint if vertical_hint in ("factory", "subway") else ""
-    cache_key = f"{city}|{hint}"
+    scope = device_scope if device_scope in ("subway", "all") else ""
+    # 缓存键必须带口径 + 设备：同城在设备级/客户级/默认三种口径下结果不同，
+    # 不同设备绑的工厂也不同，混用会把 A 厂的岗发给 B 厂号（反之亦然）。
+    cache_key = f"{city}|{scope}|{hint}|{device_code}"
     now = time.monotonic()
     cached = _cache.get(cache_key)
     if cached and now < cached[0]:
@@ -62,7 +127,7 @@ async def lookup_jobs(city: str, vertical_hint: str = "") -> list[dict[str, Any]
         return []
     url = os.getenv("FLOW_JOBS_URL", DEFAULT_JOBS_URL)
     try:
-        items = await _fetch_items(city, token, url)
+        items = await _fetch_items(city, token, url, device_code)
     except Exception:  # noqa: BLE001  超时/4222 挂了/返回乱码：一律空结果
         items = []
     # 字段齐全的排前面：占位/空壳岗位往往什么都没填，别让它们抢第一位
@@ -74,14 +139,19 @@ async def lookup_jobs(city: str, vertical_hint: str = "") -> list[dict[str, Any]
     filled = [j for j in items if any(
         str(j.get(k) or "").strip() for k in ("wage_text", "hours_text", "welfare_text")
     )]
-    # 「只推地铁」是 2026-11-12 运营的阶段性指令。只在客户没表态时生效：
-    # 客户明确说去工厂就不过滤，明确说做地铁就强制过滤。
-    if hint == "subway":
+    # 口径判定：设备绑定 > 客户用词 > 环境变量默认。
+    # 设备级最先——地铁号就是地铁号，不能被客户随口一句「工厂」带跑偏。
+    if scope == "all":
+        pass                                    # 设备明确不限，谁都不过滤
+    elif scope == "subway":
+        filled = _only_subway(filled) or filled
+    elif hint == "subway":
         filled = _only_subway(filled) or filled
     elif hint == "factory":
         factory_only = [j for j in filled if not _is_subway(j)]
         filled = factory_only or filled
     elif _only_subway_enabled():
+        # 2026-11-12 运营阶段性指令「暂时按地铁的来」；客户没表态时才生效
         filled = _only_subway(filled) or filled
     if filled:
         items = filled
@@ -122,9 +192,11 @@ def vertical_hint_of(text: str) -> str:
 
 __all__ = [
     "lookup_jobs",
+    "lookup_cities",
     "vertical_hint_of",
     "clear_cache",
     "DEFAULT_JOBS_URL",
+    "DEFAULT_CITIES_URL",
     "TIMEOUT",
     "CACHE_TTL",
 ]

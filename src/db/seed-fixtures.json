@@ -16,7 +16,7 @@
     [9001, "mock-device-1", "mock-c1", "示例候选人A", "invited", "张三（示例）", "13800000001", "广州"],
     [9002, "mock-device-1", "mock-c2", "示例候选人B", "invited", "李四（示例）", "13800000002", "深圳"]
   ],
-  "old_friend_records": [[9001, "mock-account-1", "mock-c1", "示例老友A", "mock-device-1", "active"]],
+  "old_friend_records": [[9001, "mock-account-1", "mock-c1", "示例老友A", "mock-device-1", "unreleased"]],
   "agent_device": {
     "id": 1,
     "device_name": "本地示例设备",

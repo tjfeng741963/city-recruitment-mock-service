@@ -4,6 +4,18 @@ import { parsePagination } from "../../shared/pagination.js";
 import { serializeCity, serializeFactory, serializeServicePosition } from "../../shared/response-serializers.js";
 import { canAccessCity, cityConstraint, getUserScope, type UserScope } from "../../auth/user-scopes.js";
 
+function mergePositionData(raw: string, body: Record<string, unknown>): Record<string, unknown> {
+  const object = (value: unknown): Record<string, unknown> =>
+    value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  let current: Record<string, unknown> = {};
+  try { current = object(JSON.parse(raw)); } catch { /* No recoverable stored fields. */ }
+  // 旧导入可能多包一层 data_json。更新表单字段时保留未展示的岗位事实和媒体，
+  // 同时让新提交的字段覆盖旧值，不能让旧嵌套内容反过来盖住本次保存。
+  const merged = { ...current, ...object(current.data_json), ...body, ...object(body.data_json) };
+  delete merged.data_json;
+  return merged;
+}
+
 function list(db: DatabaseSync, table: string, query: Record<string, unknown>, serialize: (row: Record<string, unknown>) => Record<string, unknown>, where = "", args: Array<string | number | null> = [], scopeFilter?: { sql: string; values: number[] }) {
   const { page, pageSize, offset } = parsePagination(query);
   const scopeSql = scopeFilter?.sql ?? "";
@@ -100,7 +112,12 @@ export async function registerCoreRoutes(app: FastifyInstance, db: DatabaseSync)
     const result = db.prepare("UPDATE factories SET city_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(cityId, Number(request.body?.factory_id));
     return result.changes ? { success: true } : reply.code(404).send({ detail: "工厂不存在" });
   });
-  app.get<{ Querystring: Record<string, unknown> }>("/api/v1/factories", async (request) => list(db, "factories", request.query, serializeFactory, "", [], cityConstraint(scopeFor(request.auth!), "city_id")));
+  app.get<{ Querystring: Record<string, unknown> }>("/api/v1/factories", async (request) => {
+    const cityId = Number(request.query.city_id);
+    const where = Number.isSafeInteger(cityId) && cityId > 0 ? " WHERE city_id=?" : "";
+    const args = where ? [cityId] : [];
+    return list(db, "factories", request.query, serializeFactory, where, args, cityConstraint(scopeFor(request.auth!), "city_id"));
+  });
   app.get<{ Params: { id: string } }>("/api/v1/factories/:id", async (request, reply) => { const row = db.prepare("SELECT * FROM factories WHERE id=?").get(Number(request.params.id)) as (Record<string, unknown> & { city_id: number }) | undefined; return row && canAccessCity(scopeFor(request.auth!), Number(row.city_id)) ? serializeFactory(row) : reply.code(404).send({ detail: "工厂不存在" }); });
   app.post<{ Body: Record<string, unknown> }>("/api/v1/factories", async (request, reply) => { const cityId = typeof request.body?.city_id === "number" ? request.body.city_id : null; if (cityId === null || denyCityWrite(scopeFor(request.auth!), cityId, reply)) return reply.sent ? reply : reply.code(422).send({ detail: "city_id is required" }); const row = db.prepare("INSERT INTO factories(factory_name,city_id,data_json) VALUES (?,?,?) RETURNING *").get(String(request.body?.factory_name ?? request.body?.name ?? "本地工厂"), cityId, JSON.stringify(request.body ?? {})) as Record<string, unknown>; return serializeFactory(row); });
   app.put<{ Params: { id: string }; Body: Record<string, unknown> }>("/api/v1/factories/:id", async (request, reply) => { const id = Number(request.params.id); const current = db.prepare("SELECT city_id FROM factories WHERE id=?").get(id) as { city_id: number } | undefined; if (!current || denyCityWrite(scopeFor(request.auth!), Number(current.city_id), reply)) return reply.sent ? reply : reply.code(404).send({ detail: "工厂不存在" }); const cityId = typeof request.body?.city_id === "number" ? request.body.city_id : Number(current.city_id); if (denyCityWrite(scopeFor(request.auth!), cityId, reply)) return reply; const name = request.body?.factory_name ?? request.body?.name; const result = db.prepare("UPDATE factories SET factory_name=COALESCE(?,factory_name),city_id=COALESCE(?,city_id),data_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(typeof name === "string" ? name : null, typeof request.body?.city_id === "number" ? request.body.city_id : null, JSON.stringify(request.body ?? {}), id); return result.changes ? serializeFactory(db.prepare("SELECT * FROM factories WHERE id=?").get(id) as Record<string, unknown>) : reply.code(404).send({ detail: "工厂不存在" }); });
@@ -127,7 +144,22 @@ export async function registerCoreRoutes(app: FastifyInstance, db: DatabaseSync)
   });
   app.get<{ Params: { id: string } }>("/api/v1/service-positions/:id", async (request, reply) => { const row = db.prepare("SELECT * FROM service_positions WHERE id=?").get(Number(request.params.id)) as (Record<string, unknown> & { city_id: number }) | undefined; return row && canAccessCity(scopeFor(request.auth!), Number(row.city_id)) ? serializeServicePosition(row) : reply.code(404).send({ detail: "岗位不存在" }); });
   app.post<{ Body: Record<string, unknown> }>("/api/v1/service-positions", async (request, reply) => { const cityId = typeof request.body?.city_id === "number" ? request.body.city_id : null; if (cityId === null || denyCityWrite(scopeFor(request.auth!), cityId, reply)) return reply.sent ? reply : reply.code(422).send({ detail: "city_id is required" }); const row = db.prepare("INSERT INTO service_positions(position_name,factory_id,city_id,data_json) VALUES (?,?,?,?) RETURNING *").get(String(request.body?.position_name ?? request.body?.name ?? "本地岗位"), typeof request.body?.factory_id === "number" ? request.body.factory_id : null, cityId, JSON.stringify(request.body ?? {})) as Record<string, unknown>; return serializeServicePosition(row); });
-  app.put<{ Params: { id: string }; Body: Record<string, unknown> }>("/api/v1/service-positions/:id", async (request, reply) => { const id = Number(request.params.id); const current = db.prepare("SELECT city_id FROM service_positions WHERE id=?").get(id) as { city_id: number } | undefined; if (!current || denyCityWrite(scopeFor(request.auth!), Number(current.city_id), reply)) return reply.sent ? reply : reply.code(404).send({ detail: "岗位不存在" }); const cityId = typeof request.body?.city_id === "number" ? request.body.city_id : Number(current.city_id); if (denyCityWrite(scopeFor(request.auth!), cityId, reply)) return reply; const name = request.body?.position_name ?? request.body?.name; const result = db.prepare("UPDATE service_positions SET position_name=COALESCE(?,position_name),factory_id=COALESCE(?,factory_id),city_id=COALESCE(?,city_id),data_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(typeof name === "string" ? name : null, typeof request.body?.factory_id === "number" ? request.body.factory_id : null, typeof request.body?.city_id === "number" ? request.body.city_id : null, JSON.stringify(request.body ?? {}), id); return result.changes ? serializeServicePosition(db.prepare("SELECT * FROM service_positions WHERE id=?").get(id) as Record<string, unknown>) : reply.code(404).send({ detail: "岗位不存在" }); });
+  app.put<{ Params: { id: string }; Body: Record<string, unknown> }>("/api/v1/service-positions/:id", async (request, reply) => {
+    const id = Number(request.params.id);
+    const current = db.prepare("SELECT city_id,data_json FROM service_positions WHERE id=?").get(id) as { city_id: number; data_json: string } | undefined;
+    if (!current || denyCityWrite(scopeFor(request.auth!), Number(current.city_id), reply)) return reply.sent ? reply : reply.code(404).send({ detail: "岗位不存在" });
+    const body = request.body ?? {};
+    const cityId = typeof body.city_id === "number" ? body.city_id : Number(current.city_id);
+    if (denyCityWrite(scopeFor(request.auth!), cityId, reply)) return reply;
+    const name = body.position_name ?? body.name;
+    const result = db.prepare("UPDATE service_positions SET position_name=COALESCE(?,position_name),factory_id=COALESCE(?,factory_id),city_id=COALESCE(?,city_id),data_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(
+      typeof name === "string" ? name : null,
+      typeof body.factory_id === "number" ? body.factory_id : null,
+      typeof body.city_id === "number" ? body.city_id : null,
+      JSON.stringify(mergePositionData(current.data_json, body)), id,
+    );
+    return result.changes ? serializeServicePosition(db.prepare("SELECT * FROM service_positions WHERE id=?").get(id) as Record<string, unknown>) : reply.code(404).send({ detail: "岗位不存在" });
+  });
   app.delete<{ Params: { id: string } }>("/api/v1/service-positions/:id", async (request, reply) => { const id = Number(request.params.id); const row = db.prepare("SELECT city_id FROM service_positions WHERE id=?").get(id) as { city_id: number } | undefined; if (!row) return reply.code(404).send({ detail: "岗位不存在" }); if (denyCityWrite(scopeFor(request.auth!), Number(row.city_id), reply)) return reply; db.prepare("DELETE FROM service_positions WHERE id=?").run(id); return { success: true }; });
   app.put<{ Params: { id: string } }>("/api/v1/service-positions/:id/toggle-featured", async (request, reply) => { const id = Number(request.params.id); const current = db.prepare("SELECT city_id FROM service_positions WHERE id=?").get(id) as { city_id: number } | undefined; if (!current || denyCityWrite(scopeFor(request.auth!), Number(current.city_id), reply)) return reply.sent ? reply : reply.code(404).send({ detail: "岗位不存在" }); const result = db.prepare("UPDATE service_positions SET featured=1-featured,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(id); return result.changes ? serializeServicePosition(db.prepare("SELECT * FROM service_positions WHERE id=?").get(id) as Record<string, unknown>) : reply.code(404).send({ detail: "岗位不存在" }); });
   // Target 404s when the parent position is missing and counts the real total.

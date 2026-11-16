@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
 import { parsePagination } from "../../shared/pagination.js";
+import { assertFaqWritable, faqIssues, KbInputError, normalizeFaq } from "./kb-governance.js";
 
 /**
  * 知识库 v3 配置接口：品类 / 位置树 / 招工方 / 场景问答 / 模板包。
@@ -342,11 +343,22 @@ export async function registerKbV3Routes(app: FastifyInstance, db: DatabaseSync)
   });
 
   // ── 场景问答 ────────────────────────────────────────────────────
+  app.get("/api/v1/kb-faqs/audit", async (request, reply) => {
+    if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
+    const rows = db.prepare("SELECT * FROM kb_faq WHERE tenant_id=1 AND status<>'deleted' ORDER BY id").all() as Json[];
+    const items = rows.map(row => ({ ...row, governance: faqIssues(db, row) })).filter(row => row.governance.length);
+    return { source: "node", total: rows.length, needs_review: items.length, items,
+      faq_inventory: rows.map(row => ({ id: row.id, question: row.question, answer: row.answer,
+        scope_level: row.scope_level, vertical_id: row.vertical_id, scope_location_id: row.scope_location_id,
+        scope_employer_id: row.scope_employer_id, scope_position_id: row.scope_position_id,
+        keywords: parseList(row.keywords), media: parseList(row.media), priority: row.priority, status: row.status })) };
+  });
+
   app.get<{ Querystring: { vertical_id?: string; scope_level?: string; scope_employer_id?: string; scope_position_id?: string } }>(
     "/api/v1/kb-faqs",
     async (request) => {
       const { pageSize, offset } = parsePagination(request.query as Record<string, unknown>);
-      const conditions: string[] = ["status<>'deleted'"];
+      const conditions: string[] = ["tenant_id=1", "status<>'deleted'"];
       const params: Array<string | number> = [];
       if (request.query.vertical_id) {
         conditions.push("vertical_id=?");
@@ -376,6 +388,7 @@ export async function registerKbV3Routes(app: FastifyInstance, db: DatabaseSync)
           ...row,
           keywords: parseList(row.keywords),
           media: parseList(row.media),
+          governance: faqIssues(db, row),
         })),
         total,
       };
@@ -384,38 +397,13 @@ export async function registerKbV3Routes(app: FastifyInstance, db: DatabaseSync)
 
   app.post<{ Body: Json }>("/api/v1/kb-faqs", async (request, reply) => {
     if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
-    const body = request.body ?? {};
-    const question = text(body.question).trim();
-    const answer = text(body.answer).trim();
-    if (!question) return reply.code(422).send({ detail: "question is required" });
-    if (!answer) return reply.code(422).send({ detail: "answer is required" });
-    const scopeLevel = text(body.scope_level, "global");
-    if (!["global", "vertical", "city", "employer", "position"].includes(scopeLevel)) {
-      return reply.code(422).send({ detail: "scope_level 只能是 global/vertical/city/employer/position" });
-    }
-    const scopeEmployerId =
-      body.scope_employer_id === undefined || body.scope_employer_id === null
-        ? null
-        : int(body.scope_employer_id);
-    const scopeLocationId =
-      body.scope_location_id === undefined || body.scope_location_id === null
-        ? null
-        : int(body.scope_location_id);
-    // 岗位级：同厂不同工种工价不同（华荻普工 24-26 / 焊工 35-40），
-    // 按厂存一条只能答一种，答错要赔钱。
-    const scopePositionId =
-      body.scope_position_id === undefined || body.scope_position_id === null
-        ? null
-        : int(body.scope_position_id);
-    // scope 与 id 必须配套，否则检索时这一条永远命中不到
-    if (scopeLevel === "employer" && !scopeEmployerId) {
-      return reply.code(422).send({ detail: "employer 级问答必须指定 scope_employer_id" });
-    }
-    if (scopeLevel === "city" && !scopeLocationId) {
-      return reply.code(422).send({ detail: "city 级问答必须指定 scope_location_id" });
-    }
-    if (scopeLevel === "position" && !scopePositionId) {
-      return reply.code(422).send({ detail: "position 级问答必须指定 scope_position_id" });
+    let body: Json;
+    try {
+      body = normalizeFaq(request.body ?? {});
+      assertFaqWritable(db, body);
+    } catch (error) {
+      if (error instanceof KbInputError) return reply.code(422).send({ detail: error.message });
+      throw error;
     }
     const row = db
       .prepare(
@@ -424,15 +412,15 @@ export async function registerKbV3Routes(app: FastifyInstance, db: DatabaseSync)
          VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *`,
       )
       .get(
-        body.vertical_id === undefined || body.vertical_id === null ? null : int(body.vertical_id),
-        scopeLevel,
-        scopeLocationId,
-        scopeEmployerId,
-        scopePositionId,
-        question,
-        JSON.stringify(Array.isArray(body.keywords) ? body.keywords : []),
-        answer,
-        JSON.stringify(Array.isArray(body.media) ? body.media : []),
+        body.vertical_id as number | null,
+        String(body.scope_level),
+        body.scope_location_id as number | null,
+        body.scope_employer_id as number | null,
+        body.scope_position_id as number | null,
+        String(body.question),
+        JSON.stringify(body.keywords),
+        String(body.answer),
+        JSON.stringify(body.media),
         int(body.priority, 0),
         text(body.status, "enabled"),
         body.template_item_id === undefined || body.template_item_id === null
@@ -445,24 +433,39 @@ export async function registerKbV3Routes(app: FastifyInstance, db: DatabaseSync)
   app.put<{ Params: { id: string }; Body: Json }>("/api/v1/kb-faqs/:id", async (request, reply) => {
     if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
     const id = int(request.params.id);
-    const current = db.prepare("SELECT * FROM kb_faq WHERE id=?").get(id) as Record<string, unknown> | undefined;
+    const current = db.prepare("SELECT * FROM kb_faq WHERE tenant_id=1 AND id=?").get(id) as Record<string, unknown> | undefined;
     if (!current) return reply.code(404).send({ detail: "问答不存在" });
-    const body = request.body ?? {};
+    let body: Json;
+    try {
+      const incoming = request.body ?? {};
+      // 关联目标已失效的旧数据也必须能单独停用，不能被完整编辑校验挡住。
+      const onlyDisable = incoming.status === "disabled" && Object.keys(incoming).length === 1;
+      body = onlyDisable
+        ? { ...current, status: "disabled", keywords: parseList(current.keywords), media: parseList(current.media) }
+        : normalizeFaq(incoming, current);
+      if (!onlyDisable) assertFaqWritable(db, body);
+    } catch (error) {
+      if (error instanceof KbInputError) return reply.code(422).send({ detail: error.message });
+      throw error;
+    }
     // 运营手工改过的条目默认断开模板关联，否则下次模板升级会被覆盖；
     // 显式传 keep_template_link=true 才保留。
     const keepTemplateLink = body.keep_template_link === true;
     const row = db
       .prepare(
         `UPDATE kb_faq SET question=?,keywords=?,answer=?,media=?,priority=?,status=?,
+         vertical_id=?,scope_level=?,scope_location_id=?,scope_employer_id=?,scope_position_id=?,
          template_item_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=? RETURNING *`,
       )
       .get(
         text(body.question, String(current.question)),
-        Array.isArray(body.keywords) ? JSON.stringify(body.keywords) : String(current.keywords),
+        JSON.stringify(body.keywords),
         text(body.answer, String(current.answer)),
-        Array.isArray(body.media) ? JSON.stringify(body.media) : String(current.media),
+        JSON.stringify(body.media),
         body.priority === undefined ? Number(current.priority) : int(body.priority),
         text(body.status, String(current.status)),
+        body.vertical_id as number | null, String(body.scope_level),
+        body.scope_location_id as number | null, body.scope_employer_id as number | null, body.scope_position_id as number | null,
         keepTemplateLink ? Number(current.template_item_id ?? 0) || null : null,
         id,
       ) as Record<string, unknown>;
@@ -471,7 +474,7 @@ export async function registerKbV3Routes(app: FastifyInstance, db: DatabaseSync)
 
   app.delete<{ Params: { id: string } }>("/api/v1/kb-faqs/:id", async (request, reply) => {
     if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
-    const result = db.prepare("DELETE FROM kb_faq WHERE id=?").run(int(request.params.id));
+    const result = db.prepare("DELETE FROM kb_faq WHERE tenant_id=1 AND id=?").run(int(request.params.id));
     return result.changes ? { success: true } : reply.code(404).send({ detail: "问答不存在" });
   });
 
@@ -508,6 +511,124 @@ export async function registerKbV3Routes(app: FastifyInstance, db: DatabaseSync)
 
   // 一键导入：模板项 → 租户的 kb_faq。
   // 已存在同 question 的跳过，不覆盖运营改过的内容。
+  // ── 节点化编排：节点与边 ─────────────────────────────────────────────
+  // 一个板块一套节点图；device_code 非空表示该设备专属覆盖。
+  // 读允许已登录用户，写仅管理员——与上面各资源一致。
+  app.get<{ Querystring: { vertical_code?: string; device_code?: string } }>(
+    "/api/v1/flow-nodes",
+    async (request) => {
+      const vertical = text(request.query.vertical_code);
+      const device = text(request.query.device_code);
+      const conditions: string[] = [];
+      const params: string[] = [];
+      if (vertical) { conditions.push("vertical_code=?"); params.push(vertical); }
+      if (device) { conditions.push("(device_code='' OR device_code=?)"); params.push(device); }
+      else { conditions.push("device_code=''"); }
+      const where = conditions.length ? ` WHERE ${conditions.join(" AND ")}` : "";
+      const rows = db.prepare(`SELECT * FROM flow_nodes${where} ORDER BY vertical_code,sort_order,id`).all(...params) as Array<Record<string, unknown>>;
+      return { items: rows, total: rows.length };
+    },
+  );
+
+  app.post<{ Body: Json }>("/api/v1/flow-nodes", async (request, reply) => {
+    if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
+    const body = request.body ?? {};
+    const verticalCode = text(body.vertical_code);
+    const nodeKey = text(body.node_key);
+    if (!verticalCode) return reply.code(422).send({ detail: "vertical_code is required" });
+    if (!nodeKey) return reply.code(422).send({ detail: "node_key is required" });
+    const existing = db.prepare(
+      "SELECT id FROM flow_nodes WHERE tenant_id=1 AND device_code=? AND vertical_code=? AND node_key=?",
+    ).get(text(body.device_code), verticalCode, nodeKey) as { id: number } | undefined;
+    if (existing) {
+      // upsert：同一 (device, vertical, node_key) 视为同一节点
+      db.prepare(
+        `UPDATE flow_nodes SET title=?,body=?,media=?,is_entry=?,status=?,sort_order=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+      ).run(
+        text(body.title), text(body.body), text(body.media),
+        int(body.is_entry) ? 1 : 0, text(body.status, "enabled"), int(body.sort_order), existing.id,
+      );
+      return db.prepare("SELECT * FROM flow_nodes WHERE id=?").get(existing.id);
+    }
+    const created = db.prepare(
+      `INSERT INTO flow_nodes(tenant_id,device_code,vertical_code,node_key,title,body,media,is_entry,status,sort_order)
+       VALUES (1,?,?,?,?,?,?,?,?,?) RETURNING *`,
+    ).get(
+      text(body.device_code), verticalCode, nodeKey, text(body.title), text(body.body), text(body.media),
+      int(body.is_entry) ? 1 : 0, text(body.status, "enabled"), int(body.sort_order),
+    );
+    return reply.code(201).send(created);
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/v1/flow-nodes/:id", async (request, reply) => {
+    if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
+    const id = int(request.params.id);
+    const row = db.prepare("SELECT device_code,vertical_code,node_key FROM flow_nodes WHERE id=?").get(id) as
+      | { device_code: string; vertical_code: string; node_key: string }
+      | undefined;
+    if (!row) return reply.code(404).send({ detail: "Node not found" });
+    // 还有边指向/来自它就不删——静默删掉会让流程断在半路
+    const used = db.prepare(
+      "SELECT COUNT(*) c FROM flow_edges WHERE tenant_id=1 AND device_code=? AND vertical_code=? AND (from_node=? OR to_node=?)",
+    ).get(row.device_code, row.vertical_code, row.node_key, row.node_key) as { c: number };
+    if (used.c > 0) {
+      return reply.code(409).send({ detail: `该节点还被 ${used.c} 条边引用，请先删除连线` });
+    }
+    db.prepare("DELETE FROM flow_nodes WHERE id=?").run(id);
+    return { success: true };
+  });
+
+  app.get<{ Querystring: { vertical_code?: string; device_code?: string } }>(
+    "/api/v1/flow-edges",
+    async (request) => {
+      const vertical = text(request.query.vertical_code);
+      const device = text(request.query.device_code);
+      const conditions: string[] = [];
+      const params: string[] = [];
+      if (vertical) { conditions.push("vertical_code=?"); params.push(vertical); }
+      if (device) { conditions.push("(device_code='' OR device_code=?)"); params.push(device); }
+      else { conditions.push("device_code=''"); }
+      const where = conditions.length ? ` WHERE ${conditions.join(" AND ")}` : "";
+      const rows = db.prepare(`SELECT * FROM flow_edges${where} ORDER BY vertical_code,from_node,priority,id`).all(...params) as Array<Record<string, unknown>>;
+      return { items: rows, total: rows.length };
+    },
+  );
+
+  app.post<{ Body: Json }>("/api/v1/flow-edges", async (request, reply) => {
+    if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
+    const body = request.body ?? {};
+    const verticalCode = text(body.vertical_code);
+    const fromNode = text(body.from_node);
+    const toNode = text(body.to_node);
+    if (!verticalCode) return reply.code(422).send({ detail: "vertical_code is required" });
+    if (!fromNode || !toNode) return reply.code(422).send({ detail: "from_node 和 to_node 必填" });
+    // 两端节点必须存在，否则流程会断在半路
+    const deviceCode = text(body.device_code);
+    const findNode = db.prepare(
+      "SELECT 1 AS ok FROM flow_nodes WHERE tenant_id=1 AND device_code=? AND vertical_code=? AND node_key=?",
+    );
+    for (const key of [fromNode, toNode]) {
+      const hit = findNode.get(deviceCode, verticalCode, key) ?? findNode.get("", verticalCode, key);
+      if (!hit) return reply.code(422).send({ detail: `节点 ${key} 不存在` });
+    }
+    const created = db.prepare(
+      `INSERT INTO flow_edges(tenant_id,device_code,vertical_code,from_node,to_node,condition_type,condition_value,priority,status)
+       VALUES (1,?,?,?,?,?,?,?,?) RETURNING *`,
+    ).get(
+      deviceCode, verticalCode, fromNode, toNode,
+      text(body.condition_type, "always"), text(body.condition_value),
+      int(body.priority) || 100, text(body.status, "enabled"),
+    );
+    return reply.code(201).send(created);
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/v1/flow-edges/:id", async (request, reply) => {
+    if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
+    const result = db.prepare("DELETE FROM flow_edges WHERE id=?").run(int(request.params.id));
+    return result.changes ? { success: true } : reply.code(404).send({ detail: "Edge not found" });
+  });
+
+
   app.post<{ Params: { code: string } }>("/api/v1/kb-templates/:code/import", async (request, reply) => {
     if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
     const template = db.prepare("SELECT * FROM kb_template WHERE code=?").get(request.params.code) as
@@ -532,22 +653,32 @@ export async function registerKbV3Routes(app: FastifyInstance, db: DatabaseSync)
     );
     let imported = 0;
     let skipped = 0;
+    const blocked: Array<{ id: unknown; question: unknown; detail: string }> = [];
+    const accepted: Json[] = [];
     for (const item of items) {
       if (exists.get(vertical.id, String(item.question))) {
         skipped += 1;
         continue;
       }
-      insert.run(
-        vertical.id,
-        String(item.question),
-        String(item.keywords),
-        String(item.answer),
-        String(item.media),
-        Number(item.priority ?? 0),
-        item.id as number,
-      );
-      imported += 1;
+      try {
+        const candidate = normalizeFaq({ ...item, keywords: parseList(item.keywords), media: parseList(item.media), vertical_id: vertical.id, scope_level: "global", status: "enabled" });
+        assertFaqWritable(db, candidate);
+        accepted.push(item);
+      } catch (error) {
+        if (!(error instanceof KbInputError)) throw error;
+        blocked.push({ id: item.id, question: item.question, detail: error.message });
+      }
     }
-    return { success: true, imported, skipped, template: template.code };
+    db.exec("BEGIN");
+    try {
+      for (const item of accepted) {
+        // 同一模板里的重复问题也只能插入一次。
+        if (exists.get(vertical.id, String(item.question))) { skipped += 1; continue; }
+        insert.run(vertical.id, String(item.question), String(item.keywords), String(item.answer), String(item.media), Number(item.priority ?? 0), item.id as number);
+        imported += 1;
+      }
+      db.exec("COMMIT");
+    } catch (error) { db.exec("ROLLBACK"); throw error; }
+    return { success: true, imported, skipped, blocked, template: template.code };
   });
 }

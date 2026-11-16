@@ -43,7 +43,7 @@ describe("unknown question conversion", () => {
         brainCalls.push({ path: req.url ?? "", token: req.headers["x-profile-token"], body });
         const status = brainMode === "ok" ? 201 : brainMode;
         res.writeHead(status, { "Content-Type": "application/json", Connection: "close" });
-        res.end(JSON.stringify({ id: 4321, title: body.title ?? "" }));
+        res.end(JSON.stringify(status === 422 ? { detail: "请先明确工厂归属" } : { id: 4321, title: body.title ?? "" }));
       });
     });
     await new Promise<void>((resolve) => brain.listen(0, "127.0.0.1", resolve));
@@ -171,6 +171,17 @@ describe("unknown question conversion", () => {
     expect(converted.statusCode).toBe(502);
     const stored = db.prepare("SELECT status FROM unknown_questions WHERE id=?").get(id) as { status: string };
     expect(stored.status).toBe("pending");
+    brainMode = "ok";
+  });
+
+  it("shows policy rejection and keeps the original question pending", async () => {
+    const id = await createQuestion("工资政策归属校验");
+    brainMode = 422;
+    const converted = await app.inject({ method: "POST", url: `/api/v1/unknown-questions/${id}/convert`,
+      headers: { authorization: `Bearer ${token}` }, payload: { answer: "25元/小时" } });
+    expect(converted.statusCode).toBe(422);
+    expect(converted.json().detail).toBe("请先明确工厂归属");
+    expect(db.prepare("SELECT status FROM unknown_questions WHERE id=?").get(id)).toMatchObject({ status: "pending" });
     brainMode = "ok";
   });
 
