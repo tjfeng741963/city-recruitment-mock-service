@@ -202,6 +202,9 @@
   }
 
   function ensureLine(cell, position) {
+    // 同 device-factories：styles() 原本只在 openDrawer 里调用，
+    // 行内按钮要一直有样式，必须在挂块时注入。
+    styles();
     let line = cell.querySelector(".rk-pa-line");
     if (line) return line;
     line = el("div", "rk-pa-line");

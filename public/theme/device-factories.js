@@ -185,6 +185,9 @@
   // 操作列 width:200 且 fixed:"right"，里面已经有 编辑/复制/删除 三个按钮，
   // 再塞第四个会被 .cell 的 overflow 裁掉；名称列是 min-width，窗口宽时有富余空间。
   function ensureBlock(cell, device) {
+    // 行内块的样式必须在这里注入：styles() 原本只在 openDrawer（点开抽屉）
+    // 时调用，用户不点抽屉，行内的胶囊和按钮就永远是裸文本。
+    styles();
     let block = cell.querySelector(`[${BLOCK}]`);
     if (block) return block;
 
