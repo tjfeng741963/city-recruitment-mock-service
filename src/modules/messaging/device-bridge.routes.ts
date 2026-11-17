@@ -4,11 +4,10 @@ import type { FastifyInstance } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
 import { canAccessDevice, getUserScope } from "../../auth/user-scopes.js";
 import { DeviceBridgeStore } from "./device-bridge.js";
-import { MessageAutomationService } from "./message-automation.js";
 import { MessageEventService } from "./message-events.js";
 import { createMessageChannelProvider } from "./message-channel-provider.js";
 import { NOOP_NOTIFIER, type StreamNotifier } from "./stream-events.js";
-import { createDifyProvider } from "../dify/create-provider.js";
+import { recordInboundMessage } from "./inbound-store.js";
 import { loadFactories, readDeviceFactoryIds } from "../../shared/device-factories.js";
 import { latestPositionScriptStamp, loadPositionScripts } from "../../shared/media-assets.js";
 
@@ -42,7 +41,8 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
   const events = new MessageEventService(db, { webhookSecret: process.env.REA_WEBHOOK_SECRET ?? "local-webhook-secret" });
   // Dify 用不上时宁可不回也不能把 Mock 文案发给真实客户（2026-11-16 整合）：
   // 部署没配 REA_DIFY_PROVIDER → 服务端只记录不生成，执行权归客户端 drain()。
-  const automation = new MessageAutomationService(db, events, createDifyProvider(), createMessageChannelProvider(undefined, db), notifier, { observeOnly: !process.env.REA_DIFY_PROVIDER });
+  // AI 自动回复已由新 Agent 链路（autopilot + /agent/chat）负责，入站只做存储与事件
+
 
   // 免登录自注册：客户端首次启动时用共享密钥换 bridge_token。
   // 幂等：同一台机器重复注册只是换发 token（旧 token 立即失效），
@@ -277,9 +277,12 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
       }
       const scopedId = store.inboundEvent(code, eventId, contactId, content);
       const customerId = store.contact(code, contactId, field(body, "nickname"));
+      // 落库（agent_messages + 会话摘要）——原 automation 的存储半段
+      recordInboundMessage(db, { deviceCode: code, customerId, content, sentAt, eventId: scopedId });
       events.recordEvent({ eventId: scopedId, eventType: "message.created", direction: "inbound", deviceCode: code, customerId, payload: { content } });
-      const result = await automation.handleInbound({ eventId: scopedId, deviceCode: code, customerId, content, sentAt });
-      return reply.code(result.reply_status === "failed" ? 502 : 200).send({ ...result, customer_id: customerId });
+      // SSE 推送（原由 automation 内部触发，摘除 dify 后改为路由内直发）
+      notifier.messageCreated(code, customerId, scopedId);
+      return { status: "stored", customer_id: customerId };
     });
   }
   /**

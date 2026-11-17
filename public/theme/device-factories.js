@@ -45,11 +45,14 @@
     const style = document.createElement("style");
     style.id = STYLE_ID;
     style.textContent = `
-      .rk-devf{display:flex;align-items:center;gap:8px;margin-top:4px;min-width:0;font-size:12px;line-height:1.4;color:var(--rk-ink-3);font-weight:400}
-      .rk-devf-text{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-      .rk-devf-text.is-bound{color:var(--rk-ink-2)}
-      .rk-devf-btn{flex:0 0 auto;height:22px;padding:0 10px;border:1px solid var(--rk-border-strong);border-radius:999px;background:var(--rk-bg);color:var(--rk-accent);cursor:pointer;font:inherit;font-size:12px;line-height:20px}
-      .rk-devf-btn:hover{border-color:var(--rk-accent);background:var(--rk-accent-soft)}
+      .rk-devf{display:flex;align-items:center;gap:10px;margin-top:6px;min-width:0;font-size:12px;line-height:1.4;color:var(--rk-ink-3);font-weight:400}
+      .rk-devf-chips{flex:1 1 auto;display:flex;flex-wrap:wrap;gap:5px;min-width:0}
+      .rk-devf-chip{display:inline-flex;align-items:center;gap:5px;max-width:100%;height:22px;padding:0 9px;border-radius:999px;background:var(--rk-accent-soft);color:var(--rk-accent);font-size:11.5px;line-height:22px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .rk-devf-chip i{flex:0 0 auto;width:5px;height:5px;border-radius:50%;background:var(--rk-accent)}
+      .rk-devf-chip.is-empty{background:var(--rk-bg);color:var(--rk-ink-3);border:1px dashed var(--rk-border-strong)}
+      .rk-devf-btn{flex:0 0 auto;display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 12px;border:1px solid var(--rk-accent);border-radius:999px;background:transparent;color:var(--rk-accent);cursor:pointer;font:inherit;font-size:12px;line-height:22px;transition:background .15s ease,color .15s ease,box-shadow .15s ease}
+      .rk-devf-btn::before{content:"";width:8px;height:8px;border-radius:2px;background:linear-gradient(135deg,var(--rk-accent),#3b8dd8)}
+      .rk-devf-btn:hover{background:var(--rk-accent);color:#fff;box-shadow:0 4px 12px -4px rgba(24,95,165,.5)}
       .rk-devf-mask{position:fixed;inset:0;z-index:4000;display:flex;justify-content:flex-end;background:rgba(18,28,52,.26);backdrop-filter:blur(6px) saturate(1.2);-webkit-backdrop-filter:blur(6px) saturate(1.2)}
       .rk-devf-panel{display:flex;flex-direction:column;width:min(520px,100%);height:100%;border:1px solid var(--gl-edge);border-radius:var(--gl-r-shell) 0 0 var(--gl-r-shell);background:linear-gradient(180deg,rgba(255,255,255,.94),rgba(250,252,255,.86));backdrop-filter:var(--gl-blur);-webkit-backdrop-filter:var(--gl-blur);box-shadow:var(--gl-shadow-float)}
       .rk-devf-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:16px 20px;border-bottom:1px solid var(--rk-border)}
@@ -188,8 +191,8 @@
     block.className = "rk-devf";
     block.setAttribute(BLOCK, String(device.id ?? ""));
 
-    const text = document.createElement("span");
-    text.className = "rk-devf-text";
+    const chips = document.createElement("div");
+    chips.className = "rk-devf-chips";
 
     const button = document.createElement("button");
     button.type = "button";
@@ -204,23 +207,36 @@
       openDrawer(current);
     });
 
-    block.append(text, button);
+    block.append(chips, button);
     cell.append(block);
     return block;
   }
 
   function paint(block, device) {
     if (block.getAttribute(BLOCK) !== String(device.id ?? "")) block.setAttribute(BLOCK, String(device.id ?? ""));
-    const text = block.querySelector(".rk-devf-text");
+    const chips = block.querySelector(".rk-devf-chips");
     const names = boundNames(device);
     // 值没变就不碰 DOM：这个脚本自己也在 MutationObserver 的监听范围里，
-    // 无条件写 textContent 会让「改文本 → 触发观察 → 再改文本」变成每帧一次的空转。
-    const next = names.length ? `已绑 ${names.length} 厂：${names.join("、")}` : "未绑定";
-    if (text.textContent !== next) text.textContent = next;
-    text.classList.toggle("is-bound", names.length > 0);
-    // 名称列窄，长名单靠 CSS 省略号；title 里放全量，鼠标悬停能看到。
-    const title = names.length ? names.join("、") : "这台设备还没有绑定工厂";
-    if (text.title !== title) text.title = title;
+    // 无条件重写会让「改文本 → 触发观察 → 再改文本」变成每帧一次的空转。
+    const next = names.join("\u0001");
+    if (chips.dataset.names === next) return;
+    chips.dataset.names = next;
+    chips.innerHTML = "";
+    if (names.length) {
+      names.forEach((name) => {
+        const chip = document.createElement("span");
+        chip.className = "rk-devf-chip";
+        chip.title = name;
+        const dot = document.createElement("i");
+        chip.append(dot, name);
+        chips.append(chip);
+      });
+    } else {
+      const chip = document.createElement("span");
+      chip.className = "rk-devf-chip is-empty";
+      chip.textContent = "未绑定工厂";
+      chips.append(chip);
+    }
   }
 
   // 从 DOM 反查这一行是哪台设备：编译产物里拿不到 Vue 组件实例，

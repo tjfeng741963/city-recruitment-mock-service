@@ -8,7 +8,6 @@ import { createMessageChannelProvider } from "../messaging/message-channel-provi
 import { BridgeError, DeviceBridgeStore } from "../messaging/device-bridge.js";
 import { NOOP_NOTIFIER, type StreamNotifier } from "../messaging/stream-events.js";
 import { readWeComConfig } from "../wecom/wecom-config.js";
-import { deviceDifyConfig, HttpDifyProvider } from "../dify/dify-provider.js";
 import { listReminderTasks } from "./followup.js";
 import { loadFactories, parseDeviceData, readDeviceFactoryIds } from "../../shared/device-factories.js";
 
@@ -111,6 +110,8 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
       return reply.code(404).send({ detail: "设备不存在" });
     }
     const merged = { ...data, ...(request.body ?? {}) } as Record<string, unknown>;
+    // Dify 已全链路下线（2026-11-17）：本次提交与历史遗留的 dify 字段一律不落库
+    for (const key of ["dify_url", "dify_key", "dify_key_env"]) delete merged[key];
     // 设备 → 工厂多选绑定：本次提交了 factory_ids 就规范化后落库——
     // 去重、丢掉非整数与库里不存在的 id（忽略而不是整单 422），空数组 = 不绑任何厂。
     // 没提交这个键时保持原值，老客户端不受影响（与 vertical_id 的按需校验同一思路）。

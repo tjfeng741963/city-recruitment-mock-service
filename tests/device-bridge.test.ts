@@ -28,25 +28,21 @@ describe("independent device bridge", () => {
   });
   const call = (suffix: string, payload: object = {}) => app.inject({ method: "POST", url: `/api/v1/bridge/devices/local-device-001/${suffix}`, headers: device, payload });
 
-  it("binds a logged-in account, maps an opaque contact id and delivers an AI reply only after a device receipt", async () => {
+  it("binds a logged-in account, maps an opaque contact id and stores the inbound message for the agent chain", async () => {
     await call("heartbeat", { state: "online", account_id: "wx-owner" });
-    // Inbound processing waits for the independently polling device to send.
-    const pending = call("inbound", { event_id: "wx-message-1", contact_id: "wxid_external_abc", nickname: "测试联系人", content: "想找广州的工作" }).then(r => r);
-    const store = new DeviceBridgeStore(app.db);
-    const deadline = Date.now() + 3000;
-    let command: any;
-    while (!command && Date.now() < deadline) {
-      command = (await call("claim")).json().command;
-      if (!command) await new Promise(resolve => setTimeout(resolve, 10));
-    }
-    expect(command).toMatchObject({ contact_id: "wxid_external_abc", content: expect.stringContaining("Mock response") });
-    expect((await call("receipts", { command_id: command.id, lease_token: command.lease_token, status: "succeeded", message_id: "real-wx-send-id" })).statusCode).toBe(200);
-    expect((await pending).json()).toMatchObject({ reply_status: "sent" });
+    // Dify 自动回复已下线（2026-11-17）：入站只落库（agent_messages + 会话摘要），
+    // AI 回复由客户端 autopilot 经 /agent/chat 生成，不再产生 claim 队列。
+    const first = await call("inbound", { event_id: "wx-message-1", contact_id: "wxid_external_abc", nickname: "测试联系人", content: "想找广州的工作" });
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).toMatchObject({ status: "stored", customer_id: expect.any(Number) });
+    const row = app.db.prepare("SELECT direction,content,status FROM agent_messages WHERE content='想找广州的工作'").get() as any;
+    expect(row).toMatchObject({ direction: "inbound", content: "想找广州的工作", status: "received" });
+    const convo = app.db.prepare("SELECT last_msg,unread FROM agent_conversations WHERE last_msg='想找广州的工作'").get() as any;
+    expect(convo).toMatchObject({ last_msg: "想找广州的工作", unread: 1 });
+    // 同一事件重放：消息幂等（不重复入库），响应仍是 stored
     const replay = await call("inbound", { event_id: "wx-message-1", contact_id: "wxid_external_abc", content: "想找广州的工作" });
-    expect(replay.json()).toMatchObject({ status: "duplicate" });
+    expect(replay.statusCode).toBe(200);
     expect((await call("claim")).json().command).toBeNull();
-    expect(app.db.prepare("SELECT provider_message_id FROM message_deliveries").get()).toMatchObject({ provider_message_id: "real-wx-send-id" });
-    expect(store.status("local-device-001")).toMatchObject({ state: "online", account_id: "wx-owner" });
   });
 
   it("reconciles a late device receipt into the application message and failed delivery", async () => {

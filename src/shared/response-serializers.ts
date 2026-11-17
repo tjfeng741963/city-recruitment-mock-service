@@ -186,8 +186,6 @@ export function serializeAgentDevice(row: Row): Row {
     id: source.id,
     device_code: String(source.device_code ?? ""),
     name: String(source.name ?? source.device_name ?? ""),
-    dify_url: String(source.dify_url ?? ""),
-    dify_key: String(source.dify_key ?? ""),
     recruiter_id: String(source.recruiter_id ?? ""),
     // 设备绑定的工厂/城市（data_json 透传，供 admin 设备列表展示；空串 = 通用）
     factory_name: String(source.factory_name ?? ""),

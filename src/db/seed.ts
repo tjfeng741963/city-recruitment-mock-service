@@ -4,7 +4,6 @@ import { scryptSync, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { openDatabase } from "./connection.js";
 import { migrateDatabase } from "./migrate.js";
-import { ACTIVATION_STRATEGY_DEFAULTS } from "../modules/activation/activation.strategies.js";
 
 export function hashPassword(password: string, salt = randomBytes(16).toString("hex")): string {
   return `${salt}:${scryptSync(password, salt, 64).toString("hex")}`;
@@ -17,8 +16,6 @@ interface SeedFixtures {
   factories: Array<[number, string, number]>;
   service_positions: Array<[number, string, number, number]>;
   knowledge_items: Array<[number, string, string]>;
-  activation_strategies: Array<[number, string]>;
-  activation_devices: Array<[number, string]>;
   recruiter: { id: number; username: string; city_id: number; data: Record<string, unknown>; scope_users: string[]; scope_city_id: string };
   candidate_events: Array<[number, string, string, string, string, string, string, string]>;
   old_friend_records: Array<[number, string, string, string, string, string]>;
@@ -38,12 +35,6 @@ function seedFixtures(db: DatabaseSync, seedScope: ReturnType<DatabaseSync["prep
   }
   for (const [id, title, content] of d.knowledge_items) {
     db.prepare("INSERT OR IGNORE INTO knowledge_items(id,title,content) VALUES (?,?,?)").run(id, title, content);
-  }
-  for (const [id, strategy_name] of d.activation_strategies) {
-    db.prepare("INSERT OR IGNORE INTO activation_strategies(id,strategy_name) VALUES (?,?)").run(id, strategy_name);
-  }
-  for (const [id, device_name] of d.activation_devices) {
-    db.prepare("INSERT OR IGNORE INTO activation_devices(id,device_name,status,data_json) VALUES (?,?,'enabled','{}')").run(id, device_name);
   }
   db.prepare("INSERT OR IGNORE INTO recruiters(id,username,city_id,data_json) VALUES (?,?,?,?)")
     .run(d.recruiter.id, d.recruiter.username, d.recruiter.city_id, JSON.stringify(d.recruiter.data));
@@ -108,13 +99,6 @@ export function seedDatabase(db: DatabaseSync): void {
     db.prepare("INSERT OR IGNORE INTO city_links(city_id,linked_city_id) VALUES (2,3)").run();
   }
 
-  const insertActivationStrategy = db.prepare("INSERT OR IGNORE INTO activation_strategy_rules(code,enabled,config_json) VALUES (?,?,?)");
-  for (const strategy of ACTIVATION_STRATEGY_DEFAULTS) insertActivationStrategy.run(strategy.code, strategy.enabled ? 1 : 0, JSON.stringify(strategy.config));
-  db.prepare("INSERT OR IGNORE INTO activation_config(id) VALUES (1)").run();
-  const scripts = [
-    [25, "有收到吗？收到回复下我呢", "寒暄召回"], [22, "这边还要找工作的么，这几天岗位都挺好的呢", "寒暄召回"], [16, "这边看的咋样啦，我们继续聊聊呗", "岗位推荐"],
-  ] as const;
-  for (const [id, content, category] of scripts) db.prepare("INSERT OR IGNORE INTO activation_scripts(id,script_name,content,status,data_json) VALUES (?,?,?,?,?)").run(id, category, content, "enabled", JSON.stringify({ category, is_active: true, used_count: 0 }));
   const knowledge = ["超龄", "可以不加班吗", "买社保吗", "有试用期吗", "合同签多久"]; for (const [index, question] of knowledge.entries()) db.prepare("INSERT OR IGNORE INTO knowledge_items(id,title,content,status,data_json) VALUES (?,?,?,?,?)").run(4176 + index, question, question, "enabled", JSON.stringify({ question, keywords: [], is_active: true, sort_order: 0 }));
 
   const seedScope = db.prepare("INSERT OR IGNORE INTO user_scope_assignments(user_id,scope_type,scope_id) SELECT id,?,? FROM users WHERE username=?");
