@@ -132,20 +132,50 @@
   .toasts{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);display:flex;flex-direction:column;gap:8px;z-index:60;pointer-events:none}
   .toast{padding:9px 14px;border-radius:var(--radius);background:rgba(23,28,38,.94);color:#fff;font-size:13px}
   .toast.error{background:rgba(163,45,45,.96)}
-  .dev-detail{display:flex;flex-direction:column;gap:14px;overflow:auto}
-  .dev-detail .binding{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
-  .dev-detail .kv{padding:10px 14px;border:1px solid var(--line);border-radius:var(--radius);background:#fff}
-  .dev-detail .kv b{display:block;font-size:12px;color:var(--muted);font-weight:400;margin-bottom:4px}
-  .dev-detail .kv span{font-size:14px;font-family:var(--mono)}
-  .dev-detail .badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px}
-  .dev-detail .badge.on{background:#e1f5ee;color:#0f6e56}
-  .dev-detail .badge.off{background:#fcebeb;color:#a32d2d}
-  .dev-detail .qr-panel{padding:16px;border:1px solid var(--line);border-radius:var(--radius);background:#fff;text-align:center}
-  .dev-detail .qr-panel img{width:300px;height:300px;object-fit:contain;border:1px solid var(--line-strong);border-radius:8px;background:#fff}
-  .dev-detail .qr-panel .hint{font-size:12.5px;color:var(--muted);margin-top:8px}
-  .qr-steps p{font-size:12.5px;color:var(--muted);line-height:1.7;margin:2px 0}
-  .dev-item{padding:10px 12px;border:1px solid var(--line);border-radius:var(--radius);background:#fff;cursor:pointer;margin-bottom:8px;font-size:13px}
-  .dev-item.is-active{border-color:var(--accent);box-shadow:0 0 0 2px rgba(24,95,165,.12)}
+
+  /* ── 设备登录视图 ── */
+  .dev-item{position:relative;display:flex;align-items:center;gap:12px;width:100%;padding:13px 14px;margin-bottom:10px;border:1px solid var(--line);border-radius:12px;background:var(--panel);cursor:pointer;text-align:left;transition:box-shadow .18s,border-color .18s,transform .18s}
+  .dev-item:hover{border-color:var(--line-strong);box-shadow:0 8px 20px -12px rgba(20,40,90,.28);transform:translateY(-1px)}
+  .dev-item.is-active{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft),0 8px 20px -12px rgba(24,95,165,.35)}
+  .dev-avatar{flex:0 0 38px;width:38px;height:38px;border-radius:10px;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#185fa5,#3b8dd8);color:#fff;font-weight:700;font-size:15px}
+  .dev-item.is-offline .dev-avatar{background:linear-gradient(135deg,#8a94a6,#a9b2c0)}
+  .dev-main{flex:1;min-width:0}
+  .dev-code{font-family:var(--mono);font-weight:600;font-size:13.5px;color:var(--ink)}
+  .dev-sub{font-size:11.5px;color:var(--faint);margin-top:2px}
+  .dev-pill{flex:0 0 auto;display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 11px;border-radius:999px;font-size:11.5px;font-weight:600}
+  .dev-pill.on{background:var(--ok-soft);color:var(--ok)}
+  .dev-pill.off{background:var(--err-soft);color:var(--err)}
+  .dev-pill i{width:6px;height:6px;border-radius:50%;background:currentColor}
+  .dev-pill.on i{animation:pulse 1.6s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+  .timeline{position:relative;padding-left:26px}
+  .timeline::before{content:"";position:absolute;left:9px;top:8px;bottom:8px;width:2px;background:linear-gradient(180deg,var(--accent),var(--line))}
+  .tl-step{position:relative;padding-bottom:14px;font-size:12.5px;line-height:1.6;color:var(--muted)}
+  .tl-step:last-child{padding-bottom:0}
+  .tl-step::before{content:"";position:absolute;left:-24px;top:4px;width:10px;height:10px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+  .tl-step b{color:var(--ink);font-weight:600}
+
+  .dev-detail{overflow:auto;padding:20px 24px}
+  .dev-hero{display:flex;align-items:center;gap:16px;padding:18px 20px;border-radius:14px;background:linear-gradient(120deg,rgba(24,95,165,.08),rgba(59,141,216,.05));border:1px solid rgba(24,95,165,.14)}
+  .dev-hero .dev-avatar{width:46px;height:46px;font-size:18px;border-radius:13px}
+  .dev-hero-title{font-size:17px;font-weight:700;font-family:var(--mono)}
+  .dev-hero-sub{font-size:12px;color:var(--muted);margin-top:3px}
+  .binding{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:14px}
+  .kv-card{padding:13px 15px;border:1px solid var(--line);border-radius:12px;background:var(--panel);box-shadow:0 2px 8px -4px rgba(20,40,90,.1)}
+  .kv-card b{display:block;font-size:11px;font-weight:400;color:var(--faint);margin-bottom:5px;letter-spacing:.02em}
+  .kv-card span{font-size:13.5px;font-weight:600;font-family:var(--mono);color:var(--ink)}
+  .qr-card{margin-top:16px;padding:22px;border:1px solid var(--line);border-radius:14px;background:var(--panel);display:flex;gap:26px;align-items:center}
+  .qr-frame{position:relative;flex:0 0 264px;width:264px;height:264px;border-radius:16px;padding:12px;background:linear-gradient(135deg,#185fa5,#3b8dd8)}
+  .qr-frame img{width:100%;height:100%;object-fit:cover;border-radius:10px;background:#fff;display:block}
+  .qr-frame .scanline{position:absolute;left:12px;right:12px;top:12px;height:3px;border-radius:999px;background:linear-gradient(90deg,transparent,#7ee2c0,#4ade80,transparent);animation:scan 2.4s ease-in-out infinite;opacity:.9}
+  @keyframes scan{0%{top:14px}50%{top:250px}100%{top:14px}}
+  .qr-side{flex:1;min-width:0}
+  .qr-side h4{margin:0 0 8px;font-size:14px;font-weight:700}
+  .qr-side .hint{font-size:12.5px;color:var(--muted);line-height:1.7}
+  .qr-side .stamp{margin-top:10px;font-size:11px;color:var(--faint);font-family:var(--mono)}
+  .qr-wait{flex:1;padding:40px;text-align:center;color:var(--faint);font-size:13px}
+  .dev-placeholder{flex:1;display:flex;align-items:center;justify-content:center;color:var(--faint);font-size:13px}
 </style>
 </head>
 <body>
@@ -239,21 +269,21 @@
   <section class="view" id="view-devices" hidden>
     <div class="agent-left">
       <div class="sec">
-        <h3>设备列表</h3>
+        <h3>设备</h3>
         <div id="dev-list" class="empty">加载中…</div>
       </div>
       <div class="sec">
-        <h3>绑定流程</h3>
-        <div class="qr-steps">
-          <p>1. 服务器客户端启动后自动注册 / 心跳，出现在左侧列表；</p>
-          <p>2. 企微掉登录时客户端每 30 秒推送扫码窗截图，下方自动出现二维码；</p>
-          <p>3. 用手机企微扫码登录，客户端检测到恢复后自动清掉二维码；</p>
-          <p>4. 绑定关系（设备码 ↔ 岗位）在右侧，岗位在「岗位管理 → Agent」里配置。</p>
+        <h3>扫码绑定流程</h3>
+        <div class="timeline">
+          <div class="tl-step"><b>启动客户端</b> —— 服务器客户端注册并心跳，出现在设备列表</div>
+          <div class="tl-step"><b>出现二维码</b> —— 企微掉登录时客户端每 30 秒推送扫码窗截图</div>
+          <div class="tl-step"><b>手机扫码</b> —— 用手机企业微信扫网页上的二维码</div>
+          <div class="tl-step"><b>绑定完成</b> —— 登录恢复后二维码自动清除，设备上线</div>
         </div>
       </div>
     </div>
-    <div class="agent-right">
-      <div id="dev-detail" class="dev-detail empty">从左侧选一台设备。</div>
+    <div class="agent-right" style="background:var(--bg)">
+      <div id="dev-detail" class="dev-placeholder">从左侧选一台设备查看绑定信息与二维码。</div>
     </div>
   </section>
 </main>
@@ -766,10 +796,16 @@
     }
     box.className = "";
     deviceState.list.forEach(function (device) {
-      var item = el("div", "dev-item" + (device.device_code === deviceState.current ? " is-active" : ""));
-      var badge = el("span", "badge " + (device.online ? "on" : "off"), device.online ? "在线" : "离线");
-      item.append(el("b", null, device.device_code + (device.name ? " · " + device.name : "")), " ", badge);
-      if (device.position_id) item.append(el("span", null, "（岗位 #" + device.position_id + "）"));
+      var active = device.device_code === deviceState.current;
+      var item = el("div", "dev-item" + (device.online ? "" : " is-offline") + (active ? " is-active" : ""));
+      item.append(el("div", "dev-avatar", (device.device_code || "?").slice(-2)));
+      var main = el("div", "dev-main");
+      main.append(el("div", "dev-code", device.device_code));
+      main.append(el("div", "dev-sub", (device.name || "未命名设备") + (device.position_id ? " · 岗位 #" + device.position_id : "")));
+      item.append(main);
+      var pill = el("span", "dev-pill " + (device.online ? "on" : "off"));
+      pill.append(el("i"), el("span", null, device.online ? "在线" : "离线"));
+      item.append(pill);
       item.addEventListener("click", function () {
         deviceState.current = device.device_code;
         paintDeviceDetail(device);
@@ -787,23 +823,44 @@
     var box = $("dev-detail");
     box.className = "dev-detail";
     box.innerHTML = "";
-    var title = el("h3", null, "设备绑定信息 · " + device.device_code);
+    var hero = el("div", "dev-hero");
+    hero.append(el("div", "dev-avatar", (device.device_code || "?").slice(-2)));
+    var heroText = el("div");
+    heroText.append(el("div", "dev-hero-title", device.device_code));
+    heroText.append(el("div", "dev-hero-sub", (device.name || "未命名设备") + " · 云端企微专用机"));
+    hero.append(heroText);
+    var heroPill = el("span", "dev-pill " + (device.online ? "on" : "off"));
+    heroPill.append(el("i"), el("span", null, device.online ? "在线" : "离线"));
+    hero.append(heroPill);
+    box.append(hero);
+
     var grid = el("div", "binding");
-    [["设备码", device.device_code], ["名称", device.name || "-"],
-     ["在线状态", device.online ? "在线" : "离线"], ["最近在线", device.last_online || "-"],
-     ["绑定岗位", device.position_id ? "岗位 #" + device.position_id : "未绑定"], ["排队消息", device.queue_depth ?? 0]]
+    [["绑定岗位", device.position_id ? "岗位 #" + device.position_id : "未绑定"],
+     ["最近在线", device.last_online || "-"],
+     ["排队消息", device.queue_depth ?? 0]]
       .forEach(function (pair) {
-        var kv = el("div", "kv");
+        var kv = el("div", "kv-card");
         kv.append(el("b", null, pair[0]), el("span", null, String(pair[1])));
         grid.append(kv);
       });
-    var qrPanel = el("div", "qr-panel");
-    qrPanel.append(el("h3", null, "企微登录二维码"));
+    box.append(grid);
+
+    var qrCard = el("div", "qr-card");
+    var frame = el("div", "qr-frame");
+    frame.id = "qr-frame";
+    frame.append(el("div", "scanline"));
     var imgWrap = el("div");
     imgWrap.id = "qr-img-wrap";
-    imgWrap.append(el("p", "hint", "轮询中：客户端掉登录后 30 秒内会出现二维码，手机企微扫码即可。"));
-    qrPanel.append(imgWrap);
-    box.append(title, grid, qrPanel);
+    frame.append(imgWrap);
+    qrCard.append(frame);
+    var side = el("div", "qr-side");
+    side.append(el("h4", null, "企业微信登录二维码"));
+    side.append(el("p", "hint", "手机打开企业微信 → 右上角「+」→ 扫一扫，对准左侧二维码确认登录。二维码由服务器客户端每 30 秒自动刷新，过期不用管。"));
+    var stamp = el("div", "stamp");
+    stamp.id = "qr-stamp";
+    side.append(stamp);
+    qrCard.append(side);
+    box.append(qrCard);
     pullQr();
   }
 
@@ -814,13 +871,20 @@
       var wrap = $("qr-img-wrap");
       if (!wrap) return;
       wrap.innerHTML = "";
+      var frame = $("qr-frame");
       if (data.available && data.image) {
         var img = el("img");
         img.src = data.image;
         img.alt = "企微登录二维码";
-        wrap.append(img, el("p", "hint", "用手机企业微信扫这个码（截图来自服务器，" + (data.captured_at || "") + "）"));
+        wrap.append(img);
+        if (frame) frame.style.opacity = "1";
+        var stamp = $("qr-stamp");
+        if (stamp) stamp.textContent = "截图时间 " + (data.captured_at || "") + " · 客户端每 30 秒自动刷新";
       } else {
-        wrap.append(el("p", "hint", "当前没有待扫的二维码——设备在线时这里就是空的。"));
+        if (frame) frame.style.opacity = ".35";
+        wrap.append(el("div", "qr-wait", "当前没有待扫的二维码 —— 设备在线时这里就是空的"));
+        var stamp = $("qr-stamp");
+        if (stamp) stamp.textContent = "";
       }
     } catch (e) { /* 轮询失败不打扰 */ }
   }
