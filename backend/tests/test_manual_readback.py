@@ -73,8 +73,8 @@ def test_rowid_alias_failure_recovers_using_real_store_message_id(database, tmp_
 
     def sender(*args, **kwargs):
         database.insert(102)
-        with pytest.raises(IndexError):
-            database.core._find_new_sent(database.store, COMMAND["content"], {101})
+        # 回读改用位置下标后，必须能读到刚插入的那条，而不是抛 IndexError。
+        assert database.core._find_new_sent(database.store, COMMAND["content"], {101}) == COMMAND["contact_id"]
         return {"ok": True, "conversation_id": "", "detail": "sent but legacy readback failed: IndexError"}
 
     agent.core_send.send.side_effect = sender

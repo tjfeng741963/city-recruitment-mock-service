@@ -272,7 +272,11 @@ def _find_new_sent(store, text: str, before: set) -> str:
         con.close()
 
     for r in rows:
-        if r["rowid"] in before:
+        # 用位置下标读 rowid：message_table 的 message_id 是 INTEGER PRIMARY KEY，
+        # 也就是 rowid 的别名，`select rowid` 返回的列名是 `message_id` 而不是
+        # `rowid`，按名字取会每行都抛 IndexError（实测：发送后回读全部失败，
+        # 消息被记成 unknown 且不自动补发）。_sent_snapshot 一直用 r[0]，不受影响。
+        if r[0] in before:
             continue
         if _pb_text(r["content"]).strip() == text:
             return r["conversation_id"]
