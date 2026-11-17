@@ -1,17 +1,19 @@
-"""向企微验证码窗口输入验证码：用法 python input-code.py 354853
+"""向企微验证码弹窗输入验证码：用法 python input-code.py 354853
 
-窗口是 Qt 自绘（无 Win32 控件），只能走前台焦点 + SendInput Unicode。
-必须在交互式会话（Console）里跑，SSH 会话看不到窗口。
+关键教训（2026-11-17）：短信验证码弹窗是浮在登录窗上方的独立窗口
+（类名 WXworkWindow，320x214，自绘无控件）——敲 WeChatLogin 是无效的。
+
+流程：找 WXworkWindow → 前台 → 点输入框区域聚焦 → 清残留 → 逐位敲入
+→ 点「验证」按钮。必须在交互式会话（Console）里跑。
 """
 import ctypes
 import sys
 import time
+
 import win32gui
 
 u = ctypes.windll.user32
-k = ctypes.windll.kernel32
 
-# SendInput 结构（KEYBDINPUT）
 PUL = ctypes.POINTER(ctypes.c_ulong)
 
 
@@ -43,6 +45,8 @@ class Input(ctypes.Structure):
 KEYEVENTF_UNICODE = 0x0004
 KEYEVENTF_KEYUP = 0x0002
 INPUT_KEYBOARD = 1
+MOUSEEVENTF_LEFTDOWN = 0x0002
+MOUSEEVENTF_LEFTUP = 0x0004
 
 VK_RETURN = 0x0D
 VK_CONTROL = 0x11
@@ -59,7 +63,6 @@ def _key(vk: int, down: bool) -> None:
 
 
 def send_char(ch: str) -> None:
-    """一个 Unicode 字符 = 按下 + 抬起两个事件。"""
     for flag in (0, KEYEVENTF_KEYUP):
         ii = Input_I()
         ii.ki = KeyBdInput(0, ord(ch), KEYEVENTF_UNICODE | flag, 0, None)
@@ -73,12 +76,17 @@ def send_enter() -> None:
     _key(VK_RETURN, False)
 
 
-def clear_input() -> None:
-    """清空当前焦点输入框：Ctrl+A 全选 → Delete。
+def click_at(x: int, y: int) -> None:
+    """鼠标移动到屏幕绝对坐标并左键单击（验证码窗是自绘的，靠点击聚焦）。"""
+    u.SetCursorPos(int(x), int(y))
+    time.sleep(0.1)
+    u.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, None)
+    time.sleep(0.05)
+    u.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, None)
+    time.sleep(0.2)
 
-    企微的验证码窗是自绘控件，残留的上一次输入会让新码拼成错误位数
-    （「验证码位数错误」的来源），敲码前必须先清。
-    """
+
+def clear_input() -> None:
     _key(VK_CONTROL, True)
     _key(VK_A, False)
     _key(VK_CONTROL, False)
@@ -88,16 +96,40 @@ def clear_input() -> None:
     time.sleep(0.15)
 
 
-def find_login_window() -> int:
-    found = []
+def find_windows() -> dict:
+    """收集企微全部可见顶层窗口，按类名归类。"""
+    import subprocess
+
+    out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq WXWork.exe", "/FO", "CSV"],
+                         capture_output=True, text=True).stdout
+    pids = []
+    for line in out.splitlines():
+        if "WXWork" in line:
+            parts = line.split('","')
+            if len(parts) > 1:
+                try:
+                    pids.append(int(parts[1].strip('"')))
+                except ValueError:
+                    pass
+
+    found = {}
 
     def cb(hwnd, _):
-        if win32gui.GetClassName(hwnd) == "WeChatLogin" and win32gui.IsWindowVisible(hwnd):
-            found.append(hwnd)
+        if not win32gui.IsWindowVisible(hwnd):
+            return True
+        try:
+            pid = win32gui.GetWindowThreadProcessId(hwnd)[1]
+        except Exception:
+            return True
+        if pid not in pids:
+            return True
+        cls = win32gui.GetClassName(hwnd)
+        # 同类窗口取最后一个（最上层）
+        found[cls] = hwnd
         return True
 
     win32gui.EnumWindows(cb, None)
-    return found[0] if found else 0
+    return found
 
 
 def main() -> int:
@@ -109,14 +141,19 @@ def main() -> int:
         print("验证码必须是纯数字:", code)
         return 2
 
-    hwnd = find_login_window()
-    if not hwnd:
-        print("没找到企微登录窗（WeChatLogin）")
-        return 1
-    title = win32gui.GetWindowText(hwnd)
-    print("登录窗:", hex(hwnd), title)
+    windows = find_windows()
+    print("可见企微窗口:", {k: hex(v) for k, v in windows.items()})
 
-    # 前台 + 焦点（最小化时先还原）
+    # 优先验证码弹窗（WXworkWindow）；没有就退回登录窗
+    hwnd = windows.get("WXworkWindow") or windows.get("WeChatLogin") or 0
+    if not hwnd:
+        print("没找到企微窗口")
+        return 1
+    cls = win32gui.GetClassName(hwnd)
+    left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+    w, h = right - left, bottom - top
+    print("目标窗口:", cls, hex(hwnd), f"({left},{top}) {w}x{h}")
+
     try:
         win32gui.ShowWindow(hwnd, 9)  # SW_RESTORE
     except Exception:
@@ -125,18 +162,29 @@ def main() -> int:
         win32gui.SetForegroundWindow(hwnd)
     except Exception as exc:
         print("SetForegroundWindow 失败（继续尝试）:", exc)
-    time.sleep(1.2)
+    time.sleep(1.0)
 
-    # 先清掉可能残留的旧输入（上一次失败的码拼在后面 = 位数错误）
+    # 点击输入框区域聚焦（弹窗布局：标题在上，六个格子约在 45~55% 高度，验证按钮约 75%）
+    box_x = left + w // 2
+    box_y = top + int(h * 0.48)
+    click_at(box_x, box_y)
+    print(f"点击输入框区域 ({box_x},{box_y})")
+
     clear_input()
 
     for ch in code:
         send_char(ch)
         time.sleep(0.15)
-    print("已输入", code, "，等 1.5 秒后回车")
-    time.sleep(1.5)
+    print("已输入", code, "，等 1 秒后点「验证」按钮")
+    time.sleep(1.0)
+
+    btn_y = top + int(h * 0.76)
+    click_at(box_x, btn_y)
+    print(f"已点击验证按钮 ({box_x},{btn_y})")
+    time.sleep(1.0)
+    # 兜底：部分版本回车也能提交
     send_enter()
-    print("已回车提交")
+    print("完成")
     return 0
 
 

@@ -68,6 +68,28 @@ def restart_wxwork(wxwork: Path) -> None:
     time.sleep(12)
 
 
+def verify_dialog_open() -> bool:
+    """短信验证码弹窗（WXworkWindow 类，浮在登录窗上方）是否已出现。
+
+    这个类的存在本身就是「验证码界面出现了」的信号——比截图哈希
+    变化更可靠：弹窗是独立顶层窗口，出现即可立即敲码，不用等 90 秒兜底。
+    """
+    try:
+        import win32gui
+
+        hit = []
+
+        def cb(hwnd, _):
+            if win32gui.IsWindowVisible(hwnd) and win32gui.GetClassName(hwnd) == "WXworkWindow":
+                hit.append(hwnd)
+            return True
+
+        win32gui.EnumWindows(cb, None)
+        return bool(hit)
+    except Exception:
+        return False
+
+
 def poll_verify_code(bridge) -> str:
     """轮询前端提交的短信验证码（one-shot）：有就返回，没有返回空串。"""
     try:
@@ -184,18 +206,22 @@ def main() -> int:
                 if code:
                     pending = {"code": code, "hash": window_hash(), "at": time.time()}
                     print(f"收到前端提交的验证码 {code}，等验证码界面出现后再输入（最多等 90 秒）")
-                # 等到窗口离开二维码界面（或超时）才敲
+                # 等到验证码弹窗出现（WXworkWindow 类）或窗口离开二维码界面才敲
                 if pending:
                     current = window_hash()
                     waited = int(time.time() - pending["at"])
-                    if current and current != pending["hash"]:
-                        print(f"窗口已切到验证码界面（等了 {waited} 秒），输入验证码")
+                    dialog = verify_dialog_open()
+                    if dialog or (current and current != pending["hash"]):
+                        print(
+                            f"验证码界面就绪（{'弹窗已出现' if dialog else '截图已变化'}，等了 {waited} 秒），"
+                            "输入验证码"
+                        )
                         type_verify_code(pending["code"])
                         pending = None
                         last_code_at = time.time()
                         fresh.reset()
                     elif waited > 90:
-                        print(f"等了 90 秒窗口没变化，直接输入碰运气")
+                        print("等了 90 秒窗口没变化，直接输入碰运气")
                         type_verify_code(pending["code"])
                         pending = None
                         last_code_at = time.time()
