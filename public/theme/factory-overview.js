@@ -17,7 +17,7 @@
  *   GET /api/v1/service-positions?page=1&page_size=1000 → {items:[{id,position_name,factory_id,city_name,store_name,is_active}]}
  *     （POSITION_KEYS 含 factory_id：岗位→工厂是一对一外键，4fe4ec5 起显式归属）
  *   GET /api/v1/position-scripts                 → 不带 position_id 时返回全量
- *     {items:[{id,position_id,stage,title,content,media,status}]}，stage ∈ 五时点 key
+ *     {items:[{id,position_id,stage,title,content,media,status}]}，stage ∈ 九时点 key
  *   GET /api/v1/employers                        → {items:[{id,employer_code,display_name,short_name,vertical_id,location_id,status,aliases}]}
  *   GET /api/v1/kb-faqs?page_size=1000&page=N    → {items:[{id,question,answer,scope_level,scope_employer_id,scope_position_id,vertical_id,status,priority}],total}
  *   GET /api/v1/kb-publish/history               → {target_url,target_id,items:[{id,created_at}]}，最近一次发布时间
@@ -39,8 +39,13 @@
   const STYLE_ID = "rk-fo-style";
   const TAG = "[factory-overview]";
 
-  // 五时点：key 与后端 SCRIPT_STAGES / position-scripts.js 的白名单一致，顺序即业务顺序。
-  const STAGES = ["greet", "send_info", "ask_interview", "booked", "unanswered"];
+  // 九个时点：key 与后端 SCRIPT_STAGES / position-scripts.js 的白名单一致，顺序即业务顺序。
+  // 2026-11-17 起扩充到 9 个（问城市/要姓名电话/收尾语等也进了话术表），
+  // 这里不同步就会一直显示「x/5」，运营以为配满了、其实只配了五项。
+  const STAGES = [
+    "greet", "ask_city", "send_info", "ask_interview",
+    "collect", "booked", "gave_up", "reopen", "closing",
+  ];
 
   function log() {
     try { console.info.apply(console, [TAG].concat(Array.prototype.slice.call(arguments))); } catch (e) { /* ignore */ }
@@ -322,7 +327,7 @@
     var positions = model.positionRows[id] || [];
     var devices = model.deviceNames[id] || [];
 
-    // 话术统计：本厂全部岗位的已配时点并集覆盖 x/5；条数 = 各岗位话术条数和。
+    // 话术统计：本厂全部岗位的已配时点并集覆盖 x/9；条数 = 各岗位话术条数和。
     var scriptCount = 0;
     var covered = {};
     if (model.scriptStages) positions.forEach(function (position) {
@@ -361,7 +366,7 @@
     else stats.appendChild(statsCell("设备", devices.length, devices.length ? "" : "is-zero"));
     stats.appendChild(statsCell("岗位", positions.length, positions.length ? "" : "is-zero"));
     if (model.scriptStages === null) stats.appendChild(dash("话术"));
-    else stats.appendChild(statsCell("话术", scriptCount + " 条 · 覆盖 " + coveredCount + "/5", scriptCount ? "" : "is-zero"));
+    else stats.appendChild(statsCell("话术", scriptCount + " 条 · 覆盖 " + coveredCount + "/" + STAGES.length, scriptCount ? "" : "is-zero"));
     if (model.faqGlobal === null) stats.appendChild(dash("KB"));
     else {
       var kbText = "全局 " + model.faqGlobal.length;
