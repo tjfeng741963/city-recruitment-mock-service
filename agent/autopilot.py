@@ -480,7 +480,8 @@ class Reporter:
             or getattr(api, "device_code", "")
             or ""
         ).strip()
-        self.api.device_code = self.device_code
+        if self.api is not None:
+            self.api.device_code = self.device_code
         self._cursor: dict[str, int] = {
             str(k): int(v) for k, v in (self._state.get("cursor") or {}).items()
         }
@@ -682,6 +683,8 @@ class Reporter:
             log(f"[桥接] messages 异常（忽略）：{agent_client.describe_error(exc)}")
 
     def _send_heartbeat(self, heartbeat: dict) -> None:
+        if self.api is None:
+            return  # 服务端客户端未配置（纯桥接模式），桥接心跳由 _send_bridge 负责
         if not self.device_code:
             log("[心跳] 跳过：没有 device_code（config.json 加 device_code 或设 AGENT_DEVICE_CODE）")
             return
@@ -817,6 +820,9 @@ class Reporter:
         messages = batch.get("messages") or []
         if not messages:
             log("[上报] 无新增消息")
+            return
+        if self.api is None:
+            # 纯桥接模式：消息走 _send_bridge_messages 进 4222，不走服务端 ingest
             return
         try:
             res = self.api.ingest(batch)
@@ -1659,12 +1665,18 @@ def _make_reporter(cfg: dict, store: Store) -> Reporter | None:
     """
     server = (cfg.get("server") or "").strip()
     token = (cfg.get("device_token") or "").strip()
-    if not server or not token:
-        log("[心跳] 未配置 server / device_token，跳过心跳与上报")
-        return None
     code = resolve_device_code(cfg)
-    api = agent_client.AgentClient(server, token, device_code=code)
+    api = None
+    if server and token:
+        api = agent_client.AgentClient(server, token, device_code=code)
     bridge = _make_bridge(cfg, code)
+    # 云端部署只走桥接（bridge_server 指向隧道），没有 server/device_token——
+    # 此时也要建 Reporter，否则桥接心跳和消息上报永远不会跑。
+    if api is None and bridge is None:
+        log("[心跳] 未配置 server/device_token 与桥接，心跳和上报全部跳过")
+        return None
+    if api is None:
+        log("[心跳] 未配置 server / device_token：跳过服务端心跳与上报，仅桥接心跳")
     rep = Reporter(api, store, device_code=code, bridge=bridge, cfg=cfg)
     if rep.device_code:
         log(f"[心跳] 目标 {server} / device_code={rep.device_code}")
@@ -1756,12 +1768,8 @@ def load_config(args: argparse.Namespace, config_path: Path | None = None) -> di
     if cfg["brain"] is not None and not isinstance(cfg["brain"], dict):
         raise ValueError("brain must contain an object")
     bcfg = cfg.get("brain") or {}
-    if bcfg and bcfg.get("mode") not in ("kb", "flow", "fixed"):
-        raise ValueError("brain.mode must be kb, flow or fixed")
-    if bcfg.get("mode") in ("kb", "flow") and (
-        not isinstance(bcfg.get("base_url"), str) or not bcfg["base_url"].strip()
-    ):
-        raise ValueError("brain.base_url is required for kb/flow mode")
+    if bcfg and bcfg.get("mode") not in ("agent", "fixed"):
+        raise ValueError("brain.mode must be agent or fixed")
     return cfg
 
 
