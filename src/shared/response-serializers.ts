@@ -52,7 +52,8 @@ const CANDIDATE_KEYS = [
 ] as const;
 
 const DEVICE_KEYS = [
-  "id", "device_code", "name", "dify_url", "dify_key", "recruiter_id", "factory_name", "city", "status", "online", "mode",
+  // dify_url / dify_key 已随 Dify 全链路下线（2026-11-17），不再返回。
+  "id", "device_code", "name", "recruiter_id", "factory_name", "city", "status", "online", "mode",
   "config", "last_online", "created_at", "last_offline", "queue_depth", "queue_stale",
 ] as const;
 
@@ -102,6 +103,10 @@ export function serializeFactory(row: Row): Row {
 export function serializeServicePosition(row: Row): Row {
   const source = merged(row);
   const result: Row = {};
+
+  // 事实卡取值助手：事实卡是 data_json 里的中文键值（见 seed-shenzhen 脚本）。
+  const fact = (key: string) => String(source[key] ?? "").trim();
+
   for (const key of POSITION_KEYS) {
     const value = source[key] ?? (key === "is_featured" && source.featured !== undefined ? source.featured : undefined);
     if (value !== undefined && value !== null) result[key] = value;
@@ -118,6 +123,22 @@ export function serializeServicePosition(row: Row): Row {
   const sectionKeys = [...new Set([...Object.keys(POSITION_DEFAULTS.base_section_labels as Row), ...Object.keys(sections)])];
   result.base_sections = Object.fromEntries(sectionKeys.map((key) => [key, String(sections[key] ?? "")]));
   result.base_section_labels = result.base_section_labels && typeof result.base_section_labels === "object" ? result.base_section_labels : {};
+  // 新链路的事实卡（data_json）是唯一事实源；编译版列表页读的是旧列，
+  // 旧列没填时从事实卡推导展示值，保证前端展示与 Agent 实际引用的数据一致。
+  // 运营在 Agent 配置里改事实卡，列表页下一轮刷新就跟着变。
+  if (fact("job_title") || fact("wage_text")) {
+    if (!result.city_name && fact("city")) result.city_name = fact("city");
+    if (!result.age_range && fact("age_text")) result.age_range = fact("age_text");
+    if (!result.height_require && fact("height_text")) result.height_require = fact("height_text");
+    if (!result.accommodation && fact("welfare_text")) result.accommodation = fact("welfare_text");
+    if (!result.address && fact("place")) result.address = fact("place");
+    if (!result.interview_time && fact("interview_time")) result.interview_time = fact("interview_time");
+    if (!result.gender) {
+      const age = fact("age_text");
+      result.gender = /男/.test(age) && /女/.test(age) ? "男女不限" : "不限";
+    }
+    if (!result.job_type) result.job_type = "全职";
+  }
   return result;
 }
 
