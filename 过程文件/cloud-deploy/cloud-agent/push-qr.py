@@ -115,10 +115,19 @@ def main() -> int:
     original_upload = bridge.upload_login_qr
 
     def tracked_upload(image_b64: str, width: int, height: int, captured_at: str) -> object:
+        nonlocal ever_moved
+        # 同一次启动里出现过第二种截图内容 = 窗口离开过二维码界面
+        if fresh.hash and hashlib.md5(image_b64.encode("utf-8")).hexdigest() != fresh.hash:
+            ever_moved = True
         fresh.record(image_b64)
         return original_upload(image_b64, width, height, captured_at)
 
     bridge.upload_login_qr = tracked_upload  # type: ignore[method-assign]
+
+    # 过期重启只针对「还停在最初二维码界面」的情况。窗口一旦换过界面
+    # （如「请在手机上确认登录」），就绝不能自动重启——那会把用户手机端
+    # 正在进行的确认流程杀掉。
+    ever_moved = False
 
     qr = login_qr.LoginQrPusher()
     wxwork = next((p for p in WXWORK_CANDIDATES if p.exists()), None)
@@ -181,14 +190,16 @@ def main() -> int:
                         fresh.reset()
                     else:
                         print(f"窗口仍在二维码界面，等手机端确认（已等 {waited} 秒）")
-                # 过期重启：敲码后 3 分钟内不重启，别打断登录流程
-                elif wxwork and fresh.stale() and time.time() - last_code_at > 180:
+                # 过期重启：只针对「还停在最初二维码界面」；窗口换过界面
+                # （确认/验证码屏）绝不重启，别杀掉手机端正在进行的确认
+                elif wxwork and fresh.stale() and not ever_moved and time.time() - last_code_at > 180:
                     print(
                         f"二维码已过期（同一张图持续 {int(time.time() - fresh.changed_at)} 秒），"
                         "重启企微换新码"
                     )
                     restart_wxwork(wxwork)
                     fresh.reset()
+                    ever_moved = False
         except Exception as exc:  # noqa: BLE001
             print(f"轮询失败（忽略）: {type(exc).__name__}: {exc}")
         time.sleep(15)
