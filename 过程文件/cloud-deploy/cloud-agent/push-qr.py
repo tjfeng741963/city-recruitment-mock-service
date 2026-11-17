@@ -119,6 +119,7 @@ def main() -> int:
         # 同一次启动里出现过第二种截图内容 = 窗口离开过二维码界面
         if fresh.hash and hashlib.md5(image_b64.encode("utf-8")).hexdigest() != fresh.hash:
             ever_moved = True
+            save_state()
         fresh.record(image_b64)
         return original_upload(image_b64, width, height, captured_at)
 
@@ -126,8 +127,19 @@ def main() -> int:
 
     # 过期重启只针对「还停在最初二维码界面」的情况。窗口一旦换过界面
     # （如「请在手机上确认登录」），就绝不能自动重启——那会把用户手机端
-    # 正在进行的确认流程杀掉。
+    # 正在进行的确认流程杀掉。状态落盘：推送器自身重启不会重新武装杀计时器。
+    state_path = ROOT / "qr-state.json"
     ever_moved = False
+    try:
+        ever_moved = bool(json.loads(state_path.read_text(encoding="utf-8")).get("ever_moved"))
+    except Exception:
+        pass
+
+    def save_state() -> None:
+        try:
+            state_path.write_text(json.dumps({"ever_moved": ever_moved}), encoding="utf-8")
+        except Exception:
+            pass
 
     qr = login_qr.LoginQrPusher()
     wxwork = next((p for p in WXWORK_CANDIDATES if p.exists()), None)
@@ -200,6 +212,7 @@ def main() -> int:
                     restart_wxwork(wxwork)
                     fresh.reset()
                     ever_moved = False
+                    save_state()
         except Exception as exc:  # noqa: BLE001
             print(f"轮询失败（忽略）: {type(exc).__name__}: {exc}")
         time.sleep(15)
