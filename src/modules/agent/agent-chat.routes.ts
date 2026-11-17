@@ -97,7 +97,7 @@ function positionOfDevice(db: DatabaseSync, deviceCode: string): number {
   return Number(row?.position_id ?? 0);
 }
 
-function buildFacts(row: PositionRow | undefined): Record<string, string> {
+function buildFacts(db: DatabaseSync, row: PositionRow | undefined): Record<string, string> {
   if (!row) return {};
   const data = safeJson(row.data_json);
   const merged: Record<string, string> = {
@@ -114,11 +114,30 @@ function buildFacts(row: PositionRow | undefined): Record<string, string> {
     // 「几点面试 / 怎么走」，不硬提取、不硬编码。
     interview_time_text: text(data.interview_time_text),
     interview_address: text(data.interview_address),
+    interview_material: text(data.interview_material),
+    basic_requirements: text(data.basic_requirements),
+    onboarding_notes: text(data.onboarding_notes),
     height_text: text(data.height_text),
     tattoo_policy: text(data.tattoo_policy),
     cert_text: text(data.cert_text),
     job_content: text(data.job_content),
   };
+  // 岗位专属媒体（2026-11-17 媒体分层）：通用素材（工作内容/安检视频/宿舍）
+  // 全岗位共用、模型按媒体库清单随取；面试地点图各城市地址不同，绑定到岗位
+  // （media_assets.position_id），这里把名字注入事实卡——模型只知道本岗位
+  // 的地点图，不会把广州的图发给佛山的客户。
+  const boundMedia = db
+    .prepare(
+      "SELECT name, kind FROM media_assets WHERE position_id=? AND status='enabled' ORDER BY id",
+    )
+    .all(row.id) as Array<{ name: string; kind: string }>;
+  for (const media of boundMedia) {
+    if (media.kind === "image" && !merged.interview_address_image) {
+      merged.interview_address_image = String(media.name);
+    } else if (media.kind === "video" && !merged.interview_video) {
+      merged.interview_video = String(media.name);
+    }
+  }
   // 空值不出现：prompt 里「工价：」后面空着比不写更容易让模型以为「没有限制」
   return Object.fromEntries(
     Object.entries(merged).filter(([, value]) => String(value || "").trim()),
@@ -204,7 +223,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
 
       const row = positionRow(db, positionId);
       if (!row) return reply.code(404).send({ detail: "position not found" });
-      const facts = buildFacts(row);
+      const facts = buildFacts(db, row);
       const persona = personaOf(db, positionId);
       const opening = openingOf(db, positionId).map((item) => ({
         id: Number(item.id),
@@ -528,7 +547,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         : [];
 
     const persona = personaOf(db, positionId);
-    const facts = buildFacts(row);
+    const facts = buildFacts(db, row);
     // 今天的日期给模型：interview.date 的「明天/后天」由它换算成具体几月几号
     const nowLabel = todayLabel();
     const opening: OpeningItem[] = openingOf(db, positionId).map((item) => ({
