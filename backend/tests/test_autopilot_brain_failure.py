@@ -99,7 +99,7 @@ def test_kb_mode_without_initialized_brain_does_not_send_fixed_reply(agent):
 
 
 def test_retry_held_cli_requeues_and_exits_without_initializing_store(agent, tmp_path, monkeypatch):
-    agent.rlog.mark_held("10", "timeout")
+    agent.rlog.mark_held("10", "S:customer", "timeout")
     monkeypatch.setattr(agent, "ROOT", tmp_path)
     monkeypatch.setattr(agent.sys, "argv", ["autopilot.py", "--retry-held"])
     assert agent.main() == 0

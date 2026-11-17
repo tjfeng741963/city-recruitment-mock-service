@@ -95,7 +95,7 @@ compat.apply_click_input()
 compat.apply_input_focus_retry()
 
 from wecom_io_core import send as core_send  # noqa: E402
-from wecom_io_core.store import Store  # noqa: E402
+from wecom_io_core.store import Store, find_data_dir  # noqa: E402
 
 # 企微自带的应用/系统会话，前缀命中就不回复
 SYSTEM_PREFIXES = (
@@ -146,6 +146,9 @@ GREET_STATE_LIMIT = 2000                     # 只留最近 N 个会话，文件
 REPORT_INTERVAL = 30.0                       # 心跳/上报间隔（按时间戳判断，不 sleep）
 REPORT_MAX_MESSAGES = 50                     # 单次上报最多条数
 REPORT_FIRST_WINDOW = 24 * 3600              # 首次没有游标时只补最近 24 小时
+# 进程退出码：企微账号目录变了，需要守护进程用新进程重新解析。
+# 用非 0 值是为了让「正常退出」和「需要重启」在日志/计划任务里能分辨。
+ACCOUNT_SWITCH_EXIT_CODE = 3
 
 # 加好友固定介绍是独立阶段：首段用完整流程定位会话，后续段留在同一已打开
 # 的会话里发送，避免每段重新搜索。客户中途发来的问题保留在 pending，整组
@@ -235,6 +238,36 @@ def wal_signature(data_dir: Path) -> tuple:
         except OSError:
             sig.append((name, 0, 0))
     return tuple(sig)
+
+
+def account_switched(data_dir: Path | None) -> Path | None:
+    """当前生效的企微账号目录是否已经不是 data_dir 了；变了就返回新目录。
+
+    为什么需要：企微每个账号在 Documents/WXWork/<vid>/Data 下有独立的数据目录，
+    Store 只在**启动时**解析一次（find_data_dir 取 message.db 最新那个），
+    之后主循环一直盯着这一个目录。换账号（退登录再扫码）后旧目录不再写入，
+    wal_signature 永远不变 → 不再 refresh → 扫不到任何新消息，
+    日志只有一句「上报：无新增消息」，看起来像客户端在正常工作
+    （2026-11-17 线上实测：换号后所有客户都不回，重启进程才恢复）。
+
+    这里只做判断，不做热切换：换账号等于整套上下文都换（self_id 缓存、
+    _decrypted 快照、.greeted.json、欢迎语队列），进程内改引用容易漏掉某处，
+    直接退出让守护进程拉起新进程最稳。
+    """
+    if not data_dir:
+        return None
+    try:
+        current = find_data_dir()
+    except Exception:  # noqa: BLE001 目录读不到就当下次再说，绝不能因此崩掉
+        return None
+    if not current:
+        return None
+    try:
+        if Path(data_dir).resolve() == Path(current).resolve():
+            return None
+    except OSError:
+        return None
+    return current
 
 
 def is_system_conv(conv_id: str, name: str = "") -> bool:
@@ -843,7 +876,7 @@ def bootstrap(store: Store, cfg: dict) -> None:
         if not rlog.record_incoming(m):
             continue
         if int(m.get("time") or 0) < cutoff:
-            rlog.mark_skipped(str(m["id"]), "历史消息（初始化跳过）")
+            rlog.mark_skipped(str(m["id"]), cid, "历史消息（初始化跳过）")
             skipped += 1
         else:
             kept += 1
@@ -1166,7 +1199,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             continue  # A pending welcome owns its source; later questions stay queued.
         if newest[it["conv_id"]]["message_id"] != it["message_id"]:
             if not dry:
-                rlog.mark_skipped(it["message_id"], "同会话合并到最新一条")
+                rlog.mark_skipped(it["message_id"], it["conv_id"], "同会话合并到最新一条")
             stats["merged"] += 1
     if stats["merged"]:
         log(f"同会话合并：{stats['merged']} 条旧消息并入最新一条，不单独回")
@@ -1187,7 +1220,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
 
         if is_system_conv(cid, name):
             if not dry:
-                rlog.mark_skipped(mid, "系统/官方会话")
+                rlog.mark_skipped(mid, cid, "系统/官方会话")
             stats["skipped"] += 1
             log(f"跳过 {name or cid}：系统/官方会话")
             continue
@@ -1196,7 +1229,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         # 随 /config 下发到这里。命中就整轮不碰这个会话——否则人工和 AI 会同时发言。
         if cid in remote_cfg.takeover_sessions():
             if not dry:
-                rlog.mark_skipped(mid, "人工接管中")
+                rlog.mark_skipped(mid, cid, "人工接管中")
             stats["skipped"] += 1
             log(f"跳过 {name or cid}：人工接管中")
             continue
@@ -1206,14 +1239,14 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         # 整轮不碰这个会话，一句都不发，等运营在网页上手动恢复。
         if cid in remote_cfg.abandoned_sessions():
             if not dry:
-                rlog.mark_skipped(mid, "客户已流失")
+                rlog.mark_skipped(mid, cid, "客户已流失")
             stats["skipped"] += 1
             log(f"跳过 {name or cid}：客户已流失")
             continue
 
         if not name or name == cid:
             if not dry:
-                rlog.mark_skipped(mid, "会话没有可搜索的名字")
+                rlog.mark_skipped(mid, cid, "会话没有可搜索的名字")
             stats["skipped"] += 1
             log(f"跳过 {cid}：会话没有可搜索的名字")
             continue
@@ -1283,7 +1316,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 # 流程走完（已约到面试）后不再自动回复，这条消息记为跳过
                 if res.get("skip"):
                     if not dry:
-                        rlog.mark_skipped(mid, res.get("detail") or "流程已结束")
+                        rlog.mark_skipped(mid, cid, res.get("detail") or "流程已结束")
                     stats["skipped"] += 1
                     log(f"    [flow] {res.get('detail') or '流程已结束，不再回复'}")
                     continue
@@ -1303,7 +1336,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     if welcome_delivery:
                         rlog.fail_welcome(cid, reason, unknown=True)
                     else:
-                        rlog.mark_held(mid, reason)
+                        rlog.mark_held(mid, cid, reason)
                     _last_error = reason[:200]
                 stats["blocked"] += 1
                 log(f"    [brain] {reason}")
@@ -1343,7 +1376,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         if not compat.wait_clipboard_writable(timeout=15):
             if welcome_delivery:
                 rlog.fail_welcome(cid, '剪贴板被占用超过 15 秒', unknown=False)
-            rlog.mark_failed(mid, "剪贴板被占用超过 15 秒", scene, text)
+            rlog.mark_failed(mid, cid, "剪贴板被占用超过 15 秒", scene, text)
             _last_error = "剪贴板被占用超过 15 秒"
             stats["failed"] += 1
             log("    跳过：剪贴板被占用（向日葵同步？）")
@@ -1439,7 +1472,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 # 回车已按但回读解密库确认不了落点：结果不明。不能记 sent
                 #（可能静默丢失），也不能记 failed（下轮自动补发可能重复发送）。
                 # 记 unknown 不参与自动补发，--retry-held 由人工核对后重新入队。
-                rlog.mark_unknown(mid, detail_text, scene, text)
+                rlog.mark_unknown(mid, cid, detail_text, scene, text)
                 _last_error = detail_text[:200]
                 _consecutive_send_failures += 1
                 stats["unknown"] += 1
@@ -1449,7 +1482,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     greeted.add(cid)
                     _save_greeted(greeted)
                 else:
-                    rlog.mark_sent(mid, scene, text)
+                    rlog.mark_sent(mid, cid, scene, text)
                 _last_reply_at = time.time()
                 _consecutive_send_failures = 0
                 _last_error = ""
@@ -1461,7 +1494,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     _observe_lead(store, cid, name, mid, log)
             else:
                 if not welcome_delivery:
-                    rlog.mark_failed(mid, result["detail"], scene, text)
+                    rlog.mark_failed(mid, cid, result["detail"], scene, text)
                 _last_error = str(result["detail"])[:200]
                 _consecutive_send_failures += 1
                 stats["failed"] += 1
@@ -1470,7 +1503,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             if welcome_delivery:
                 rlog.fail_welcome(cid, f'{type(exc).__name__}: {exc}', unknown=True)
             else:
-                rlog.mark_failed(mid, f"{type(exc).__name__}: {exc}", scene, text)
+                rlog.mark_failed(mid, cid, f"{type(exc).__name__}: {exc}", scene, text)
             _last_error = f"{type(exc).__name__}: {exc}"[:200]
             _consecutive_send_failures += 1
             stats["failed"] += 1
@@ -2163,7 +2196,7 @@ def main() -> int:
         rlog.cancel_welcomes()
         n = 0
         for it in rlog.pending(include_failed=True, limit=5000):
-            rlog.mark_skipped(it["message_id"], "手动 reset")
+            rlog.mark_skipped(it["message_id"], it["conv_id"], "手动 reset")
             n += 1
         log(f"已作废 {n} 条待发/失败记录")
         print_history(12)
@@ -2241,6 +2274,19 @@ def main() -> int:
                 reporter.tick(wecom_state, pending_count())
 
             time.sleep(cfg["interval"])
+            # 换账号检测：企微退登录再扫码后，startup 时解析的账号目录就不再写入，
+            # 继续盯着旧目录只会一直「无新增消息」。这里主动退出，交给守护进程
+            # （run.cmd 的 :loop 或 supervise.py）用新进程重新解析目录。
+            # 只对「自动发现目录」生效：显式配了 data_dir 的机器，运营明确指定了
+            # 盯哪个账号，不能被自动切走。
+            if data_dir is None:
+                switched = account_switched(store.data_dir)
+                if switched is not None:
+                    log(
+                        f"[账号] 企微账号目录已变化：{store.data_dir} → {switched}；"
+                        "本进程退出，由守护进程重启并重新解析"
+                    )
+                    return ACCOUNT_SWITCH_EXIT_CODE
             sig = wal_signature(store.data_dir)
             if sig != last_sig:
                 store.refresh()

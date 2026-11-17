@@ -107,7 +107,7 @@ def test_retry_held_requeues_unknown_records(tmp_path):
         "id": 10, "conv_id": "S:customer", "conv_name": "Customer",
         "text": "salary?", "type": 2, "time": 100,
     })
-    records.mark_unknown("10", "已发送但回读失败", scene="kb", reply_text="hi")
+    records.mark_unknown("10", "S:customer", "已发送但回读失败", scene="kb", reply_text="hi")
     assert records.pending(include_failed=True) == []
     assert records.retry_held() == 1
     rows = records.pending(include_failed=True)
