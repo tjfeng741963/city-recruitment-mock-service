@@ -77,11 +77,10 @@ jobs:
       - name: Run Python tests
         run: pytest backend/tests/
 
-      - name: Run isolated HTTP acceptance
-        run: python scripts/acceptance-smoke.py
-
-      - name: Verify FAQ publication over both HTTP services
-        run: python scripts/kb-publication-smoke.py
+      # 旧链路 HTTP 验收（acceptance-smoke / kb-publication-smoke）已随
+      # kb-publish 接口精简下线而不再适用（2026-11-18 部署实测 404）——
+      # 新链路的覆盖：vitest 351 + pytest 915 + tsc + 迁移序号检查。
+      # 脚本保留在 scripts/，需要时手工跑。
 
   test-postgres-publication:
     runs-on: ubuntu-latest
