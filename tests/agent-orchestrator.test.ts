@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   buildOrchestration,
-  guardMoney,
-  guardScript,
   parseScripts,
 } from "../src/modules/agent/agent-orchestrator.js";
 
-// 受控编排层：话术库解析、prompt 拼装、两条护栏。这些是纯函数，不碰网络。
+// 编排层：话术库解析与 prompt 拼装。纯函数，不碰网络。
+// 代码级护栏（guardScript/guardMoney）已于 2026-11-17 按运营决定拆除：
+// 话术约束走 prompt，相信模型。
 describe("agent orchestrator", () => {
   const PERSONA = `你是深圳地铁安检的招工人员。
 
@@ -65,44 +65,11 @@ describe("agent orchestrator", () => {
     expect(scripts).toHaveLength(3);
   });
 
-  it("guardScript：模型说用了 S2 但输出跑偏 → 整条替换回原文", () => {
-    const scripts = parseScripts(PERSONA);
-    const modelOutput = [{ type: "text", content: "我觉得这个工资还行啦，你要不要再考虑一下？" }];
-    const guarded = guardScript(modelOutput, "S2", scripts);
-    expect(guarded.replaced).toBe(true);
-    // 替换后的内容必须来自原文，不能是模型自己的转述
-    const joined = guarded.messages.map((item) => item.content).join("\n");
-    expect(joined).toContain("175/班");
-    expect(joined).not.toContain("考虑一下");
-  });
-
-  it("guardScript：输出确实来自原文 → 放行", () => {
-    const scripts = parseScripts(PERSONA);
-    const fromScript = [{ type: "text", content: "咱们是转正175/班5-6小时 350/天9-10小时，还有高峰补贴。" }];
-    const guarded = guardScript(fromScript, "S2", scripts);
-    expect(guarded.replaced).toBe(false);
-    expect(guarded.messages).toEqual(fromScript);
-  });
-
-  it("guardScript：script_used 为空时不干预，自拟回复原样通过", () => {
-    const scripts = parseScripts(PERSONA);
-    const free = [{ type: "text", content: "这个我确认一下，稍后回你。" }];
-    expect(guardScript(free, null, scripts)).toEqual({ messages: free, replaced: false });
-  });
-
-  it("guardMoney：事实里没有的工价直接拦下", () => {
-    const facts = { wage_text: "160/班" };
-    expect(guardMoney([{ type: "text", content: "这边是 180/小时" }], facts)).toContain("180");
-    expect(guardMoney([{ type: "text", content: "这边是 160/班" }], facts)).toBeNull();
-    expect(guardMoney([{ type: "text", content: "这里没有数字" }], facts)).toBeNull();
-  });
-
-  it("guardMoney：话术原文里的数字可信，模型逐字引用不误伤", () => {
-    const facts = { wage_text: "160/班" };
-    // S2 原文的 175/班 不在事实卡里，但属于运营原文，不能拦
-    const original = [{ type: "text", content: "咱们是转正175/班5-6小时 350/天9-10小时" }];
-    expect(guardMoney(original, facts, "早班7-15\n咱们是转正175/班5-6小时 350/天9-10小时")).toBeNull();
-    // 原文和事实里都没有的数字仍然拦
-    expect(guardMoney(original, facts, "早班7-15")).toContain("175");
+  it("prompt 不再要求 script_used 声明：护栏拆除后由模型自由引用原文", () => {
+    const { messages } = buildOrchestration({ persona: PERSONA, facts: {}, history: [], input: "工资多少" });
+    // 输出规范里不应再出现 script_used
+    expect(messages[0].content).not.toContain("script_used");
+    // 话术使用规则仍在：命中就引用原文，数字不改
+    expect(messages[0].content).toContain("用该类原文回答");
   });
 });

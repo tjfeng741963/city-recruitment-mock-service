@@ -113,11 +113,9 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
   "reply": {
     "messages": [{ "type": "text", "content": "22 一小时，包吃包住" }],
     "capture": { "name": "张三", "phone": "13800138000", "city": "", "day": "" },
-    "script_used": "S2",
     "handoff": false,
     "done": false
   },
-  "script_replaced": false,
   "scripts": ["S1 外宿人员嫌弃面试地址远", "S2 工资待遇不清晰/嫌低", "..."],
   "raw": "模型原文",
   "model": "deepseek-chat",
@@ -127,17 +125,18 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 }
 ```
 
-**受控编排（2026-11-17 起）**：system = 人设（话术段落剥离）+ 岗位事实 +
-话术库（人设里 `[S1 标题]` 格式的段落）+ 输出规范。模型声明 `script_used`
-命中某类话术时，输出必须来自该类原文；跑偏会被 `guardScript` 整条替换回
-原文（`script_replaced=true`），原文比模型的转述更可信。多轮对话按 DeepSeek
-无状态 API 的约定：每轮把上一轮 assistant 输出 append 回 messages 末尾。
+**编排（2026-11-17 信任模式）**：system = 人设（话术段落剥离）+ 岗位事实 +
+话术库（人设里 `[S1 标题]` 格式的段落）+ 输出规范。话术命中与引用方式由
+模型自行判断，**没有代码级护栏**（原 guardScript 替换、guardMoney 金额拦截
+已拆除，相信模型按 prompt 约束回答）。
+
+多轮对话按 DeepSeek 无状态 API 的约定：服务端不记上下文，客户端每轮把
+全量 history 传回来；assistant 历史由编排层装回 JSON 信封（等价于
+「append 上一轮原始输出」），保证输出格式不漂移。
 
 失败时统一是 `{"ok": false, "error": "原因", "code": "no_api_key"}`，
-HTTP 仍是 200——调用方按 `ok` 判断，不要按状态码。
-
-金额护栏：回复里出现的「N 元」「N/小时」必须能在岗位事实里找到，
-否则 `ok=false`，`error` 说明是哪个数字对不上。
+HTTP 仍是 200——调用方按 `ok` 判断，不要按状态码。模型输出不是 JSON 时
+`code=bad_json`，返回里带 `latency_ms` 与 `usage` 便于诊断。
 
 ---
 
@@ -176,6 +175,7 @@ HTTP 仍是 200——调用方按 `ok` 判断，不要按状态码。
 
 | 日期 | 改动 |
 |---|---|
+| 2026-11-17 | chat 拆除代码级护栏（guardScript 替换 / guardMoney 金额拦截 / script_used 声明），话术约束走 prompt 信任模型；assistant 历史装回 JSON 信封防格式漂移 |
 | 2026-11-17 | chat 接口：assistant 历史由编排层装回 JSON 信封（防多轮格式漂移，实测修掉 5/16 轮解析失败）；金额护栏放行话术原文里的数字；解析失败返回 code=bad_json 且带 latency_ms/usage |
 | 2026-11-17 | 删除旧「岗位话术 5 时点」接口（GET/POST/DELETE /api/v1/position-scripts）；8090 摘除 kb / kb_publish / lead / lead_board / flow / webhook 六组废弃路由；客户端 brain 切到 4222 的 agent/opening + agent/chat |
 | 2026-11-17 | Agent 会话重构为受控编排（agent-orchestrator.ts）：话术库注入 + script_used 声明 + 原文比对护栏；agent/opening 与 opening/log 改为设备令牌或服务令牌鉴权 |

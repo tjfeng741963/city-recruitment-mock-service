@@ -3,7 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { authorizeProfileRequest } from "./profile.routes.js";
 import { isValidDeviceToken } from "./position-scripts.routes.js";
 import { complete, llmConfig, parseJsonObject } from "./agent-llm.js";
-import { buildOrchestration, guardMoney, guardScript, parseScripts } from "./agent-orchestrator.js";
+import { buildOrchestration, parseScripts } from "./agent-orchestrator.js";
 
 /**
  * Agent 会话接口 + 调试台的后端（迁移 038 的消费侧）。
@@ -166,7 +166,6 @@ function normalizeReply(parsed: Record<string, unknown>) {
     },
     handoff: Boolean(parsed.handoff),
     done: Boolean(parsed.done),
-    script_used: typeof parsed.script_used === "string" ? parsed.script_used : null,
   };
 }
 
@@ -341,29 +340,14 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         };
       }
 
-      // 话术护栏：模型说用了某类话术但输出跑偏 → 整条替换回运营原文
-      const scriptGuard = guardScript(replyPayload.messages, (parsed as Record<string, unknown>).script_used, scripts);
-      replyPayload.messages = scriptGuard.messages;
-
-      // 金额护栏：事实卡 + 话术库原文都是可信数字来源（原文是运营写的，
-      // 模型逐字引用原文里的「175/班」不算编造）；两头都没有的数字才拦。
-      const moneyIssue = guardMoney(
-        replyPayload.messages,
-        facts,
-        scripts.map((script) => script.content).join("\n"),
-      );
+      // 信任模式：不做代码级护栏，模型按 prompt 约束引用话术原文（2026-11-17）。
       return {
-        ok: !moneyIssue,
-        error: moneyIssue || undefined,
+        ok: true,
         reply: replyPayload,
         raw: result.content,
         model: result.model,
         usage: result.usage,
         latency_ms: result.latency_ms,
-        script_used: typeof (parsed as Record<string, unknown>).script_used === "string"
-          ? (parsed as Record<string, unknown>).script_used
-          : null,
-        script_replaced: scriptGuard.replaced,
         scripts: scripts.map((script) => script.id + " " + script.title),
         messages,
       };
