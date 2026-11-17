@@ -876,7 +876,7 @@ def bootstrap(store: Store, cfg: dict) -> None:
         if not rlog.record_incoming(m):
             continue
         if int(m.get("time") or 0) < cutoff:
-            rlog.mark_skipped(str(m["id"]), "历史消息（初始化跳过）")
+            rlog.mark_skipped(str(m["id"]), cid, "历史消息（初始化跳过）")
             skipped += 1
         else:
             kept += 1
@@ -1199,7 +1199,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             continue  # A pending welcome owns its source; later questions stay queued.
         if newest[it["conv_id"]]["message_id"] != it["message_id"]:
             if not dry:
-                rlog.mark_skipped(it["message_id"], "同会话合并到最新一条")
+                rlog.mark_skipped(it["message_id"], it["conv_id"], "同会话合并到最新一条")
             stats["merged"] += 1
     if stats["merged"]:
         log(f"同会话合并：{stats['merged']} 条旧消息并入最新一条，不单独回")
@@ -1220,7 +1220,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
 
         if is_system_conv(cid, name):
             if not dry:
-                rlog.mark_skipped(mid, "系统/官方会话")
+                rlog.mark_skipped(mid, cid, "系统/官方会话")
             stats["skipped"] += 1
             log(f"跳过 {name or cid}：系统/官方会话")
             continue
@@ -1229,7 +1229,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         # 随 /config 下发到这里。命中就整轮不碰这个会话——否则人工和 AI 会同时发言。
         if cid in remote_cfg.takeover_sessions():
             if not dry:
-                rlog.mark_skipped(mid, "人工接管中")
+                rlog.mark_skipped(mid, cid, "人工接管中")
             stats["skipped"] += 1
             log(f"跳过 {name or cid}：人工接管中")
             continue
@@ -1239,14 +1239,14 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         # 整轮不碰这个会话，一句都不发，等运营在网页上手动恢复。
         if cid in remote_cfg.abandoned_sessions():
             if not dry:
-                rlog.mark_skipped(mid, "客户已流失")
+                rlog.mark_skipped(mid, cid, "客户已流失")
             stats["skipped"] += 1
             log(f"跳过 {name or cid}：客户已流失")
             continue
 
         if not name or name == cid:
             if not dry:
-                rlog.mark_skipped(mid, "会话没有可搜索的名字")
+                rlog.mark_skipped(mid, cid, "会话没有可搜索的名字")
             stats["skipped"] += 1
             log(f"跳过 {cid}：会话没有可搜索的名字")
             continue
@@ -1316,7 +1316,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 # 流程走完（已约到面试）后不再自动回复，这条消息记为跳过
                 if res.get("skip"):
                     if not dry:
-                        rlog.mark_skipped(mid, res.get("detail") or "流程已结束")
+                        rlog.mark_skipped(mid, cid, res.get("detail") or "流程已结束")
                     stats["skipped"] += 1
                     log(f"    [flow] {res.get('detail') or '流程已结束，不再回复'}")
                     continue
@@ -1336,7 +1336,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     if welcome_delivery:
                         rlog.fail_welcome(cid, reason, unknown=True)
                     else:
-                        rlog.mark_held(mid, reason)
+                        rlog.mark_held(mid, cid, reason)
                     _last_error = reason[:200]
                 stats["blocked"] += 1
                 log(f"    [brain] {reason}")
@@ -1376,7 +1376,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         if not compat.wait_clipboard_writable(timeout=15):
             if welcome_delivery:
                 rlog.fail_welcome(cid, '剪贴板被占用超过 15 秒', unknown=False)
-            rlog.mark_failed(mid, "剪贴板被占用超过 15 秒", scene, text)
+            rlog.mark_failed(mid, cid, "剪贴板被占用超过 15 秒", scene, text)
             _last_error = "剪贴板被占用超过 15 秒"
             stats["failed"] += 1
             log("    跳过：剪贴板被占用（向日葵同步？）")
@@ -1472,7 +1472,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 # 回车已按但回读解密库确认不了落点：结果不明。不能记 sent
                 #（可能静默丢失），也不能记 failed（下轮自动补发可能重复发送）。
                 # 记 unknown 不参与自动补发，--retry-held 由人工核对后重新入队。
-                rlog.mark_unknown(mid, detail_text, scene, text)
+                rlog.mark_unknown(mid, cid, detail_text, scene, text)
                 _last_error = detail_text[:200]
                 _consecutive_send_failures += 1
                 stats["unknown"] += 1
@@ -1482,7 +1482,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     greeted.add(cid)
                     _save_greeted(greeted)
                 else:
-                    rlog.mark_sent(mid, scene, text)
+                    rlog.mark_sent(mid, cid, scene, text)
                 _last_reply_at = time.time()
                 _consecutive_send_failures = 0
                 _last_error = ""
@@ -1494,7 +1494,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     _observe_lead(store, cid, name, mid, log)
             else:
                 if not welcome_delivery:
-                    rlog.mark_failed(mid, result["detail"], scene, text)
+                    rlog.mark_failed(mid, cid, result["detail"], scene, text)
                 _last_error = str(result["detail"])[:200]
                 _consecutive_send_failures += 1
                 stats["failed"] += 1
@@ -1503,7 +1503,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             if welcome_delivery:
                 rlog.fail_welcome(cid, f'{type(exc).__name__}: {exc}', unknown=True)
             else:
-                rlog.mark_failed(mid, f"{type(exc).__name__}: {exc}", scene, text)
+                rlog.mark_failed(mid, cid, f"{type(exc).__name__}: {exc}", scene, text)
             _last_error = f"{type(exc).__name__}: {exc}"[:200]
             _consecutive_send_failures += 1
             stats["failed"] += 1
@@ -2196,7 +2196,7 @@ def main() -> int:
         rlog.cancel_welcomes()
         n = 0
         for it in rlog.pending(include_failed=True, limit=5000):
-            rlog.mark_skipped(it["message_id"], "手动 reset")
+            rlog.mark_skipped(it["message_id"], it["conv_id"], "手动 reset")
             n += 1
         log(f"已作废 {n} 条待发/失败记录")
         print_history(12)

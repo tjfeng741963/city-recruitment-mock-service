@@ -264,7 +264,7 @@ def test_reset_cancels_welcome_without_later_reactivation(tmp_path, monkeypatch)
     agent.core_send.send.return_value = UNSENT
     agent.drain(store, CFG)
     agent.rlog.cancel_welcomes()
-    for row in agent.rlog.pending(): agent.rlog.mark_skipped(row['message_id'], 'manual reset')
+    for row in agent.rlog.pending(): agent.rlog.mark_skipped(row['message_id'], row['conv_id'], 'manual reset')
     assert not agent.rlog.active_welcomes()
     assert not agent._is_first_contact('S:test', set())
     assert agent.drain(store, CFG)['sent'] == 0
@@ -341,7 +341,7 @@ def test_unknown_retry_cannot_bypass_an_unfinished_welcome(tmp_path, monkeypatch
     agent.scan(store, CFG)
     agent.core_send.send.side_effect = None
     agent.drain(store, CFG)
-    agent.rlog.mark_unknown('1', 'synthetic ordinary unknown marker')
+    agent.rlog.mark_unknown('1', 'S:test', 'synthetic ordinary unknown marker')
     assert agent.rlog.retry_held() == 0
     assert agent.rlog.welcome('S:test')['state'] == 'held'
 
