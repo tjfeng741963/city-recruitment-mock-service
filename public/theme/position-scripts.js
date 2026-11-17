@@ -4,8 +4,9 @@
  * 线上后台是编译好的 Vue 包（public/assets/），仓库里没有 .vue 源码，改不了表格列、也加不了路由。
  * 所以沿用项目已有的做法（theme/device-factories.js、city-factories.js 同一套路）在运行时补：
  *
- *   1. /service-positions（侧栏「岗位 / 工作」）每一行的岗位名下面加一行「话术 · 已配 N/5」按钮
- *   2. 点按钮开右侧抽屉：五个时点各一份 标题 + 正文，可插占位符、可挂图片/视频
+ *   1. /service-positions（侧栏「岗位 / 工作」）每一行的岗位名下面加一行「话术 · 已配 N/9」按钮
+ *   2. 点按钮开右侧抽屉：九个时点各一份 标题 + 正文，可插占位符、可挂图片/视频；
+ *      每一步都显示「什么时候发 / 不填时客户收到什么」，运营照着填即可
  *   3. 打开时 GET 回填，保存走 POST（服务端 UNIQUE(position_id,stage) 是 upsert，重复点不会堆行）
  *
  * 接口（Node 端 src/modules/agent/position-scripts.routes.ts，已实现）：
@@ -27,16 +28,82 @@
   const MARK = "data-rk-pscripts";
   const STYLE_ID = "rk-pscripts-style";
 
-  // 五个时点：顺序即业务顺序，key 是后端 SCRIPT_STAGES 白名单，不能改。
+  // 话术时点：顺序即客户实际经历的流程顺序，key 是后端 SCRIPT_STAGES 白名单，不能改。
+  //
+  // 每一项都写清三件事，页面上原样展示给运营：
+  //   when      —— 什么时候会发（客户走到哪一步）
+  //   fallback  —— 不填时客户实际会收到什么（代码里现在硬编码的那句）
+  //   tokens    —— 这一步最常用的占位符，排在占位符条最前面
+  // 2026-11-17 扩充：原来只有 5 个时点，问城市/要姓名电话/收尾这几句写死在代码里，
+  // 运营在页面上既看不见也改不了，等于流程有一半不可配。
   const STAGES = [
-    { key: "greet", label: "加好友首句", hint: "客户端发现首次会话记录后发送；无需客户先提问，通常用于问地点" },
-    { key: "send_info", label: "发岗位信息", hint: "拿到地点后发这个岗位的硬编码卡，可带图片/视频" },
-    { key: "ask_interview", label: "问面试意向", hint: "岗位发完追问一句「这两天能来吗」" },
-    { key: "booked", label: "面试地点", hint: "客户答应后发的固定地址与时间" },
-    { key: "unanswered", label: "未回复跟进", hint: "客户没回时补一句，别一上来就催" },
+    {
+      key: "greet",
+      label: "加好友首句",
+      when: "客户刚加上好友、还没开口时发出；通常用来问城市，也可先发一段招聘介绍。",
+      fallback: "没配首句时：先发该企微号配置的「招聘介绍」；再没有就直接发岗位卡。",
+      tokens: ["{{factory}}", "{{job_title}}", "{{cities}}"],
+    },
+    {
+      key: "ask_city",
+      label: "问城市",
+      when: "还不知道客户在哪个城市、需要先问清楚时。",
+      fallback: "你投递的是哪个城市的简历？我们这边{cities}都有厂在招。",
+      tokens: ["{{cities}}"],
+    },
+    {
+      key: "send_info",
+      label: "发岗位信息",
+      when: "客户报了城市、确定要发这个岗位的详情时；可带图片和视频。",
+      fallback: "没填时：代码按岗位数据自动拼「工价 / 班次 / 年龄 / 吃住 / 面试地点」和多段信息。",
+      tokens: ["{{factory}}", "{{job_title}}", "{{wage}}", "{{hours_text}}", "{{age_text}}", "{{welfare}}", "{{place}}", "{{window}}"],
+    },
+    {
+      key: "ask_interview",
+      label: "问面试意向",
+      when: "岗位信息发完之后，问一句「这两天能不能来面试」。整场只用一次。",
+      fallback: "没填时：用内置的三句轮换说法追问，避免同一句连发三遍。",
+      tokens: ["{{factory}}", "{{place}}", "{{window}}"],
+    },
+    {
+      key: "collect",
+      label: "要姓名电话",
+      when: "客户答应来面试、需要登记姓名和手机号时。",
+      fallback: "那我登记一下：麻烦把姓名和手机号一起发我。",
+      tokens: ["{{missing}}", "{{factory}}", "{{place}}"],
+    },
+    {
+      key: "booked",
+      label: "面试确认",
+      when: "资料齐了、面试时间定下来之后发的确认（面试地点和时段在这里）。",
+      fallback: "没填时：代码按「姓名 + 电话 + 面试地点 + 面试时段」自动拼确认语。",
+      tokens: ["{{factory}}", "{{place}}", "{{window}}", "{{wage}}"],
+    },
+    {
+      key: "gave_up",
+      label: "不去了的收尾",
+      when: "客户明确说不来面试时，回一句收尾，之后不再追问。",
+      fallback: "好的，那就不打扰你了。后面想过来的话随时找我，名额一直有。",
+      tokens: ["{{factory}}"],
+    },
+    {
+      key: "reopen",
+      label: "流失客户回来了",
+      when: "标记过流失的客户又主动发消息时，用这句重新接待。整场只用一次。",
+      fallback: "在的，{工厂名}那边随时可以了解。你是想再看看岗位，还是安排面试？",
+      tokens: ["{{factory}}", "{{city}}"],
+    },
+    {
+      key: "closing",
+      label: "流失后再来（收尾）",
+      when: "回流机会用完、客户再发消息时，只回这一句，不再邀约。",
+      fallback: "好的，那就不打扰你了。后面想了解哪个城市的岗位，随时跟我说哈。",
+      tokens: ["{{factory}}", "{{city}}"],
+    },
   ];
 
-  // 占位符：发送前由客户端按岗位/工厂数据替换。键名与后端迁移 030 的注释一致。
+  // 占位符：发送前由客户端按岗位/流程数据替换。键名与后端 render_script 的 mapping 一致，
+  // 不在表里的 {{x}} 会被清空（绝不把花括号发给客户）。
   const PLACEHOLDERS = [
     { token: "{{factory}}", label: "工厂名" },
     { token: "{{job_title}}", label: "岗位名" },
@@ -44,7 +111,19 @@
     { token: "{{hours_text}}", label: "工时" },
     { token: "{{age_text}}", label: "年龄要求" },
     { token: "{{welfare}}", label: "福利" },
+    { token: "{{place}}", label: "面试地点" },
+    { token: "{{window}}", label: "面试时段" },
+    { token: "{{cities}}", label: "在招城市" },
+    { token: "{{missing}}", label: "还缺的资料" },
   ];
+
+  /** 这一步最常用的占位符排在前面，其余照常可用（后端全部认识）。 */
+  function placeholdersFor(stage) {
+    const preferred = (stage && stage.tokens) || [];
+    const first = PLACEHOLDERS.filter((item) => preferred.includes(item.token));
+    const rest = PLACEHOLDERS.filter((item) => !preferred.includes(item.token));
+    return [...first, ...rest];
+  }
 
   // 与后端 MEDIA_MAX_BYTES 对齐：base64 走 JSON 会放大 1/3，前端先拦掉明显超限的文件，
   // 免得上传几分钟最后被 413 打回。
@@ -168,7 +247,7 @@
     return positionCache.items;
   }
 
-  // 不带 position_id 的 GET 返回全部话术，正好用来在按钮上显示「已配 N/5」，一条请求覆盖整页。
+  // 不带 position_id 的 GET 返回全部话术，正好用来在按钮上显示「已配 N/9」，一条请求覆盖整页。
   let scriptCache = { at: 0, items: [], ok: false };
   async function allScripts(force = false) {
     if (!force && scriptCache.ok && Date.now() - scriptCache.at < 30_000) return scriptCache.items;
@@ -264,7 +343,10 @@
     if (document.querySelector(".rk-ps-mask")) return; // 只允许开一个
     const device = String(position.device_code || "");
     const general = !device && Number(position.id) === 0;
-    const stages = general || device ? STAGES.filter((stage) => stage.key === "greet") : STAGES;
+    // 企微号维度只配置「招聘介绍」这一条（device_scripts 只读 greet）；
+    // 通用条目（position_id=0）现在是所有岗位的兜底文案，九个时点都能填——
+    // 问城市、要资料、收尾语这些本来就没有对应岗位，只能配在通用条目上。
+    const stages = device ? STAGES.filter((stage) => stage.key === "greet") : STAGES;
 
     const mask = document.createElement("div");
     mask.className = "rk-ps-mask";
@@ -292,7 +374,7 @@
     head.className = "rk-ps-head";
     const titles = document.createElement("div");
     const h2 = document.createElement("h2");
-    h2.textContent = device ? "加好友招聘介绍" : general ? "通用欢迎语" : "话术配置";
+    h2.textContent = device ? "加好友招聘介绍" : general ? "通用话术（所有岗位兜底）" : "话术与流程";
     const sub = document.createElement("p");
     sub.textContent = `${position.position_name || "岗位"}${position.store_name ? ` · ${position.store_name}` : ""}${position.city_name ? ` · ${position.city_name}` : ""}`;
     titles.append(h2, sub);
@@ -422,6 +504,12 @@
         toast(`「${file.name}」${(file.size / 1024 / 1024).toFixed(1)}MB，超过 20MB 上限，先压缩再传`, "error");
         return;
       }
+      // 媒体名必须**不带扩展名**：标记协议是【图片:名称】/【视频:名称】，
+      // 客户端 find_media(name) 会自己往上拼 .jpg/.png/.mp4。以前直接传 file.name，
+      // 存成「安检工作.mp4」、标记写成【视频:安检工作.mp4】，客户端拼成
+      // 安检工作.mp4.jpg 找不到，于是图片视频全部静默发不出去（2026-11-17 实测）。
+      // 落盘后缀由服务端按原文件的扩展名单独决定，不依赖这里的 name。
+      const bare = file.name.replace(/\.[^./\\]+$/, "").trim() || file.name;
       const button = form.querySelector('[data-action="upload"]');
       const area = form.querySelector(".rk-ps-area");
       const stageKey = active; // 上传期间可能切 tab，把发起时点固定下来
@@ -447,7 +535,7 @@
         try {
           const asset = await api("/api/v1/media", {
             method: "POST",
-            body: JSON.stringify({ name: file.name, kind, data_base64: base64 }),
+            body: JSON.stringify({ name: bare, kind, data_base64: base64 }),
           });
           mediaCache.items = mediaCache.items.filter((item) => item.name !== asset.name).concat([{
             id: Number(asset.id), name: String(asset.name), kind: String(asset.kind), bytes: Number(asset.bytes || 0),
@@ -477,9 +565,18 @@
       hint.textContent = device
         ? "只发给添加这个企微号的新客户。可填写工作内容、时间、福利和面试要求；请与此号绑定工厂及岗位资料保持一致。多个基地先写共通信息，客户选择后再确认具体安排。"
         : general
-        ? "适用于未配置岗位专属首句的所有设备。请使用通用招呼和询问地点，避免写某家工厂的工资或承诺。"
-        : `第 ${stages.indexOf(stage) + 1} 个时点 / 共 ${stages.length} 个 · ${stage.hint}`;
+        ? "通用兜底：岗位自己配了同一个时点就用岗位的，没配才用这里。适合写问城市、要姓名电话、收尾这类跟具体工厂无关的话。"
+        : `第 ${stages.indexOf(stage) + 1} 步 / 共 ${stages.length} 步 · ${stage.when || ""}`;
       fragment.append(hint);
+
+      // 「不填会怎样」必须写在编辑框上面：运营要知道自己不填时客户收到的是什么，
+      // 才判断得出该不该覆盖。以前这段只说「第几个时点」，等于没说。
+      if (!device && stage.fallback) {
+        const fallback = document.createElement("p");
+        fallback.className = "rk-ps-note";
+        fallback.textContent = `不填时客户收到：${stage.fallback}`;
+        fragment.append(fallback);
+      }
 
       const enabledLabel = document.createElement("label");
       enabledLabel.className = "rk-ps-stage";
@@ -501,7 +598,7 @@
       phTitle.textContent = "可用占位符（点击插入到光标处；发送前由客户端按岗位数据替换）";
       const phList = document.createElement("div");
       phList.className = "rk-ps-ph-list";
-      for (const item of PLACEHOLDERS) {
+      for (const item of placeholdersFor(stage)) {
         const button = document.createElement("button");
         button.type = "button";
         button.textContent = item.token;
@@ -512,7 +609,7 @@
         phList.append(button);
       }
       ph.append(phTitle, phList);
-      if (!general && !device) fragment.append(ph);
+      if (!device) fragment.append(ph);
 
       const titleField = document.createElement("div");
       titleField.className = "rk-ps-field";
@@ -545,6 +642,18 @@
       area.spellcheck = false;
       area.placeholder = stage.key === "greet"
         ? "你好，欢迎咨询招聘岗位。\n---\n我先帮你了解一下。\n---\n请问你现在在哪个城市？"
+        : stage.key === "ask_city"
+        ? "你投递的是哪个城市的简历？我们这边{{cities}}都有厂在招。"
+        : stage.key === "collect"
+        ? "那我登记一下：麻烦把姓名和手机号一起发我。"
+        : stage.key === "gave_up"
+        ? "好的，那就不打扰你了。后面想过来的话随时找我，名额一直有。"
+        : stage.key === "reopen"
+        ? "在的，{{factory}}那边随时可以了解。你是想再看看岗位，还是安排面试？"
+        : stage.key === "closing"
+        ? "好的，那就不打扰你了。后面想了解哪个城市的岗位，随时跟我说哈。"
+        : stage.fallback
+        ? stage.fallback
         : "在这里写这个时点要发的话…";
       area.value = draft.content;
       area.addEventListener("input", () => {
@@ -642,7 +751,8 @@
 
       const note = document.createElement("p");
       note.className = "rk-ps-note";
-      note.textContent = "媒体标记会以【图片:文件名】【视频:文件名】的形式写进正文，客户端解析后连带文件一起发；"
+      note.textContent = "媒体标记会以【图片:名称】【视频:名称】的形式写进正文，客户端解析后连带文件一起发；"
+        + "名称不带扩展名（上传时会自动去掉，从别处复制的带 .jpg/.mp4 的标记保存时也会纠正）。"
         + "文件本体放在服务端媒体库（/api/v1/media），单文件上限 20MB。";
       note.hidden = Boolean(device);
       fragment.append(note);
@@ -675,7 +785,10 @@
         button.className = `rk-ps-tab${stage.key === active ? " is-active" : ""}`;
         button.setAttribute("role", "tab");
         button.setAttribute("aria-selected", String(stage.key === active));
-        button.textContent = stage.label;
+        // 序号 + 时点名：抽屉里一眼看出客户是按什么顺序收到这些话的。
+        // 通用条目/企微号只有一条时点，不加序号（不是流程）。
+        const index = stages.indexOf(stage);
+        button.textContent = stages.length > 1 ? `${index + 1}. ${stage.label}` : stage.label;
         // 绿点 = 这个时点已经存过（不是「有改动」，是服务端有记录），方便运营一眼看出还差哪几个。
         if (drafts.get(stage.key).saved) {
           const dot = document.createElement("span");
@@ -724,12 +837,15 @@
           const draft = drafts.get(key);
           // 正文里手写的【图片:x】也要能挂上文件：把标记里的名字并进 media，
           // 否则客户端只会收到文字、拿不到文件。类型优先按媒体库的 kind，查不到再按扩展名猜。
-          const markerNames = mediaMarkers(draft.content);
-          const media = draft.media.slice();
+          // 名字一律去扩展名（发送端按不带后缀的名字找文件）。
+          const content = normalizeMarkers(draft.content);
+          draft.content = content;
+          const markerNames = mediaMarkers(content).map(bareMediaName);
+          const media = draft.media.map((item) => ({ name: bareMediaName(item.name), kind: item.kind }));
           for (const name of markerNames) {
-            if (media.some((item) => item.name === name)) continue;
+            if (!name || media.some((item) => item.name === name)) continue;
             const asset = mediaCache.items.find((item) => item.name === name);
-            media.push({ name, kind: asset ? asset.kind : (/\.(mp4|mov|m4v|webm|avi)$/i.test(name) ? "video" : "image") });
+            media.push({ name, kind: asset ? asset.kind : "image" });
           }
           const saved = await api(device ? "/api/v1/agent/device-scripts" : "/api/v1/position-scripts", {
             method: "POST",
@@ -738,7 +854,7 @@
               ...(device ? { device_code: device, city: "" } : {}),
               stage: key,
               title: draft.title,
-              content: draft.content,
+              content,
               media,
               status: draft.status,
             }),
@@ -746,7 +862,7 @@
           draft.id = Number(saved.id || 0);
           draft.saved = true;
           draft.media = Array.isArray(saved.media) ? saved.media.map((item) => ({ name: String(item.name), kind: String(item.kind) })) : media;
-          // 同步「全部话术」缓存，按钮上的 N/5 立刻变，不用等下一次重渲染。
+          // 同步「全部话术」缓存，按钮上的 N/9 立刻变，不用等下一次重渲染。
           if (!device) {
             scriptCache.ok = true;
             scriptCache.at = Date.now();
@@ -809,6 +925,22 @@
     return names;
   }
 
+  // 媒体名统一去掉扩展名：客户端按【图片:名称】去本地目录拼 .jpg/.png/.mp4，
+  // 名字里带扩展名就永远找不到（2026-11-17 实测：【视频:安检工作.mp4】发不出去，
+  // 【视频:安检工作】正常）。运营从别处复制过来的标记可能带后缀，保存时纠正，
+  // 免得「页面看着都配好了、客户一条没收到」。
+  const MEDIA_EXT = /\.(jpe?g|png|gif|webp|bmp|heic|mp4|mov|m4v|webm|avi)$/i;
+  const bareMediaName = (name) => String(name || "").trim().replace(MEDIA_EXT, "");
+  function normalizeMarkers(content) {
+    return String(content || "").replace(
+      /【(图片|视频)[:：]\s*([^】]+)】/g,
+      (whole, kind, name) => {
+        const bare = bareMediaName(name);
+        return bare ? `【${kind}:${bare}】` : whole;
+      },
+    );
+  }
+
   // ── 装饰当前页 ──
   let decorating = false;
   let deviceCache = { at: 0, items: [] };
@@ -829,7 +961,7 @@
       const rows = (scoped.length ? scoped : [...document.querySelectorAll(".bd-table .el-table__row")])
         .filter((row) => !row.closest(".el-dialog"));
       if (!scriptCache.ok) {
-        // 先同步拿一次全量话术：既能显示「已配 N/5」，也能判断这个账号有没有权限。
+        // 先同步拿一次全量话术：既能显示「已配 N/9」，也能判断这个账号有没有权限。
         try {
           await allScripts();
         } catch (caught) {
@@ -887,9 +1019,9 @@
         const button = document.createElement("button");
         button.type = "button";
         button.className = "rk-ps-btn";
-        button.textContent = "通用欢迎语";
-        button.addEventListener("click", () => openDrawer({ id: 0, position_name: "所有设备的默认加好友首句" }));
-        bar.append(button, document.createTextNode("岗位专属首句优先；可配置多条固定消息。"));
+        button.textContent = "通用话术";
+        button.addEventListener("click", () => openDrawer({ id: 0, position_name: "所有岗位共用的兜底话术" }));
+        bar.append(button, document.createTextNode("问城市、要姓名电话、收尾语等所有岗位共用的句子都配在这里；岗位自己配了同名时点则优先用岗位的。"));
         table.before(bar);
       }
       if (!rows.length) return;

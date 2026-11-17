@@ -147,6 +147,32 @@ describe("position scripts", () => {
     expect(unboundScripts.some((item) => item.title === "停用话术")).toBe(false);
   });
 
+  // 2026-11-17：问城市 / 要姓名电话 / 收尾 / 回流 / 收尾语这些「流程文字」也进了
+  // position_scripts。它们必须是通用条目（position_id=0），而且必须真的下发到设备——
+  // 只存进库、不下发，运营在页面上填了等于没填。
+  it("delivers general flow-text stages to every device config", async () => {
+    const stages = ["ask_city", "collect", "gave_up", "reopen", "closing"];
+    const created: number[] = [];
+    try {
+      for (const stage of stages) {
+        const saved = await post({ position_id: 0, stage, content: `${stage} 的文案` });
+        expect(saved.statusCode).toBe(200);
+        created.push(Number(saved.json().id));
+      }
+      const config = await configOf("local-device-001");
+      expect(config.statusCode).toBe(200);
+      const rows = config.json().position_scripts as Array<Record<string, unknown>>;
+      const general = rows.filter((row) => Number(row.position_id) === 0).map((row) => String(row.stage));
+      expect(general.sort()).toEqual([...stages].sort());
+      // 通用条目对任何设备都可见（不受 factory_ids 过滤影响）
+      expect(rows.filter((row) => Number(row.position_id) === 0).every((row) => row.content))
+        .toBe(true);
+    } finally {
+      // 同一个库被整份文件共用：不收尾会污染后面「通用条目只有一条」的断言。
+      for (const id of created) app.db.prepare("DELETE FROM position_scripts WHERE id=?").run(id);
+    }
+  });
+
   it("exposes media on /agent/jobs and drops assets that do not exist", async () => {
     const uploaded = await upload("岗位图.png");
     const sha256 = uploaded.json().sha256 as string;
@@ -194,12 +220,20 @@ describe("position scripts", () => {
     expect(reread.json().items[0]).toMatchObject({ content: "新版欢迎语", status: "disabled" });
   });
 
-  it("restricts the general entry to explicit zero, welcome stage and nonblank enabled text", async () => {
+  it("accepts general entries for every flow stage but still rejects a bad stage", async () => {
     for (const position_id of [null, false, "", -1, 0.5]) {
       expect((await post({ position_id, stage: "greet", content: "欢迎" })).statusCode).toBe(422);
     }
-    expect((await post({ position_id: 0, stage: "booked", content: "不能配置通用面试承诺" })).statusCode).toBe(422);
+    // 2026-11-17 起通用条目就是「所有岗位的兜底文案」：问城市/要资料/收尾这些
+    // 本来没有对应岗位，只能在 position_id=0 上配，不能再限制只允许 greet。
+    for (const stage of ["ask_city", "collect", "gave_up", "reopen", "closing", "booked"]) {
+      const saved = await post({ position_id: 0, stage, content: `通用 ${stage}` });
+      expect(saved.statusCode).toBe(200);
+      expect(saved.json()).toMatchObject({ position_id: 0, stage, content: `通用 ${stage}` });
+    }
+    expect((await post({ position_id: 0, stage: "not_a_stage", content: "x" })).statusCode).toBe(422);
     expect((await post({ position_id: 0, stage: "greet", content: "\n---\n " })).statusCode).toBe(422);
+    expect((await post({ position_id: 0, stage: "collect", content: "   " })).statusCode).toBe(422);
     const denied = await app.inject({ method: "POST", url: "/api/v1/position-scripts", payload: { position_id: 0, stage: "greet", content: "欢迎" } });
     expect(denied.statusCode).toBe(403);
   });

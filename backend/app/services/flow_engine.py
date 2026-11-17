@@ -52,6 +52,14 @@ SCRIPT_STAGE_SEND_INFO = "send_info"
 SCRIPT_STAGE_ASK_INTERVIEW = "ask_interview"
 SCRIPT_STAGE_BOOKED = "booked"
 SCRIPT_STAGE_UNANSWERED = "unanswered"
+# 2026-11-17：把原来写死在代码里的四段流程文字也做成可填话术。
+# 运营能改的才是「流程可视化」——后台看得见「这一步客户收到什么」，
+# 而不是只有 greet/send_info 这几个点能改、剩下的只能找开发。
+SCRIPT_STAGE_ASK_CITY = "ask_city"
+SCRIPT_STAGE_COLLECT = "collect"
+SCRIPT_STAGE_GAVE_UP = "gave_up"
+SCRIPT_STAGE_REOPEN = "reopen"
+SCRIPT_STAGE_CLOSING = "closing"
 
 # 面试时间窗口：工厂账号可改成别的窗口，地铁账号固定早场
 INTERVIEW_WINDOW = "09:00-11:00"
@@ -483,8 +491,14 @@ def set_position_scripts(scripts: list[dict[str, Any]] | None) -> None:
     _POSITION_SCRIPTS.set(list(scripts or []))
 
 
-def _stage_script(slots: dict[str, Any], stage: str) -> str:
+def _stage_script(
+    slots: dict[str, Any], stage: str, extra: dict[str, Any] | None = None
+) -> str:
     """取某个时点的岗位话术并渲染；没命中返回空串。
+
+    extra 是「这句话才有的占位符」，如问城市的 {{cities}}、要资料的 {{missing}}。
+    这些值不属于岗位数据，只能由调用方在当场算出来再传进来；有同名岗位字段时
+    以岗位字段为准（render_script 用 setdefault 合并，岗位事实永远优先）。
 
     延迟导入 device_scripts：它反向依赖本模块的 INTERVIEW_WINDOW，
     模块级互相 import 会成环。
@@ -497,7 +511,9 @@ def _stage_script(slots: dict[str, Any], stage: str) -> str:
     script = pick_position_script(scripts, int(slots.get("position_id") or 0), stage)
     if not script:
         return ""
-    job = _job_of(slots)
+    job = dict(_job_of(slots))
+    for key, value in (extra or {}).items():
+        job.setdefault(str(key), value)
     window = ""
     if stage == SCRIPT_STAGE_BOOKED and slots.get("interview_period"):
         window = str(slots.get("interview_window") or "")
@@ -631,8 +647,16 @@ def _job_of(slots: dict[str, Any]) -> dict[str, str]:
 
 
 def _city_ask(slots: dict[str, Any] | None = None) -> str:
-    del slots
+    """问城市这句。
+
+    后台配了 ask_city 话术就用运营的原话（可用 {{cities}} 插在招城市清单）；
+    没配才用内置默认。问城市发生在还没钉岗位的时候，所以命中的基本是
+    position_id=0 的通用条目——但客户从老会话回来时岗位可能已钉住，照样按岗位优先。
+    """
     cities = "、".join(remote_job_cities())
+    scripted = _stage_script(dict(slots or {}), SCRIPT_STAGE_ASK_CITY, {"cities": cities})
+    if scripted:
+        return scripted
     if cities:
         return f"你投递的是哪个城市的简历？我们这边{cities}都有厂在招。"
     return "你投递的是哪个城市的简历？"
@@ -1017,7 +1041,16 @@ def _interview_ask(slots: dict[str, Any] | None = None) -> str:
     return variants[retries % len(variants)]
 
 
-def _collect_ask(missing: str = "") -> str:
+def _collect_ask(missing: str = "", slots: dict[str, Any] | None = None) -> str:
+    """要姓名/手机号。
+
+    后台配了 collect 话术就用运营原话，{{missing}} 由代码替换成当前缺什么
+    （「姓名」「手机号」「姓名和手机号」），运营一句话覆盖三种情况。
+    """
+    label = {"name": "姓名", "phone": "手机号"}.get(missing, "姓名和手机号")
+    scripted = _stage_script(dict(slots or {}), SCRIPT_STAGE_COLLECT, {"missing": label})
+    if scripted:
+        return scripted
     if missing == "name":
         return "方便留个姓名吗？我这边登记一下。"
     if missing == "phone":
@@ -1025,7 +1058,11 @@ def _collect_ask(missing: str = "") -> str:
     return "那我登记一下：麻烦把姓名和手机号一起发我。"
 
 
-def _gave_up_text() -> str:
+def _gave_up_text(slots: dict[str, Any] | None = None) -> str:
+    """客户说不去时的收尾语。后台配了 gave_up 话术就用运营原话。"""
+    scripted = _stage_script(dict(slots or {}), SCRIPT_STAGE_GAVE_UP)
+    if scripted:
+        return scripted
     return "好的，那就不打扰你了。后面想过来的话随时找我，名额一直有。"
 
 
@@ -1502,7 +1539,7 @@ def step(
             slots["recruit_status"] = "disqualified"
             state["stage"] = STAGE_DONE
             return FlowResult(
-                reply=_gave_up_text(),
+                reply=_gave_up_text(slots),
                 stage=STAGE_DONE,
                 slots=slots,
                 finished=True,
@@ -1584,7 +1621,7 @@ def _route_by_graph(
         state["stage"] = STAGE_DONE
         state["node"] = STAGE_DONE
         return FlowResult(
-            reply=_gave_up_text(),
+            reply=_gave_up_text(slots),
             stage=STAGE_DONE,
             slots=slots,
             finished=True,
@@ -1654,7 +1691,7 @@ def _route_by_graph(
             slots["recruit_status"] = "disqualified"
             state["stage"] = STAGE_DONE
             return FlowResult(
-                reply=_gave_up_text(),
+                reply=_gave_up_text(slots),
                 stage=STAGE_DONE,
                 slots=slots,
                 finished=True,
@@ -1699,7 +1736,7 @@ def _route_by_graph(
             state["stage"] = STAGE_DONE
             state["node"] = STAGE_DONE
             return FlowResult(
-                reply=_gave_up_text(),
+                reply=_gave_up_text(slots),
                 stage=STAGE_DONE,
                 slots=slots,
                 finished=True,
@@ -1741,17 +1778,17 @@ def _collect_prompt(slots: dict[str, Any]) -> str:
     if has_name and has_phone:
         return ""
     if has_name:
-        return _collect_ask("phone")
+        return _collect_ask("phone", slots)
     if has_phone:
-        return _collect_ask("name")
-    return _collect_ask()
+        return _collect_ask("name", slots)
+    return _collect_ask(slots=slots)
 
 
 def _decline_interview(state: dict[str, Any], slots: dict[str, Any]) -> FlowResult:
     slots.update({"recruit_status": "disqualified", "interview_agreed": False, "booked": False})
     state["stage"] = STAGE_DONE
     state["node"] = STAGE_DONE
-    return FlowResult(reply=_gave_up_text(), stage=STAGE_DONE, slots=slots,
+    return FlowResult(reply=_gave_up_text(slots), stage=STAGE_DONE, slots=slots,
                       finished=True, action=ACTION_GAVE_UP, source="fact")
 
 

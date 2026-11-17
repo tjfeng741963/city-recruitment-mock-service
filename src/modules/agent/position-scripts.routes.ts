@@ -28,7 +28,22 @@ import {
  */
 
 const ADMIN_REQUIRED = { detail: "Admin access required" } as const;
-const SCRIPT_STAGES = new Set(["greet", "send_info", "ask_interview", "booked", "unanswered"]);
+/**
+ * 话术时点白名单（2026-11-17 扩充）。
+ *
+ * 前五个是发卡流程里的固定节点；后五个是原来写死在 flow_engine 里的流程文字，
+ * 运营提「流程要能看到、能改」，所以它们也进同一张表、同一个抽屉：
+ *   ask_city   还没选定岗位时问城市（可用 {{cities}}）
+ *   collect    要姓名/手机号（可用 {{missing}}）
+ *   gave_up    客户说不去时的收尾语
+ *   reopen     流失客户重新回来时的第一句
+ *   closing    流失后再发消息时的收尾语
+ * 这五个基本都发生在「还没钉岗位」的时候，所以 position_id 允许为 0（通用条目）。
+ */
+const SCRIPT_STAGES = new Set([
+  "greet", "send_info", "ask_interview", "booked", "unanswered",
+  "ask_city", "collect", "gave_up", "reopen", "closing",
+]);
 const MEDIA_KINDS = new Set<MediaKind>(["image", "video"]);
 /** JSON 里的 base64 比原始字节大约 1/3，路由级 bodyLimit 必须比 20MB 宽。 */
 const MEDIA_BODY_LIMIT = 32 * 1024 * 1024;
@@ -120,9 +135,11 @@ export async function registerPositionScriptRoutes(app: FastifyInstance, db: Dat
     if (!general && positionId <= 0) return reply.code(422).send({ detail: "position_id is required" });
     const stage = text(body.stage).trim();
     if (!SCRIPT_STAGES.has(stage)) {
-      return reply.code(422).send({ detail: "stage must be one of greet, send_info, ask_interview, booked, unanswered" });
+      return reply.code(422).send({ detail: "stage must be one of greet, ask_city, send_info, ask_interview, collect, booked, gave_up, reopen, closing, unanswered" });
     }
-    if (general && stage !== "greet") return reply.code(422).send({ detail: "通用条目仅支持加好友首句" });
+    // 通用条目（position_id=0）现在是「所有岗位共用的兜底文案」：问城市、要资料、
+    // 收尾语这些时点本来就没有岗位可选，只能配通用条目。2026-11-17 起不再限制
+    // 只允许 greet——否则运营在页面上根本填不了这几步。
     if (!general && !db.prepare("SELECT id FROM service_positions WHERE id=?").get(positionId)) {
       return reply.code(422).send({ detail: "position not found" });
     }
@@ -130,8 +147,10 @@ export async function registerPositionScriptRoutes(app: FastifyInstance, db: Dat
     if (!["enabled", "disabled"].includes(status)) {
       return reply.code(422).send({ detail: "status must be enabled or disabled" });
     }
-    if (general && status === "enabled" && !text(body.content).split(/^[ \t]*---[ \t]*\r?$/m).some((part) => part.trim())) {
-      return reply.code(422).send({ detail: "请填写至少一条欢迎语" });
+    if (status === "enabled" && !text(body.content).split(/^[ \t]*---[ \t]*\r?$/m).some((part) => part.trim())) {
+      return reply.code(422).send({
+        detail: general && stage === "greet" ? "请填写至少一条欢迎语" : "请填写正文",
+      });
     }
     // media 只保留 {name,kind}，sha256 由 media_assets 提供，不接受客户端自报。
     const media = parseMediaRefs(body.media).map((ref) => ({ name: ref.name, kind: ref.kind }));

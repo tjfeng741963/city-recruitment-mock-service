@@ -39,7 +39,9 @@ from .services.device_scripts import (
     render_welcome_parts,
 )
 from .services.flow_engine import (
+    SCRIPT_STAGE_CLOSING,
     SCRIPT_STAGE_GREET,
+    SCRIPT_STAGE_REOPEN,
     SCRIPT_STAGE_SEND_INFO,
     STAGE_ASK_CITY,
     STAGE_ASK_INTERVIEW,
@@ -47,12 +49,13 @@ from .services.flow_engine import (
     STAGE_DONE,
     STAGE_SEND_INFO,
     FlowResult,
+    _is_bare_confirm,
+    _stage_script,
     absorb_profile,
     distinct_places,
     device_intro_followup,
     enter_info_result,
     extract_city,
-    _is_bare_confirm,
     interview_window_of,
     jobs_for_city,
     pin_position,
@@ -112,8 +115,17 @@ def _abandon_reopen_text(slots: dict[str, Any]) -> str:
 
     只用 slot 里的既定事实，不邀约、不问「这两天能不能来」：对方上一轮刚说过
     不来，立刻再约等于打脸。把主动权交回去，让他自己说想干嘛。
+
+    后台配了 reopen 话术就用运营原话（可用 {{city}} {{factory}}）；
+    没配才用内置默认。这里必须带 slots 渲染——回流话术里的城市/工厂
+    正是「他上次想去的那个」，换成通用文案就白配了。
+    city 要显式当 extra 传：render_script 只认识 {{factory}}/{{wage}} 这些
+    岗位字段，{{city}} 不是岗位字段，不传就会被当未知占位符清空。
     """
     city = str(slots.get("city") or "").strip()
+    scripted = _stage_script(slots, SCRIPT_STAGE_REOPEN, {"city": city})
+    if scripted:
+        return scripted
     factory = str(slots.get("factory_name") or "").strip()
     if factory:
         return f"在的，{factory}那边随时可以了解。你是想再看看岗位，还是安排面试？跟我说一声就行。"
@@ -236,6 +248,16 @@ async def flow_answer(
         #
         # 但「收到 / 好的 / 嗯」这类收尾应答不算回流：客户刚说完不来，紧接着的
         # 一句「收到」只是在结束对话，这时候重新接待等于自说自话。
+        #
+        # 这条分支跑在下面「统一拉话术」之前，但回流语/收尾语都要用后台话术，
+        # 所以在这里就地拉一次（与后面共用 60s meta 缓存，不会多打网络）。
+        try:
+            _early_scripts = await fetch_position_scripts(
+                _resolve_device_code(payload.device_code)
+            )
+        except Exception:  # noqa: BLE001  拉不到就用内置默认，不影响回复
+            _early_scripts = []
+        set_position_scripts(_early_scripts)
         if (
             int(slots.get("abandon_return_count") or 0) < _ABANDON_RETURN_LIMIT
             and not _is_bare_confirm(payload.text)
@@ -301,7 +323,9 @@ async def flow_answer(
         # 只回一句终止语并记一条入站事件，保留 slots 供人工在看板恢复。
         # 之前这里会重激活到 ask_interview，于是「在吗」这种随口一句
         # 又会收到「这两天能不能过来面试」，实测 4 次，属骚扰级红线。
-        closing = "好的，那就不打扰你了。后面想了解哪个城市的岗位，随时跟我说哈。"
+        closing = _stage_script(
+            slots, SCRIPT_STAGE_CLOSING, {"city": str(slots.get("city") or "").strip()}
+        ) or "好的，那就不打扰你了。后面想了解哪个城市的岗位，随时跟我说哈。"
         await store.append_events(
             session,
             payload.session_key,

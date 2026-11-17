@@ -731,7 +731,7 @@ def apply_decision(
         slots["recruit_status"] = "disqualified"
         state["stage"] = STAGE_DONE
         return FlowResult(
-            reply=_gave_up_text(),
+            reply=_gave_up_text(slots),
             stage=STAGE_DONE,
             slots=slots,
             finished=True,
