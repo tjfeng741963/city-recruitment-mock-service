@@ -867,7 +867,7 @@
     qrCard.append(frame);
     var side = el("div", "qr-side");
     side.append(el("h4", null, "企业微信登录二维码"));
-    side.append(el("p", "hint", "手机打开企业微信 → 右上角「+」→ 扫一扫，对准左侧二维码确认登录。二维码由服务器客户端每 30 秒自动刷新，过期不用管。"));
+    side.append(el("p", "hint", "手机打开企业微信 → 右上角「+」→ 扫一扫 → 在手机上确认。等左侧截图变成验证码界面后，把收到的短信码填进下面输入框（几分钟内有效，只需提交一次）。二维码过期会自动重启企微换新码。"));
     var stamp = el("div", "stamp");
     stamp.id = "qr-stamp";
     side.append(stamp);

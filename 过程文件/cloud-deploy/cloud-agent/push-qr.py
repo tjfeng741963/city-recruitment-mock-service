@@ -124,31 +124,71 @@ def main() -> int:
     wxwork = next((p for p in WXWORK_CANDIDATES if p.exists()), None)
     print(f"WXWork: {wxwork or '未找到'}")
 
+    # 验证码敲入的时机控制（教训来自 923070 那次：码敲进了二维码屏幕）：
+    # 用户提交码时窗口往往还在二维码界面（手机端还没确认完），数字全部落空。
+    # 正确顺序：收到码 → 记录当前截图哈希 → 等窗口真的离开二维码界面
+    # （截图内容变化 = 验证码界面出现）再敲；最多等 90 秒，超时敲一次碰运气。
+    pending: dict | None = None
+    last_code_at = 0.0
+
+    def window_hash() -> str:
+        hwnd = login_qr.find_login_window()
+        if not hwnd:
+            return ""
+        import screenshot
+
+        b64, _w, _h = screenshot.png_base64(hwnd, scale=login_qr.SCALE)
+        return hashlib.md5(b64.encode("utf-8")).hexdigest()
+
     while True:
         try:
             state = detect_wecom_state()
-            if state == "not_running" and wxwork and wxwork.exists():
-                print("企微没在跑，拉起 WXWork.exe")
-                subprocess.Popen([str(wxwork)], cwd=str(wxwork.parent))
-                time.sleep(10)
-                state = detect_wecom_state()
+            if state == "not_running":
+                if wxwork and wxwork.exists():
+                    print("企微没在跑，拉起 WXWork.exe")
+                    subprocess.Popen([str(wxwork)], cwd=str(wxwork.parent))
+                    time.sleep(10)
+                    state = detect_wecom_state()
+                pending = None
             print(f"状态: {state}")
             qr.tick(state, bridge, log=print)
             if state == "online":
+                if pending:
+                    print("已登录，丢弃未输入的验证码")
+                    pending = None
                 print("企微已登录！可以让 autopilot 接管了（本脚本继续值守）")
-            elif state == "login_required" and wxwork and fresh.stale():
-                print(
-                    f"二维码已过期（同一张图持续 {int(time.time() - fresh.changed_at)} 秒），"
-                    "重启企微换新码"
-                )
-                restart_wxwork(wxwork)
-                fresh.reset()
             elif state == "login_required":
-                # 扫码后企微可能要求短信验证码：前端提交 → 这里取走 → 敲进登录窗
+                # 前端提交的新码：记录提交时刻的窗口哈希
                 code = poll_verify_code(bridge)
                 if code:
-                    print(f"收到前端提交的验证码 {code}，开始输入")
-                    type_verify_code(code)
+                    pending = {"code": code, "hash": window_hash(), "at": time.time()}
+                    print(f"收到前端提交的验证码 {code}，等验证码界面出现后再输入（最多等 90 秒）")
+                # 等到窗口离开二维码界面（或超时）才敲
+                if pending:
+                    current = window_hash()
+                    waited = int(time.time() - pending["at"])
+                    if current and current != pending["hash"]:
+                        print(f"窗口已切到验证码界面（等了 {waited} 秒），输入验证码")
+                        type_verify_code(pending["code"])
+                        pending = None
+                        last_code_at = time.time()
+                        fresh.reset()
+                    elif waited > 90:
+                        print(f"等了 90 秒窗口没变化，直接输入碰运气")
+                        type_verify_code(pending["code"])
+                        pending = None
+                        last_code_at = time.time()
+                        fresh.reset()
+                    else:
+                        print(f"窗口仍在二维码界面，等手机端确认（已等 {waited} 秒）")
+                # 过期重启：敲码后 3 分钟内不重启，别打断登录流程
+                elif wxwork and fresh.stale() and time.time() - last_code_at > 180:
+                    print(
+                        f"二维码已过期（同一张图持续 {int(time.time() - fresh.changed_at)} 秒），"
+                        "重启企微换新码"
+                    )
+                    restart_wxwork(wxwork)
+                    fresh.reset()
         except Exception as exc:  # noqa: BLE001
             print(f"轮询失败（忽略）: {type(exc).__name__}: {exc}")
         time.sleep(15)

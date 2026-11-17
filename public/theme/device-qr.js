@@ -256,7 +256,7 @@
     });
     const hint = document.createElement("p");
     hint.className = "rk-devqr-verify-hint";
-    hint.textContent = "扫码后在手机上确认，如企微弹短信验证码，收到后立刻在这里输入（几分钟时效）";
+    hint.textContent = "扫码并在手机上确认 → 等左侧截图变成验证码界面 → 收到短信码立刻在这里输入（几分钟内有效）。提交后设备会在界面出现时自动敲入，不用重复提交。";
     row.append(input, submit, hint);
     return row;
   }
