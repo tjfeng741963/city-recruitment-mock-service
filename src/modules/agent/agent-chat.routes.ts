@@ -341,8 +341,10 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
     for (const row of rows) {
       const sessionKey = String(row.session_key ?? "");
       const deviceCode = String(row.device_code ?? "");
-      const devRow = db.prepare("SELECT data_json FROM agent_devices WHERE device_code=?")
-        .get(deviceCode) as { data_json: string } | undefined;
+      // agent_devices 没有 device_code 列（在 data_json 里），按 JSON 提取匹配
+      const devRow = db.prepare(
+        "SELECT data_json FROM agent_devices WHERE json_extract(data_json,'$.device_code')=?",
+      ).get(deviceCode) as { data_json: string } | undefined;
       let groupChat = "";
       try {
         groupChat = String((JSON.parse(devRow?.data_json || "{}") as Record<string, unknown>).group_chat ?? "");
@@ -424,7 +426,9 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         `UPDATE agent_archive SET session_key=? WHERE session_key=?`,
       ).run(`manual:${deviceCode}:${sessionKey}`, sessionKey);
       const groupChat = (() => {
-        const devRow = db.prepare("SELECT data_json FROM agent_devices WHERE device_code=?")
+        const devRow = db.prepare(
+        "SELECT data_json FROM agent_devices WHERE json_extract(data_json,'$.device_code')=?",
+      )
           .get(deviceCode) as { data_json: string } | undefined;
         try {
           return String((JSON.parse(devRow?.data_json || "{}") as Record<string, unknown>).group_chat ?? "");
@@ -649,7 +653,9 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
             .get(sessionKey) as { device_code: string; nickname: string } | undefined;
           if (convRow) {
             const devRow = db
-              .prepare("SELECT data_json FROM agent_devices WHERE device_code=?")
+              .prepare(
+          "SELECT data_json FROM agent_devices WHERE json_extract(data_json,'$.device_code')=?",
+        )
               .get(convRow.device_code) as { data_json: string } | undefined;
             let devData: Record<string, unknown> = {};
             try {
