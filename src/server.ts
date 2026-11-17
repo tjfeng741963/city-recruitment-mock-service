@@ -7,7 +7,6 @@ import type { DatabaseSync } from "node:sqlite";
 import { config } from "./config.js";
 import { openDatabase } from "./db/connection.js";
 import { migrateDatabase } from "./db/migrate.js";
-import { backfillLegacyKb } from "./db/backfill.js";
 import { seedDatabase } from "./db/seed.js";
 import { AuthService } from "./auth/auth.service.js";
 import { registerAuthRoutes } from "./auth/auth.routes.js";
@@ -108,7 +107,6 @@ export function buildServer() {
   seedDatabase(db);
   // 回填必须在种子之后：迁移在种子前跑，那时 cities/factories 还是空的。
   // 幂等（NOT EXISTS），每次启动重跑不会产生重复行。
-  backfillLegacyKb(db);
   // This deployment uses one app process per SQLite database. Keep bridge command
   // leases intact; retrying a recovered delivery reuses its durable command id.
   db.prepare("UPDATE message_deliveries SET status='failed',last_error='Application restarted before delivery was finalized' WHERE status='sending'").run();

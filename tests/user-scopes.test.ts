@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
+import { applyBackfillFile } from "../src/db/backfill.js";
 import { buildServer } from "../src/server.js";
 
 describe("business scope enforcement", () => {
@@ -12,6 +13,10 @@ describe("business scope enforcement", () => {
     process.env.REA_DATABASE_PATH = ":memory:";
     app = buildServer();
     await app.ready();
+    // 启动回填已随旧链路下线（2026-11-17）：本用例的多城市数据来自 029/030，显式应用
+    applyBackfillFile(app.db, "backfill/029_kb_real_subway.sql");
+    applyBackfillFile(app.db, "backfill/030_kb_real_scripts.sql");
+
     adminToken = (await app.inject({ method: "POST", url: "/api/v1/auth/login", payload: { username: "local-admin", password: "local-demo-only" } })).json().access_token;
     customerToken = (await app.inject({ method: "POST", url: "/api/v1/auth/login", payload: { username: "local-customer", password: "local-demo-only" } })).json().access_token;
     recruiterToken = (await app.inject({ method: "POST", url: "/api/v1/auth/login", payload: { username: "local-recruiter", password: "local-demo-only" } })).json().access_token;

@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { applyBackfillFile } from "../src/db/backfill.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildServer } from "../src/server.js";
@@ -33,6 +34,8 @@ describe("FAQ writes and read-only inventory", () => {
     process.env.REA_DIFY_PROVIDER = "mock";
     app = buildServer();
     await app.ready();
+    // 启动回填已随旧链路下线（2026-11-17）：本用例依赖 028 建的厂/岗位，显式应用
+    applyBackfillFile(app.db, "backfill/028_kb_real_factories.sql");
     for (const name of ["local-admin", "local-customer"]) {
       const token = (await app.inject({ method: "POST", url: "/api/v1/auth/login", payload: { username: name, password: "local-demo-only" } })).json().access_token;
       if (name === "local-admin") admin = { authorization: `Bearer ${token}` }; else customer = { authorization: `Bearer ${token}` };
