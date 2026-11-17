@@ -1,0 +1,16 @@
+{
+  "server": "http://127.0.0.1:8090",
+  "device_token": "留空 + 填 register_key 时自动注册并回写本文件",
+  "device_code": "留空时自动生成 pc-<机器码哈希>；填了就固定用这个",
+  "device_name": "",
+  "register_key": "留空=关闭自注册；与服务端 REA_REGISTER_KEY / APP_REGISTER_KEY 一致",
+  "bridge_server": "http://127.0.0.1:4222",
+  "bridge_token": "留空时随自注册一起拿到",
+  "data_dir": "",
+  "interval_seconds": 60,
+  "dry_run": true,
+  "brain": {
+    "mode": "agent",
+    "timeout": 45
+  }
+}

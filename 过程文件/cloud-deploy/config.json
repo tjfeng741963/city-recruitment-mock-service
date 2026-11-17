@@ -1,0 +1,13 @@
+{
+  "server": "http://127.0.0.1:18080",
+  "device_token": "",
+  "device_code": "AG-SZDT01",
+  "device_name": "云企微专用机",
+  "register_key": "",
+  "bridge_server": "http://127.0.0.1:18080",
+  "bridge_token": "agt-2ab891997a9433e52058f9387e8bda0078f75a775d670014",
+  "data_dir": "",
+  "interval_seconds": 60,
+  "dry_run": false,
+  "brain": { "mode": "agent", "timeout": 45 }
+}

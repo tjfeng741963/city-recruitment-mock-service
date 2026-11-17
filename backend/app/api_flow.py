@@ -36,9 +36,12 @@ from .services.device_scripts import (
     pick_position_script,
     pick_script,
     render_script,
+    render_welcome_parts,
 )
 from .services.flow_engine import (
+    SCRIPT_STAGE_CLOSING,
     SCRIPT_STAGE_GREET,
+    SCRIPT_STAGE_REOPEN,
     SCRIPT_STAGE_SEND_INFO,
     STAGE_ASK_CITY,
     STAGE_ASK_INTERVIEW,
@@ -46,18 +49,23 @@ from .services.flow_engine import (
     STAGE_DONE,
     STAGE_SEND_INFO,
     FlowResult,
+    _is_bare_confirm,
+    _stage_script,
     absorb_profile,
     distinct_places,
+    device_intro_followup,
     enter_info_result,
     extract_city,
     interview_window_of,
     jobs_for_city,
     pin_position,
+    select_position_by_place,
     send_info_parts,
     set_position_scripts,
     set_remote_cities,
     set_remote_jobs,
     split_by_section_heads,
+    throttle_invite,
 )
 from .services.job_lookup import lookup_cities, lookup_jobs, vertical_hint_of
 from .services.flow_llm import a_step, review_loop
@@ -96,6 +104,35 @@ router = APIRouter(prefix="/api/v1/flow", tags=["flow"])
 # kb_answer，只能把岗位卡再发一遍（2026-11-14 模拟实测）。
 _KB_STAGES = {STAGE_SEND_INFO, STAGE_ASK_INTERVIEW, STAGE_COLLECT, STAGE_DONE}
 
+# 流失客户回流时允许「重新接待」的次数。
+# 只给 1 次：真正想回来的人第一句就能被接住；若他下一句还是拒绝，重新标流失，
+# 之后的消息回到终止语，避免「发一句『在吗』就被反复追问面试」的骚扰红线。
+_ABANDON_RETURN_LIMIT = 1
+
+
+def _abandon_reopen_text(slots: dict[str, Any]) -> str:
+    """流失客户回流时的重新接待语。
+
+    只用 slot 里的既定事实，不邀约、不问「这两天能不能来」：对方上一轮刚说过
+    不来，立刻再约等于打脸。把主动权交回去，让他自己说想干嘛。
+
+    后台配了 reopen 话术就用运营原话（可用 {{city}} {{factory}}）；
+    没配才用内置默认。这里必须带 slots 渲染——回流话术里的城市/工厂
+    正是「他上次想去的那个」，换成通用文案就白配了。
+    city 要显式当 extra 传：render_script 只认识 {{factory}}/{{wage}} 这些
+    岗位字段，{{city}} 不是岗位字段，不传就会被当未知占位符清空。
+    """
+    city = str(slots.get("city") or "").strip()
+    scripted = _stage_script(slots, SCRIPT_STAGE_REOPEN, {"city": city})
+    if scripted:
+        return scripted
+    factory = str(slots.get("factory_name") or "").strip()
+    if factory:
+        return f"在的，{factory}那边随时可以了解。你是想再看看岗位，还是安排面试？跟我说一声就行。"
+    if city:
+        return f"在的，{city}这边的岗位还在招。想看岗位、问工资或者安排面试都可以跟我说。"
+    return "在的，你想找哪个城市的工作？跟我说一声，我这边帮你看现在在招的岗位。"
+
 
 class FlowAnswerIn(BaseModel):
     session_key: str = Field(min_length=1, max_length=64)
@@ -119,7 +156,7 @@ class FlowAnswerOut(BaseModel):
 
 
 class GreetIn(BaseModel):
-    """新好友首句：不问方向，按设备绑定的板块直接发岗位卡（11-13 与 HR 对齐）。"""
+    """新好友开场：本号招聘介绍优先，其次是岗位/通用首句及默认开场。"""
 
     session_key: str = Field(min_length=1, max_length=64)
     device_code: str = Field(default="", max_length=64)
@@ -197,11 +234,98 @@ async def flow_answer(
         stage_before = "ask_interview"
 
     if abandoned and stage_before == "done":
+        # 客户已明确放弃过（recruit_status=disqualified/gave_up）。
+        #
+        # 原来的做法是「从此永久静音，只回一句终止语」：客户过几天回过神来说
+        # 「我还想去」，后台没人工去点「状态修改」就永远没有任何反应。
+        # 2026-11-17 Evans_峰 实测：他其实答应了后天到，只因手机号只有 10 位
+        # 没被采到，后来一句「不能」被误判流失，之后连发 5 条「你好」全被跳过。
+        #
+        # 现在给一次回流机会，且只给一次：
+        #   流失后的第一条新消息 → 清掉流失标记，按正常流程重新接待；
+        #   再之后若又被拒绝 → 重新标流失，后续消息回到终止语，不再反复拉扯。
+        # 既不漏掉真想回来的人，也不会出现「每发一句都被追问面试」的红线。
+        #
+        # 但「收到 / 好的 / 嗯」这类收尾应答不算回流：客户刚说完不来，紧接着的
+        # 一句「收到」只是在结束对话，这时候重新接待等于自说自话。
+        #
+        # 这条分支跑在下面「统一拉话术」之前，但回流语/收尾语都要用后台话术，
+        # 所以在这里就地拉一次（与后面共用 60s meta 缓存，不会多打网络）。
+        try:
+            _early_scripts = await fetch_position_scripts(
+                _resolve_device_code(payload.device_code)
+            )
+        except Exception:  # noqa: BLE001  拉不到就用内置默认，不影响回复
+            _early_scripts = []
+        set_position_scripts(_early_scripts)
+        if (
+            int(slots.get("abandon_return_count") or 0) < _ABANDON_RETURN_LIMIT
+            and not _is_bare_confirm(payload.text)
+        ):
+            # 必须写空串而不是 pop：diff_slots 只记录仍在字典里的键，
+            # pop 之后回放看到的仍是旧的 disqualified，标记等于没清。
+            slots["recruit_status"] = ""
+            slots["abandon_return_count"] = int(slots.get("abandon_return_count") or 0) + 1
+            slots["interview_agreed"] = False
+            slots["booked"] = False
+            # 回到「先摸清诉求」：有城市就停在邀约前一步，没城市先问城市。
+            restored = STAGE_ASK_INTERVIEW if slots.get("city") else STAGE_ASK_CITY
+            reopen = _abandon_reopen_text(slots)
+            records = [
+                (store.EVENT_INBOUND, {"text": payload.text}),
+                (store.EVENT_STAGE, {"from": stage_before, "to": restored}),
+                *store.diff_slots(before, slots),
+                (
+                    store.EVENT_REPLY,
+                    {
+                        "text": reopen,
+                        "parts": [reopen],
+                        # 与终止语同理单独标记：这一条是「流失客户回流」的重新接待，
+                        # 灰度复盘要能统计回流有多少、回复及不及时。
+                        "trace": {
+                            "source": "reopen",
+                            "stage_from": stage_before,
+                            "stage_to": restored,
+                            "action": None,
+                            "kb_entry_id": "",
+                            "recruit_status": "",
+                            "abandon_return_count": slots["abandon_return_count"],
+                        },
+                    },
+                ),
+            ]
+            await store.append_events(session, payload.session_key, records)
+            state["stage"] = restored
+            # 回流必须同步回 4222：否则网页仍显示「不符合」，客户端也还把它当流失名单，
+            # 下一句又要靠这条分支兜一次。推送尽力而为，失败不影响客户收到话。
+            try:
+                await profile_push.push(
+                    _resolve_device_code(payload.device_code),
+                    payload.session_key,
+                    profile_push.build_profile(dict(slots), restored, None)
+                    | {"recruit_status": "none", "state": "active"},
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            collect_llm_trace()
+            return FlowAnswerOut(
+                reply=reopen,
+                parts=[reopen],
+                stage=restored,
+                finished=False,
+                action=None,
+                slots=dict(slots),
+                profile=dict(state.get("profile") or {}),
+            )
+
+    if abandoned and stage_before == "done":
         # 客户已明确放弃（流程已结束 + 标记流失/不合适）：不再推进、不再邀约。
         # 只回一句终止语并记一条入站事件，保留 slots 供人工在看板恢复。
         # 之前这里会重激活到 ask_interview，于是「在吗」这种随口一句
         # 又会收到「这两天能不能过来面试」，实测 4 次，属骚扰级红线。
-        closing = "好的，那就不打扰你了。后面想了解哪个城市的岗位，随时跟我说哈。"
+        closing = _stage_script(
+            slots, SCRIPT_STAGE_CLOSING, {"city": str(slots.get("city") or "").strip()}
+        ) or "好的，那就不打扰你了。后面想了解哪个城市的岗位，随时跟我说哈。"
         await store.append_events(
             session,
             payload.session_key,
@@ -318,7 +442,12 @@ async def flow_answer(
     # 所以必须先在这里占位，否则非 KB 阶段一走就是 UnboundLocalError。
     faq_hit: Any | None = None
 
-    if stage_before in _KB_STAGES:
+    if stage_before == STAGE_ASK_CITY and slots.get("device_intro_sent"):
+        # Only an explicit customer base selection pins a multi-base introduction.
+        if select_position_by_place(slots, payload.text):
+            slots["interview_offer_sent"] = True
+
+    if stage_before in _KB_STAGES or (stage_before == STAGE_ASK_CITY and slots.get("device_intro_sent")):
         city_hint_for_kb = (
             str(slots.get("city") or "")
             or extract_city(payload.text)
@@ -449,7 +578,10 @@ async def flow_answer(
     media_material = kb_answer or ""
     device_material_used = False
 
-    if position_script and str(position_script.get("content") or "").strip():
+    intro_result = device_intro_followup(state, payload.text, kb_answer)
+    if intro_result is not None:
+        result = intro_result
+    elif position_script and str(position_script.get("content") or "").strip():
         # 岗位话术命中：整段按运营台词直发（占位符由代码替换、媒体标记原样保留），
         # 这轮一次模型都不调——工价/年龄/地点一个字都不许被改写。
         # 状态推进仍走确定性规则：发过卡 + 进 ask_interview。
@@ -586,6 +718,13 @@ async def flow_answer(
         # 标题不足 2 个时原样返回，不做任何改动。
         if len(result.parts) == 1:
             result.parts = split_by_section_heads(result.parts[0])
+        # 邀约限流（2026-11-17 灰度实测）：客户连问 5 个问题时，每条回复都挂
+        # 「这两天能不能过来面试」，客户直接说「你好多问题都没回答我，还有点
+        # 顾虑」，之后仍被追问，最后流失。这里按会话计数限流，客户表达顾虑时
+        # 本轮一律不邀约。
+        result.parts = throttle_invite(
+            result.parts or [result.reply], result.slots, payload.text
+        )
         result.reply = "\n".join(result.parts)
         # 灰度复盘用的诊断：这条回复是谁生成的、走了哪一步、命中了哪条知识库、
         # 审核动过没有、兜底触发过没有。追加字段不影响回放——project() 只读 text。
@@ -679,15 +818,10 @@ async def flow_answer(
 async def flow_greet(
     payload: GreetIn, session: SessionDep, _: ServiceOrUser
 ) -> GreetOut:
-    """新好友首句：直接发岗位卡，不先问「你想找怎样的工作」。
+    """新好友开场：本号招聘介绍 → 岗位首句 → 通用欢迎语 → 默认开场。
 
-    业务前提（11-13 HR 对齐）：一个微信号只做一个板块，品类是账号层面定死的。
-    所以进来的人不需要先被问方向——直接把该板块的岗位甩过去。
-
-    两种情况不发卡，只发问句：
-      * 设备没绑板块（老数据 / 运营没配）→ 无法判断发哪套卡
-      * 地铁号没绑城市 → 不知道发哪个城市的安检岗，得先问城市
-    这两种都 `skipped=True` 并给出 detail，客户端据此决定要不要发问句。
+    固定欢迎语按独占一行的 --- 分条，不需要客户先发问题，也不调用模型。
+    没有可用话术且岗位前提不足时返回 skipped=True，由客户端沿用原兜底。
     """
     device_code = _resolve_device_code(payload.device_code)
     try:
@@ -700,9 +834,72 @@ async def flow_greet(
     factory_name = str(meta.get("factory_name") or "").strip()
     vertical_id = int(meta.get("vertical_id") or 0)
 
+    # 通用欢迎语不依赖岗位或客户先发消息；仍由原客户端发送链路投递。
+    try:
+        position_scripts = await fetch_position_scripts(device_code)
+    except Exception:  # noqa: BLE001
+        position_scripts = []
+    set_position_scripts(position_scripts)
+    existing_slots = dict((store.project(await store.load_events(session, payload.session_key)).get("slots") or {}))
+    sent_value = existing_slots.get("scripted_sent")
+    scripted_sent = dict(sent_value) if isinstance(sent_value, dict) else {}
+
+    try:
+        intro = pick_script(await fetch_scripts(device_code), "greet", city)
+    except Exception:  # noqa: BLE001
+        intro = None
+
+    async def device_welcome(jobs: list[dict[str, Any]]) -> GreetOut | None:
+        if not intro or scripted_sent.get("greet"):
+            return None
+        # Keep only facts shared by all bases of the same factory. Different wages,
+        # addresses and requirements must not silently come from jobs[0].
+        common: dict[str, Any] = {}
+        if jobs and len({str(j.get("factory_name") or "") for j in jobs}) == 1:
+            common = {key: value for key, value in jobs[0].items()
+                      if isinstance(value, (str, int, float)) and not isinstance(value, bool)
+                      and all(j.get(key) == value for j in jobs)}
+        parts = render_welcome_parts(str(intro.get("content") or ""), common, str(common.get("interview_time") or ""))
+        if not parts:
+            return None
+        slots = {**existing_slots, "city": city, "vertical_id": vertical_id,
+                 "device_intro_sent": True, "scripted_sent": {**scripted_sent, "greet": True}}
+        pin_position(slots, common)
+        selected = len(jobs) == 1 and bool(slots.get("position_id"))
+        slots["interview_offer_sent"] = selected
+        stage = STAGE_SEND_INFO if selected else STAGE_ASK_CITY
+        await store.append_events(session, payload.session_key, [
+            (store.EVENT_STAGE, {"to": stage}),
+            *store.diff_slots(existing_slots, slots),
+            (store.EVENT_REPLY, {"text": "\n".join(parts), "parts": parts, "source": "device_intro"}),
+        ])
+        return GreetOut(reply="\n".join(parts), parts=parts, stage=stage,
+                        skipped=False, detail="本企微号的固定招聘介绍")
+
+    async def configured_welcome(job: dict[str, Any]) -> GreetOut | None:
+        if scripted_sent.get("greet"):
+            return None
+        script = pick_position_script(position_scripts, int(job.get("position_id") or job.get("id") or 0), SCRIPT_STAGE_GREET)
+        if not script:
+            return None
+        parts = render_welcome_parts(str(script.get("content") or ""), job, interview_window_of(job))
+        if not parts:
+            return None
+        scripted_sent["greet"] = True
+        await store.append_events(session, payload.session_key, [
+            (store.EVENT_STAGE, {"to": STAGE_ASK_CITY}),
+            (store.EVENT_SLOT, {"key": "scripted_sent", "value": scripted_sent}),
+            (store.EVENT_REPLY, {"text": "\n".join(parts), "parts": parts, "source": "script"}),
+        ])
+        return GreetOut(reply="\n".join(parts), parts=parts, stage=STAGE_ASK_CITY,
+                        skipped=False, detail="后台配置的加好友首句")
+
     # 没绑板块：不知道该发哪套卡。不做「按城市兜底」——那等于自己猜品类，
     # 而业务上不存在综合号（一个微信号只做一个板块）。交回上层发问句。
     if not vertical_code:
+        welcome = await device_welcome([]) or await configured_welcome({})
+        if welcome:
+            return welcome
         return GreetOut(
             reply="",
             stage=STAGE_ASK_CITY,
@@ -712,6 +909,9 @@ async def flow_greet(
 
     # 地铁号没绑城市：先问城市（这一步沿用现有话术，不问方向）
     if vertical_code == "subway" and not city:
+        welcome = await device_welcome([]) or await configured_welcome({})
+        if welcome:
+            return welcome
         return GreetOut(
             reply="",
             stage=STAGE_ASK_CITY,
@@ -736,6 +936,9 @@ async def flow_greet(
             jobs = scoped
 
     if not jobs:
+        welcome = await device_welcome([]) or await configured_welcome({})
+        if welcome:
+            return welcome
         # 板块没岗位数据时不瞎编，交回上层走「帮你问问」
         return GreetOut(
             reply="",
@@ -744,27 +947,11 @@ async def flow_greet(
             detail=f"板块 {vertical_code or '(未绑定)'} 没有在招岗位",
         )
 
+    welcome = await device_welcome(jobs)
+    if welcome:
+        return welcome
+
     set_remote_jobs({city: jobs})
-
-    # 岗位级话术：greet（加好友首句）/ send_info 等时点命中即整段直发，不调模型
-    position_scripts: list[dict[str, Any]] = []
-    try:
-        position_scripts = await fetch_position_scripts(device_code)
-    except Exception:  # noqa: BLE001  话术拉不到就走默认岗位卡
-        position_scripts = []
-    set_position_scripts(position_scripts)
-
-    # 话术一次性（scripted_sent）：greet 整个会话只发一次。会话已有事件时
-    # 投影出旧 slots，greet 发过就不再命中（换回老行为发岗位卡）。
-    existing_slots: dict[str, Any] = {}
-    try:
-        existing_slots = dict((store.project(await store.load_events(session, payload.session_key)).get("slots") or {}))
-    except Exception:  # noqa: BLE001  投影失败按全新会话处理
-        existing_slots = {}
-    if isinstance(existing_slots.get("scripted_sent"), dict):
-        scripted_sent: dict[str, Any] = dict(existing_slots["scripted_sent"])
-    else:
-        scripted_sent = {}
 
     slots: dict[str, Any] = {
         **existing_slots,
@@ -779,46 +966,9 @@ async def flow_greet(
         pin_position(slots, card_job) or int(meta.get("position_id") or 0)
     )
 
-    # 首句话术：有岗位话术就用（有 position 匹配 position，没有用设备默认），
-    # 一条都没有则保持现有默认——用与 send_info 同一套渲染发岗位卡。
-    greet = None
-    if not scripted_sent.get("greet"):
-        greet = pick_position_script(
-            position_scripts, int(slots.get("position_id") or 0), SCRIPT_STAGE_GREET
-        )
-    greet_text = (
-        render_script(
-            str(greet.get("content") or ""), card_job, interview_window_of(card_job)
-        ).strip()
-        if greet
-        else ""
-    )
-    if greet_text:
-        # 配了「加好友首句」话术 → 只发话术（通常是先问城市），**不发岗位卡**。
-        # 2026-11-14 实测：刚加好友就收到一张卡，客户说「我想去南昌」时卡和城市
-        # 对不上。业务口径：加好友 → 问地点 → 拿到地点 → 发该厂硬编码岗位。
-        # 下一轮客户说了城市，走 ask_city 分支正常发卡（interview_offer_sent 不置位）。
-        # 占位符仍用该板块第一个岗位的数据渲染（{{factory}}/{{wage}} 不落空）。
-        # 话术一次性：greet 发过即记账，重复触发 greet 不再发同一句。
-        scripted_sent["greet"] = True
-        slots["scripted_sent"] = scripted_sent
-        parts = [greet_text]
-        await store.append_events(
-            session,
-            payload.session_key,
-            [
-                (store.EVENT_STAGE, {"to": STAGE_ASK_CITY}),
-                (store.EVENT_SLOT, {"key": "scripted_sent", "value": scripted_sent}),
-                (store.EVENT_REPLY, {"text": "\n".join(parts)}),
-            ],
-        )
-        return GreetOut(
-            reply="\n".join(parts),
-            parts=parts,
-            stage=STAGE_ASK_CITY,
-            skipped=False,
-            detail=f"greet 话术 · {vertical_code} · {len(jobs)} 个岗位",
-        )
+    welcome = await configured_welcome(card_job)
+    if welcome:
+        return welcome
 
     # 没配首句话术：一个工厂多个面试基地时先问去哪个基地，不直接甩卡。
     # 2026-11-15 实测：地铁号（陈村/竹料两个基地）加好友第一句就收到 jobs[0]

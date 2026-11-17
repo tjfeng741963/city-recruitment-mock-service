@@ -52,6 +52,14 @@ SCRIPT_STAGE_SEND_INFO = "send_info"
 SCRIPT_STAGE_ASK_INTERVIEW = "ask_interview"
 SCRIPT_STAGE_BOOKED = "booked"
 SCRIPT_STAGE_UNANSWERED = "unanswered"
+# 2026-11-17：把原来写死在代码里的四段流程文字也做成可填话术。
+# 运营能改的才是「流程可视化」——后台看得见「这一步客户收到什么」，
+# 而不是只有 greet/send_info 这几个点能改、剩下的只能找开发。
+SCRIPT_STAGE_ASK_CITY = "ask_city"
+SCRIPT_STAGE_COLLECT = "collect"
+SCRIPT_STAGE_GAVE_UP = "gave_up"
+SCRIPT_STAGE_REOPEN = "reopen"
+SCRIPT_STAGE_CLOSING = "closing"
 
 # 面试时间窗口：工厂账号可改成别的窗口，地铁账号固定早场
 INTERVIEW_WINDOW = "09:00-11:00"
@@ -338,8 +346,16 @@ _CONSENT_INTENT = ("面试", "过去", "过来", "到厂", "到场", "上班")
 
 
 def agrees_to_interview(text: str) -> bool:
-    """同意面试的完整判定：短句沿用 is_agree，长句表态也接得住。"""
+    """同意面试的完整判定：短句沿用 is_agree，长句表态也接得住。
+
+    第三种情形是「报出具体到岗日」（「我要后天才能到」「明天过去」）：这类句子
+    没有「面试」二字，长度也常超过短句阈值，但它是明确的到场承诺。2026-11-17
+    Evans_峰 实测：这句话没被认成同意，`interview_agreed` 为空，两小时后又追问
+    「这两天能不能过来面试」，他回「不能」（实话是后天才能到），直接判成流失。
+    """
     if is_agree(text):
+        return True
+    if states_arrival_day(text):
         return True
     value = (text or "").strip()
     if not value or len(value) > 30:
@@ -351,6 +367,24 @@ def agrees_to_interview(text: str) -> bool:
     return (
         any(word in value for word in _STRONG_AGREE)
         and any(word in value for word in _CONSENT_INTENT)
+    )
+
+
+def states_arrival_day(text: str) -> bool:
+    """客户报出具体到岗日（「我要后天才能到」「明天过去」）＝答应来，只是时间靠后。
+
+    2026-11-17 Evans_峰 实测：他回「我要后天才能到」，这句被当成普通陈述，
+    `interview_agreed` 没置位；两小时后他再问岗位，系统又追问「这两天能不能过来
+    面试」，他答「不能」（实话是后天才能到），直接判成流失。客户给的是日期，
+    不是拒绝，必须按答应面试处理。
+    """
+    value = (text or "").strip()
+    if not value or looks_like_question(value) or is_disagree(value):
+        return False
+    if any(word in value for word in _CONSENT_BLOCKERS):
+        return False
+    return extract_day_offset(value) is not None and any(
+        word in value for word in ("到", "来", "去", "过来", "过去", "到厂")
     )
 
 
@@ -457,8 +491,14 @@ def set_position_scripts(scripts: list[dict[str, Any]] | None) -> None:
     _POSITION_SCRIPTS.set(list(scripts or []))
 
 
-def _stage_script(slots: dict[str, Any], stage: str) -> str:
+def _stage_script(
+    slots: dict[str, Any], stage: str, extra: dict[str, Any] | None = None
+) -> str:
     """取某个时点的岗位话术并渲染；没命中返回空串。
+
+    extra 是「这句话才有的占位符」，如问城市的 {{cities}}、要资料的 {{missing}}。
+    这些值不属于岗位数据，只能由调用方在当场算出来再传进来；有同名岗位字段时
+    以岗位字段为准（render_script 用 setdefault 合并，岗位事实永远优先）。
 
     延迟导入 device_scripts：它反向依赖本模块的 INTERVIEW_WINDOW，
     模块级互相 import 会成环。
@@ -471,7 +511,9 @@ def _stage_script(slots: dict[str, Any], stage: str) -> str:
     script = pick_position_script(scripts, int(slots.get("position_id") or 0), stage)
     if not script:
         return ""
-    job = _job_of(slots)
+    job = dict(_job_of(slots))
+    for key, value in (extra or {}).items():
+        job.setdefault(str(key), value)
     window = ""
     if stage == SCRIPT_STAGE_BOOKED and slots.get("interview_period"):
         window = str(slots.get("interview_window") or "")
@@ -605,8 +647,16 @@ def _job_of(slots: dict[str, Any]) -> dict[str, str]:
 
 
 def _city_ask(slots: dict[str, Any] | None = None) -> str:
-    del slots
+    """问城市这句。
+
+    后台配了 ask_city 话术就用运营的原话（可用 {{cities}} 插在招城市清单）；
+    没配才用内置默认。问城市发生在还没钉岗位的时候，所以命中的基本是
+    position_id=0 的通用条目——但客户从老会话回来时岗位可能已钉住，照样按岗位优先。
+    """
     cities = "、".join(remote_job_cities())
+    scripted = _stage_script(dict(slots or {}), SCRIPT_STAGE_ASK_CITY, {"cities": cities})
+    if scripted:
+        return scripted
     if cities:
         return f"你投递的是哪个城市的简历？我们这边{cities}都有厂在招。"
     return "你投递的是哪个城市的简历？"
@@ -890,12 +940,29 @@ def send_info_parts(
     part2 = f"面试地点：{job.get('place', '')}\n面试时间：{day} {interview_window_of(job)}"
     part3 = _interview_ask(slots)
     # 主城没单、按后台「周边城市设置」取到隔壁城市的岗：必须先说清楚在哪，
-    # 否则客户以为是本地的，到面试地点才发现跨城。
+    # 否则客户以为是本地岗，到面试地点才发现跨城。
     asked = str(slots.get("city") or "")
     job_city = str(job.get("city") or "")
     if asked and job_city and asked != job_city:
         part1 = f"{asked}这边暂时没有合适的厂，{job_city}有岗，过去方便的话可以安排。\n{part1}"
-    return [part1, part2, part3]
+    # 岗位媒体：发卡这一轮把运营在岗位里配的图片/视频带上。
+    # 以前这些媒体只进了 api_flow 的 allowed_media 白名单，从来没被拼进正文，
+    # 所以发出去的永远只有文字（2026-11-17 灰度实测「没有发图片和视频」）。
+    # 只在发卡这一轮追加，客户后续插问不会每条都刷一遍图。
+    parts = [part1, part2, part3]
+    parts.extend(_job_media_markers(job))
+    return parts
+
+
+def _job_media_markers(job: dict[str, Any]) -> list[str]:
+    """岗位配置的媒体 → 【图片:x】【视频:x】标记（每个标记独占一段）。
+
+    标记必须原样进正文：客户端靠它调 paste_media 从本地媒体目录粘贴发送。
+    名字里带路径分隔符或空名的引用直接丢弃（与 media_guard 同一套校验）。
+    """
+    from .media_guard import markers_from_refs
+
+    return markers_from_refs((job or {}).get("media"))
 
 
 def _job_card_lines(job: dict[str, Any]) -> list[str]:
@@ -974,7 +1041,16 @@ def _interview_ask(slots: dict[str, Any] | None = None) -> str:
     return variants[retries % len(variants)]
 
 
-def _collect_ask(missing: str = "") -> str:
+def _collect_ask(missing: str = "", slots: dict[str, Any] | None = None) -> str:
+    """要姓名/手机号。
+
+    后台配了 collect 话术就用运营原话，{{missing}} 由代码替换成当前缺什么
+    （「姓名」「手机号」「姓名和手机号」），运营一句话覆盖三种情况。
+    """
+    label = {"name": "姓名", "phone": "手机号"}.get(missing, "姓名和手机号")
+    scripted = _stage_script(dict(slots or {}), SCRIPT_STAGE_COLLECT, {"missing": label})
+    if scripted:
+        return scripted
     if missing == "name":
         return "方便留个姓名吗？我这边登记一下。"
     if missing == "phone":
@@ -982,7 +1058,11 @@ def _collect_ask(missing: str = "") -> str:
     return "那我登记一下：麻烦把姓名和手机号一起发我。"
 
 
-def _gave_up_text() -> str:
+def _gave_up_text(slots: dict[str, Any] | None = None) -> str:
+    """客户说不去时的收尾语。后台配了 gave_up 话术就用运营原话。"""
+    scripted = _stage_script(dict(slots or {}), SCRIPT_STAGE_GAVE_UP)
+    if scripted:
+        return scripted
     return "好的，那就不打扰你了。后面想过来的话随时找我，名额一直有。"
 
 
@@ -1459,7 +1539,7 @@ def step(
             slots["recruit_status"] = "disqualified"
             state["stage"] = STAGE_DONE
             return FlowResult(
-                reply=_gave_up_text(),
+                reply=_gave_up_text(slots),
                 stage=STAGE_DONE,
                 slots=slots,
                 finished=True,
@@ -1541,7 +1621,7 @@ def _route_by_graph(
         state["stage"] = STAGE_DONE
         state["node"] = STAGE_DONE
         return FlowResult(
-            reply=_gave_up_text(),
+            reply=_gave_up_text(slots),
             stage=STAGE_DONE,
             slots=slots,
             finished=True,
@@ -1611,7 +1691,7 @@ def _route_by_graph(
             slots["recruit_status"] = "disqualified"
             state["stage"] = STAGE_DONE
             return FlowResult(
-                reply=_gave_up_text(),
+                reply=_gave_up_text(slots),
                 stage=STAGE_DONE,
                 slots=slots,
                 finished=True,
@@ -1656,7 +1736,7 @@ def _route_by_graph(
             state["stage"] = STAGE_DONE
             state["node"] = STAGE_DONE
             return FlowResult(
-                reply=_gave_up_text(),
+                reply=_gave_up_text(slots),
                 stage=STAGE_DONE,
                 slots=slots,
                 finished=True,
@@ -1698,17 +1778,17 @@ def _collect_prompt(slots: dict[str, Any]) -> str:
     if has_name and has_phone:
         return ""
     if has_name:
-        return _collect_ask("phone")
+        return _collect_ask("phone", slots)
     if has_phone:
-        return _collect_ask("name")
-    return _collect_ask()
+        return _collect_ask("name", slots)
+    return _collect_ask(slots=slots)
 
 
 def _decline_interview(state: dict[str, Any], slots: dict[str, Any]) -> FlowResult:
     slots.update({"recruit_status": "disqualified", "interview_agreed": False, "booked": False})
     state["stage"] = STAGE_DONE
     state["node"] = STAGE_DONE
-    return FlowResult(reply=_gave_up_text(), stage=STAGE_DONE, slots=slots,
+    return FlowResult(reply=_gave_up_text(slots), stage=STAGE_DONE, slots=slots,
                       finished=True, action=ACTION_GAVE_UP, source="fact")
 
 
@@ -1803,6 +1883,13 @@ _JOB_FACT_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # (快照字段, 触发词)。顺序即优先级：一句话问多个字段时取先命中的。
     # 2026-11-15 真实聊天记录复盘补齐：面试时间/宿舍/体检/保险/日结/纹身/身高/
     # 证件这些字段 4222 早就下发了，之前一个触发词都没配，客户问就变「确认一下」。
+    #
+    # 发薪口径必须排在工价之前（2026-11-17 灰度实测）：「几号发工资」「什么时候
+    # 发工资」里含「工资」，被 wage_text 抢答成工价表，客户连说三次「不是这个」，
+    # 最后气到不肯来面试。发薪日和发多少是两个问题，问发薪日就只能答发薪日。
+    ("advance_text", ("几号发工资", "什么时候发工资", "哪天发工资", "工资几号",
+                      "月结", "发薪", "日结", "预支", "借支", "压工资", "工资什么时候结",
+                      "什么时候结")),
     ("wage_text", ("工资", "工价", "多少钱", "薪资", "待遇", "多少钱一天", "多少钱一个月",
                    "多少钱一小时", "一小时多少", "一天多少", "怎么算", "纯工价")),
     ("interview_time", ("面试时间", "什么时候面试", "几点面试", "面试几点", "明天几点到",
@@ -1817,13 +1904,91 @@ _JOB_FACT_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("line_text", ("线路", "哪条线", "安排哪")),
     # 体检/社保/证件属于「政策口径」，必须走按岗位配好的 FAQ：岗位里的
     # medical_text 只写「要体检」，不代表报价，抢答会把工价/要求冒充成金额。
-    ("advance_text", ("日结", "预支", "借支", "压工资", "几号发工资", "发工资")),
     ("tattoo_policy", ("纹身", "刺青", "花臂")),
     ("height_text", ("身高", "多高")),
     ("ethnicity_policy", ("民族", "少数民族")),
     ("place", ("在哪", "地址", "地点", "哪里面试", "哪儿", "怎么走")),
     ("job_title", ("做什么", "什么工作", "干什么的", "什么岗位", "招什么")),
 )
+
+# 问「发薪日」时，只有这些字段能回答；快照里没有就必须承认要确认，
+# 绝不回落工价表（工资多少 ≠ 哪天发）。
+_PAY_DATE_FIELDS = ("advance_text",)
+
+# 「几号发工资 / 什么时候结工资 / 工资月结吗」——这些问的是发放时间，不是金额。
+_PAY_DATE_PATTERNS = (
+    "几号发", "哪天发", "什么时候发", "什么时候结", "几号结", "哪天结",
+    "月结", "发薪日", "发工资", "工资几号", "工资哪天",
+)
+
+
+def _asks_pay_date(text: str) -> bool:
+    """是否在问「什么时候发工资」（而不是「发多少」）。"""
+    value = str(text or "")
+    return any(p in value for p in _PAY_DATE_PATTERNS)
+
+
+# ── 邀约限流 ────────────────────────────────────────────────────────────
+# 客户连续提问时，每条回复末尾都挂「这两天能不能过来面试」，实测把客户逼到
+# 「你好多问题都没回答我，还有点顾虑」甚至直接流失。这里按会话计数限流。
+_INVITE_PHRASES = (
+    "这两天能不能过来面试", "这两天方便过来面试", "这两天能过来面试",
+    "哪天方便过来", "什么时候方便过来", "名额给你留着", "名额我先给你留着",
+    "名额我先帮你留着",
+)
+# 客户表达顾虑/不满时，本轮禁止邀约：这时候再约等于火上浇油。
+_CONCERN_WORDS = (
+    "顾虑", "没回答", "没答", "不是问这个", "不是这个", "你没说", "说不明白",
+    "搞清楚", "了解清楚", "才知道", "考虑一下", "再看看",
+)
+# 同一会话最多主动邀约几次（客户答应后走正常约面，不计入）。
+_INVITE_ASK_LIMIT = 2
+
+
+def _wants_invite(text: str) -> bool:
+    """客户本轮是否主动提到面试/到场（他自己提就不算骚扰）。"""
+    value = str(text or "")
+    return any(w in value for w in ("面试", "过来", "过去", "到厂", "来厂", "过去看看"))
+
+
+def throttle_invite(
+    parts: list[str], slots: dict[str, Any], customer_text: str
+) -> list[str]:
+    """按会话限流邀约话术，返回处理后的分段。
+
+    规则（为避免骚扰红线，2026-11-17 灰度实测后加入）：
+      1. 客户本轮在表达顾虑/不满 → 本轮所有分段都不邀约；
+      2. 客户自己没提面试，且该会话已主动邀约过 `_INVITE_ASK_LIMIT` 次 → 不邀约；
+      3. 其余情况正常保留，并累加计数。
+    邀约句被删后若某段变空，该段整条去掉；全空时保底一句话，绝不发空消息。
+    """
+    value = "\n".join(p for p in (parts or []) if str(p).strip())
+    if not value:
+        return list(parts or [])
+    has_invite = any(p in value for p in _INVITE_PHRASES)
+    if not has_invite:
+        return list(parts or [])
+    concerned = any(w in str(customer_text or "") for w in _CONCERN_WORDS)
+    count = int(slots.get("invite_ask_count") or 0)
+    if concerned or (not _wants_invite(customer_text) and count >= _INVITE_ASK_LIMIT):
+        cleaned: list[str] = []
+        for part in parts or []:
+            text = str(part)
+            for phrase in _INVITE_PHRASES:
+                if phrase in text:
+                    # 按句切掉含邀约的那一句，避免留下半截话
+                    sentences = re.split(r"(?<=[。！？\n])", text)
+                    text = "".join(
+                        s for s in sentences if phrase not in s
+                    ).strip()
+            if text.strip():
+                cleaned.append(text.strip())
+        if cleaned:
+            return cleaned
+        # 全被删光：退回一句不带邀约的中性承接语
+        return ["这些我这边确认清楚再回你，有其他想了解的也可以直接问。"]
+    slots["invite_ask_count"] = count + 1
+    return list(parts or [])
 
 _FACT_LABELS = {
     "wage_text": "工价",
@@ -1884,6 +2049,14 @@ def _job_fact_answer(slots: dict[str, Any], text: str) -> str:
     # FAQ 里，没配就承认要确认。这条规则有专门用例守着，别改。
     if is_non_wage_cost_question(lowered):
         return ""
+    # 问「几号发工资 / 什么时候发工资」时，快照里没有发薪日就直说要确认。
+    # 绝不回落工价表：2026-11-17 灰度实测，桂花连问三次「工资什么时候结」，
+    # 三次都收到同一张工价表，最后一句「你不和我说明白我不去面试」直接流失。
+    if _asks_pay_date(lowered):
+        pay = str(snapshot.get("advance_text") or "").strip()
+        if not pay:
+            return ""
+        return f"{_FACT_LABELS['advance_text']}：{pay}"
     # 客户自报年龄（「我52了还能去吗」）：直接跟岗位年龄上限比，别装傻。
     asked_age = _age_in_text(lowered)
     if asked_age is not None and re.search(r"岁|年龄|还能|能做|可以去|可以不|行不行|要吗", lowered):
@@ -1915,6 +2088,39 @@ def _job_fact_answer(slots: dict[str, Any], text: str) -> str:
                 return f"年龄要求：{value}，{asked} 岁超了，我帮你看看别的岗位？"
         return f"{_FACT_LABELS[field]}：{value}"
     return ""
+
+
+def device_intro_followup(state: dict[str, Any], text: str, kb_answer: str | None = None) -> FlowResult | None:
+    """A device introduction is not a selection of the first interview base."""
+    slots = state.get("slots") or {}
+    if state.get("stage") != STAGE_ASK_CITY or not slots.get("device_intro_sent"):
+        return None
+    city = extract_city(text)
+    if city and city != str(slots.get("city") or ""):
+        return None  # Explicit city changes keep the existing flow.
+    _absorb(slots, text, strict_name=True)
+    places = distinct_places(slots)
+    choice = (f"面试基地有：{'、'.join(places)}，你去哪个基地方便？" if places
+              else "你在哪个城市？我帮你确认对应的岗位和面试安排。")
+    selected = bool(slots.get("position_id")) and bool(slots.get("interview_offer_sent"))
+    if looks_like_question(text) or kb_answer:
+        job_fact = _job_fact_answer(slots, text)
+        fact = job_fact or kb_answer
+        target = STAGE_SEND_INFO if selected else STAGE_ASK_CITY
+        if fact:
+            return FlowResult(reply="", parts=[fact], stage=target, slots=slots, source="fact" if job_fact else "kb")
+        return FlowResult(reply="", parts=["这个要求我再确认一下。", choice], stage=target,
+                          slots=slots, unknown_question=text)
+    if selected:
+        job = slots.get("job_snapshot") or {}
+        parts = [f"面试基地：{job['place']}"] if job.get("place") else []
+        if job.get("interview_time"):
+            parts.append(f"面试时间：{job['interview_time']}")
+        parts.append("你哪天方便过来面试？")
+        return FlowResult(reply="", parts=parts, stage=STAGE_ASK_INTERVIEW, slots=slots, source="fact")
+    if not slots.get("city") and not places:
+        return None
+    return FlowResult(reply="", parts=[choice], stage=STAGE_ASK_CITY, slots=slots, source="fact")
 
 
 def _answer_side_question(
@@ -1970,6 +2176,23 @@ def _answer_side_question(
     followup = _faq_retry(stage, slots)
     state["stage"] = stage
     return FlowResult(reply=followup, stage=stage, slots=slots)
+
+
+def claims_booking(reply: str) -> bool:
+    """回复里是否声称「已经登记/约好了」。
+
+    给 flow_llm 的事实地板用：`booked` 不为 True 时这类话不能发给客户。
+    2026-11-17 Evans_峰 实测——他给 10 位手机号（抽取失败、booked 从未置位），
+    模型却回了「收到啦万小姐，我这边登记好了」，客户以为约成了，后台没有记录。
+    """
+    value = str(reply or "")
+    return any(word in value for word in _BOOKING_CLAIMS)
+
+
+_BOOKING_CLAIMS = (
+    "登记好了", "已经登记", "已登记", "登记成功", "帮你登记好",
+    "约好了", "已经约好", "预约成功", "约定了", "定好了时间",
+)
 
 
 def align_reply_with_slots(reply: str, slots: dict[str, Any]) -> str:

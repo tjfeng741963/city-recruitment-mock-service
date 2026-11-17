@@ -1,0 +1,49 @@
+===DIR=== 
+ Volume in drive C has no label.
+ Volume Serial Number is 6875-2D72
+
+ Directory of C:\cloud-agent
+
+2026/11/17  12:06    <DIR>          .
+2026/11/17  11:33            94,244 autopilot.py
+2026/11/17  11:33             7,146 brain.py
+2026/11/17  11:33            10,339 client.py
+2026/11/17  11:33             8,960 collector.py
+2026/11/17  11:33            16,197 compat.py
+2026/11/17  11:33               567 config.example.json
+2026/11/17  11:33               400 config.json
+2026/11/17  11:33             4,499 echo_guard.py
+2026/11/17  11:33             7,555 login_qr.py
+2026/11/17  11:33            10,194 login_watch.py
+2026/11/17  11:33             6,263 main.py
+2026/11/17  11:33             8,156 media_fetch.py
+2026/11/17  12:06                12 probe-out.txt
+2026/11/17  11:46               400 probe.cmd
+2026/11/17  11:54               170 probe2.cmd
+2026/11/17  12:06               590 probe3.cmd
+2026/11/17  11:35         1,421,312 python-inst.exe
+2026/11/17  11:33             5,476 register.py
+2026/11/17  11:33             9,948 remote_config.py
+2026/11/17  11:33            12,903 reply_store.py
+2026/11/17  12:01               124 run-setup.cmd
+2026/11/17  11:33             6,844 screenshot.py
+2026/11/17  11:33            11,632 sender.py
+2026/11/17  11:49                 0 setup.cmd
+2026/11/17  11:51               151 tasks-create.cmd
+2026/11/17  11:33            51,233 wecomcracker.py
+2026/11/17  11:33    <DIR>          wecom_io_core
+2026/11/17  11:33             1,868 _verify_clipboard.py
+              27 File(s)      1,697,183 bytes
+               2 Dir(s)  42,975,342,592 bytes free
+===TASKLIST=== 
+cmd.exe                       8832 Services                   0      6,440 K
+curl.exe                      5072 Services                   0      8,844 K
+cmd.exe                       8300 Services                   0     17,020 K
+cmd.exe                       1352 Services                   0     16,980 K
+cmd.exe                       3232 Services                   0      6,524 K
+===RUNSETUP=== 
+@echo off
+call C:\cloud-agent\setup.cmd > C:\cloud-agent\setup.log 2>&1
+echo SETUP-COMPLETED >> C:\cloud-agent\setup.log
+===LOG=== 
+NO-LOG 

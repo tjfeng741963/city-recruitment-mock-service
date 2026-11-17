@@ -1,0 +1,31 @@
+
+Folder: \
+HostName:                             10_0_0_16
+TaskName:                             \CloudSetup
+Next Run Time:                        2026/11/17 23:59:00
+Status:                               Ready
+Logon Mode:                           Interactive only
+Last Run Time:                        2026/11/17 11:51:45
+Last Result:                          1
+Author:                               10_0_0_16\Administrator
+Task To Run:                          C://cloud-agent//run-setup.cmd 
+Start In:                             N/A
+Comment:                              N/A
+Scheduled Task State:                 Enabled
+Idle Time:                            Disabled
+Power Management:                     Stop On Battery Mode, No Start On Batteries
+Run As User:                          Administrator
+Delete Task If Not Rescheduled:       Disabled
+Stop Task If Runs X Hours and X Mins: 72:00:00
+Schedule:                             Scheduling data is not available in this format.
+Schedule Type:                        One Time Only
+Start Time:                           23:59:00
+Start Date:                           2026/11/17
+End Date:                             N/A
+Days:                                 N/A
+Months:                               N/A
+Repeat: Every:                        Disabled
+Repeat: Until: Time:                  Disabled
+Repeat: Until: Duration:              Disabled
+Repeat: Stop If Still Running:        Disabled
+Invalid switch - "/".

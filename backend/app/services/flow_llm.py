@@ -40,6 +40,7 @@ from .flow_engine import (
     _agree_interview,
     _absorb,
     _book,
+    _collect_prompt,
     _day_offset_of,
     _decline_interview,
     _gave_up_text,
@@ -50,6 +51,7 @@ from .flow_engine import (
     _stage_script,
     acknowledge_contact_update,
     align_reply_with_slots,
+    claims_booking,
     agrees_to_interview,
     extract_day_offset,
     enter_info_result,
@@ -729,7 +731,7 @@ def apply_decision(
         slots["recruit_status"] = "disqualified"
         state["stage"] = STAGE_DONE
         return FlowResult(
-            reply=_gave_up_text(),
+            reply=_gave_up_text(slots),
             stage=STAGE_DONE,
             slots=slots,
             finished=True,
@@ -782,6 +784,15 @@ def apply_decision(
         reply = "这个我确认一下，稍后回你"
     # P2-6：回复里的日期/时段说法必须与 slots 一致，冲突的按 slots 改写
     reply = align_reply_with_slots(reply, slots)
+    # 事实护栏：没真正约成（booked 非 True）时，回复里不许出现「登记好了 / 约好了」
+    # 这类已完成的说法。2026-11-17 Evans_峰 实测：他给的手机号只有 10 位，抽取失败，
+    # booked 从未置位，模型却回了「收到啦万小姐，我这边登记好了」——客户以为约成了，
+    # 实际后台没有任何预约记录。这里整段作废，换成确定性提问（缺什么要什么）。
+    if not slots.get("booked") and claims_booking(reply):
+        prompt = _collect_prompt(slots)
+        if prompt:
+            return FlowResult(reply=prompt, stage=stage, slots=slots, source="collect")
+        return fallback_step(state, text, now=now, kb_answer=kb_answer, graph=graph)
     parts = _split_parts(reply)
 
     # 兜底：空话/编了工价 → 退确定性状态机（事实卡 → 知识库 → 确认一下）

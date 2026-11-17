@@ -897,7 +897,7 @@ def bootstrap(store: Store, cfg: dict) -> None:
         if not rlog.record_incoming(m):
             continue
         if int(m.get("time") or 0) < cutoff:
-            rlog.mark_skipped(str(m["id"]), "历史消息（初始化跳过）")
+            rlog.mark_skipped(str(m["id"]), cid, "历史消息（初始化跳过）")
             skipped += 1
         else:
             kept += 1
@@ -1062,7 +1062,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
     for it in items:
         if newest[it["conv_id"]]["message_id"] != it["message_id"]:
             if not dry:
-                rlog.mark_skipped(it["message_id"], "同会话合并到最新一条")
+                rlog.mark_skipped(it["message_id"], it["conv_id"], "同会话合并到最新一条")
             stats["merged"] += 1
     if stats["merged"]:
         log(f"同会话合并：{stats['merged']} 条旧消息并入最新一条，不单独回")
@@ -1077,7 +1077,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
 
         if is_system_conv(cid, name):
             if not dry:
-                rlog.mark_skipped(mid, "系统/官方会话")
+                rlog.mark_skipped(mid, cid, "系统/官方会话")
             stats["skipped"] += 1
             log(f"跳过 {name or cid}：系统/官方会话")
             continue
@@ -1086,7 +1086,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         # 随 /config 下发到这里。命中就整轮不碰这个会话——否则人工和 AI 会同时发言。
         if cid in remote_cfg.takeover_sessions():
             if not dry:
-                rlog.mark_skipped(mid, "人工接管中")
+                rlog.mark_skipped(mid, cid, "人工接管中")
             stats["skipped"] += 1
             log(f"跳过 {name or cid}：人工接管中")
             continue
@@ -1096,14 +1096,14 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         # 整轮不碰这个会话，一句都不发，等运营在网页上手动恢复。
         if cid in remote_cfg.abandoned_sessions():
             if not dry:
-                rlog.mark_skipped(mid, "客户已流失")
+                rlog.mark_skipped(mid, cid, "客户已流失")
             stats["skipped"] += 1
             log(f"跳过 {name or cid}：客户已流失")
             continue
 
         if not name or name == cid:
             if not dry:
-                rlog.mark_skipped(mid, "会话没有可搜索的名字")
+                rlog.mark_skipped(mid, cid, "会话没有可搜索的名字")
             stats["skipped"] += 1
             log(f"跳过 {cid}：会话没有可搜索的名字")
             continue
@@ -1139,18 +1139,18 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                     log=lambda s: log(f"    {s}"),
                                 )
                                 if result["ok"]:
-                                    rlog.mark_sent(fake_id, "开场", str(item["content"]))
+                                    rlog.mark_sent(fake_id, cid, "开场", str(item["content"]))
                                     _brain.log_receipt(cid, seq, kind, "sent")
                                     sent_items += 1
                                     log(f"    [开场 {seq}/{len(ores['items'])}] 已发送", scope="send")
                                 else:
-                                    rlog.mark_failed(fake_id, result["detail"], "开场")
+                                    rlog.mark_failed(fake_id, cid, result["detail"], "开场")
                                     _brain.log_receipt(cid, seq, kind, "failed", result["detail"])
                                     _consecutive_send_failures += 1
                                     log(f"    [开场 {seq}] 发送失败：{result['detail']}", level="warning")
                             else:
                                 # 媒体占位：当前阶段不真实发送，只上报
-                                rlog.mark_sent(fake_id, "开场-媒体占位", f"{kind}:{item['media_name']}")
+                                rlog.mark_sent(fake_id, cid, "开场-媒体占位", f"{kind}:{item['media_name']}")
                                 _brain.log_receipt(cid, seq, kind, "skipped", "媒体占位不真实发送")
                                 log(f"    [开场 {seq}] {kind}:{item['media_name']} 占位跳过", scope="send")
                         greeted.add(cid)
@@ -1167,7 +1167,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     agent_medias = res.get("medias") or []
                 if res.get("skip"):
                     if not dry:
-                        rlog.mark_skipped(mid, res.get("detail") or "流程已结束")
+                        rlog.mark_skipped(mid, cid, res.get("detail") or "流程已结束")
                     stats["skipped"] += 1
                     log(f"    [flow] {res.get('detail') or '流程已结束，不再回复'}",
                         scope="flow", message_id=mid, trace_id=trace)
@@ -1191,7 +1191,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             except Exception as exc:  # noqa: BLE001
                 reason = f"Agent 暂停，待人工处理：{type(exc).__name__}: {exc}"
                 if not dry:
-                    rlog.mark_held(mid, reason)
+                    rlog.mark_held(mid, cid, reason)
                     _last_error = reason[:200]
                 stats["blocked"] += 1
                 log(f"    [brain] {reason}", level="warning",
@@ -1233,7 +1233,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
 
         # 按键之前先确认剪贴板可写，避免 Ctrl+F 打开搜索框后才卡住
         if not compat.wait_clipboard_writable(timeout=15):
-            rlog.mark_failed(mid, "剪贴板被占用超过 15 秒", scene, text)
+            rlog.mark_failed(mid, cid, "剪贴板被占用超过 15 秒", scene, text)
             _last_error = "剪贴板被占用超过 15 秒"
             stats["failed"] += 1
             log("    跳过：剪贴板被占用（向日葵同步？）", level="warning",
@@ -1288,7 +1288,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 # 回车已按但回读解密库确认不了落点：结果不明。不能记 sent
                 #（可能静默丢失），也不能记 failed（下轮自动补发可能重复发送）。
                 # 记 unknown 不参与自动补发，--retry-held 由人工核对后重新入队。
-                rlog.mark_unknown(mid, detail_text, scene, text)
+                rlog.mark_unknown(mid, cid, detail_text, scene, text)
                 _last_error = detail_text[:200]
                 _consecutive_send_failures += 1
                 stats["unknown"] += 1
@@ -1296,7 +1296,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     level="warning", scope="send", message_id=mid, trace_id=trace,
                     duration_ms=duration_ms)
             elif result["ok"]:
-                rlog.mark_sent(mid, scene, text, duration_ms=duration_ms)
+                rlog.mark_sent(mid, cid, scene, text, duration_ms=duration_ms)
                 _consecutive_send_failures = 0
                 _last_error = ""
                 stats["sent"] += 1
@@ -1309,14 +1309,14 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     log(f"    [媒体占位] {kind}:{mname} → 当前阶段不真实发送，仅记录",
                         scope="media", message_id=mid, trace_id=trace)
             else:
-                rlog.mark_failed(mid, result["detail"], scene, text)
+                rlog.mark_failed(mid, cid, result["detail"], scene, text)
                 _last_error = str(result["detail"])[:200]
                 _consecutive_send_failures += 1
                 stats["failed"] += 1
                 log(f"    发送失败：{result['detail']}", level="warning", scope="send",
                     message_id=mid, trace_id=trace, duration_ms=duration_ms)
         except Exception as exc:  # noqa: BLE001
-            rlog.mark_failed(mid, f"{type(exc).__name__}: {exc}", scene, text)
+            rlog.mark_failed(mid, cid, f"{type(exc).__name__}: {exc}", scene, text)
             _last_error = f"{type(exc).__name__}: {exc}"[:200]
             _consecutive_send_failures += 1
             stats["failed"] += 1
@@ -1946,7 +1946,7 @@ def main() -> int:
     if args.reset:
         n = 0
         for it in rlog.pending(include_failed=True, limit=5000):
-            rlog.mark_skipped(it["message_id"], "手动 reset")
+            rlog.mark_skipped(it["message_id"], it["conv_id"], "手动 reset")
             n += 1
         log(f"已作废 {n} 条待发/失败记录")
         print_history(12)

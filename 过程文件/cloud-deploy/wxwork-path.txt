@@ -1,0 +1,21 @@
+===APPPATHS=== 
+ERROR: The system was unable to find the specified registry key or value.
+===UNINSTALL=== 
+ERROR: The system was unable to find the specified registry key or value.
+===PF86=== 
+ Volume in drive C has no label.
+ Volume Serial Number is 6875-2D72
+
+ Directory of C:\Program Files (x86)\WXWork
+
+2026/11/17  10:49    <DIR>          .
+2026/11/17  10:47    <DIR>          ..
+2026/11/17  10:49    <DIR>          5.0.13.6005
+2026/10/22  11:44         2,406,976 Uninstall.exe
+2026/10/22  23:07       285,517,592 WXWork.exe
+2026/11/17  10:49    <DIR>          WXWorkUpgrader
+               2 File(s)    287,924,568 bytes
+               4 Dir(s)  42,755,051,520 bytes free
+===SEARCH=== 
+C:\Program Files (x86)\WXWork\WXWork.exe
+INFO: Could not find files for the given pattern(s).

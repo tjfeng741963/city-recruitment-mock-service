@@ -1,0 +1,3 @@
+===dir===  C://cloud-agent 
+===task===  /Query /TN CloudSetup /V /FO LIST 
+===log===  C://cloud-agent//setup.log 

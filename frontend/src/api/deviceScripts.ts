@@ -1,9 +1,10 @@
 /** /api/v1/agent/device-scripts 按设备话术（4222）。 */
 import { request } from "./client";
 
-export type DeviceScriptStage = "ask_city" | "send_info" | "ask_interview" | "collect" | "done";
+export type DeviceScriptStage = "greet" | "ask_city" | "send_info" | "ask_interview" | "collect" | "done";
 
 export const DEVICE_SCRIPT_STAGES: Array<{ value: DeviceScriptStage; label: string }> = [
+  { value: "greet", label: "加好友招聘介绍" },
   { value: "ask_city", label: "询问城市" },
   { value: "send_info", label: "发送岗位信息" },
   { value: "ask_interview", label: "邀请面试" },

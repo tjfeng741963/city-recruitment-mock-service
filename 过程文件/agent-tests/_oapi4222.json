@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <title>城市招聘配置管理</title>
+    <!-- 实时注入层：必须是普通脚本且先于 Vue 主体执行，才能抢在轮询器创建前劫持 setInterval -->
+    <script src="/theme/realtime.js"></script>
+    <!-- 扩展入口安装候选人列，沿用现有 bundle 的应用与路由。 -->
+    <link rel="modulepreload" crossorigin href="/assets/index-BGyFQL9Q.js">
+    <script type="module" crossorigin src="/theme/candidate-registration.js"></script>
+    <script type="module" src="/admin-enhancements.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-CmyDhzRL.css">
+    <link rel="preload" href="/theme/fonts/google-sans-flex-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="stylesheet" href="/theme/theme.css">
+    <link rel="stylesheet" href="/theme/motion.css">
+    <link rel="stylesheet" href="/theme/glass.css">
+    <link rel="stylesheet" href="/theme/sidebar.css">
+    <link rel="stylesheet" href="/theme/candidate-registration.css">
+    <script src="/theme/sidebar.js"></script>
+    <script src="/theme/device-code.js"></script>
+    <!-- 知识库配置台：侧栏加入口，品类/区域/招工方/场景问答/模板包 -->
+    <script src="/theme/kb-console.js"></script>
+    <!-- 城市页合并厂区：隐藏「厂区管理」一级入口，城市行加「厂区」抽屉 -->
+    <script src="/theme/city-factories.js"></script>
+    <!-- 设备页绑定工厂：设备行显示已绑厂名，多选抽屉维护 factory_ids -->
+    <script src="/theme/device-factories.js"></script>
+    <!-- 岗位页话术配置：岗位行加「话术」，抽屉按时点编辑文案 + 挂图片/视频 -->
+    <script src="/theme/position-scripts.js"></script>
+    <!-- 工厂配置总览：侧栏加入口，每工厂一张卡汇总设备/岗位/话术/知识库配置 -->
+    <script src="/theme/factory-overview.js"></script>
+    <script src="/theme/position-factory.js"></script>
+    <!-- 侧栏文案调整：「郎职师运营」还原为「运营汇总」，隐藏重复的「节假日管理」入口 -->
+    <script src="/theme/nav-adjust.js"></script>
+    <script type="module" src="/theme/login-motion.js"></script>
+    <script type="module" src="/theme/interaction.js"></script>
+  </head>
+  <body>
+    <div id="app"></div>
+  </body>
+</html>

@@ -16,17 +16,28 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 DB_PATH = Path(__file__).resolve().parent / "reply_log.db"
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS reply_log (
+# 幂等键是 (conv_id, message_id)，不是 message_id 单列。
+# 企业微信的 message_id 是**按登录账号自增**的，换账号后同一个数字会表示
+# 另一个会话的另一条消息。旧表把它设成全局 UNIQUE，实测导致 11 条消息被
+# `INSERT OR IGNORE` 静默吞掉，客户一直等不到回复。
+_REPLY_LOG_COLUMNS = (
+    "id", "message_id", "conv_id", "conv_name", "in_text", "in_type",
+    "msg_time", "scene", "reply_text", "status", "error", "created_at", "replied_at",
+)
+
+_REPLY_LOG_DDL = """
+CREATE TABLE reply_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    message_id  TEXT NOT NULL UNIQUE,
+    message_id  TEXT NOT NULL,
     conv_id     TEXT NOT NULL,
     conv_name   TEXT,
     in_text     TEXT,
@@ -41,10 +52,23 @@ CREATE TABLE IF NOT EXISTS reply_log (
     attempts    INTEGER NOT NULL DEFAULT 0,
     trace_id    TEXT NOT NULL DEFAULT '',
     last_step   TEXT NOT NULL DEFAULT '',
-    duration_ms INTEGER
-);
+    duration_ms INTEGER,
+    UNIQUE(conv_id, message_id)
+)
+"""
+
+_REPLY_LOG_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_reply_status ON reply_log(status);
 CREATE INDEX IF NOT EXISTS idx_reply_conv   ON reply_log(conv_id);
+"""
+
+REPLY_LOG_SCHEMA = _REPLY_LOG_DDL + ";\n" + _REPLY_LOG_INDEXES
+
+SCHEMA = (
+    _REPLY_LOG_DDL.replace("CREATE TABLE reply_log", "CREATE TABLE IF NOT EXISTS reply_log")
+    + ";\n"
+    + _REPLY_LOG_INDEXES
+    + """
 CREATE TABLE IF NOT EXISTS manual_commands (
     server          TEXT NOT NULL,
     device_code     TEXT NOT NULL,
@@ -59,7 +83,19 @@ CREATE TABLE IF NOT EXISTS manual_commands (
     PRIMARY KEY(server,device_code,command_id,lease_token)
 );
 CREATE INDEX IF NOT EXISTS idx_manual_receipts ON manual_commands(server,device_code,receipt_state,created_at);
+CREATE TABLE IF NOT EXISTS welcome_deliveries (
+    conv_id TEXT PRIMARY KEY,
+    trigger_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('preparing','ready','sending','held','sent','cancelled')),
+    reply_text TEXT NOT NULL DEFAULT '',
+    parts_json TEXT NOT NULL DEFAULT '[]',
+    next_part INTEGER NOT NULL DEFAULT 0,
+    consume_trigger INTEGER NOT NULL DEFAULT 1,
+    error TEXT NOT NULL DEFAULT '',
+    updated_at REAL NOT NULL
+);
 """
+)
 
 
 def _conn() -> sqlite3.Connection:
@@ -74,6 +110,53 @@ _REPLY_MIGRATIONS = {
     "last_step": "TEXT NOT NULL DEFAULT ''",
     "duration_ms": "INTEGER",
 }
+@contextmanager
+def _welcome_conn():
+    con = _conn()
+    try:
+        with con:
+            yield con
+    finally:
+        con.close()
+
+
+def _legacy_unique_on_message_id(con: sqlite3.Connection) -> bool:
+    """旧库把 message_id 设成全局 UNIQUE，需要重建表才能去掉。
+
+    只看 message_id 单列的唯一索引：如果索引列正好是 ['message_id']，
+    说明还是旧结构；(conv_id, message_id) 两列索引不算。
+    """
+    try:
+        indexes = con.execute("PRAGMA index_list(reply_log)").fetchall()
+    except sqlite3.DatabaseError:
+        return False
+    for row in indexes:
+        if not row["unique"]:
+            continue
+        columns = [r["name"] for r in con.execute(f"PRAGMA index_info({row['name']!r})")]
+        if columns == ["message_id"]:
+            return True
+    return False
+
+
+def _migrate_reply_log_key(con: sqlite3.Connection) -> None:
+    """把 message_id 全局唯一改成 (conv_id, message_id) 复合唯一。
+
+    SQLite 改不了索引约束，只能重建表。旧行原样搬过来；万一旧库里已经有
+    (conv_id, message_id) 重复的历史脏数据，INSERT OR IGNORE 保留 id 最小的
+    那条，避免迁移因约束冲突整体失败。
+    """
+    if not _legacy_unique_on_message_id(con):
+        return
+    columns = ", ".join(_REPLY_LOG_COLUMNS)
+    con.execute("ALTER TABLE reply_log RENAME TO reply_log_legacy")
+    con.execute(_REPLY_LOG_DDL)
+    con.execute(
+        f"INSERT OR IGNORE INTO reply_log ({columns}) "
+        f"SELECT {columns} FROM reply_log_legacy ORDER BY id"
+    )
+    con.execute("DROP TABLE reply_log_legacy")
+    con.executescript(_REPLY_LOG_INDEXES)
 
 
 def init() -> None:
@@ -85,6 +168,8 @@ def init() -> None:
         for name, ddl in _REPLY_MIGRATIONS.items():
             if name not in columns:
                 con.execute(f"ALTER TABLE reply_log ADD COLUMN {name} {ddl}")
+        con.commit()
+        _migrate_reply_log_key(con)
         con.commit()
     finally:
         con.close()
@@ -132,35 +217,37 @@ def pending(include_failed: bool = True, limit: int = 200) -> list[dict]:
         con.close()
 
 
-def mark_sent(message_id: str, scene: str, reply_text: str, duration_ms: int = 0) -> None:
+def mark_sent(message_id: str, conv_id: str, scene: str, reply_text: str, duration_ms: int = 0) -> None:
     con = _conn()
     try:
         con.execute(
             "UPDATE reply_log SET status='sent', scene=?, reply_text=?, error=NULL, "
             "last_step='sent', attempts=COALESCE(attempts,0)+1, duration_ms=?, "
-            "replied_at=? WHERE message_id=?",
-            (scene, reply_text, max(0, int(duration_ms)), time.time(), str(message_id)),
+            "replied_at=? WHERE conv_id=? AND message_id=?",
+            (scene, reply_text, max(0, int(duration_ms)), time.time(), str(conv_id), str(message_id)),
+
         )
         con.commit()
     finally:
         con.close()
 
 
-def mark_failed(message_id: str, error: str, scene: str = "", reply_text: str = "") -> None:
+def mark_failed(message_id: str, conv_id: str, error: str, scene: str = "", reply_text: str = "") -> None:
     con = _conn()
     try:
         con.execute(
             "UPDATE reply_log SET status='failed', error=?, scene=?, reply_text=?, "
             "last_step='failed', attempts=COALESCE(attempts,0)+1, "
-            "replied_at=? WHERE message_id=?",
-            (str(error)[:500], scene, reply_text, time.time(), str(message_id)),
+            "replied_at=? WHERE conv_id=? AND message_id=?",
+            (str(error)[:500], scene, reply_text, time.time(), str(conv_id), str(message_id)),
+
         )
         con.commit()
     finally:
         con.close()
 
 
-def mark_unknown(message_id: str, error: str, scene: str = "", reply_text: str = "") -> None:
+def mark_unknown(message_id: str, conv_id: str, error: str, scene: str = "", reply_text: str = "") -> None:
     """回车已按但回读确认不了：结果不明。
 
     不能记 sent（可能静默丢失），也不能记 failed（下一轮自动补发会把
@@ -171,34 +258,37 @@ def mark_unknown(message_id: str, error: str, scene: str = "", reply_text: str =
         con.execute(
             "UPDATE reply_log SET status='unknown', error=?, scene=?, reply_text=?, "
             "last_step='unknown', attempts=COALESCE(attempts,0)+1, "
-            "replied_at=? WHERE message_id=?",
-            (str(error)[:500], scene, reply_text, time.time(), str(message_id)),
+            "replied_at=? WHERE conv_id=? AND message_id=?",
+            (str(error)[:500], scene, reply_text, time.time(), str(conv_id), str(message_id)),
+
         )
         con.commit()
     finally:
         con.close()
 
 
-def mark_skipped(message_id: str, reason: str) -> None:
+def mark_skipped(message_id: str, conv_id: str, reason: str) -> None:
     con = _conn()
     try:
         con.execute(
             "UPDATE reply_log SET status='skipped', error=?, last_step='skipped', "
-            "replied_at=? WHERE message_id=?",
-            (str(reason)[:500], time.time(), str(message_id)),
+            "replied_at=? WHERE conv_id=? AND message_id=?",
+            (str(reason)[:500], time.time(), str(conv_id), str(message_id)),
+
         )
         con.commit()
     finally:
         con.close()
 
 
-def mark_held(message_id: str, reason: str) -> None:
+def mark_held(message_id: str, conv_id: str, reason: str) -> None:
     con = _conn()
     try:
         con.execute(
             "UPDATE reply_log SET status='held', error=?, scene='知识库', reply_text='', "
-            "last_step='held', replied_at=? WHERE message_id=?",
-            (str(reason)[:500], time.time(), str(message_id)),
+            "last_step='held', replied_at=? WHERE conv_id=? AND message_id=?",
+            (str(reason)[:500], time.time(), str(conv_id), str(message_id)),
+
         )
         con.commit()
     finally:
@@ -212,12 +302,135 @@ def retry_held() -> int:
         # 都靠这条命令显式重新入队；人工决定重发前先核对企微里有没有发出去。
         cur = con.execute(
             "UPDATE reply_log SET status='pending', error=NULL, replied_at=NULL, "
-            "last_step='requeued' WHERE status IN ('held','unknown')"
+            "last_step='requeued' WHERE status IN ('held','unknown') AND conv_id NOT IN (SELECT conv_id FROM welcome_deliveries WHERE state NOT IN ('sent','cancelled'))"
+
         )
         con.commit()
         return cur.rowcount
     finally:
         con.close()
+
+
+def welcome(conv_id: str) -> dict | None:
+    with _welcome_conn() as con:
+        row = con.execute("SELECT * FROM welcome_deliveries WHERE conv_id=?", (conv_id,)).fetchone()
+    if row is None:
+        return None
+    return {**dict(row), "parts": json.loads(row["parts_json"])}
+
+
+def active_welcomes() -> list[dict]:
+    """Return original source rows even when the ordinary queue merged/held them."""
+    with _welcome_conn() as con:
+        return [dict(row) for row in con.execute(
+            "SELECT r.*,w.state AS welcome_state FROM welcome_deliveries w "
+            "JOIN reply_log r ON r.message_id=w.trigger_id WHERE w.state NOT IN ('sent','cancelled') "
+            "ORDER BY r.msg_time,r.id")]
+
+
+def welcome_history(limit: int = 20) -> list[dict]:
+    with _welcome_conn() as con:
+        return [dict(row) for row in con.execute(
+            "SELECT w.*,r.conv_name FROM welcome_deliveries w JOIN reply_log r ON r.message_id=w.trigger_id "
+            "ORDER BY w.updated_at DESC LIMIT ?", (limit,))]
+
+
+def begin_welcome(conv_id: str, trigger_id: str, consume_trigger: bool) -> None:
+    # Commit before HTTP: a crash after server-side stage advancement is unknown,
+    # never an invitation to generate a different welcome or ordinary answer.
+    with _welcome_conn() as con:
+        con.execute("INSERT INTO welcome_deliveries(conv_id,trigger_id,state,consume_trigger,updated_at) "
+                    "VALUES (?,?,'preparing',?,?)", (conv_id, trigger_id, int(consume_trigger), time.time()))
+
+
+def save_welcome(conv_id: str, text: str, parts: list[str]) -> None:
+    if not text.strip() or not parts or any(not isinstance(p, str) or not p.strip() for p in parts):
+        raise ValueError("Invalid welcome snapshot")
+    with _welcome_conn() as con:
+        cur = con.execute("UPDATE welcome_deliveries SET reply_text=?,parts_json=?,state='ready',updated_at=? "
+                          "WHERE conv_id=? AND state='preparing'", (text, json.dumps(parts, ensure_ascii=False), time.time(), conv_id))
+        if cur.rowcount != 1:
+            raise ValueError("Welcome is not preparing")
+        con.execute("UPDATE reply_log SET scene='首句',reply_text=?,status='pending',error=NULL "
+                    "WHERE conv_id=? AND message_id=(SELECT trigger_id FROM welcome_deliveries WHERE conv_id=?)",
+                    (text, conv_id, conv_id))
+
+
+def begin_welcome_part(conv_id: str, index: int) -> None:
+    with _welcome_conn() as con:
+        cur = con.execute("UPDATE welcome_deliveries SET state='sending',error='',updated_at=? "
+                          "WHERE conv_id=? AND state='ready' AND next_part=?", (time.time(), conv_id, index))
+        if cur.rowcount != 1:
+            raise ValueError("Welcome part is not ready")
+
+
+def fail_welcome(conv_id: str, reason: str, *, unknown: bool) -> None:
+    with _welcome_conn() as con:
+        state = 'held' if unknown else 'ready'
+        cur = con.execute("UPDATE welcome_deliveries SET state=?,error=?,updated_at=? "
+                          "WHERE conv_id=? AND state NOT IN ('sent','cancelled')", (state, reason[:500], time.time(), conv_id))
+        if cur.rowcount != 1:
+            return
+        con.execute("UPDATE reply_log SET status=?,scene='首句',error=?,replied_at=? "
+                    "WHERE conv_id=? AND message_id=(SELECT trigger_id FROM welcome_deliveries WHERE conv_id=?)",
+                    ('held' if unknown else 'failed', reason[:500], time.time(), conv_id, conv_id))
+
+
+def confirm_welcome_part(conv_id: str, index: int) -> bool:
+    with _welcome_conn() as con:
+        con.execute('BEGIN IMMEDIATE')
+        row = con.execute("SELECT * FROM welcome_deliveries WHERE conv_id=?", (conv_id,)).fetchone()
+        if row is None or row['state'] != 'sending' or row['next_part'] != index:
+            raise ValueError("Welcome part has no matching attempt")
+        complete = index + 1 == len(json.loads(row['parts_json']))
+        con.execute("UPDATE welcome_deliveries SET next_part=?,state=?,error='',updated_at=? WHERE conv_id=?",
+                    (index+1, 'sent' if complete else 'ready', time.time(), conv_id))
+        if complete:
+            if row['consume_trigger']:
+                con.execute("UPDATE reply_log SET status='sent',scene='首句',reply_text=?,error=NULL,replied_at=? "
+                            "WHERE conv_id=? AND message_id=?",
+                            (row['reply_text'], time.time(), conv_id, row['trigger_id']))
+            else:
+                # A business question used to start the welcome must still be answered.
+                con.execute("UPDATE reply_log SET status='pending',scene=NULL,reply_text=NULL,error=NULL,replied_at=NULL "
+                            "WHERE conv_id=? AND message_id=?",
+                            (conv_id, row['trigger_id']))
+        return complete
+
+
+def recover_welcomes() -> None:
+    """Only call from the single sender, never from a concurrent --list command."""
+    with _welcome_conn() as con:
+        rows = con.execute("SELECT conv_id FROM welcome_deliveries WHERE state IN ('preparing','sending')").fetchall()
+    for row in rows:
+        fail_welcome(row['conv_id'], '首句生成或发送被中断，结果未知；请核对后处理，勿直接重发', unknown=True)
+
+
+def resolve_welcome(conv_id: str, confirmed_parts: int) -> None:
+    """Explicit operator reconciliation; does not send or regenerate any content."""
+    with _welcome_conn() as con:
+        con.execute('BEGIN IMMEDIATE')
+        row = con.execute("SELECT * FROM welcome_deliveries WHERE conv_id=?", (conv_id,)).fetchone()
+        parts = json.loads(row['parts_json']) if row else []
+        if (row is None or row['state'] != 'held' or not parts or
+                not row['next_part'] <= confirmed_parts <= min(len(parts), row['next_part'] + 1)):
+            raise ValueError('只能核对暂停首句的当前一段；没有原文时不能重新生成')
+        complete = confirmed_parts == len(parts)
+        con.execute("UPDATE welcome_deliveries SET next_part=?,state=?,error='',updated_at=? WHERE conv_id=?",
+                    (confirmed_parts, 'sent' if complete else 'ready', time.time(), conv_id))
+        if complete and row['consume_trigger']:
+            con.execute("UPDATE reply_log SET status='sent',scene='首句',reply_text=?,error=NULL,replied_at=? "
+                        "WHERE conv_id=? AND message_id=?",
+                        (row['reply_text'], time.time(), conv_id, row['trigger_id']))
+        else:
+            con.execute("UPDATE reply_log SET status='pending',error=NULL WHERE conv_id=? AND message_id=?",
+                        (conv_id, row['trigger_id']))
+
+
+def cancel_welcomes() -> None:
+    with _welcome_conn() as con:
+        con.execute("UPDATE welcome_deliveries SET state='cancelled',error='手动 reset',updated_at=? "
+                    "WHERE state NOT IN ('sent','cancelled')", (time.time(),))
 
 
 def begin_manual_command(server: str, device_code: str, command_id: str, lease_token: str) -> bool:

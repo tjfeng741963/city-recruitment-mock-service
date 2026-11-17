@@ -1,0 +1,362 @@
+{
+  "fixture": {
+    "subway": {
+      "position_id": 16,
+      "employer_id": 11,
+      "city": "广东城际",
+      "factory_name": "广东城际地铁安检",
+      "job_title": "安检员",
+      "vertical_code": "subway",
+      "employer_label": "线路",
+      "place": "陈村基地",
+      "wage_text": "陈村安保220/天",
+      "hours_text": "8小时/天，两班倒，月休4天",
+      "age_text": "18-45岁",
+      "welfare_text": "安排线路：广东城际全线路",
+      "line_text": "广东城际全线路",
+      "rest_text": "月休4天",
+      "height_text": "男168cm以上，女158cm以上",
+      "tattoo_policy": "手臂无明显纹身",
+      "ethnicity_policy": "不限民族",
+      "cert_text": "身份证原件",
+      "medical_text": "体检费80元，入职满一个月报销",
+      "insurance_text": "转正后购买社保",
+      "regular_text": "试用期1个月",
+      "advance_text": "每周可预支500元",
+      "dorm_text": "6人间，空调热水齐全",
+      "interview_time": "周一至周六 上午11:00-12:00、下午14:00-17:00",
+      "province": "广东",
+      "city_name": "广东城际",
+      "media": []
+    },
+    "factory": {
+      "position_id": 31,
+      "employer_id": 12,
+      "city": "广州",
+      "factory_name": "番禺某电子厂",
+      "job_title": "普工",
+      "vertical_code": "factory",
+      "employer_label": "厂名",
+      "place": "番禺区石楼",
+      "wage_text": "22元/小时，月综合6500-7500",
+      "hours_text": "10小时/天，长白班",
+      "age_text": "16-48岁",
+      "welfare_text": "包吃包住，宿舍6人间有空调",
+      "dorm_text": "6人间，空调热水",
+      "interview_time": "每天12:00-12:30",
+      "media": []
+    }
+  },
+  "subway_rows": [
+    {
+      "问题": "包吃住吗",
+      "fact直调": "（空）",
+      "step实际回复": "这个我确认一下，稍后回你 / 这两天能不能过来面试？能来的话我把名额给你留着。",
+      "来源": "兜底-确认一下",
+      "stage": "ask_interview",
+      "unknown_question": "包吃住吗",
+      "slots带答案": {
+        "wage_text": "陈村安保220/天",
+        "hours_text": "8小时/天，两班倒，月休4天",
+        "age_text": "18-45岁",
+        "welfare_text": "安排线路：广东城际全线路",
+        "line_text": "广东城际全线路",
+        "dorm_text": "6人间，空调热水齐全",
+        "tattoo_policy": "手臂无明显纹身",
+        "medical_text": "体检费80元，入职满一个月报销",
+        "advance_text": "每周可预支500元",
+        "interview_time": "周一至周六 上午11:00-12:00、下午14:00-17:00",
+        "place": "陈村基地"
+      }
+    },
+    {
+      "问题": "宿舍几人间有空调吗",
+      "fact直调": "（空）",
+      "step实际回复": "这个我确认一下，稍后回你 / 这两天能不能过来面试？能来的话我把名额给你留着。",
+      "来源": "兜底-确认一下",
+      "stage": "ask_interview",
+      "unknown_question": "宿舍几人间有空调吗",
+      "slots带答案": {
+        "wage_text": "陈村安保220/天",
+        "hours_text": "8小时/天，两班倒，月休4天",
+        "age_text": "18-45岁",
+        "welfare_text": "安排线路：广东城际全线路",
+        "line_text": "广东城际全线路",
+        "dorm_text": "6人间，空调热水齐全",
+        "tattoo_policy": "手臂无明显纹身",
+        "medical_text": "体检费80元，入职满一个月报销",
+        "advance_text": "每周可预支500元",
+        "interview_time": "周一至周六 上午11:00-12:00、下午14:00-17:00",
+        "place": "陈村基地"
+      }
+    },
+    {
+      "问题": "要押金吗",
+      "fact直调": "（空）",
+      "step实际回复": "这个我确认一下，稍后回你 / 这两天能不能过来面试？能来的话我把名额给你留着。",
+      "来源": "兜底-确认一下",
+      "stage": "ask_interview",
+      "unknown_question": "要押金吗",
+      "slots带答案": {
+        "wage_text": "陈村安保220/天",
+        "hours_text": "8小时/天，两班倒，月休4天",
+        "age_text": "18-45岁",
+        "welfare_text": "安排线路：广东城际全线路",
+        "line_text": "广东城际全线路",
+        "dorm_text": "6人间，空调热水齐全",
+        "tattoo_policy": "手臂无明显纹身",
+        "medical_text": "体检费80元，入职满一个月报销",
+        "advance_text": "每周可预支500元",
+        "interview_time": "周一至周六 上午11:00-12:00、下午14:00-17:00",
+        "place": "陈村基地"
+      }
+    },
+    {
+      "问题": "多大年龄能做",
+      "fact直调": "年龄要求：18-45岁",
+      "step实际回复": "你看是明天还是后天方便过来？我好提前给你登记。",
+      "来源": "兜底-邀约（答非所问）",
+      "stage": "ask_interview",
+      "unknown_question": "",
+      "slots带答案": {
+        "wage_text": "陈村安保220/天",
+        "hours_text": "8小时/天，两班倒，月休4天",
+        "age_text": "18-45岁",
+        "welfare_text": "安排线路：广东城际全线路",
+        "line_text": "广东城际全线路",
+        "dorm_text": "6人间，空调热水齐全",
+        "tattoo_policy": "手臂无明显纹身",
+        "medical_text": "体检费80元，入职满一个月报销",
+        "advance_text": "每周可预支500元",
+        "interview_time": "周一至周六 上午11:00-12:00、下午14:00-17:00",
+        "place": "陈村基地"
+      }
+    },
+    {
+      "问题": "什么时候面试",
+      "fact直调": "（空）",
+      "step实际回复": "这个我确认一下，稍后回你 / 这两天能不能过来面试？能来的话我把名额给你留着。",
+      "来源": "兜底-确认一下",
+      "stage": "ask_interview",
+      "unknown_question": "什么时候面试",
+      "slots带答案": {
+        "wage_text": "陈村安保220/天",
+        "hours_text": "8小时/天，两班倒，月休4天",
+        "age_text": "18-45岁",
+        "welfare_text": "安排线路：广东城际全线路",
+        "line_text": "广东城际全线路",
+        "dorm_text": "6人间，空调热水齐全",
+        "tattoo_policy": "手臂无明显纹身",
+        "medical_text": "体检费80元，入职满一个月报销",
+        "advance_text": "每周可预支500元",
+        "interview_time": "周一至周六 上午11:00-12:00、下午14:00-17:00",
+        "place": "陈村基地"
+      }
+    },
+    {
+      "问题": "面试在哪儿",
+      "fact直调": "地点：陈村基地",
+      "step实际回复": "地点：陈村基地",
+      "来源": "fact",
+      "stage": "ask_interview",
+      "unknown_question": "",
+      "slots带答案": {
+        "wage_text": "陈村安保220/天",
+        "hours_text": "8小时/天，两班倒，月休4天",
+        "age_text": "18-45岁",
+        "welfare_text": "安排线路：广东城际全线路",
+        "line_text": "广东城际全线路",
+        "dorm_text": "6人间，空调热水齐全",
+        "tattoo_policy": "手臂无明显纹身",
+        "medical_text": "体检费80元，入职满一个月报销",
+        "advance_text": "每周可预支500元",
+        "interview_time": "周一至周六 上午11:00-12:00、下午14:00-17:00",
+        "place": "陈村基地"
+      }
+    },
+    {
+      "问题": "一天上几个小时",
+      "fact直调": "班次：8小时/天，两班倒，月休4天",
+      "step实际回复": "你看是明天还是后天方便过来？我好提前给你登记。",
+      "来源": "兜底-邀约（答非所问）",
+      "stage": "ask_interview",
+      "unknown_question": "",
+      "slots带答案": {
+        "wage_text": "陈村安保220/天",
+        "hours_text": "8小时/天，两班倒，月休4天",
+        "age_text": "18-45岁",
+        "welfare_text": "安排线路：广东城际全线路",
+        "line_text": "广东城际全线路",
+        "dorm_text": "6人间，空调热水齐全",
+        "tattoo_policy": "手臂无明显纹身",
+        "medical_text": "体检费80元，入职满一个月报销",
+        "advance_text": "每周可预支500元",
+        "interview_time": "周一至周六 上午11:00-12:00、下午14:00-17:00",
+        "place": "陈村基地"
+      }
+    },
+    {
+      "问题": "工资多少",
+      "fact直调": "工价：陈村安保220/天",
+      "step实际回复": "工价：陈村安保220/天",
+      "来源": "fact",
+      "stage": "ask_interview",
+      "unknown_question": "",
+      "slots带答案": {
+        "wage_text": "陈村安保220/天",
+        "hours_text": "8小时/天，两班倒，月休4天",
+        "age_text": "18-45岁",
+        "welfare_text": "安排线路：广东城际全线路",
+        "line_text": "广东城际全线路",
+        "dorm_text": "6人间，空调热水齐全",
+        "tattoo_policy": "手臂无明显纹身",
+        "medical_text": "体检费80元，入职满一个月报销",
+        "advance_text": "每周可预支500元",
+        "interview_time": "周一至周六 上午11:00-12:00、下午14:00-17:00",
+        "place": "陈村基地"
+      }
+    },
+    {
+      "问题": "有日结吗",
+      "fact直调": "（空）",
+      "step实际回复": "这个我确认一下，稍后回你 / 这两天能不能过来面试？能来的话我把名额给你留着。",
+      "来源": "兜底-确认一下",
+      "stage": "ask_interview",
+      "unknown_question": "有日结吗",
+      "slots带答案": {
+        "wage_text": "陈村安保220/天",
+        "hours_text": "8小时/天，两班倒，月休4天",
+        "age_text": "18-45岁",
+        "welfare_text": "安排线路：广东城际全线路",
+        "line_text": "广东城际全线路",
+        "dorm_text": "6人间，空调热水齐全",
+        "tattoo_policy": "手臂无明显纹身",
+        "medical_text": "体检费80元，入职满一个月报销",
+        "advance_text": "每周可预支500元",
+        "interview_time": "周一至周六 上午11:00-12:00、下午14:00-17:00",
+        "place": "陈村基地"
+      }
+    },
+    {
+      "问题": "体检费谁出",
+      "fact直调": "（空）",
+      "step实际回复": "你看是明天还是后天方便过来？我好提前给你登记。",
+      "来源": "兜底-邀约（答非所问）",
+      "stage": "ask_interview",
+      "unknown_question": "",
+      "slots带答案": {
+        "wage_text": "陈村安保220/天",
+        "hours_text": "8小时/天，两班倒，月休4天",
+        "age_text": "18-45岁",
+        "welfare_text": "安排线路：广东城际全线路",
+        "line_text": "广东城际全线路",
+        "dorm_text": "6人间，空调热水齐全",
+        "tattoo_policy": "手臂无明显纹身",
+        "medical_text": "体检费80元，入职满一个月报销",
+        "advance_text": "每周可预支500元",
+        "interview_time": "周一至周六 上午11:00-12:00、下午14:00-17:00",
+        "place": "陈村基地"
+      }
+    },
+    {
+      "问题": "纹身能不能进",
+      "fact直调": "（空）",
+      "step实际回复": "这个我确认一下，稍后回你 / 这两天能不能过来面试？能来的话我把名额给你留着。",
+      "来源": "兜底-确认一下",
+      "stage": "ask_interview",
+      "unknown_question": "纹身能不能进",
+      "slots带答案": {
+        "wage_text": "陈村安保220/天",
+        "hours_text": "8小时/天，两班倒，月休4天",
+        "age_text": "18-45岁",
+        "welfare_text": "安排线路：广东城际全线路",
+        "line_text": "广东城际全线路",
+        "dorm_text": "6人间，空调热水齐全",
+        "tattoo_policy": "手臂无明显纹身",
+        "medical_text": "体检费80元，入职满一个月报销",
+        "advance_text": "每周可预支500元",
+        "interview_time": "周一至周六 上午11:00-12:00、下午14:00-17:00",
+        "place": "陈村基地"
+      }
+    },
+    {
+      "问题": "我52了还能去吗",
+      "fact直调": "（空）",
+      "step实际回复": "这个我确认一下，稍后回你 / 这两天能不能过来面试？能来的话我把名额给你留着。",
+      "来源": "兜底-确认一下",
+      "stage": "ask_interview",
+      "unknown_question": "我52了还能去吗",
+      "slots带答案": {
+        "wage_text": "陈村安保220/天",
+        "hours_text": "8小时/天，两班倒，月休4天",
+        "age_text": "18-45岁",
+        "welfare_text": "安排线路：广东城际全线路",
+        "line_text": "广东城际全线路",
+        "dorm_text": "6人间，空调热水齐全",
+        "tattoo_policy": "手臂无明显纹身",
+        "medical_text": "体检费80元，入职满一个月报销",
+        "advance_text": "每周可预支500元",
+        "interview_time": "周一至周六 上午11:00-12:00、下午14:00-17:00",
+        "place": "陈村基地"
+      }
+    }
+  ],
+  "factory_control_rows": [
+    {
+      "问题": "包吃住吗",
+      "fact直调": "吃住：包吃包住，宿舍6人间有空调",
+      "step实际回复": "吃住：包吃包住，宿舍6人间有空调",
+      "来源": "fact",
+      "stage": "ask_interview",
+      "unknown_question": "",
+      "slots带答案": {
+        "wage_text": "22元/小时，月综合6500-7500",
+        "hours_text": "10小时/天，长白班",
+        "age_text": "16-48岁",
+        "welfare_text": "包吃包住，宿舍6人间有空调",
+        "dorm_text": "6人间，空调热水",
+        "interview_time": "每天12:00-12:30",
+        "place": "番禺区石楼"
+      }
+    },
+    {
+      "问题": "宿舍几人间有空调吗",
+      "fact直调": "吃住：包吃包住，宿舍6人间有空调",
+      "step实际回复": "吃住：包吃包住，宿舍6人间有空调",
+      "来源": "fact",
+      "stage": "ask_interview",
+      "unknown_question": "",
+      "slots带答案": {
+        "wage_text": "22元/小时，月综合6500-7500",
+        "hours_text": "10小时/天，长白班",
+        "age_text": "16-48岁",
+        "welfare_text": "包吃包住，宿舍6人间有空调",
+        "dorm_text": "6人间，空调热水",
+        "interview_time": "每天12:00-12:30",
+        "place": "番禺区石楼"
+      }
+    },
+    {
+      "问题": "有日结吗",
+      "fact直调": "（空）",
+      "step实际回复": "这个我确认一下，稍后回你 / 这两天能不能过来面试？能来的话我把名额给你留着。",
+      "来源": "兜底-确认一下",
+      "stage": "ask_interview",
+      "unknown_question": "有日结吗",
+      "slots带答案": {
+        "wage_text": "22元/小时，月综合6500-7500",
+        "hours_text": "10小时/天，长白班",
+        "age_text": "16-48岁",
+        "welfare_text": "包吃包住，宿舍6人间有空调",
+        "dorm_text": "6人间，空调热水",
+        "interview_time": "每天12:00-12:30",
+        "place": "番禺区石楼"
+      }
+    }
+  ],
+  "age_probe": {
+    "extract_age_from_query('我52了还能去吗')": 52,
+    "岗位age_text": "18-45岁",
+    "flow是否调用该函数": false
+  }
+}
