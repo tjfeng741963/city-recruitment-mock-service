@@ -605,6 +605,38 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         };
       }
 
+      // 媒体名兜底 + 串岗防线（2026-11-17 模拟实测抓到两类问题）：
+      // ① 模型偶尔会把事实卡字段名「interview_address_image」本身当成
+      //    图片文件名输出——命中事实卡媒体字段 → 替换成字段值（真实文件名）
+      // ② 模型可能输出不属于本岗位的媒体名（通用池之外的）——直接剥掉，
+      //    绝不把广州的地点图发给深圳的客户。可发集合 = 通用池 ∪ 本岗位绑定
+      {
+        const allowed = new Set(
+          (
+            db
+              .prepare(
+                "SELECT name FROM media_assets WHERE status='enabled' AND (position_id=0 OR position_id=?)",
+              )
+              .all(positionId) as Array<{ name: string }>
+          ).map((row) => row.name),
+        );
+        const resolved: typeof replyPayload.messages = [];
+        for (const message of replyPayload.messages) {
+          if (message.type !== "image" && message.type !== "video") {
+            resolved.push(message);
+            continue;
+          }
+          const key = String(message.name ?? "").trim();
+          if (!key) continue;
+          const value = facts[key];
+          const name = value && value !== key ? value : key;
+          if (!allowed.has(name)) continue;
+          message.name = name;
+          resolved.push(message);
+        }
+        replyPayload.messages = resolved;
+      }
+
       // 信任模式：不做代码级护栏，模型按 prompt 约束引用话术原文（2026-11-17）。
       // 会话成功才有记忆：客户这句 + 模型完整 JSON 输出（messages/capture/
       // interview）落进 agent_session——历史信封要装完整结构，模型才不会把
