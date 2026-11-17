@@ -63,9 +63,16 @@ def _key(vk: int, down: bool) -> None:
 
 
 def send_char(ch: str) -> None:
-    for flag in (0, KEYEVENTF_KEYUP):
+    """数字走标准虚拟键码（VK 0x30-0x39 + 扫描码），兼容性最好。
+
+    之前用 KEYEVENTF_UNICODE（VK_PACKET）企微自绘输入框不认——
+    点击聚焦成功但数字不进格子（2026-11-17 用户实测）。
+    """
+    vk = 0x30 + int(ch)  # "0"-"9" → VK 0x30-0x39
+    scan = u.MapVirtualKeyW(vk, 0)
+    for down in (True, False):
         ii = Input_I()
-        ii.ki = KeyBdInput(0, ord(ch), KEYEVENTF_UNICODE | flag, 0, None)
+        ii.ki = KeyBdInput(vk, scan, 0 if down else KEYEVENTF_KEYUP, 0, None)
         arr = (Input * 1)(Input(INPUT_KEYBOARD, ii))
         u.SendInput(1, arr, ctypes.sizeof(Input))
         time.sleep(0.12)
@@ -97,35 +104,20 @@ def clear_input() -> None:
 
 
 def find_windows() -> dict:
-    """收集企微全部可见顶层窗口，按类名归类。"""
-    import subprocess
+    """按类名收集企微顶层窗口（WXworkWindow=验证码弹窗，WeChatLogin=登录窗）。
 
-    out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq WXWork.exe", "/FO", "CSV"],
-                         capture_output=True, text=True).stdout
-    pids = []
-    for line in out.splitlines():
-        if "WXWork" in line:
-            parts = line.split('","')
-            if len(parts) > 1:
-                try:
-                    pids.append(int(parts[1].strip('"')))
-                except ValueError:
-                    pass
-
+    不用 tasklist 过滤 PID：计划任务环境里 tasklist 解析曾失败导致
+    「可见企微窗口: {}」直接退出（2026-11-17）。这两个类名足够特异。
+    """
     found = {}
 
     def cb(hwnd, _):
         if not win32gui.IsWindowVisible(hwnd):
             return True
-        try:
-            pid = win32gui.GetWindowThreadProcessId(hwnd)[1]
-        except Exception:
-            return True
-        if pid not in pids:
-            return True
         cls = win32gui.GetClassName(hwnd)
-        # 同类窗口取最后一个（最上层）
-        found[cls] = hwnd
+        if cls in ("WXworkWindow", "WeChatLogin"):
+            # 同类窗口取最后一个（最上层）
+            found[cls] = hwnd
         return True
 
     win32gui.EnumWindows(cb, None)
