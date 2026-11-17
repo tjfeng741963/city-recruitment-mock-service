@@ -1,15 +1,18 @@
 import type { FastifyInstance } from "fastify";
-import { API_CATALOG } from "./api-catalog.js";
+import { API_CATALOG, type CatalogEndpoint } from "./api-catalog.js";
+import { ROUTE_NOTES } from "./route-notes.js";
 
 /**
  * 接口调试台的后端（/dev 页面用）。
  *
  * 两个接口：
- *   GET /api/v1/debug/catalog  分类目录（人工写的说明 + 示例）
+ *   GET /api/v1/debug/catalog  分类目录（人工详细说明 + 全量路由一句话说明）
  *   GET /api/v1/debug/routes   服务真实注册的全部路由（onRoute 自动收集）
  *
- * 目录和真实路由会做一次差集：代码里有、目录里没写的接口放进 unclassified，
- * 页面底部单独列出。这样「加了接口忘了写说明」是看得见的，不会悄悄过期。
+ * 覆盖顺序：api-catalog.ts 人工写的详细条目优先；没写到的路由按
+ * route-notes.ts 的全量说明归类（含「旧链路·未接线」标记）；两条都没有的
+ * 才进 unclassified。理想状态 unclassified 恒为 0——真出现了说明加了接口
+ * 忘了写说明，页面上看得见。
  *
  * 只给管理员：这份清单等于把整套 API 摊开。
  */
@@ -51,15 +54,41 @@ export function registerApiDebugRoutes(app: FastifyInstance, routes: RouteEntry[
       }
     }
 
-    const all = realRoutes();
-    const unclassified = all.filter((route) => !documented.has(`${route.method} ${route.url}`));
+    // 人工目录没写到的路由：按 route-notes 的全量说明归组
+    const byGroup = new Map<string, CatalogEndpoint[]>();
+    const unclassified: RouteEntry[] = [];
+    for (const route of realRoutes()) {
+      const key = `${route.method} ${route.url}`;
+      if (documented.has(key)) continue;
+      const note = ROUTE_NOTES.find((n) => n.method === route.method && n.url === route.url);
+      if (!note) {
+        unclassified.push(route);
+        continue;
+      }
+      const list = byGroup.get(note.group) || [];
+      list.push({
+        method: note.method,
+        url: note.url,
+        purpose: note.purpose,
+        auth: note.status === "客户端在用" ? "device" : "admin",
+        notes: [note.status],
+      });
+      byGroup.set(note.group, list);
+    }
 
+    const merged = [...API_CATALOG];
+    for (const [group, endpoints] of byGroup) {
+      merged.push({ group, note: `${endpoints.length} 个接口（一句话说明，详情以调用为准）`, endpoints });
+    }
+
+    const total = merged.reduce((sum, g) => sum + g.endpoints.length, 0);
     return {
-      groups: API_CATALOG,
+      groups: merged,
       unclassified,
       stats: {
         documented: documented.size,
-        routes: all.length,
+        noted: byGroup.size > 0 ? [...byGroup.values()].reduce((sum, list) => sum + list.length, 0) : 0,
+        routes: documented.size + [...byGroup.values()].reduce((sum, list) => sum + list.length, 0) + unclassified.length,
         unclassified: unclassified.length,
       },
     };

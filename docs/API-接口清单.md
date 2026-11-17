@@ -186,6 +186,7 @@ HTTP 仍是 200——调用方按 `ok` 判断，不要按状态码。模型输�
 
 | 日期 | 改动 |
 |---|---|
+| 2026-11-17 | chat 加进设备令牌直通清单（客户端对话链路 403 断点修复，路由内校验管理员或设备令牌）；/dev 目录全量覆盖 260 条路由（route-notes.ts 一句话说明 + 在用状态标记），未归类归零 |
 | 2026-11-17 | chat 加 session_key 服务端会话记忆（迁移 039 agent_session）；开场序列每轮由服务端注入为 assistant 历史；客户端 brain 只传 session_key+这句话，删除本地历史构建 |
 | 2026-11-17 | chat 拆除代码级护栏（guardScript 替换 / guardMoney 金额拦截 / script_used 声明），话术约束走 prompt 信任模型；assistant 历史装回 JSON 信封防格式漂移 |
 | 2026-11-17 | chat 接口：assistant 历史由编排层装回 JSON 信封（防多轮格式漂移，实测修掉 5/16 轮解析失败）；金额护栏放行话术原文里的数字；解析失败返回 code=bad_json 且带 latency_ms/usage |

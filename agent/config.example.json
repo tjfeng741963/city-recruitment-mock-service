@@ -10,11 +10,7 @@
   "interval_seconds": 60,
   "dry_run": true,
   "brain": {
-    "mode": "kb",
-    "base_url": "http://127.0.0.1:8090",
-    "username": "local-admin",
-    "password": "填后端管理员密码",
-    "timeout": 20,
-    "history_limit": 6
+    "mode": "agent",
+    "timeout": 45
   }
 }

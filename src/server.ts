@@ -62,6 +62,9 @@ const DEVICE_TOKEN_ROUTES = new Set(["heartbeat", "claim", "receipts", "inbound"
     // 开场清单与回执也是设备调的：设备令牌在路由内校验（与媒体下载同一套）。
     "GET /api/v1/agent/opening",
     "POST /api/v1/agent/opening/log",
+    // Agent 对话：客户端（设备令牌）与调试台（管理员 JWT）都要能调。
+    // 路由内校验「管理员或设备令牌二选一」。
+    "POST /api/v1/agent/chat",
   ]));
 const PUBLIC_ROUTES = new Set([
   "POST /api/v1/auth/login",
@@ -235,8 +238,21 @@ export function buildServer() {
         const issues = collectValidationErrors(contract, request.body, request.query, isMultipart);
         if (issues.length) return reply.code(422).send({ detail: issues });
       }
-      // These four routes authenticate their own per-device tokens, never user JWTs.
-      if (DEVICE_TOKEN_ROUTES.has(`${request.method} ${request.routeOptions.url}`)) return;
+    // These four routes authenticate their own per-device tokens, never user JWTs.
+    if (DEVICE_TOKEN_ROUTES.has(`${request.method} ${request.routeOptions.url}`)) {
+      // 设备令牌不是用户 JWT，不能在这里 401 掉——路由内自校验。
+      // 但管理员 JWT（调试台）也要解析出来给路由用：解析失败不拦。
+      const deviceOptional = request.headers.authorization;
+      if (deviceOptional?.startsWith("Bearer ")) {
+        try {
+          request.auth = auth.me(deviceOptional.slice("Bearer ".length));
+          request.authToken = deviceOptional.slice("Bearer ".length);
+        } catch {
+          // 设备令牌或匿名：request.auth 留空，由路由内 isValidDeviceToken 校验
+        }
+      }
+      return;
+    }
       // Device endpoints are callable anonymously, but a supplied bearer token
       // still identifies the operator and must participate in scope checks.
       // Keep the login endpoint credential-agnostic.

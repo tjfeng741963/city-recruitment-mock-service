@@ -318,7 +318,8 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
 
   // ── 一轮对话 ──────────────────────────────────────────────────
   app.post<{ Body: Record<string, unknown> }>("/api/v1/agent/chat", async (request, reply) => {
-    if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
+    // 客户端（设备令牌）与调试台（管理员 JWT）都可调：对话链路的两个调用方
+    if (!isAdmin(request) && !isValidDeviceToken(db, request)) return reply.code(403).send(ADMIN_REQUIRED);
     const body = request.body ?? {};
     const deviceCode = text(body.device_code).trim();
     const positionId = int(body.position_id) || (deviceCode ? positionOfDevice(db, deviceCode) : 0);
