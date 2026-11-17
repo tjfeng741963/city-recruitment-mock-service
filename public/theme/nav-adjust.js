@@ -39,6 +39,13 @@
     "激活看板",
     "未知问题",
     "运营汇总",
+    // 「复聊激活」分组（2026-11-17 用户截图圈出）：激活名单/策略配置/
+    // 设备配置/语料库全是旧 kb/复聊链路的功能，后端接口已下线（点开 404）。
+    // 子项全隐藏后分组标题由下方逻辑整组隐藏，不留空壳组名。
+    "激活名单",
+    "策略配置",
+    "设备配置",
+    "语料库",
   ];
 
   /** 把节点里的旧文案换成新文案。返回是否改过。 */
@@ -75,6 +82,22 @@
         item.dataset.rkRenamed = "1";
         // 侧栏折叠态的悬浮提示读的是 data-rk-label，改名后要一起更新
         if (item.dataset.rkLabel) item.dataset.rkLabel = span.textContent.trim();
+      }
+    }
+
+    // 子项全部被隐藏的分组，连同组标题整组隐藏——否则留一个点不开的
+    // 空壳组名挂在侧栏（「复聊激活」四个子项全是死菜单后的遗留问题）。
+    for (const sub of sidebar.querySelectorAll(".el-sub-menu")) {
+      if (sub.dataset.rkGroupHidden === "1") continue;
+      const items = sub.querySelectorAll(".el-menu-item");
+      if (!items.length) continue;
+      const allHidden = Array.prototype.every.call(
+        items,
+        (it) => it.style.display === "none",
+      );
+      if (allHidden) {
+        sub.dataset.rkGroupHidden = "1";
+        sub.style.display = "none";
       }
     }
   }
