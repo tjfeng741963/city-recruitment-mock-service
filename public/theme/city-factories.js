@@ -263,6 +263,20 @@
       // 行内「厂区」按钮的样式必须在这里注入：styles() 原本只在 openDrawer
       // （点开抽屉）时调用，用户不点抽屉，按钮就一直是裸文本。
       styles();
+      // 城市招聘状态开关替换为只读胶囊（2026-11-17 用户定论：不给人手改）。
+      // 状态由设备绑定推导（服务端 syncCityRecruitmentStatus）：设备绑定岗位
+      // 的城市=招聘中，其余=已停止。原 el-switch 手动开关已无意义。
+      for (const sw of document.querySelectorAll(".bd-table .el-switch")) {
+        if (sw.dataset.rkRecruit !== undefined) continue;
+        sw.dataset.rkRecruit = "1";
+        const active = sw.classList.contains("is-checked") || sw.getAttribute("aria-checked") === "true";
+        const pill = document.createElement("span");
+        pill.style.cssText = "display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 11px;border-radius:999px;font-size:11.5px;font-weight:600;white-space:nowrap;" +
+          (active ? "background:#c4eed0;color:#146c2e" : "background:#eef0f3;color:#8a929e");
+        pill.textContent = active ? "招聘中（设备绑定）" : "已停止（未绑定设备）";
+        pill.title = "状态由设备绑定自动判定：设备绑定该城市岗位=招聘中；在设备页改绑即自动更新";
+        sw.replaceWith(pill);
+      }
       const rows = document.querySelectorAll(".bd-table .el-table__row");
       if (!rows.length) return;
       const list = await cities();

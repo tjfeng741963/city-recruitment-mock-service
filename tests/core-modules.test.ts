@@ -62,10 +62,10 @@ describe("core CRUD modules", () => {
     expect(byCity.json().items.map((f: { factory_name: string }) => f.factory_name)).toEqual(["测试厂区"]);
   });
 
-  it("updates city status and toggles a featured service position", async () => {
+  it("rejects manual city status changes (device-binding derived) and toggles a featured service position", async () => {
+    // 2026-11-17：招聘状态由设备绑定自动推导，PATCH 手改返回 422
     const city = await app.inject({ method: "PATCH", url: "/api/v1/cities/1/status", headers: { authorization: `Bearer ${token}` }, payload: { recruitment_status: "inactive" } });
-    expect(city.statusCode).toBe(200);
-    expect(city.json().recruitment_status).toBe("inactive");
+    expect(city.statusCode).toBe(422);
     const position = await app.inject({ method: "PUT", url: "/api/v1/service-positions/1/toggle-featured", headers: { authorization: `Bearer ${token}` } });
     expect(position.statusCode).toBe(200);
     expect(position.json().is_featured).toBe(true);

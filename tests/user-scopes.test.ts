@@ -70,10 +70,10 @@ expect(adminCities.json().total).toBe(14);
     const response = await app.inject({ method: "PUT", url: "/api/v1/agent/conversations/700002/restart?device_code=other-device", headers: headers(customerToken) });
     expect(response.statusCode).toBe(403);
   });
-  it("blocks city status changes outside the assigned city scope", async () => {
+  it("blocks city status changes — manual edits rejected for everyone (device-binding derived)", async () => {
     const response = await app.inject({ method: "PATCH", url: "/api/v1/cities/2/status", headers: headers(customerToken), payload: { recruitment_status: "disabled" } });
-    expect(response.statusCode).toBe(403);
-    expect((app.db.prepare("SELECT recruitment_status FROM cities WHERE id=2").get() as { recruitment_status: string }).recruitment_status).toBe("enabled");
+    expect(response.statusCode).toBe(422);
+    expect((app.db.prepare("SELECT recruitment_status FROM cities WHERE id=2").get() as { recruitment_status: string }).recruitment_status).toBe("inactive");
   });
   it("blocks activation actions outside the assigned device scope", async () => {
     const response = await app.inject({ method: "POST", url: "/api/v1/activation/records/9901/approve", headers: headers(customerToken), payload: {} });

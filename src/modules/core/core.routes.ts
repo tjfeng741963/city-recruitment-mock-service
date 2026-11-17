@@ -31,12 +31,41 @@ function list(db: DatabaseSync, table: string, query: Record<string, unknown>, s
 export async function registerCoreRoutes(app: FastifyInstance, db: DatabaseSync) {
   const scopeFor = (auth: NonNullable<import("fastify").FastifyRequest["auth"]>) => getUserScope(db, auth);
   const denyCityWrite = (scope: UserScope, cityId: number, reply: import("fastify").FastifyReply) => canAccessCity(scope, cityId) ? null : reply.code(403).send({ detail: "无权访问该城市" });
+
+  // 城市招聘状态推导（2026-11-17 用户定论：不给人手改，按有的来）。
+  // 链路：agent_devices 绑定岗位（data_json.position_id）→ 该岗位启用中
+  // → 岗位所属城市 = 招聘中（active）；没有设备绑定的城市 = 已停止（inactive）。
+  // 推导结果回写 recruitment_status——前端展示、状态筛选、数据库三者永远一致。
+  const syncCityRecruitmentStatus = () => {
+    const boundPids = (
+      db.prepare(
+        "SELECT DISTINCT json_extract(data_json,'$.position_id') AS pid FROM agent_devices WHERE status='enabled'",
+      ).all() as Array<{ pid: number | null }>
+    )
+      .map((row) => Number(row.pid ?? 0))
+      .filter((pid) => pid > 0);
+    const recruitingCityIds = new Set<number>();
+    for (const pid of boundPids) {
+      const pos = db.prepare("SELECT city_id FROM service_positions WHERE id=? AND status='enabled'").get(pid) as
+        | { city_id: number | null }
+        | undefined;
+      if (pos?.city_id) recruitingCityIds.add(Number(pos.city_id));
+    }
+    for (const city of db.prepare("SELECT id FROM cities").all() as Array<{ id: number }>) {
+      const next = recruitingCityIds.has(Number(city.id)) ? "active" : "inactive";
+      db.prepare(
+        "UPDATE cities SET recruitment_status=? WHERE id=? AND recruitment_status<>?",
+      ).run(next, city.id, next);
+    }
+  };
   app.get<{ Querystring: Record<string, unknown> }>("/api/v1/cities", async (request) => {
+    syncCityRecruitmentStatus();
     const where = request.query.status ? " WHERE recruitment_status=?" : "";
     const args = request.query.status ? [String(request.query.status)] : [];
     return list(db, "cities", request.query, serializeCity, where, args, cityConstraint(scopeFor(request.auth!), "id"));
   });
   app.get<{ Params: { id: string } }>("/api/v1/cities/:id", async (request, reply) => {
+    syncCityRecruitmentStatus();
     const id = Number(request.params.id);
     const row = db.prepare("SELECT * FROM cities WHERE id=?").get(id) as Record<string, unknown> | undefined;
     if (!row || !canAccessCity(scopeFor(request.auth!), id)) return reply.code(404).send({ detail: "城市不存在" });
@@ -80,7 +109,16 @@ export async function registerCoreRoutes(app: FastifyInstance, db: DatabaseSync)
       throw error;
     }
   });
-  app.patch<{ Params: { id: string }; Body: { recruitment_status?: string } }>("/api/v1/cities/:id/status", async (request, reply) => { const id = Number(request.params.id); if (denyCityWrite(scopeFor(request.auth!), id, reply)) return reply.sent ? reply : reply.code(404).send({ detail: "城市不存在" }); const result = db.prepare("UPDATE cities SET recruitment_status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(typeof request.body?.recruitment_status === "string" ? request.body.recruitment_status : "enabled", id); return result.changes ? serializeCity(db.prepare("SELECT * FROM cities WHERE id=?").get(id) as Record<string, unknown>) : reply.code(404).send({ detail: "城市不存在" }); });
+  app.patch<{ Params: { id: string }; Body: { recruitment_status?: string } }>(
+    "/api/v1/cities/:id/status",
+    async (request, reply) => {
+      // 2026-11-17 用户定论：招聘状态由设备绑定自动推导（syncCityRecruitmentStatus），
+      // 不支持手动修改——设备绑定岗位的城市=招聘中，其余=已停止。
+      return reply.code(422).send({
+        detail: "招聘状态由设备绑定自动判定（设备绑定岗位的城市=招聘中），不支持手动修改",
+      });
+    },
+  );
   // City-factory relations live on factories.city_id. The target 404s with
   // "City not found" for a missing or inaccessible city before listing.
   const cityExists = (id: number) => Boolean(db.prepare("SELECT id FROM cities WHERE id=?").get(id));
