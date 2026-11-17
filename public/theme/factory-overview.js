@@ -3,10 +3,10 @@
  *
  * 为什么是运行时补丁而不是改 Vue 源码：线上后台是编译好的 Vue 包（public/assets/，
  * 93 个 chunk、无 sourcemap、无 .vue 源码），加不了路由也改不了侧栏。沿用项目里
- * kb-console.js / device-factories.js / position-scripts.js 的既有做法——在侧栏注入
+ * kb-console.js / device-factories.js 的既有做法——在侧栏注入
  * 一个入口按钮，点开是覆盖式独立面板，直接打 /api/v1/* 接口，与 Vue 主体互不干扰。
  *
- * 一眼看清每个工厂：绑了哪些设备 / 有哪些岗位 / 话术配了几条 / 知识库配了什么。
+ * 一眼看清每个工厂：绑了哪些设备 / 有哪些岗位 / 知识库配了什么。
  *
  * 数据源（全部是现有 GET 接口，字段已对照 src/ 路由源码逐一确认，见各 api 调用处注释）：
  *   GET /api/v1/factories?page=1&page_size=1000  → 工厂主表 {items:[{id,factory_name,city_id,address,contact,salary,is_active}]}
@@ -16,7 +16,6 @@
  *     （agent.routes.ts 列表路由在序列化结果上追加 factory_ids 与 factories，设备→工厂多选绑定）
  *   GET /api/v1/service-positions?page=1&page_size=1000 → {items:[{id,position_name,factory_id,city_name,store_name,is_active}]}
  *     （POSITION_KEYS 含 factory_id：岗位→工厂是一对一外键，4fe4ec5 起显式归属）
- *   GET /api/v1/position-scripts                 → 不带 position_id 时返回全量
  *     {items:[{id,position_id,stage,title,content,media,status}]}，stage ∈ 五时点 key
  *   GET /api/v1/employers                        → {items:[{id,employer_code,display_name,short_name,vertical_id,location_id,status,aliases}]}
  *   GET /api/v1/kb-faqs?page_size=1000&page=N    → {items:[{id,question,answer,scope_level,scope_employer_id,scope_position_id,vertical_id,status,priority}],total}
@@ -38,9 +37,6 @@
   const ENTRY_ID = "rk-fo-entry";
   const STYLE_ID = "rk-fo-style";
   const TAG = "[factory-overview]";
-
-  // 五时点：key 与后端 SCRIPT_STAGES / position-scripts.js 的白名单一致，顺序即业务顺序。
-  const STAGES = ["greet", "send_info", "ask_interview", "booked", "unanswered"];
 
   function log() {
     try { console.info.apply(console, [TAG].concat(Array.prototype.slice.call(arguments))); } catch (e) { /* ignore */ }
@@ -130,7 +126,6 @@
       function () { return api("/api/v1/cities?page=1&page_size=1000"); },      // 1 城市
       function () { return api("/api/v1/agent/devices"); },                     // 2 设备（含 factory_ids）
       function () { return api("/api/v1/service-positions?page=1&page_size=1000"); }, // 3 岗位（含 factory_id）
-      function () { return api("/api/v1/position-scripts"); },                  // 4 话术全量
       function () { return api("/api/v1/employers"); },                         // 5 招工方（KB 归属）
       loadAllFaqs,                                                              // 6 FAQ 全量
       function () { return api("/api/v1/kb-publish/history"); },                // 7 最近发布时间
@@ -141,7 +136,6 @@
         cities: results[1].ok ? itemsOf(results[1].value) : null,
         devices: results[2].ok ? itemsOf(results[2].value) : null,
         positions: results[3].ok ? itemsOf(results[3].value) : null,
-        scripts: results[4].ok ? itemsOf(results[4].value) : null,
         employers: results[5].ok ? itemsOf(results[5].value) : null,
         faqs: results[6].ok ? results[6].value : null,
         publish: results[7].ok ? results[7].value : null,
@@ -193,16 +187,6 @@
         if (!deviceNames[id]) deviceNames[id] = [];
         deviceNames[id].push(label);
       });
-    });
-
-    // 话术：position_id → 已配时点集合（只算启用中的，停用话术不会发）。
-    // 接口失败时置 null，卡片上显示「—」而不是误导性的 0。
-    var scriptStages = data.scripts === null ? null : {};
-    (data.scripts || []).forEach(function (row) {
-      if (String(row.status || "enabled") === "disabled") return;
-      var id = Number(row.position_id);
-      if (!scriptStages[id]) scriptStages[id] = {};
-      scriptStages[id][String(row.stage)] = true;
     });
 
     // 岗位：按 factory_id 归组；没归属任何已知工厂的单独放 unassigned。
@@ -322,18 +306,6 @@
     var positions = model.positionRows[id] || [];
     var devices = model.deviceNames[id] || [];
 
-    // 话术统计：本厂全部岗位的已配时点并集覆盖 x/5；条数 = 各岗位话术条数和。
-    var scriptCount = 0;
-    var covered = {};
-    if (model.scriptStages) positions.forEach(function (position) {
-      var stages = model.scriptStages[Number(position.id)];
-      if (!stages) return;
-      var keys = Object.keys(stages);
-      scriptCount += keys.length;
-      keys.forEach(function (key) { covered[key] = true; });
-    });
-    var coveredCount = STAGES.filter(function (stage) { return covered[stage]; }).length;
-
     // KB 统计：global 全站共用一条计数；employer / 岗位级按归属归到本厂。
     var employer = model.employerOf[id];
     var faqEmployer = employer ? (model.faqByEmployer[Number(employer.id)] || []) : null;
@@ -360,8 +332,6 @@
     if (model.deviceFailed) stats.appendChild(dash("设备"));
     else stats.appendChild(statsCell("设备", devices.length, devices.length ? "" : "is-zero"));
     stats.appendChild(statsCell("岗位", positions.length, positions.length ? "" : "is-zero"));
-    if (model.scriptStages === null) stats.appendChild(dash("话术"));
-    else stats.appendChild(statsCell("话术", scriptCount + " 条 · 覆盖 " + coveredCount + "/5", scriptCount ? "" : "is-zero"));
     if (model.faqGlobal === null) stats.appendChild(dash("KB"));
     else {
       var kbText = "全局 " + model.faqGlobal.length;

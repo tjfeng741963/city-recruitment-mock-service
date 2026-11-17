@@ -260,6 +260,9 @@
     if (decorating) return;
     decorating = true;
     try {
+      // 行内「厂区」按钮的样式必须在这里注入：styles() 原本只在 openDrawer
+      // （点开抽屉）时调用，用户不点抽屉，按钮就一直是裸文本。
+      styles();
       const rows = document.querySelectorAll(".bd-table .el-table__row");
       if (!rows.length) return;
       const list = await cities();
