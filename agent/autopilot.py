@@ -95,7 +95,7 @@ compat.apply_click_input()
 compat.apply_input_focus_retry()
 
 from wecom_io_core import send as core_send  # noqa: E402
-from wecom_io_core.store import Store  # noqa: E402
+from wecom_io_core.store import Store, find_data_dir  # noqa: E402
 
 # 企微自带的应用/系统会话，前缀命中就不回复
 SYSTEM_PREFIXES = (
@@ -146,6 +146,9 @@ GREET_STATE_LIMIT = 2000                     # 只留最近 N 个会话，文件
 REPORT_INTERVAL = 30.0                       # 心跳/上报间隔（按时间戳判断，不 sleep）
 REPORT_MAX_MESSAGES = 50                     # 单次上报最多条数
 REPORT_FIRST_WINDOW = 24 * 3600              # 首次没有游标时只补最近 24 小时
+# 进程退出码：企微账号目录变了，需要守护进程用新进程重新解析。
+# 用非 0 值是为了让「正常退出」和「需要重启」在日志/计划任务里能分辨。
+ACCOUNT_SWITCH_EXIT_CODE = 3
 
 # 加好友固定介绍是独立阶段：首段用完整流程定位会话，后续段留在同一已打开
 # 的会话里发送，避免每段重新搜索。客户中途发来的问题保留在 pending，整组
@@ -235,6 +238,36 @@ def wal_signature(data_dir: Path) -> tuple:
         except OSError:
             sig.append((name, 0, 0))
     return tuple(sig)
+
+
+def account_switched(data_dir: Path | None) -> Path | None:
+    """当前生效的企微账号目录是否已经不是 data_dir 了；变了就返回新目录。
+
+    为什么需要：企微每个账号在 Documents/WXWork/<vid>/Data 下有独立的数据目录，
+    Store 只在**启动时**解析一次（find_data_dir 取 message.db 最新那个），
+    之后主循环一直盯着这一个目录。换账号（退登录再扫码）后旧目录不再写入，
+    wal_signature 永远不变 → 不再 refresh → 扫不到任何新消息，
+    日志只有一句「上报：无新增消息」，看起来像客户端在正常工作
+    （2026-11-17 线上实测：换号后所有客户都不回，重启进程才恢复）。
+
+    这里只做判断，不做热切换：换账号等于整套上下文都换（self_id 缓存、
+    _decrypted 快照、.greeted.json、欢迎语队列），进程内改引用容易漏掉某处，
+    直接退出让守护进程拉起新进程最稳。
+    """
+    if not data_dir:
+        return None
+    try:
+        current = find_data_dir()
+    except Exception:  # noqa: BLE001 目录读不到就当下次再说，绝不能因此崩掉
+        return None
+    if not current:
+        return None
+    try:
+        if Path(data_dir).resolve() == Path(current).resolve():
+            return None
+    except OSError:
+        return None
+    return current
 
 
 def is_system_conv(conv_id: str, name: str = "") -> bool:
@@ -2241,6 +2274,19 @@ def main() -> int:
                 reporter.tick(wecom_state, pending_count())
 
             time.sleep(cfg["interval"])
+            # 换账号检测：企微退登录再扫码后，startup 时解析的账号目录就不再写入，
+            # 继续盯着旧目录只会一直「无新增消息」。这里主动退出，交给守护进程
+            # （run.cmd 的 :loop 或 supervise.py）用新进程重新解析目录。
+            # 只对「自动发现目录」生效：显式配了 data_dir 的机器，运营明确指定了
+            # 盯哪个账号，不能被自动切走。
+            if data_dir is None:
+                switched = account_switched(store.data_dir)
+                if switched is not None:
+                    log(
+                        f"[账号] 企微账号目录已变化：{store.data_dir} → {switched}；"
+                        "本进程退出，由守护进程重启并重新解析"
+                    )
+                    return ACCOUNT_SWITCH_EXIT_CODE
             sig = wal_signature(store.data_dir)
             if sig != last_sig:
                 store.refresh()
