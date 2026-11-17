@@ -14,13 +14,14 @@
   // MutationObserver 兜底重挂；值没变不碰 DOM，防自触发空转。
 
   const QR_ATTR = "data-rk-devqr";
-  const api = async (method, path) => {
+  const api = async (method, path, body) => {
     let token = "";
     try { token = String(localStorage.getItem("token") || ""); } catch {}
     if (token.length > 1 && token.startsWith('"')) { try { token = JSON.parse(token); } catch {} }
     const headers = { accept: "application/json" };
+    if (body !== undefined) headers["content-type"] = "application/json";
     if (token) headers.authorization = "Bearer " + token;
-    const response = await fetch(path, { method, headers });
+    const response = await fetch(path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return response.json();
   };
@@ -58,6 +59,13 @@
       .rk-devqr-wait{width:240px;height:240px;margin:0 auto;border-radius:14px;border:1.5px dashed var(--rk-border-strong,#c8d2e0);display:flex;align-items:center;justify-content:center;text-align:center;color:var(--rk-ink-3,#93a0b3);font-size:12.5px;line-height:1.7;padding:16px}
       .rk-devqr-stamp{margin-top:12px;text-align:center;font-size:11px;color:var(--rk-ink-3,#93a0b3);font-family:ui-monospace,Menlo,Consolas,monospace}
       .rk-devqr-empty{padding:40px 20px;text-align:center;color:var(--rk-ink-3,#93a0b3);font-size:13px;line-height:1.8}
+      .rk-devqr-verify{margin-top:18px;padding:14px;border:1px solid var(--rk-border,#e2e8f1);border-radius:12px;background:var(--rk-panel,#fff)}
+      .rk-devqr-verify input{box-sizing:border-box;width:100%;height:34px;padding:0 12px;border:1px solid var(--rk-border-strong,#c8d2e0);border-radius:8px;font:inherit;font-size:14px;color:var(--rk-ink-1,#1b2432);outline:none;transition:border-color .15s ease,box-shadow .15s ease}
+      .rk-devqr-verify input:focus{border-color:var(--rk-accent,#185fa5);box-shadow:0 0 0 3px rgba(24,95,165,.14)}
+      .rk-devqr-verify button{width:100%;height:34px;margin-top:8px;border:0;border-radius:8px;background:linear-gradient(135deg,#185fa5,#3b8dd8);color:#fff;cursor:pointer;font:inherit;font-size:13px;font-weight:600;transition:opacity .15s ease}
+      .rk-devqr-verify button:hover{opacity:.9}
+      .rk-devqr-verify button:disabled{opacity:.55;cursor:default}
+      .rk-devqr-verify-hint{margin:9px 0 0;font-size:11.5px;line-height:1.6;color:var(--rk-ink-3,#93a0b3)}
     `;
     document.head.append(style);
   }
@@ -197,9 +205,55 @@
           : "等待客户端推送二维码……\n服务器上的企微掉登录后 30 秒内会自动出现在这里。";
         body.append(wait);
       }
+
+      // ── 短信验证码输入（扫码后企微可能要求）────────────────────────
+      // 提交 → 设备 5 秒内取走并在企微窗口敲入。码只有几分钟时效，输了没反应
+      // 多半是过期了，重新输一个即可。
+      body.append(buildVerifyRow(code));
     } catch (error) {
       toast("二维码读取失败：" + error.message, true);
     }
+  }
+
+  /** 验证码输入行：扫码后企微要求短信验证码时用。 */
+  function buildVerifyRow(code) {
+    const row = document.createElement("div");
+    row.className = "rk-devqr-verify";
+    const input = Object.assign(document.createElement("input"), {
+      type: "text",
+      inputMode: "numeric",
+      maxLength: 8,
+      placeholder: "企微要求验证码时在此输入",
+    });
+    const submit = document.createElement("button");
+    submit.type = "button";
+    submit.textContent = "提交验证码";
+    submit.addEventListener("click", async () => {
+      const value = input.value.trim();
+      if (!/^\d{4,8}$/.test(value)) {
+        toast("验证码是 4-8 位数字", true);
+        return;
+      }
+      submit.disabled = true;
+      submit.textContent = "提交中…";
+      try {
+        await api("POST", `/api/v1/agent/devices/${code}/verify-code`, { code: value });
+        toast("验证码已下发，设备几秒内自动输入");
+        input.value = "";
+      } catch (error) {
+        toast("提交失败：" + error.message, true);
+      }
+      submit.disabled = false;
+      submit.textContent = "提交验证码";
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") submit.click();
+    });
+    const hint = document.createElement("p");
+    hint.className = "rk-devqr-verify-hint";
+    hint.textContent = "扫码后在手机上确认，如企微弹短信验证码，收到后立刻在这里输入（几分钟时效）";
+    row.append(input, submit, hint);
+    return row;
   }
 
   // ── 行定位：与 device-factories.js 同一思路，读单元格文本匹配设备码 ──

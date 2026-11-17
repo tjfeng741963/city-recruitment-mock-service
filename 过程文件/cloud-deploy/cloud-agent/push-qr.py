@@ -16,6 +16,8 @@ import sys
 import time
 from pathlib import Path
 
+import httpx
+
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
@@ -66,6 +68,34 @@ def restart_wxwork(wxwork: Path) -> None:
     time.sleep(12)
 
 
+def poll_verify_code(bridge) -> str:
+    """轮询前端提交的短信验证码（one-shot）：有就返回，没有返回空串。"""
+    try:
+        response = httpx.get(
+            f"{bridge.base_url}/api/v1/agent/devices/{bridge.device_code}/verify-code",
+            headers={"authorization": f"Bearer {bridge.token}"},
+            timeout=8,
+        )
+        body = response.json()
+        if body.get("available"):
+            return str(body.get("code") or "")
+    except Exception as exc:  # noqa: BLE001
+        print(f"验证码轮询失败（忽略）: {type(exc).__name__}: {exc}")
+    return ""
+
+
+def type_verify_code(code: str) -> None:
+    """在 Console 会话里把验证码敲进企微登录窗（input-code.py 同会话可见窗口）。"""
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "input-code.py"), code],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    out = ((result.stdout or "") + (result.stderr or "")).strip()
+    print(f"验证码 {code} 输入结果: exit={result.returncode} {out[-200:]}")
+
+
 def main() -> int:
     cfg = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
     bridge = None
@@ -113,6 +143,12 @@ def main() -> int:
                 )
                 restart_wxwork(wxwork)
                 fresh.reset()
+            elif state == "login_required":
+                # 扫码后企微可能要求短信验证码：前端提交 → 这里取走 → 敲进登录窗
+                code = poll_verify_code(bridge)
+                if code:
+                    print(f"收到前端提交的验证码 {code}，开始输入")
+                    type_verify_code(code)
         except Exception as exc:  # noqa: BLE001
             print(f"轮询失败（忽略）: {type(exc).__name__}: {exc}")
         time.sleep(15)

@@ -58,6 +58,8 @@ const DEVICE_TOKEN_ROUTES = new Set(["heartbeat", "claim", "receipts", "inbound"
     // Agent 对话：客户端（设备令牌）与调试台（管理员 JWT）都要能调。
     // 路由内校验「管理员或设备令牌二选一」。
     "POST /api/v1/agent/chat",
+    // 登录验证码：设备轮询取走前端提交的短信码（路由内校验设备令牌或管理员）。
+    "GET /api/v1/agent/devices/:code/verify-code",
   ]));
 const PUBLIC_ROUTES = new Set([
   "POST /api/v1/auth/login",

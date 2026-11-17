@@ -9,7 +9,19 @@ import { BridgeError, DeviceBridgeStore } from "../messaging/device-bridge.js";
 import { NOOP_NOTIFIER, type StreamNotifier } from "../messaging/stream-events.js";
 import { readWeComConfig } from "../wecom/wecom-config.js";
 import { listReminderTasks } from "./followup.js";
+import { isValidDeviceToken } from "./position-scripts.routes.js";
 import { loadFactories, parseDeviceData, readDeviceFactoryIds } from "../../shared/device-factories.js";
+
+const ADMIN_REQUIRED = { detail: "Admin access required" } as const;
+
+/**
+ * 待输入的企微验证码（内存态，不必落库）。
+ *
+ * 首次登录企微可能在扫码后要求短信验证码：前端提交 → 设备轮询取走 →
+ * 在 Console 会话里模拟键盘敲进登录窗。one-shot：设备 GET 一次即清除，
+ * 超时/失败由用户重新提交（验证码本身只有几分钟时效，不需要复杂重试）。
+ */
+const pendingVerifyCodes = new Map<string, { code: string; at: string }>();
 
 export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync, notifier: StreamNotifier = NOOP_NOTIFIER) {
   const messageChannel = createMessageChannelProvider(undefined, db);
@@ -160,6 +172,38 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
       captured_at: row.captured_at,
     };
   });
+
+  // ── 企微登录验证码通道（扫码后企微可能要求短信验证码）──────────────
+  // 前端提交（管理员），设备轮询取走（设备令牌，one-shot）。
+  app.post<{ Params: { code: string }; Body: Record<string, unknown> }>(
+    "/api/v1/agent/devices/:code/verify-code",
+    async (request, reply) => {
+      const code = String(request.params.code);
+      if (!canAccessDevice(getUserScope(db, request.auth!), code)) {
+        return reply.code(403).send({ detail: "Device scope required" });
+      }
+      const verify = String((request.body ?? {}).code ?? "").trim();
+      if (!/^\d{4,8}$/.test(verify)) {
+        return reply.code(422).send({ detail: "验证码必须是 4-8 位数字" });
+      }
+      pendingVerifyCodes.set(code, { code: verify, at: new Date().toISOString() });
+      return { ok: true };
+    },
+  );
+
+  app.get<{ Params: { code: string } }>(
+    "/api/v1/agent/devices/:code/verify-code",
+    async (request, reply) => {
+      const code = String(request.params.code);
+      if (request.auth?.role !== "admin" && !isValidDeviceToken(db, request)) {
+        return reply.code(403).send(ADMIN_REQUIRED);
+      }
+      const pending = pendingVerifyCodes.get(code);
+      if (!pending) return { available: false };
+      pendingVerifyCodes.delete(code);
+      return { available: true, code: pending.code, at: pending.at };
+    },
+  );
   // 本地新增，目标站契约里没有这条（7 轮 parity 快照均未抓到同类端点）——
   // 纯运维工具：管理员在后台填完某设备自己的 dify_url/dify_key 后，一键验证能否连上，
   // 不用等真实客户发消息才发现配置错了。调用既有的 DifyProvider.healthCheck()，不新建逻辑。

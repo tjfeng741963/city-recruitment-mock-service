@@ -174,6 +174,12 @@
   .qr-side h4{margin:0 0 8px;font-size:14px;font-weight:700}
   .qr-side .hint{font-size:12.5px;color:var(--muted);line-height:1.7}
   .qr-side .stamp{margin-top:10px;font-size:11px;color:var(--faint);font-family:var(--mono)}
+  .verify-row{margin-top:16px;display:flex;gap:8px}
+  .verify-row input{flex:1;min-width:0;height:36px;padding:0 12px;border:1px solid var(--line-strong);border-radius:8px;font:inherit;font-size:14px;color:var(--ink);outline:none;transition:border-color .15s ease,box-shadow .15s ease}
+  .verify-row input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(24,95,165,.14)}
+  .verify-btn{flex:0 0 auto;height:36px;padding:0 14px;border:0;border-radius:8px;background:linear-gradient(135deg,#185fa5,#3b8dd8);color:#fff;cursor:pointer;font:inherit;font-size:13px;font-weight:600;transition:opacity .15s ease}
+  .verify-btn:hover{opacity:.9}
+  .verify-btn:disabled{opacity:.55;cursor:default}
   .qr-wait{flex:1;padding:40px;text-align:center;color:var(--faint);font-size:13px}
   .dev-placeholder{flex:1;display:flex;align-items:center;justify-content:center;color:var(--faint);font-size:13px}
 </style>
@@ -859,9 +865,46 @@
     var stamp = el("div", "stamp");
     stamp.id = "qr-stamp";
     side.append(stamp);
+    // 短信验证码：扫码后企微可能要求，前端提交 → 设备几秒内取走并敲进登录窗
+    side.append(buildVerifyRow());
     qrCard.append(side);
     box.append(qrCard);
     pullQr();
+  }
+
+  function buildVerifyRow() {
+    var row = el("div", "verify-row");
+    var input = el("input");
+    input.type = "text";
+    input.inputMode = "numeric";
+    input.maxLength = 8;
+    input.placeholder = "企微要求验证码时在此输入";
+    var btn = el("button", "verify-btn", "提交验证码");
+    btn.type = "button";
+    btn.addEventListener("click", async function () {
+      var value = (input.value || "").trim();
+      if (!/^\d{4,8}$/.test(value)) {
+        $("resp-bar") && ($("resp-bar").innerHTML = "<span>验证码是 4-8 位数字</span>");
+        return;
+      }
+      btn.disabled = true;
+      btn.textContent = "下发中…";
+      try {
+        await api("POST", "/api/v1/agent/devices/" + deviceState.current + "/verify-code", { code: value });
+        btn.textContent = "已下发 ✓";
+        input.value = "";
+        setTimeout(function () { btn.textContent = "提交验证码"; btn.disabled = false; }, 2500);
+      } catch (e) {
+        btn.textContent = "提交失败";
+        setTimeout(function () { btn.textContent = "提交验证码"; btn.disabled = false; }, 2500);
+      }
+    });
+    input.addEventListener("keydown", function (event) {
+      if (event.key === "Enter") btn.click();
+    });
+    row.append(input, btn);
+    side.append(row);
+    return row;
   }
 
   async function pullQr() {
