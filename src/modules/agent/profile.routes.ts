@@ -265,6 +265,12 @@ export async function registerProfileRoutes(app: FastifyInstance, db: DatabaseSy
     else if (invited) {
       recruitStatus = "invited";
       state = "pending_invite";
+    } else if (has("recruit_status") && asText(profile.recruit_status).trim() === "none") {
+      // 8090 的「流失客户回流」：客户被标 disqualified 之后又回来说话，流程重新
+      // 接待并显式要求解除标记。只在本次不是 gaveUp 时生效——同一轮又被拒绝时
+      // 走上面的 gaveUp 分支，不能因为带了 none 就把刚判的流失抹掉。
+      recruitStatus = "none";
+      if (asText(profile.state).trim() === "active") state = "active";
     }
 
     const row: ConversationRow = { ...conversation, ...merged, remark, recruit_status: recruitStatus, state };

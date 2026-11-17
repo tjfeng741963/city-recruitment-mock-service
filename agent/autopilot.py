@@ -1234,15 +1234,23 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             log(f"跳过 {name or cid}：人工接管中")
             continue
 
-        # 已流失：客户说过「我不去了」（8090 标记 stage=gave_up →
-        # recruit_status=disqualified）。按业务要求「只标记、不发消息」——
-        # 整轮不碰这个会话，一句都不发，等运营在网页上手动恢复。
+        # 已流失：客户曾说过「我不去了」（8090 标记 stage=gave_up →
+        # recruit_status=disqualified）。以前这里整会话跳过、一句都不发，
+        # 结果真回心转意的人（Evans_峰 2026-11-17 连发 5 条「你好」）永远没人接。
+        #
+        # 现在按「话术性质」区分，不再一刀切：
+        #   * 未完成的固定介绍/欢迎语一律不再发——这是成批主动推送，对说过不来的
+        #     人继续发等于骚扰；
+        #   * 客户自己发来的一句问话照常交给 8090，由它判断是否属于「回流」：
+        #     第一条会清掉标记回一句重新接待语，再拒绝就重新标流失回终止语。
         if cid in remote_cfg.abandoned_sessions():
-            if not dry:
-                rlog.mark_skipped(mid, cid, "客户已流失")
-            stats["skipped"] += 1
-            log(f"跳过 {name or cid}：客户已流失")
-            continue
+            if welcome_delivery:
+                if not dry:
+                    rlog.mark_skipped(mid, cid, "客户已流失（固定介绍不再续发）")
+                stats["skipped"] += 1
+                log(f"跳过 {name or cid}：客户已流失，固定介绍不再续发")
+                continue
+            log(f"{name or cid}：客户曾标流失，本轮交给流程判断是否回流接待")
 
         if not name or name == cid:
             if not dry:

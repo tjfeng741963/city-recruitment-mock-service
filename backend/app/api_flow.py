@@ -52,6 +52,7 @@ from .services.flow_engine import (
     device_intro_followup,
     enter_info_result,
     extract_city,
+    _is_bare_confirm,
     interview_window_of,
     jobs_for_city,
     pin_position,
@@ -98,6 +99,26 @@ router = APIRouter(prefix="/api/v1/flow", tags=["flow"])
 # 紧接着问的「多少钱」「包吃住吗」正落在 send_info 阶段——不含进来就查不到
 # kb_answer，只能把岗位卡再发一遍（2026-11-14 模拟实测）。
 _KB_STAGES = {STAGE_SEND_INFO, STAGE_ASK_INTERVIEW, STAGE_COLLECT, STAGE_DONE}
+
+# 流失客户回流时允许「重新接待」的次数。
+# 只给 1 次：真正想回来的人第一句就能被接住；若他下一句还是拒绝，重新标流失，
+# 之后的消息回到终止语，避免「发一句『在吗』就被反复追问面试」的骚扰红线。
+_ABANDON_RETURN_LIMIT = 1
+
+
+def _abandon_reopen_text(slots: dict[str, Any]) -> str:
+    """流失客户回流时的重新接待语。
+
+    只用 slot 里的既定事实，不邀约、不问「这两天能不能来」：对方上一轮刚说过
+    不来，立刻再约等于打脸。把主动权交回去，让他自己说想干嘛。
+    """
+    city = str(slots.get("city") or "").strip()
+    factory = str(slots.get("factory_name") or "").strip()
+    if factory:
+        return f"在的，{factory}那边随时可以了解。你是想再看看岗位，还是安排面试？跟我说一声就行。"
+    if city:
+        return f"在的，{city}这边的岗位还在招。想看岗位、问工资或者安排面试都可以跟我说。"
+    return "在的，你想找哪个城市的工作？跟我说一声，我这边帮你看现在在招的岗位。"
 
 
 class FlowAnswerIn(BaseModel):
@@ -198,6 +219,81 @@ async def flow_answer(
         before["stage"] = "ask_interview"
         before_profile = dict(state.get("profile") or {})
         stage_before = "ask_interview"
+
+    if abandoned and stage_before == "done":
+        # 客户已明确放弃过（recruit_status=disqualified/gave_up）。
+        #
+        # 原来的做法是「从此永久静音，只回一句终止语」：客户过几天回过神来说
+        # 「我还想去」，后台没人工去点「状态修改」就永远没有任何反应。
+        # 2026-11-17 Evans_峰 实测：他其实答应了后天到，只因手机号只有 10 位
+        # 没被采到，后来一句「不能」被误判流失，之后连发 5 条「你好」全被跳过。
+        #
+        # 现在给一次回流机会，且只给一次：
+        #   流失后的第一条新消息 → 清掉流失标记，按正常流程重新接待；
+        #   再之后若又被拒绝 → 重新标流失，后续消息回到终止语，不再反复拉扯。
+        # 既不漏掉真想回来的人，也不会出现「每发一句都被追问面试」的红线。
+        #
+        # 但「收到 / 好的 / 嗯」这类收尾应答不算回流：客户刚说完不来，紧接着的
+        # 一句「收到」只是在结束对话，这时候重新接待等于自说自话。
+        if (
+            int(slots.get("abandon_return_count") or 0) < _ABANDON_RETURN_LIMIT
+            and not _is_bare_confirm(payload.text)
+        ):
+            # 必须写空串而不是 pop：diff_slots 只记录仍在字典里的键，
+            # pop 之后回放看到的仍是旧的 disqualified，标记等于没清。
+            slots["recruit_status"] = ""
+            slots["abandon_return_count"] = int(slots.get("abandon_return_count") or 0) + 1
+            slots["interview_agreed"] = False
+            slots["booked"] = False
+            # 回到「先摸清诉求」：有城市就停在邀约前一步，没城市先问城市。
+            restored = STAGE_ASK_INTERVIEW if slots.get("city") else STAGE_ASK_CITY
+            reopen = _abandon_reopen_text(slots)
+            records = [
+                (store.EVENT_INBOUND, {"text": payload.text}),
+                (store.EVENT_STAGE, {"from": stage_before, "to": restored}),
+                *store.diff_slots(before, slots),
+                (
+                    store.EVENT_REPLY,
+                    {
+                        "text": reopen,
+                        "parts": [reopen],
+                        # 与终止语同理单独标记：这一条是「流失客户回流」的重新接待，
+                        # 灰度复盘要能统计回流有多少、回复及不及时。
+                        "trace": {
+                            "source": "reopen",
+                            "stage_from": stage_before,
+                            "stage_to": restored,
+                            "action": None,
+                            "kb_entry_id": "",
+                            "recruit_status": "",
+                            "abandon_return_count": slots["abandon_return_count"],
+                        },
+                    },
+                ),
+            ]
+            await store.append_events(session, payload.session_key, records)
+            state["stage"] = restored
+            # 回流必须同步回 4222：否则网页仍显示「不符合」，客户端也还把它当流失名单，
+            # 下一句又要靠这条分支兜一次。推送尽力而为，失败不影响客户收到话。
+            try:
+                await profile_push.push(
+                    _resolve_device_code(payload.device_code),
+                    payload.session_key,
+                    profile_push.build_profile(dict(slots), restored, None)
+                    | {"recruit_status": "none", "state": "active"},
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            collect_llm_trace()
+            return FlowAnswerOut(
+                reply=reopen,
+                parts=[reopen],
+                stage=restored,
+                finished=False,
+                action=None,
+                slots=dict(slots),
+                profile=dict(state.get("profile") or {}),
+            )
 
     if abandoned and stage_before == "done":
         # 客户已明确放弃（流程已结束 + 标记流失/不合适）：不再推进、不再邀约。
