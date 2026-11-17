@@ -338,8 +338,16 @@ _CONSENT_INTENT = ("面试", "过去", "过来", "到厂", "到场", "上班")
 
 
 def agrees_to_interview(text: str) -> bool:
-    """同意面试的完整判定：短句沿用 is_agree，长句表态也接得住。"""
+    """同意面试的完整判定：短句沿用 is_agree，长句表态也接得住。
+
+    第三种情形是「报出具体到岗日」（「我要后天才能到」「明天过去」）：这类句子
+    没有「面试」二字，长度也常超过短句阈值，但它是明确的到场承诺。2026-11-17
+    Evans_峰 实测：这句话没被认成同意，`interview_agreed` 为空，两小时后又追问
+    「这两天能不能过来面试」，他回「不能」（实话是后天才能到），直接判成流失。
+    """
     if is_agree(text):
+        return True
+    if states_arrival_day(text):
         return True
     value = (text or "").strip()
     if not value or len(value) > 30:
@@ -351,6 +359,24 @@ def agrees_to_interview(text: str) -> bool:
     return (
         any(word in value for word in _STRONG_AGREE)
         and any(word in value for word in _CONSENT_INTENT)
+    )
+
+
+def states_arrival_day(text: str) -> bool:
+    """客户报出具体到岗日（「我要后天才能到」「明天过去」）＝答应来，只是时间靠后。
+
+    2026-11-17 Evans_峰 实测：他回「我要后天才能到」，这句被当成普通陈述，
+    `interview_agreed` 没置位；两小时后他再问岗位，系统又追问「这两天能不能过来
+    面试」，他答「不能」（实话是后天才能到），直接判成流失。客户给的是日期，
+    不是拒绝，必须按答应面试处理。
+    """
+    value = (text or "").strip()
+    if not value or looks_like_question(value) or is_disagree(value):
+        return False
+    if any(word in value for word in _CONSENT_BLOCKERS):
+        return False
+    return extract_day_offset(value) is not None and any(
+        word in value for word in ("到", "来", "去", "过来", "过去", "到厂")
     )
 
 
@@ -2003,6 +2029,23 @@ def _answer_side_question(
     followup = _faq_retry(stage, slots)
     state["stage"] = stage
     return FlowResult(reply=followup, stage=stage, slots=slots)
+
+
+def claims_booking(reply: str) -> bool:
+    """回复里是否声称「已经登记/约好了」。
+
+    给 flow_llm 的事实地板用：`booked` 不为 True 时这类话不能发给客户。
+    2026-11-17 Evans_峰 实测——他给 10 位手机号（抽取失败、booked 从未置位），
+    模型却回了「收到啦万小姐，我这边登记好了」，客户以为约成了，后台没有记录。
+    """
+    value = str(reply or "")
+    return any(word in value for word in _BOOKING_CLAIMS)
+
+
+_BOOKING_CLAIMS = (
+    "登记好了", "已经登记", "已登记", "登记成功", "帮你登记好",
+    "约好了", "已经约好", "预约成功", "约定了", "定好了时间",
+)
 
 
 def align_reply_with_slots(reply: str, slots: dict[str, Any]) -> str:

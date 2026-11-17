@@ -220,13 +220,14 @@ async def test_llm_failure_is_recorded(monkeypatch) -> None:  # noqa: ANN001
 async def test_refusal_is_traceable(admin_client: AsyncClient) -> None:
     """客户拒接必须能从 trace 里认出来。
 
-    「说了不去还被追问」是业务红线，复盘时要能一眼找出这条链路。拒接有两条路径，
-    各自留下的证据不同——这正是容易漏埋点的地方，所以两条都锁住：
+    「说了不去还被追问」是业务红线，复盘时要能一眼找出这条链路。拒接有三段证据，
+    各自留下的痕迹不同——这正是容易漏埋点的地方，所以三段都锁住：
 
     1. 拒接当场：走 gave_up 动作，``action='gave_up'`` 且 ``recruit_status='disqualified'``
        （此时 source 可能是 fact 或空串，**不能靠 source 判断拒接**）；
-    2. 拒接之后再来消息：走 api_flow 的收尾语分支，``source='closing'``、
-       ``stage_to='done'``，且不再推进阶段。
+    2. 拒接后第一次再开口：``source='reopen'``，重新接待但**绝不邀约**
+       （2026-11-17 起给一次回流机会，避免真回心转意的人永远没人接）；
+    3. 回流额度用完之后：走 ``source='closing'``、``stage_to='done'``，不再推进阶段。
     """
     key = f"trace-refuse-{uuid.uuid4().hex[:8]}"
     await _say(admin_client, key, "你好")
@@ -241,11 +242,20 @@ async def test_refusal_is_traceable(admin_client: AsyncClient) -> None:
     ]
     assert gave_up, f"拒接当场没有留下痕迹：{traces}"
 
-    # 拒接后再发一句：必须走收尾语，且标成 closing
+    # 拒接后第一次再开口：必须标成 reopen，且不能重新邀约
+    first = await _say(admin_client, key, "在吗")
+    assert "这两天能不能过来面试" not in first["reply"]
+    assert "名额给你留着" not in first["reply"]
+    traces = await _reply_traces(key)
+    assert any(trace.get("source") == "reopen" for trace in traces), \
+        f"拒接后的首次回流没有标成 reopen：{[t.get('source') for t in traces]}"
+
+    # 再拒绝一次之后：回流额度用完，回到收尾语
+    await _say(admin_client, key, "算了 还是不去了")
     await _say(admin_client, key, "在吗")
     traces = await _reply_traces(key)
     closing = [trace for trace in traces if trace.get("source") == "closing"]
-    assert closing, f"拒接后的跟进没有标成 closing：{[t.get('source') for t in traces]}"
+    assert closing, f"回流额度用完后没有回到收尾语：{[t.get('source') for t in traces]}"
     assert closing[-1]["stage_to"] == "done", closing[-1]
 
 
