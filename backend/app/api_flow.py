@@ -62,6 +62,7 @@ from .services.flow_engine import (
     set_remote_cities,
     set_remote_jobs,
     split_by_section_heads,
+    throttle_invite,
 )
 from .services.job_lookup import lookup_cities, lookup_jobs, vertical_hint_of
 from .services.flow_llm import a_step, review_loop
@@ -693,6 +694,13 @@ async def flow_answer(
         # 标题不足 2 个时原样返回，不做任何改动。
         if len(result.parts) == 1:
             result.parts = split_by_section_heads(result.parts[0])
+        # 邀约限流（2026-11-17 灰度实测）：客户连问 5 个问题时，每条回复都挂
+        # 「这两天能不能过来面试」，客户直接说「你好多问题都没回答我，还有点
+        # 顾虑」，之后仍被追问，最后流失。这里按会话计数限流，客户表达顾虑时
+        # 本轮一律不邀约。
+        result.parts = throttle_invite(
+            result.parts or [result.reply], result.slots, payload.text
+        )
         result.reply = "\n".join(result.parts)
         # 灰度复盘用的诊断：这条回复是谁生成的、走了哪一步、命中了哪条知识库、
         # 审核动过没有、兜底触发过没有。追加字段不影响回放——project() 只读 text。

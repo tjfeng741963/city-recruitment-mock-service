@@ -1829,6 +1829,13 @@ _JOB_FACT_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # (快照字段, 触发词)。顺序即优先级：一句话问多个字段时取先命中的。
     # 2026-11-15 真实聊天记录复盘补齐：面试时间/宿舍/体检/保险/日结/纹身/身高/
     # 证件这些字段 4222 早就下发了，之前一个触发词都没配，客户问就变「确认一下」。
+    #
+    # 发薪口径必须排在工价之前（2026-11-17 灰度实测）：「几号发工资」「什么时候
+    # 发工资」里含「工资」，被 wage_text 抢答成工价表，客户连说三次「不是这个」，
+    # 最后气到不肯来面试。发薪日和发多少是两个问题，问发薪日就只能答发薪日。
+    ("advance_text", ("几号发工资", "什么时候发工资", "哪天发工资", "工资几号",
+                      "月结", "发薪", "日结", "预支", "借支", "压工资", "工资什么时候结",
+                      "什么时候结")),
     ("wage_text", ("工资", "工价", "多少钱", "薪资", "待遇", "多少钱一天", "多少钱一个月",
                    "多少钱一小时", "一小时多少", "一天多少", "怎么算", "纯工价")),
     ("interview_time", ("面试时间", "什么时候面试", "几点面试", "面试几点", "明天几点到",
@@ -1843,13 +1850,91 @@ _JOB_FACT_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("line_text", ("线路", "哪条线", "安排哪")),
     # 体检/社保/证件属于「政策口径」，必须走按岗位配好的 FAQ：岗位里的
     # medical_text 只写「要体检」，不代表报价，抢答会把工价/要求冒充成金额。
-    ("advance_text", ("日结", "预支", "借支", "压工资", "几号发工资", "发工资")),
     ("tattoo_policy", ("纹身", "刺青", "花臂")),
     ("height_text", ("身高", "多高")),
     ("ethnicity_policy", ("民族", "少数民族")),
     ("place", ("在哪", "地址", "地点", "哪里面试", "哪儿", "怎么走")),
     ("job_title", ("做什么", "什么工作", "干什么的", "什么岗位", "招什么")),
 )
+
+# 问「发薪日」时，只有这些字段能回答；快照里没有就必须承认要确认，
+# 绝不回落工价表（工资多少 ≠ 哪天发）。
+_PAY_DATE_FIELDS = ("advance_text",)
+
+# 「几号发工资 / 什么时候结工资 / 工资月结吗」——这些问的是发放时间，不是金额。
+_PAY_DATE_PATTERNS = (
+    "几号发", "哪天发", "什么时候发", "什么时候结", "几号结", "哪天结",
+    "月结", "发薪日", "发工资", "工资几号", "工资哪天",
+)
+
+
+def _asks_pay_date(text: str) -> bool:
+    """是否在问「什么时候发工资」（而不是「发多少」）。"""
+    value = str(text or "")
+    return any(p in value for p in _PAY_DATE_PATTERNS)
+
+
+# ── 邀约限流 ────────────────────────────────────────────────────────────
+# 客户连续提问时，每条回复末尾都挂「这两天能不能过来面试」，实测把客户逼到
+# 「你好多问题都没回答我，还有点顾虑」甚至直接流失。这里按会话计数限流。
+_INVITE_PHRASES = (
+    "这两天能不能过来面试", "这两天方便过来面试", "这两天能过来面试",
+    "哪天方便过来", "什么时候方便过来", "名额给你留着", "名额我先给你留着",
+    "名额我先帮你留着",
+)
+# 客户表达顾虑/不满时，本轮禁止邀约：这时候再约等于火上浇油。
+_CONCERN_WORDS = (
+    "顾虑", "没回答", "没答", "不是问这个", "不是这个", "你没说", "说不明白",
+    "搞清楚", "了解清楚", "才知道", "考虑一下", "再看看",
+)
+# 同一会话最多主动邀约几次（客户答应后走正常约面，不计入）。
+_INVITE_ASK_LIMIT = 2
+
+
+def _wants_invite(text: str) -> bool:
+    """客户本轮是否主动提到面试/到场（他自己提就不算骚扰）。"""
+    value = str(text or "")
+    return any(w in value for w in ("面试", "过来", "过去", "到厂", "来厂", "过去看看"))
+
+
+def throttle_invite(
+    parts: list[str], slots: dict[str, Any], customer_text: str
+) -> list[str]:
+    """按会话限流邀约话术，返回处理后的分段。
+
+    规则（为避免骚扰红线，2026-11-17 灰度实测后加入）：
+      1. 客户本轮在表达顾虑/不满 → 本轮所有分段都不邀约；
+      2. 客户自己没提面试，且该会话已主动邀约过 `_INVITE_ASK_LIMIT` 次 → 不邀约；
+      3. 其余情况正常保留，并累加计数。
+    邀约句被删后若某段变空，该段整条去掉；全空时保底一句话，绝不发空消息。
+    """
+    value = "\n".join(p for p in (parts or []) if str(p).strip())
+    if not value:
+        return list(parts or [])
+    has_invite = any(p in value for p in _INVITE_PHRASES)
+    if not has_invite:
+        return list(parts or [])
+    concerned = any(w in str(customer_text or "") for w in _CONCERN_WORDS)
+    count = int(slots.get("invite_ask_count") or 0)
+    if concerned or (not _wants_invite(customer_text) and count >= _INVITE_ASK_LIMIT):
+        cleaned: list[str] = []
+        for part in parts or []:
+            text = str(part)
+            for phrase in _INVITE_PHRASES:
+                if phrase in text:
+                    # 按句切掉含邀约的那一句，避免留下半截话
+                    sentences = re.split(r"(?<=[。！？\n])", text)
+                    text = "".join(
+                        s for s in sentences if phrase not in s
+                    ).strip()
+            if text.strip():
+                cleaned.append(text.strip())
+        if cleaned:
+            return cleaned
+        # 全被删光：退回一句不带邀约的中性承接语
+        return ["这些我这边确认清楚再回你，有其他想了解的也可以直接问。"]
+    slots["invite_ask_count"] = count + 1
+    return list(parts or [])
 
 _FACT_LABELS = {
     "wage_text": "工价",
@@ -1910,6 +1995,14 @@ def _job_fact_answer(slots: dict[str, Any], text: str) -> str:
     # FAQ 里，没配就承认要确认。这条规则有专门用例守着，别改。
     if is_non_wage_cost_question(lowered):
         return ""
+    # 问「几号发工资 / 什么时候发工资」时，快照里没有发薪日就直说要确认。
+    # 绝不回落工价表：2026-11-17 灰度实测，桂花连问三次「工资什么时候结」，
+    # 三次都收到同一张工价表，最后一句「你不和我说明白我不去面试」直接流失。
+    if _asks_pay_date(lowered):
+        pay = str(snapshot.get("advance_text") or "").strip()
+        if not pay:
+            return ""
+        return f"{_FACT_LABELS['advance_text']}：{pay}"
     # 客户自报年龄（「我52了还能去吗」）：直接跟岗位年龄上限比，别装傻。
     asked_age = _age_in_text(lowered)
     if asked_age is not None and re.search(r"岁|年龄|还能|能做|可以去|可以不|行不行|要吗", lowered):
