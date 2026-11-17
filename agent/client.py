@@ -143,6 +143,19 @@ class BridgeClient:
             {"state": state or "offline", "account_id": (account_id or "")[:128]},
         )
 
+    def report_groups(self, groups: list[dict]) -> dict:
+        """上报企微群聊清单（管理端下拉自选绑定群聊用）。
+
+        群聊来自 wecom_io_core sessions（type='群聊'，R: 前缀）。
+        失败由调用方兜底：群聊清单不是关键路径，下一轮再报。
+        """
+        code = quote(self.device_code, safe="")
+        return self._request(
+            "POST",
+            f"/api/v1/bridge/devices/{code}/groups",
+            {"groups": groups},
+        )
+
     def fetch_config(self, device_code: str = "") -> dict | None:
         """GET /api/v1/bridge/devices/{code}/config：远端运行参数 + 设备话术。
 

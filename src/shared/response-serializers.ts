@@ -217,6 +217,8 @@ export function serializeAgentDevice(row: Row): Row {
     employer_id: Number(source.employer_id ?? 0) || 0,
     location_id: Number(source.location_id ?? 0) || 0,
     position_id: Number(source.position_id ?? 0) || 0,
+    // 群聊通知绑定（面试登记面板回显下拉）：data_json.group_chat，空串 = 未绑定
+    group_chat: String(source.group_chat ?? ""),
     status: Boolean(source.online ?? source.status === true),
     online: Boolean(source.online),
     mode: String(source.mode ?? ""),

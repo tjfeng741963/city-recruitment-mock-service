@@ -331,6 +331,28 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
       return { ok: true };
     },
   );
+  // 设备群聊清单上报：autopilot 每 N 分钟从企微本地库（sessions type='群聊'）
+  // 读取群聊列表推上来，管理端「面试登记」面板下拉自选绑定群聊。
+  // 鉴权与 login-qr 同一套：设备桥接令牌。
+  app.post<{ Params: { code: string }; Body: Record<string, unknown> }>(
+    "/api/v1/bridge/devices/:code/groups",
+    async (req, reply) => {
+      const code = req.params.code;
+      const token = (req.headers.authorization ?? "").replace(/^Bearer /, "");
+      if (!store.authenticate(code, token)) return reply.code(401).send({ detail: "Invalid device token" });
+      if (!store.enabled(code)) return reply.code(403).send({ detail: "Device disabled" });
+      const body = req.body ?? {};
+      const raw = Array.isArray(body.groups) ? body.groups : [];
+      const groups = raw
+        .map((g) => (typeof g === "object" && g !== null ? (g as Record<string, unknown>) : {}))
+        .map((g) => ({ conv_id: String(g.conv_id ?? "").trim(), name: String(g.name ?? "").trim() }))
+        .filter((g) => g.conv_id && g.name)
+        .slice(0, 300);
+      const saved = store.saveGroups(code, groups);
+      return { ok: true, count: saved };
+    },
+  );
+
   // 返回 store 供 server.ts 挂 30s 掉线清扫定时器。
   return store;
 }

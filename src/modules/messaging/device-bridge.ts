@@ -254,6 +254,31 @@ export class DeviceBridgeStore {
   command(id: string): BridgeCommand | null {
     return this.db.prepare("SELECT * FROM bridge_commands WHERE id=?").get(id) as unknown as BridgeCommand ?? null;
   }
+  /** 设备上报的群聊清单整体替换（device_group_chats 表）。 */
+  saveGroups(code: string, groups: Array<{ conv_id: string; name: string }>): number {
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare("DELETE FROM device_group_chats WHERE device_code=?").run(code);
+      const stamp = this.now();
+      for (const group of groups) {
+        this.db.prepare(
+          "INSERT INTO device_group_chats(device_code,conv_id,name,updated_at) VALUES (?,?,?,?)",
+        ).run(code, String(group.conv_id ?? "").slice(0, 200), String(group.name ?? "").slice(0, 120), stamp);
+      }
+      this.db.exec("COMMIT");
+      return groups.length;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  listGroups(code: string): Array<{ conv_id: string; name: string }> {
+    return this.db.prepare(
+      "SELECT conv_id, name FROM device_group_chats WHERE device_code=? ORDER BY name",
+    ).all(code) as Array<{ conv_id: string; name: string }>;
+  }
+
   claim(code: string): (BridgeCommand & { nickname: string }) | null {
     this.expireClaims(code);
     if (this.status(code)?.state !== "online") return null;

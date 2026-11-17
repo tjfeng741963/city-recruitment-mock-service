@@ -685,6 +685,10 @@ class Reporter:
             self._send_bridge(heartbeat.get("wecom_state") or "unknown")
         except Exception as exc:  # noqa: BLE001
             log(f"[桥接] 异常（忽略）：{agent_client.describe_error(exc)}")
+        try:
+            self._send_groups()
+        except Exception as exc:  # noqa: BLE001
+            log(f"[群聊] 异常（忽略）：{agent_client.describe_error(exc)}")
         # 远端配置：每个心跳周期比对一次 version，变了重拉并热更运行参数
         try:
             if self.remote_config is not None:
@@ -749,6 +753,25 @@ class Reporter:
             log(f"[桥接] {self.device_code} → {state} ok=True")
         except Exception as exc:  # noqa: BLE001
             log(f"[桥接] 失败（忽略，不影响主心跳）：{agent_client.describe_error(exc)}")
+
+    def _send_groups(self) -> None:
+        """把企微里的群聊清单上报到 4222（管理端下拉自选绑定群聊）。
+
+        从 sessions（type='群聊'，R: 前缀）读取；失败只记日志，下轮再报。
+        """
+        bridge = self.bridge
+        if bridge is None or not bridge.enabled:
+            return
+        try:
+            groups = [
+                {"conv_id": s["id"], "name": s["name"]}
+                for s in self.store.sessions(limit=500)
+                if s.get("type") == "群聊" and (s.get("name") or "").strip()
+            ]
+            result = bridge.report_groups(groups)
+            log(f"[群聊] 已上报 {result.get('count', len(groups))} 个群聊")
+        except Exception as exc:  # noqa: BLE001
+            log(f"[群聊] 上报失败（忽略，下轮再报）：{agent_client.describe_error(exc)}")
 
     def _bridge_destination(self) -> list[str]:
         return [getattr(self.bridge, "base_url", ""), getattr(self.bridge, "device_code", self.device_code)]

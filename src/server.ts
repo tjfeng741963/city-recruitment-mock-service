@@ -49,6 +49,7 @@ const DEVICE_TOKEN_ROUTES = new Set(["heartbeat", "claim", "receipts", "inbound"
     // 不走用户 JWT（客户端没有登录态）。网页读取走用户鉴权的 /api/v1/agent/... 那侧。
     "POST /api/v1/bridge/devices/:code/login-qr",
     "DELETE /api/v1/bridge/devices/:code/login-qr",
+    "POST /api/v1/bridge/devices/:code/groups",
     // 媒体下载由设备 token 或 X-Profile-Token 鉴权（路由内校验），
     // 因此这里的 Bearer 不能当用户 JWT 解析，否则设备 token 会被判 401。
     "GET /api/v1/agent/media/:name",

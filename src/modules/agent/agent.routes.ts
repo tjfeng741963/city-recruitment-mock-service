@@ -154,6 +154,14 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     const result = db.prepare("DELETE FROM agent_devices WHERE id=?").run(id);
     return result.changes ? { success: true } : reply.code(404).send({ detail: "Device not found" });
   });
+  // 管理端读取设备上报的企微群聊清单（面试登记面板下拉自选绑定群聊）。
+  app.get<{ Params: { code: string } }>("/api/v1/agent/devices/:code/groups", async (request, reply) => {
+    const code = String(request.params.code);
+    if (!canAccessDevice(getUserScope(db, request.auth!), code)) {
+      return reply.code(403).send({ detail: "Device scope required" });
+    }
+    return { items: bridgeStore.listGroups(code) };
+  });
   // 登录二维码的网页读取口。设备用自己的桥接令牌 POST 上传（见 device-bridge.routes.ts），
   // 网页这一侧用用户 JWT 读——二维码等同于登录凭证，拿到就能顶替这个号登录，不能公开。
   app.get<{ Params: { code: string } }>("/api/v1/agent/devices/:code/login-qr", async (request, reply) => {
