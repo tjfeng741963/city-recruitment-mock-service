@@ -116,44 +116,4 @@ describe("manual reply gateway delivery", () => {
     expect(conflict.json()).toMatchObject({ detail: "Idempotency key was already used with different content" });
     expect(app!.db.prepare("SELECT COUNT(*) count FROM message_deliveries").get()).toMatchObject({ count: 1 });
   });
-
-  it("runs a signed inbound message through Dify and the configured target API gateway", async () => {
-    let sends = 0;
-    gateway?.removeAllListeners("request");
-    gateway?.on("request", (request, response) => {
-      sends += 1;
-      let body = "";
-      request.on("data", (chunk) => { body += chunk; });
-      request.on("end", () => {
-        expect(JSON.parse(body)).toEqual({
-          device_code: "D-1",
-          customer_id: 7,
-          content: "Mock response for 7",
-        });
-        response.setHeader("content-type", "application/json");
-        response.end(JSON.stringify({ id: 18022, status: "sent" }));
-      });
-    });
-    app!.db.prepare("INSERT INTO agent_devices(device_name,status,data_json) VALUES (?,?,?)")
-      .run("测试设备", "enabled", JSON.stringify({ device_code: "D-1", dify_url: "mock://local", dify_key: "" }));
-    const payload = {
-      id: "inbound-gateway-loop-1",
-      event: "message.created",
-      data: { device_code: "D-1", customer_id: 7, content: "想了解岗位" },
-    };
-    const signature = createHmac("sha256", "webhook-test-secret").update(JSON.stringify(payload)).digest("hex");
-
-    const response = await app!.inject({
-      method: "POST",
-      url: "/api/v1/webhooks/dify",
-      headers: { "content-type": "application/json", "x-dify-signature": signature },
-      payload,
-    });
-
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({ status: "processed", event_id: "inbound-gateway-loop-1", reply_status: "sent" });
-    expect(sends).toBe(1);
-    expect(app!.db.prepare("SELECT status,provider_message_id,attempts FROM message_deliveries WHERE event_id='inbound-gateway-loop-1:reply'").get())
-      .toMatchObject({ status: "succeeded", provider_message_id: "18022", attempts: 1 });
-  });
 });

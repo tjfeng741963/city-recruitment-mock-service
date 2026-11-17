@@ -17,27 +17,21 @@ import { registerCoreRoutes } from "./modules/core/core.routes.js";
 import { registerPositionFactoryRoutes } from "./modules/core/position-factory.routes.js";
 import { registerGenericRoutes } from "./modules/generic/generic.routes.js";
 import { registerResourceRoutes } from "./modules/resources/resource.routes.js";
-import { registerKnowledgeCompatRoutes } from "./modules/agent/knowledge-compat.routes.js";
 import { registerFileRoutes } from "./modules/files/file.routes.js";
 import { registerAgentRoutes } from "./modules/agent/agent.routes.js";
-import { registerActivationRoutes } from "./modules/activation/activation.routes.js";
 import { registerRelationRoutes } from "./modules/relations/relations.routes.js";
 import { registerPermissionRoutes } from "./modules/permissions/permission.routes.js";
-import { registerAdminRoutes } from "./modules/admin/admin.routes.js";
 import { registerDeviceBridgeRoutes } from "./modules/messaging/device-bridge.routes.js";
 import { registerStreamRoutes } from "./modules/agent/stream.routes.js";
 import { registerProfileRoutes } from "./modules/agent/profile.routes.js";
 import { registerJobRoutes } from "./modules/agent/profile.routes.js";
-import { registerUnknownQuestionRoutes } from "./modules/agent/unknown-questions.routes.js";
 import { registerKbV3Routes } from "./modules/agent/kb-v3.routes.js";
 import { registerKbPublishRoutes } from "./modules/agent/kb-publish.routes.js";
 import { registerPositionScriptRoutes } from "./modules/agent/position-scripts.routes.js";
 import { registerAgentPersonaRoutes } from "./modules/agent/agent-persona.routes.js";
 import { registerAgentChatRoutes } from "./modules/agent/agent-chat.routes.js";
 import { registerApiDebugRoutes } from "./modules/agent/api-debug.routes.js";
-import { registerFollowupRoutes } from "./modules/agent/followup.js";
 import { EventBus, createStreamNotifier } from "./modules/messaging/stream-events.js";
-import { registerWeComRoutes } from "./modules/wecom/wecom.routes.js";
 
 declare module "fastify" {
   interface FastifyInstance { db: DatabaseSync; events: EventBus }
@@ -172,7 +166,6 @@ export function buildServer() {
   // knowledge 的旧契约先由兼容层接管（读写 kb_faq，AI 实际回复用的表），
   // 这样 registerResourceRoutes 里的 knowledge 会跳过，不会重复注册。
   // 关掉兼容层（REA_KB_COMPAT=off）就回落到旧表 knowledge_items。
-  registerKnowledgeCompatRoutes(app, db);
   registerResourceRoutes(app, db);
   registerFileRoutes(app, db);
   registerAgentRoutes(app, db, notifier);
@@ -188,7 +181,6 @@ export function buildServer() {
   registerStreamRoutes(app, db, events, auth);
   registerProfileRoutes(app, db);
   registerJobRoutes(app, db);
-  registerUnknownQuestionRoutes(app, db);
   // 知识库 v3 配置接口：品类 / 位置树 / 招工方 / 场景问答 / 模板包
   registerKbV3Routes(app, db);
   registerKbPublishRoutes(app, db);
@@ -201,12 +193,8 @@ export function buildServer() {
   // 接口调试台的后端：把 onRoute 收集到的真实路由原样吐出来
   registerApiDebugRoutes(app, routeCatalog);
   registerPositionFactoryRoutes(app, db);
-  registerFollowupRoutes(app, db);
-  registerWeComRoutes(app, db);
-  registerActivationRoutes(app, db);
   registerRelationRoutes(app, db);
   registerPermissionRoutes(app);
-  registerAdminRoutes(app, db);
   registerGenericRoutes(app);
 
   // preHandler runs only after routing and schema validation, matching the

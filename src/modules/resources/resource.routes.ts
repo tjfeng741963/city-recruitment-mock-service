@@ -7,15 +7,9 @@ import { rolePreHandler } from "../../auth/rbac.js";
 
 type Resource = { table: string; name: string; fields: string[]; scope: "city" | "recruiter" | "device" | "admin" };
 const resources: Resource[] = [
-  { table: "knowledge_items", name: "knowledge", fields: ["title", "content", "status"], scope: "recruiter" },
-  { table: "unknown_questions", name: "unknown-questions", fields: ["question", "status"], scope: "recruiter" },
   // kind / date 都是 NOT NULL 但前端不传，由 normalizeHolidayBody 兜底。
   { table: "holiday_schedules", name: "holiday-schedules", fields: ["city_id", "date", "kind"], scope: "city" },
   { table: "recruiters", name: "recruiters", fields: ["username", "city_id", "status"], scope: "recruiter" },
-  { table: "agent_rules", name: "agent/rules", fields: ["rule_name", "status"], scope: "recruiter" },
-  { table: "agent_evaluations", name: "agent/evaluations", fields: ["evaluation_name", "status"], scope: "device" },
-  { table: "activation_strategies", name: "activation/strategy-resources", fields: ["strategy_name", "status"], scope: "admin" },
-  { table: "activation_devices", name: "activation/device-resources", fields: ["device_name", "status"], scope: "admin" },
 ];
 
 function rowData(row: Record<string, unknown>): Record<string, unknown> {
@@ -273,27 +267,11 @@ export async function registerResourceRoutes(app: FastifyInstance, db: DatabaseS
     return { agent_base_url: url };
   });
   app.post<{ Body: Record<string, unknown> }>("/api/v1/settings/sync", { preHandler: rolePreHandler("admin") }, async (request) => ({ success: true, synced: Object.keys(request.body ?? {}) }));
-  app.get("/api/v1/agent/reminder-config", async () => {
-    const row = db.prepare("SELECT value_json FROM agent_configs WHERE kind='reminder' AND recruiter_id='global'").get() as { value_json: string } | undefined;
-    return row ? JSON.parse(row.value_json) : { id: 0, recruiter_id: "global", enabled: false, mode: "advance", advance_hours: 2, fixed_time: "09:00", script: "" };
-  });
-  app.post<{ Body: Record<string, unknown> }>("/api/v1/agent/reminder-config", async (request, reply) => { if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin access required" }); const body = request.body ?? {}; db.prepare("INSERT INTO agent_configs(kind,recruiter_id,value_json) VALUES ('reminder','global',?) ON CONFLICT(kind,recruiter_id) DO UPDATE SET value_json=excluded.value_json,updated_at=CURRENT_TIMESTAMP").run(JSON.stringify({ id: 0, recruiter_id: "global", enabled: Boolean(body.enabled), mode: body.mode ?? "advance", advance_hours: Number(body.advance_hours ?? 2), fixed_time: body.fixed_time ?? "09:00", script: body.script ?? "" })); return JSON.parse(String((db.prepare("SELECT value_json FROM agent_configs WHERE kind='reminder' AND recruiter_id='global'").get() as { value_json: string }).value_json)); });
-  app.get("/api/v1/agent/followup-config", async () => { const row = db.prepare("SELECT value_json FROM agent_configs WHERE kind='followup' AND recruiter_id='global'").get() as { value_json: string } | undefined; return row ? JSON.parse(row.value_json) : { id: 0, recruiter_id: "global", enabled: false, interval_seconds: 300, max_count: 3, scripts: [] }; });
-  app.post<{ Body: Record<string, unknown> }>("/api/v1/agent/followup-config", async (request, reply) => { if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin access required" }); const body = request.body ?? {}; const value = { id: 0, recruiter_id: "global", enabled: Boolean(body.enabled), interval_seconds: Number(body.interval_seconds ?? 300), max_count: Number(body.max_count ?? 3), scripts: Array.isArray(body.scripts) ? body.scripts : [] }; db.prepare("INSERT INTO agent_configs(kind,recruiter_id,value_json) VALUES ('followup','global',?) ON CONFLICT(kind,recruiter_id) DO UPDATE SET value_json=excluded.value_json,updated_at=CURRENT_TIMESTAMP").run(JSON.stringify(value)); return value; });
   // Target shape: {days: number, items: array} — no per-status counters.
-  app.get<{ Querystring: { days?: string } }>("/api/v1/agent/evaluation/overview", async (request) => serializeEvaluationOverview({ days: Number(request.query.days ?? 7), items: [] }));
-  app.get<{ Querystring: { device_code?: string; eval_date?: string } }>("/api/v1/agent/evaluation/detail", async (request) => ({ device_code: request.query.device_code ?? "", eval_date: request.query.eval_date ?? "", items: [] }));
   // Running an evaluation across devices is admin-only on the target.
-  app.post<{ Querystring: { device_code?: string; eval_date?: string } }>("/api/v1/agent/evaluation/run", async (request, reply) => {
-    if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin required to evaluate all devices" });
-    return { success: true, device_code: request.query.device_code ?? "", eval_date: request.query.eval_date ?? new Date().toISOString().slice(0, 10), total: 0, invited: 0, failed: 0 };
-  });
-  app.get<{ Querystring: Record<string, unknown> }>("/api/v1/agent/report/account-summary", async (request) => serializeAccountSummary({ prefix: request.query.prefix ?? "", date_range: { start: request.query.start_date ?? "", end: request.query.end_date ?? "" }, total: {}, accounts: [], daily_trend: [] }));
   // knowledge 的两个批量接口已由 agent/knowledge-compat.routes.ts 接管
   // （读写 kb_faq）。这里按同一开关跳过，否则 Fastify 报 FST_ERR_DUPLICATED_ROUTE。
   if (!knowledgeCompatEnabled()) {
-  app.post<{ Body: { ids?: number[]; status?: string; is_active?: boolean } }>("/api/v1/knowledge/batch/update", async (request) => { const ids = Array.isArray(request.body?.ids) ? request.body.ids : []; const scope = getUserScope(db, request.auth!); const resource = resources.find((item) => item.name === "knowledge")!; let updated = 0; for (const id of ids) { const row = db.prepare("SELECT * FROM knowledge_items WHERE id=?").get(Number(id)) as Record<string, unknown> | undefined; if (!row || !canAccessResource(resource, row, scope)) continue; const result = db.prepare("UPDATE knowledge_items SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(request.body?.status ?? (request.body?.is_active === false ? "disabled" : "enabled"), Number(id)); updated += Number(result.changes); } return { success: true, updated }; });
-  app.post<{ Body: { ids?: number[] } }>("/api/v1/knowledge/batch/delete", async (request) => { const ids = Array.isArray(request.body?.ids) ? request.body.ids : []; const scope = getUserScope(db, request.auth!); const resource = resources.find((item) => item.name === "knowledge")!; let deleted = 0; for (const id of ids) { const row = db.prepare("SELECT * FROM knowledge_items WHERE id=?").get(Number(id)) as Record<string, unknown> | undefined; if (!row || !canAccessResource(resource, row, scope)) continue; deleted += Number(db.prepare("DELETE FROM knowledge_items WHERE id=?").run(Number(id)).changes); } return { success: true, deleted }; });
   }
   // Target shape: {cities: array, unlimited: boolean} — no items envelope.
   // Target item shape: {city_name, interview_site_name}.

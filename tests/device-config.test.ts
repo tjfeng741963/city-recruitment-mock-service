@@ -137,36 +137,4 @@ describe("device config distribution", () => {
     expect((await configOf("missing-device")).statusCode).toBe(401);
     expect((await configOf("local-device-001")).statusCode).toBe(200);
   });
-
-  it("upserts device scripts by (device_code, stage, city) and supports list/delete", async () => {
-    const post = (payload: object) => app.inject({ method: "POST", url: "/api/v1/agent/device-scripts", headers: admin, payload });
-    const first = await post({ device_code: "local-device-001", stage: "send_info", city: "深圳", title: "v1", content: "第一版话术" });
-    expect(first.statusCode).toBe(200);
-    const id = first.json().id;
-    expect(id).toBeGreaterThan(0);
-    // 同键再次 POST 是更新，不是新增
-    const second = await post({ device_code: "local-device-001", stage: "send_info", city: "深圳", title: "v2", content: "第二版话术" });
-    expect(second.statusCode).toBe(200);
-    expect(second.json().id).toBe(id);
-    expect(app.db.prepare("SELECT COUNT(*) n FROM device_scripts").get()).toMatchObject({ n: 1 });
-    expect(app.db.prepare("SELECT title,content,updated_at IS NOT NULL fresh FROM device_scripts WHERE id=?").get(id))
-      .toMatchObject({ title: "v2", content: "第二版话术", fresh: 1 });
-
-    await post({ device_code: "local-device-001", stage: "send_info", city: "广州", content: "广州话术" });
-    await post({ device_code: "other-device", stage: "send_info", city: "深圳", content: "别家设备" });
-    const listed = await app.inject({ method: "GET", url: "/api/v1/agent/device-scripts?device_code=local-device-001", headers: admin });
-    expect(listed.json().items).toHaveLength(2);
-    const byCity = await app.inject({ method: "GET", url: "/api/v1/agent/device-scripts?device_code=local-device-001&city=%E5%B9%BF%E5%B7%9E", headers: admin });
-    expect(byCity.json().items).toHaveLength(1);
-    expect(byCity.json().items[0]).toMatchObject({ city: "广州", content: "广州话术", status: "enabled" });
-
-    expect((await app.inject({ method: "DELETE", url: `/api/v1/agent/device-scripts/${id}`, headers: admin })).json()).toMatchObject({ ok: true });
-    expect((await app.inject({ method: "DELETE", url: `/api/v1/agent/device-scripts/${id}`, headers: admin })).statusCode).toBe(404);
-    expect(app.db.prepare("SELECT COUNT(*) n FROM device_scripts").get()).toMatchObject({ n: 2 });
-
-    expect((await post({ stage: "send_info", content: "缺 device_code" })).statusCode).toBe(422);
-    expect((await post({ device_code: "local-device-001", stage: "bogus", content: "非法 stage" })).statusCode).toBe(422);
-    // 用户鉴权沿用现有：匿名访问被 preHandler 拦截
-    expect((await app.inject({ method: "GET", url: "/api/v1/agent/device-scripts" })).statusCode).toBe(403);
-  });
 });

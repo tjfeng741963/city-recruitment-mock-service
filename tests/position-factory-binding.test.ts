@@ -60,23 +60,6 @@ describe("position factory assignment", () => {
     }
     expect((await app.inject({ method: "GET", url: url(), headers: customer })).statusCode).toBe(200);
   });
-
-  it("makes a previously orphaned job visible to its bound device without losing wages or interview data", async () => {
-    const device = await app.inject({ method: "POST", url: "/api/v1/agent/devices", headers: admin, payload: { device_code: "assignment-regression", factory_ids: [factoryId] } });
-    expect(device.statusCode).toBe(200);
-    const jobs = async () => (await app.inject({ method: "GET", url: "/api/v1/agent/jobs?city=广州&device_code=assignment-regression", headers: { "x-profile-token": "position-assignment-test" } })).json().items;
-    expect(await jobs()).toEqual([]);
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const response = await put({ factory_id: factoryId });
-      expect(response.statusCode).toBe(200);
-      expect(response.json()).toMatchObject({ factory_id: factoryId, factory_name: "岗位归属安检厂" });
-    }
-    const row = app.db.prepare("SELECT factory_id,data_json FROM service_positions WHERE id=?").get(positionId) as { factory_id: number; data_json: string };
-    expect(row.factory_id).toBe(factoryId);
-    expect(JSON.parse(row.data_json)).toEqual({ ...original, factory_id: factoryId, store_name: "岗位归属安检厂" });
-    expect(await jobs()).toEqual([expect.objectContaining({ position_id: positionId, factory_name: "岗位归属安检厂", wage_text: "125元/班" })]);
-  });
-
   it("explicitly clears an assignment while retaining all job details", async () => {
     expect((await put({ factory_id: null })).json()).toMatchObject({ factory_id: null, factory_name: "" });
     const row = app.db.prepare("SELECT factory_id,data_json FROM service_positions WHERE id=?").get(positionId) as { factory_id: null; data_json: string };

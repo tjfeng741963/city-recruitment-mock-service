@@ -65,25 +65,11 @@ expect(adminCities.json().total).toBe(14);
     const response = await app.inject({ method: "PUT", url: "/api/v1/agent/conversations/700002/restart?device_code=other-device", headers: headers(customerToken) });
     expect(response.statusCode).toBe(403);
   });
-
-  it("does not expose an unassigned city or device by guessed detail ID", async () => {
-    expect((await app.inject({ method: "GET", url: "/api/v1/cities/2", headers: headers(customerToken) })).statusCode).toBe(404);
-    expect((await app.inject({ method: "GET", url: "/api/v1/agent/device/2/workflow", headers: headers(customerToken) })).json()).toMatchObject({ ok: false, message: "设备不存在" });
-  });
-
   it("blocks city status changes outside the assigned city scope", async () => {
     const response = await app.inject({ method: "PATCH", url: "/api/v1/cities/2/status", headers: headers(customerToken), payload: { recruitment_status: "disabled" } });
     expect(response.statusCode).toBe(403);
     expect((app.db.prepare("SELECT recruitment_status FROM cities WHERE id=2").get() as { recruitment_status: string }).recruitment_status).toBe("enabled");
   });
-
-  it("blocks candidate status changes outside the assigned device scope", async () => {
-    const candidate = app.db.prepare("SELECT id FROM candidate_events WHERE device_code='other-device'").get() as { id: number };
-    const response = await app.inject({ method: "POST", url: `/api/v1/agent/candidates/${candidate.id}/mark?device_code=other-device`, headers: headers(customerToken), payload: { status: "followed" } });
-    expect(response.statusCode).toBe(404);
-    expect((app.db.prepare("SELECT status FROM candidate_events WHERE id=?").get(candidate.id) as { status: string }).status).toBe("invited");
-  });
-
   it("blocks activation actions outside the assigned device scope", async () => {
     const response = await app.inject({ method: "POST", url: "/api/v1/activation/records/9901/approve", headers: headers(customerToken), payload: {} });
     expect(response.statusCode).toBe(404);

@@ -54,15 +54,6 @@ describe("Vue city links save contract", () => {
     expect(await read()).toEqual(before);
     expect((await save({ links: [{ source_city: "广州", target_cities: ["广东城际"] }] }, customer)).statusCode).toBe(403);
   });
-
-  it("allows Guangzhou to find only the bound factory's intercity jobs", async () => {
-    const factoryId = Number(app.db.prepare("INSERT INTO factories(factory_name,city_id) VALUES ('广东城际验收安检',?)").run(intercity).lastInsertRowid);
-    const positionId = Number(app.db.prepare("INSERT INTO service_positions(position_name,factory_id,city_id,data_json) VALUES ('竹料安检',?,?,?)").run(factoryId, intercity, JSON.stringify({ wage_text: "125元/班" })).lastInsertRowid);
-    await app.inject({ method: "POST", url: "/api/v1/agent/devices", headers: admin, payload: { device_code: "city-form-test", factory_ids: [factoryId] } });
-    const response = await app.inject({ method: "GET", url: "/api/v1/agent/jobs?city=广州&device_code=city-form-test", headers: { "x-profile-token": "city-form-regression" } });
-    expect(response.json().items).toEqual([expect.objectContaining({ position_id: positionId, factory_name: "广东城际验收安检", cross_city: true, city: "广东城际", wage_text: "125元/班" })]);
-  });
-
   it("retains the numeric API and supports explicitly clearing a city's neighbors", async () => {
     expect((await save({ city_id: 1, linked_city_ids: [2] })).statusCode).toBe(201);
     expect((await read()).links.广州).toEqual(["深圳"]);

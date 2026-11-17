@@ -25,15 +25,4 @@ describe("observed role boundaries", () => {
     expect((await app.inject({ method: "PUT", url: "/api/v1/settings", headers, payload: { dedup_llm_api_key: "attacker-value" } })).statusCode).toBe(403);
     expect((await app.inject({ method: "GET", url: "/api/v1/settings", headers: { authorization: `Bearer ${admin}` } })).statusCode).toBe(200);
   });
-
-  it("keeps global activation configuration writes admin-only", async () => {
-    const customer = await token("local-customer");
-    const headers = { authorization: `Bearer ${customer}` };
-    expect((await app.inject({ method: "PUT", url: "/api/v1/activation/config", headers, payload: { paused: true } })).statusCode).toBe(403);
-    expect((await app.inject({ method: "PUT", url: "/api/v1/activation/config/paused", headers, payload: { paused: true } })).statusCode).toBe(403);
-    expect((await app.inject({ method: "PUT", url: "/api/v1/activation/strategies/no_reply", headers, payload: { enabled: false } })).statusCode).toBe(403);
-    expect((await app.inject({ method: "POST", url: "/api/v1/activation/scripts", headers, payload: { content: "越权配置" } })).statusCode).toBe(403);
-    expect((await app.inject({ method: "POST", url: "/api/v1/agent/reminder-config", headers, payload: { recruiter_id: "global", enabled: true } })).statusCode).toBe(403);
-    expect((await app.inject({ method: "POST", url: "/api/v1/agent/followup-config", headers, payload: { recruiter_id: "global", enabled: true } })).statusCode).toBe(403);
-  });
 });

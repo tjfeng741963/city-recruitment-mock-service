@@ -24,27 +24,6 @@ describe("remaining relation and batch workflows", () => {
     const cities = await app.inject({ method: "GET", url: `/api/v1/recruiters/${recruiterId}/cities`, headers: { authorization: `Bearer ${token}` } });
     expect(cities.json().items).toEqual(expect.any(Array));
   });
-
-  it("supports knowledge batch update and delete", async () => {
-    const created = await app.inject({ method: "POST", url: "/api/v1/knowledge", headers: { authorization: `Bearer ${token}` }, payload: { question: "批量知识", answer: "x" } });
-    const id = created.json().id;
-    const updated = await app.inject({ method: "POST", url: "/api/v1/knowledge/batch/update", headers: { authorization: `Bearer ${token}` }, payload: { ids: [id], status: "disabled" } });
-    expect(updated.json().updated).toBe(1);
-    const deleted = await app.inject({ method: "POST", url: "/api/v1/knowledge/batch/delete", headers: { authorization: `Bearer ${token}` }, payload: { ids: [id] } });
-    expect(deleted.json().deleted).toBe(1);
-  });
-
-  it("persists an agent workflow and exposes report metrics", async () => {
-    const saved = await app.inject({ method: "PUT", url: "/api/v1/agent/device/1/workflow", headers: { authorization: `Bearer ${token}` }, payload: { workflow: "步骤一" } });
-    // The target requires a multipart `file` field here (422 otherwise), so the
-    // local route rejects a JSON body on purpose; this asserts that contract.
-    expect(saved.statusCode).toBe(422);
-    expect(saved.json().detail[0].loc).toEqual(["body", "file"]);
-    // Target shape is a date window, not counters: {start_date, end_date, items}.
-    const metrics = await app.inject({ method: "GET", url: "/api/v1/agent/report/metrics", headers: { authorization: `Bearer ${token}` } });
-    expect(metrics.json()).toEqual({ start_date: expect.any(String), end_date: expect.any(String), items: [] });
-  });
-
   it("keeps city history, holidays and recruiter relations", async () => {
     const updated = await app.inject({ method: "PUT", url: "/api/v1/cities/1", headers: { authorization: `Bearer ${token}` }, payload: { city_name: "广州新名" } });
     expect(updated.statusCode).toBe(200);
