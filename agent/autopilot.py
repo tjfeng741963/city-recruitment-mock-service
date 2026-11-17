@@ -1381,11 +1381,29 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 log(f"    已发送：{result['detail']}", scope="send",
                     message_id=mid, trace_id=trace, duration_ms=duration_ms)
 
-                # Agent 模式的媒体占位：不真实发送，只记日志。
-                # 真正发图/视频要等瘦客户端媒体任务上线（见 docs/设计-瘦客户端）。
+                # Agent 指名要发的媒体：先检索本地 media 目录（本地有就不再
+                # 下载），缺了再从 4222 媒体库拉（bridge 通道，设备令牌鉴权），
+                # 然后走上游原生 paste_media 真实发送。失败只记日志不影响
+                # 文本已发状态，也不自动重发（防重复）。
                 for kind, mname in agent_medias:
-                    log(f"    [媒体占位] {kind}:{mname} → 当前阶段不真实发送，仅记录",
-                        scope="media", message_id=mid, trace_id=trace)
+                    if not mname.strip():
+                        continue
+                    _last_reply_at = time.time()
+                    ok_pre, pre_detail = media_fetch.ensure_media(
+                        mname,
+                        "视频" if kind == "video" else "图片",
+                        base_url=(cfg.get("bridge_server") or "").strip(),
+                        token=(cfg.get("bridge_token") or "").strip(),
+                        log=lambda s: log(f"    {s}"),
+                    )
+                    log(f"    [媒体] {mname} 预取：{pre_detail}", scope="media",
+                        message_id=mid, trace_id=trace)
+                    ok_m, detail_m = core_send.paste_media(
+                        mname, log=lambda s: log(f"    {s}"),
+                    )
+                    level = "info" if ok_m else "warning"
+                    log(f"    [媒体] {kind}:{mname} {'已发送' if ok_m else '发送失败：' + detail_m}",
+                        level=level, scope="media", message_id=mid, trace_id=trace)
             else:
                 rlog.mark_failed(mid, cid, result["detail"], scene, text)
                 _last_error = str(result["detail"])[:200]

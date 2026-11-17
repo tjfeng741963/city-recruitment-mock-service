@@ -110,6 +110,10 @@ function buildFacts(row: PositionRow | undefined): Record<string, string> {
     welfare_text: text(data.welfare_text),
     place: text(data.place),
     interview_time: text(data.interview_time),
+    // 面试时间说明与地址（2026-11-17 新岗位）：进 prompt 让 Agent 自然应答
+    // 「几点面试 / 怎么走」，不硬提取、不硬编码。
+    interview_time_text: text(data.interview_time_text),
+    interview_address: text(data.interview_address),
     height_text: text(data.height_text),
     tattoo_policy: text(data.tattoo_policy),
     cert_text: text(data.cert_text),
