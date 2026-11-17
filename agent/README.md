@@ -240,6 +240,42 @@ skipped  不该发（系统会话 / 搜索不到会话名 / 同会话合并 / �
 都没有时**只跳过心跳，上报照常**（上报只认 `X-Device-Token`），日志会提示怎么配。
 `AgentClient.__init__` 只多了一个带默认值的 `device_code` 参数，`main.py` 的调用不受影响。
 
+### 日志格式与轮转
+
+`logs/run.log` 一行一个事件，格式：
+
+```
+[2026-11-16 23:54:52] [WARNING] [send] [知识库] 张三 ← '客户前20字' → '回复前200字…(486字)' message_id=S:1:123 trace_id=tr_ab12cd34ef56 duration_ms=5123
+```
+
+- `[YYYY-MM-DD HH:MM:SS]`：带日期，跨天可查；
+- `[INFO/WARNING/ERROR]`：级别；失败、异常、冲突、超时自动判 `WARNING`，未捕获异常判 `ERROR`；
+- `[send/manual/flow/heartbeat/bridge/ingest/media/wecom/config]`：模块，便于 grep；
+- `message_id / trace_id / command_id`：和 `reply_log.db`、4222 指令对齐；
+- 客户内容只打码记录（手机号 `138****5678`、身份证 `4401**********1234`），回复最多 200 字；
+- 单文件 20MB 轮转，保留 `run.log.1` ~ `run.log.5`（可用 `AGENT_LOG_MAX_BYTES` / `AGENT_LOG_BACKUPS` 覆盖）。
+
+`reply_log.db` 新增字段（老库启动时自动 `ALTER TABLE`）：
+
+| 字段 | 用途 |
+|---|---|
+| `attempts` | 发送尝试次数（成功/失败/不明都 +1） |
+| `trace_id` | 从入站登记贯穿到发送日志的关联 id |
+| `last_step` | `created/sent/failed/unknown/skipped/held/requeued` |
+| `duration_ms` | 成功发送耗时（毫秒） |
+
+排查示例：
+
+```sql
+-- 最近失败/不明/held
+SELECT message_id, conv_name, status, attempts, last_step, error, trace_id
+FROM reply_log WHERE status IN ('failed','unknown','held')
+ORDER BY msg_time DESC LIMIT 20;
+
+-- 一次发送的完整轨迹
+grep 'trace_id=tr_ab12cd34ef56' logs/run.log
+```
+
 ### 怎么排查
 
 | 现象 | 看什么 |

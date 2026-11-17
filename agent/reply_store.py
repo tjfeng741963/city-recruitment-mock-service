@@ -1,7 +1,7 @@
 """回复历史记录（本地 SQLite）。
 
 为什么不用 JSON：`handled` 只有一个布尔语义，发送失败也会被算作"处理过"，
-导致消息静默丢失（Daylan 那条就是这么丢的）。这里把状态拆成 5 态：
+导致消息静默丢失（Daylan 那条就是这么丢的）。这里把状态拆成 6 态：
 
     pending  已入队，还没发
     sent     发送成功
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+import uuid
 from pathlib import Path
 
 DB_PATH = Path(__file__).resolve().parent / "reply_log.db"
@@ -36,7 +37,11 @@ CREATE TABLE IF NOT EXISTS reply_log (
     status      TEXT NOT NULL DEFAULT 'pending',
     error       TEXT,
     created_at  REAL,
-    replied_at  REAL
+    replied_at  REAL,
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    trace_id    TEXT NOT NULL DEFAULT '',
+    last_step   TEXT NOT NULL DEFAULT '',
+    duration_ms INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_reply_status ON reply_log(status);
 CREATE INDEX IF NOT EXISTS idx_reply_conv   ON reply_log(conv_id);
@@ -63,10 +68,23 @@ def _conn() -> sqlite3.Connection:
     return con
 
 
+_REPLY_MIGRATIONS = {
+    "attempts": "INTEGER NOT NULL DEFAULT 0",
+    "trace_id": "TEXT NOT NULL DEFAULT ''",
+    "last_step": "TEXT NOT NULL DEFAULT ''",
+    "duration_ms": "INTEGER",
+}
+
+
 def init() -> None:
     con = _conn()
     try:
         con.executescript(SCHEMA)
+        # 老库平滑升级：SQLite 没有 ADD COLUMN IF NOT EXISTS，先看表结构。
+        columns = {row["name"] for row in con.execute("PRAGMA table_info(reply_log)")}
+        for name, ddl in _REPLY_MIGRATIONS.items():
+            if name not in columns:
+                con.execute(f"ALTER TABLE reply_log ADD COLUMN {name} {ddl}")
         con.commit()
     finally:
         con.close()
@@ -78,8 +96,9 @@ def record_incoming(m: dict) -> bool:
     try:
         cur = con.execute(
             """INSERT OR IGNORE INTO reply_log
-               (message_id, conv_id, conv_name, in_text, in_type, msg_time, status, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)""",
+               (message_id, conv_id, conv_name, in_text, in_type, msg_time, status,
+                created_at, attempts, trace_id, last_step)
+               VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?, 'created')""",
             (
                 str(m.get("id")),
                 m.get("conv_id") or "",
@@ -88,6 +107,7 @@ def record_incoming(m: dict) -> bool:
                 int(m.get("type") or 0),
                 int(m.get("time") or 0),
                 time.time(),
+                f"tr_{uuid.uuid4().hex[:12]}",
             ),
         )
         con.commit()
@@ -112,13 +132,14 @@ def pending(include_failed: bool = True, limit: int = 200) -> list[dict]:
         con.close()
 
 
-def mark_sent(message_id: str, scene: str, reply_text: str) -> None:
+def mark_sent(message_id: str, scene: str, reply_text: str, duration_ms: int = 0) -> None:
     con = _conn()
     try:
         con.execute(
             "UPDATE reply_log SET status='sent', scene=?, reply_text=?, error=NULL, "
+            "last_step='sent', attempts=COALESCE(attempts,0)+1, duration_ms=?, "
             "replied_at=? WHERE message_id=?",
-            (scene, reply_text, time.time(), str(message_id)),
+            (scene, reply_text, max(0, int(duration_ms)), time.time(), str(message_id)),
         )
         con.commit()
     finally:
@@ -130,6 +151,7 @@ def mark_failed(message_id: str, error: str, scene: str = "", reply_text: str = 
     try:
         con.execute(
             "UPDATE reply_log SET status='failed', error=?, scene=?, reply_text=?, "
+            "last_step='failed', attempts=COALESCE(attempts,0)+1, "
             "replied_at=? WHERE message_id=?",
             (str(error)[:500], scene, reply_text, time.time(), str(message_id)),
         )
@@ -148,6 +170,7 @@ def mark_unknown(message_id: str, error: str, scene: str = "", reply_text: str =
     try:
         con.execute(
             "UPDATE reply_log SET status='unknown', error=?, scene=?, reply_text=?, "
+            "last_step='unknown', attempts=COALESCE(attempts,0)+1, "
             "replied_at=? WHERE message_id=?",
             (str(error)[:500], scene, reply_text, time.time(), str(message_id)),
         )
@@ -160,7 +183,8 @@ def mark_skipped(message_id: str, reason: str) -> None:
     con = _conn()
     try:
         con.execute(
-            "UPDATE reply_log SET status='skipped', error=?, replied_at=? WHERE message_id=?",
+            "UPDATE reply_log SET status='skipped', error=?, last_step='skipped', "
+            "replied_at=? WHERE message_id=?",
             (str(reason)[:500], time.time(), str(message_id)),
         )
         con.commit()
@@ -172,7 +196,8 @@ def mark_held(message_id: str, reason: str) -> None:
     con = _conn()
     try:
         con.execute(
-            "UPDATE reply_log SET status='held', error=?, scene='知识库', reply_text='', replied_at=? WHERE message_id=?",
+            "UPDATE reply_log SET status='held', error=?, scene='知识库', reply_text='', "
+            "last_step='held', replied_at=? WHERE message_id=?",
             (str(reason)[:500], time.time(), str(message_id)),
         )
         con.commit()
@@ -186,8 +211,8 @@ def retry_held() -> int:
         # held（知识库失败）与 unknown（回读未确认）都不参与自动补发，
         # 都靠这条命令显式重新入队；人工决定重发前先核对企微里有没有发出去。
         cur = con.execute(
-            "UPDATE reply_log SET status='pending', error=NULL, replied_at=NULL "
-            "WHERE status IN ('held','unknown')"
+            "UPDATE reply_log SET status='pending', error=NULL, replied_at=NULL, "
+            "last_step='requeued' WHERE status IN ('held','unknown')"
         )
         con.commit()
         return cur.rowcount
