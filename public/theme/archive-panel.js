@@ -88,12 +88,16 @@
     const body = document.getElementById("rk-arch-body");
     if (!body || !maskEl) return;
     try {
-      const [archive, devices] = await Promise.all([
+      const [archive, devices, media, positions] = await Promise.all([
         api("GET", "/api/v1/agent/archive/list"),
         api("GET", "/api/v1/agent/devices"),
+        api("GET", "/api/v1/media").catch(() => ({ items: [] })),
+        api("GET", "/api/v1/service-positions?page=1&page_size=100").catch(() => ({ items: [] })),
       ]);
       const items = archive.items || [];
       const deviceList = devices.items || [];
+      const mediaList = media.items || [];
+      const positionList = (positions.items || []).map((p) => ({ id: Number(p.id), name: String(p.position_name || p.id) }));
       body.innerHTML = "";
 
       // ── 群聊绑定配置 ──
@@ -223,6 +227,92 @@
       mrow2.append(mDate, mTime, mDevice, mBtn);
       manual.append(mrow1, mrow2);
       body.append(manual);
+
+      // ── 岗位素材库（媒体分层：通用池 + 岗位专属）──
+      const mediaBox = document.createElement("div");
+      mediaBox.className = "rk-arch-group";
+      mediaBox.innerHTML = `<b>岗位素材库（图/视频发给客户用）</b>`;
+      const mediaHint = document.createElement("p");
+      mediaHint.className = "rk-arch-hint";
+      mediaHint.textContent = "通用素材（工作内容/宿舍/安检视频）所有岗位共用；面试地点图这类各城市不同的，绑定到具体岗位——Agent 只会发本岗位绑定的图。客户问路线时 Agent 自动发对应素材。";
+      mediaBox.append(mediaHint);
+      const mediaTable = document.createElement("table");
+      mediaTable.style.cssText = "width:100%;border-collapse:collapse;font-size:11.5px;margin-top:8px";
+      const bindOptions = (current) =>
+        `<option value="0" ${!current ? "selected" : ""}>通用（所有岗位）</option>` +
+        positionList
+          .map((p) => `<option value="${p.id}" ${Number(current) === p.id ? "selected" : ""}>${escapeHtml(p.name)}</option>`)
+          .join("");
+      const fmtSize = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.round(n / 1024) + " KB");
+      mediaTable.innerHTML =
+        `<thead><tr style="text-align:left;color:var(--rk-ink-3,#5e5e5e)"><th style="padding:4px 6px">素材名</th><th style="padding:4px 6px">类型</th><th style="padding:4px 6px">大小</th><th style="padding:4px 6px">绑定岗位</th></tr></thead><tbody></tbody>`;
+      const mtbody = mediaTable.querySelector("tbody");
+      for (const m of mediaList) {
+        const tr = document.createElement("tr");
+        tr.innerHTML =
+          `<td style="padding:4px 6px">${escapeHtml(m.name)}</td>` +
+          `<td style="padding:4px 6px">${m.kind === "video" ? "视频" : "图片"}</td>` +
+          `<td style="padding:4px 6px">${fmtSize(Number(m.bytes || 0))}</td>`;
+        const td = document.createElement("td");
+        td.style.cssText = "padding:4px 6px";
+        const sel = document.createElement("select");
+        sel.className = "rk-arch-arrival";
+        sel.innerHTML = bindOptions(m.position_id);
+        sel.addEventListener("change", async () => {
+          sel.disabled = true;
+          try {
+            await api("PUT", `/api/v1/media/${m.id}/binding`, { position_id: Number(sel.value) });
+          } catch (error) {
+            sel.value = String(m.position_id || 0);
+          }
+          sel.disabled = false;
+        });
+        td.append(sel);
+        tr.append(td);
+        mtbody.append(tr);
+      }
+      mediaBox.append(mediaTable);
+      // 上传行：文件 + 绑定 + 按钮
+      const mrow = document.createElement("div");
+      mrow.className = "rk-arch-row";
+      const fileInput = document.createElement("input");
+      fileInput.type = "file";
+      fileInput.accept = "image/*,video/*";
+      const upSel = document.createElement("select");
+      upSel.innerHTML = bindOptions(0);
+      const upBtn = document.createElement("button");
+      upBtn.type = "button";
+      upBtn.textContent = "上传素材";
+      upBtn.addEventListener("click", () => {
+        const file = fileInput.files && fileInput.files[0];
+        if (!file) { upBtn.textContent = "先选文件"; return; }
+        const kind = file.type.startsWith("video") ? "video" : "image";
+        if (kind === "video" && file.size > 50 * 1048576) { upBtn.textContent = "视频超 50MB"; return; }
+        upBtn.disabled = true;
+        upBtn.textContent = "上传中…";
+        const reader = new FileReader();
+        reader.onload = async () => {
+          try {
+            const base64 = String(reader.result || "").split(",")[1] || "";
+            await api("POST", "/api/v1/media", {
+              name: file.name,
+              kind,
+              data_base64: base64,
+              position_id: Number(upSel.value) || 0,
+            });
+            upBtn.textContent = "已上传 ✓";
+            fileInput.value = "";
+            await paintBody();
+          } catch (error) {
+            upBtn.textContent = "失败：" + error.message;
+          }
+          setTimeout(() => { upBtn.textContent = "上传素材"; upBtn.disabled = false; }, 2200);
+        };
+        reader.readAsDataURL(file);
+      });
+      mrow.append(fileInput, upSel, upBtn);
+      mediaBox.append(mrow);
+      body.append(mediaBox);
 
       // ── 登记清单 ──
       const title = document.createElement("div");

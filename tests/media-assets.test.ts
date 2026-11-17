@@ -77,7 +77,8 @@ describe("media assets", () => {
     const listed = await app.inject({ method: "GET", url: "/api/v1/media", headers: admin });
     expect(listed.statusCode).toBe(200);
     expect(listed.json().items).toEqual([
-      { id: body.id, name: "联测电子厂_门头.png", kind: "image", sha256: PNG_SHA, bytes: PNG_BUFFER.length },
+      // position_id=0 通用池 / position_name=null 未绑定岗位（2026-11-17 媒体分层）
+      { id: body.id, name: "联测电子厂_门头.png", kind: "image", sha256: PNG_SHA, bytes: PNG_BUFFER.length, position_id: 0, position_name: null },
     ]);
   });
 

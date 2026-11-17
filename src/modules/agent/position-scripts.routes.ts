@@ -86,6 +86,9 @@ export async function registerPositionScriptRoutes(app: FastifyInstance, db: Dat
     }
     const kind = text(body.kind).trim() as MediaKind;
     if (!MEDIA_KINDS.has(kind)) return reply.code(422).send({ detail: "kind must be image or video" });
+    // 岗位绑定（2026-11-17 媒体分层）：0=通用池（全岗位可发），>0=岗位专属
+    // （如面试地点图——各城市地址不同，图跟岗位走）。缺省 0 兼容旧调用。
+    const positionId = Math.max(0, int(body.position_id) || 0);
     const base64 = text(body.data_base64);
     if (!base64) return reply.code(422).send({ detail: "data_base64 is required" });
     const decoded = decodeBase64(base64);
@@ -109,31 +112,57 @@ export async function registerPositionScriptRoutes(app: FastifyInstance, db: Dat
     if (!fs.existsSync(absolute)) fs.writeFileSync(absolute, buffer);
 
     const row = db.prepare(
-      `INSERT INTO media_assets(name,kind,storage_path,sha256,bytes,status)
-       VALUES (?,?,?,?,?,'enabled')
+      `INSERT INTO media_assets(name,kind,storage_path,sha256,bytes,status,position_id)
+       VALUES (?,?,?,?,?,'enabled',?)
        ON CONFLICT(name) DO UPDATE SET
          kind=excluded.kind, storage_path=excluded.storage_path,
          sha256=excluded.sha256, bytes=excluded.bytes, status='enabled'
-       RETURNING id,name,kind,sha256,bytes`,
-    ).get(name, kind, storagePath, sha256, buffer.length) as
-      | { id: number; name: string; kind: string; sha256: string; bytes: number }
+       RETURNING id,name,kind,sha256,bytes,position_id`,
+    ).get(name, kind, storagePath, sha256, buffer.length, positionId) as
+      | { id: number; name: string; kind: string; sha256: string; bytes: number; position_id: number }
       | undefined;
     if (!row) return reply.code(500).send({ detail: "failed to store media" });
-    return { id: Number(row.id), name: String(row.name), kind: String(row.kind), sha256: String(row.sha256), bytes: Number(row.bytes) };
+    return { id: Number(row.id), name: String(row.name), kind: String(row.kind), sha256: String(row.sha256), bytes: Number(row.bytes), position_id: Number(row.position_id ?? 0) };
   });
 
   app.get("/api/v1/media", async (request, reply) => {
     if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
-    const rows = db.prepare("SELECT id,name,kind,sha256,bytes FROM media_assets WHERE status='enabled' ORDER BY id")
-      .all() as Array<{ id: number; name: string; kind: string; sha256: string; bytes: number }>;
+    // 素材库面板：带岗位绑定回显（0=通用池），岗位名 join 供下拉展示
+    const rows = db.prepare(
+      `SELECT m.id, m.name, m.kind, m.sha256, m.bytes, m.position_id,
+              p.position_name AS position_name
+         FROM media_assets m
+         LEFT JOIN service_positions p ON p.id = m.position_id
+        WHERE m.status='enabled' ORDER BY m.id`,
+    ).all() as Array<{ id: number; name: string; kind: string; sha256: string; bytes: number; position_id: number; position_name: string | null }>;
     return {
       items: rows.map((row) => ({
         id: Number(row.id), name: String(row.name), kind: String(row.kind),
         sha256: String(row.sha256), bytes: Number(row.bytes ?? 0),
+        position_id: Number(row.position_id ?? 0),
+        position_name: row.position_name ?? null,
       })),
       total: rows.length,
     };
   });
+
+  // 绑定修改：素材库面板下拉即时保存（0=通用池，>0=岗位专属）。
+  // position_id 校验存在性，防手滑绑到不存在的岗位导致事实卡注入空转。
+  app.put<{ Params: { id: string }; Body: Record<string, unknown> }>(
+    "/api/v1/media/:id/binding",
+    async (request, reply) => {
+      if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
+      const id = int(request.params.id);
+      if (id <= 0) return reply.code(404).send({ detail: "Not Found" });
+      const positionId = Math.max(0, int((request.body ?? {}).position_id) || 0);
+      if (positionId > 0) {
+        const exists = db.prepare("SELECT id FROM service_positions WHERE id=?").get(positionId);
+        if (!exists) return reply.code(422).send({ detail: "岗位不存在" });
+      }
+      const result = db.prepare("UPDATE media_assets SET position_id=? WHERE id=?").run(positionId, id);
+      return result.changes ? { ok: true, position_id: positionId } : reply.code(404).send({ detail: "Not found" });
+    },
+  );
 
   app.delete<{ Params: { id: string } }>("/api/v1/media/:id", async (request, reply) => {
     if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
