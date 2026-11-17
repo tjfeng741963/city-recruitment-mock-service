@@ -132,6 +132,20 @@
   .toasts{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);display:flex;flex-direction:column;gap:8px;z-index:60;pointer-events:none}
   .toast{padding:9px 14px;border-radius:var(--radius);background:rgba(23,28,38,.94);color:#fff;font-size:13px}
   .toast.error{background:rgba(163,45,45,.96)}
+  .dev-detail{display:flex;flex-direction:column;gap:14px;overflow:auto}
+  .dev-detail .binding{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+  .dev-detail .kv{padding:10px 14px;border:1px solid var(--line);border-radius:var(--radius);background:#fff}
+  .dev-detail .kv b{display:block;font-size:12px;color:var(--muted);font-weight:400;margin-bottom:4px}
+  .dev-detail .kv span{font-size:14px;font-family:var(--mono)}
+  .dev-detail .badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px}
+  .dev-detail .badge.on{background:#e1f5ee;color:#0f6e56}
+  .dev-detail .badge.off{background:#fcebeb;color:#a32d2d}
+  .dev-detail .qr-panel{padding:16px;border:1px solid var(--line);border-radius:var(--radius);background:#fff;text-align:center}
+  .dev-detail .qr-panel img{width:300px;height:300px;object-fit:contain;border:1px solid var(--line-strong);border-radius:8px;background:#fff}
+  .dev-detail .qr-panel .hint{font-size:12.5px;color:var(--muted);margin-top:8px}
+  .qr-steps p{font-size:12.5px;color:var(--muted);line-height:1.7;margin:2px 0}
+  .dev-item{padding:10px 12px;border:1px solid var(--line);border-radius:var(--radius);background:#fff;cursor:pointer;margin-bottom:8px;font-size:13px}
+  .dev-item.is-active{border-color:var(--accent);box-shadow:0 0 0 2px rgba(24,95,165,.12)}
 </style>
 </head>
 <body>
@@ -140,6 +154,7 @@
   <nav>
     <button data-view="api" class="is-active">接口目录</button>
     <button data-view="agent">Agent 对话</button>
+    <button data-view="devices">设备登录</button>
   </nav>
   <div class="who">
     <span class="dot" id="dot"></span>
@@ -218,6 +233,27 @@
           <button id="chat-clear" type="button">清空</button>
         </div>
       </div>
+    </div>
+  </section>
+
+  <section class="view" id="view-devices" hidden>
+    <div class="agent-left">
+      <div class="sec">
+        <h3>设备列表</h3>
+        <div id="dev-list" class="empty">加载中…</div>
+      </div>
+      <div class="sec">
+        <h3>绑定流程</h3>
+        <div class="qr-steps">
+          <p>1. 服务器客户端启动后自动注册 / 心跳，出现在左侧列表；</p>
+          <p>2. 企微掉登录时客户端每 30 秒推送扫码窗截图，下方自动出现二维码；</p>
+          <p>3. 用手机企微扫码登录，客户端检测到恢复后自动清掉二维码；</p>
+          <p>4. 绑定关系（设备码 ↔ 岗位）在右侧，岗位在「岗位管理 → Agent」里配置。</p>
+        </div>
+      </div>
+    </div>
+    <div class="agent-right">
+      <div id="dev-detail" class="dev-detail empty">从左侧选一台设备。</div>
     </div>
   </section>
 </main>
@@ -342,7 +378,9 @@
       var view = button.getAttribute("data-view");
       $("view-api").hidden = view !== "api";
       $("view-agent").hidden = view !== "agent";
+      $("view-devices").hidden = view !== "devices";
       if (view === "agent" && !$("pos").options.length) loadAgent().catch(function () {});
+      if (view === "devices") startDeviceView(); else stopDeviceView();
     });
   });
 
@@ -704,6 +742,95 @@
       $("chat-send").textContent = "发送";
     }
   });
+
+  // ── 设备登录（二维码绑定通用流程）──
+  // 状态机：设备列表 → 选中设备 → 每 5 秒轮询 登录二维码 + 设备在线状态。
+  // 二维码由客户端（服务器上的企微机）掉登录时推送，扫完客户端自动清掉。
+  var deviceState = { list: [], current: "", timer: null, qrTimer: null };
+
+  function stopDeviceView() {
+    if (deviceState.timer) clearInterval(deviceState.timer);
+    if (deviceState.qrTimer) clearInterval(deviceState.qrTimer);
+    deviceState.timer = deviceState.qrTimer = null;
+  }
+
+  async function refreshDevices() {
+    var data = await api("GET", "/api/v1/agent/devices");
+    deviceState.list = data.items || [];
+    var box = $("dev-list");
+    box.innerHTML = "";
+    if (!deviceState.list.length) {
+      box.className = "empty";
+      box.textContent = "还没有设备。服务器客户端启动并注册后，这里会出现。";
+      return;
+    }
+    box.className = "";
+    deviceState.list.forEach(function (device) {
+      var item = el("div", "dev-item" + (device.device_code === deviceState.current ? " is-active" : ""));
+      var badge = el("span", "badge " + (device.online ? "on" : "off"), device.online ? "在线" : "离线");
+      item.append(el("b", null, device.device_code + (device.name ? " · " + device.name : "")), " ", badge);
+      if (device.position_id) item.append(el("span", null, "（岗位 #" + device.position_id + "）"));
+      item.addEventListener("click", function () {
+        deviceState.current = device.device_code;
+        paintDeviceDetail(device);
+        Array.prototype.forEach.call(box.querySelectorAll(".dev-item"), function (n) { n.classList.remove("is-active"); });
+        item.classList.add("is-active");
+      });
+      box.append(item);
+      // 默认选中第一台
+      if (!deviceState.current) deviceState.current = device.device_code;
+      if (device.device_code === deviceState.current) paintDeviceDetail(device);
+    });
+  }
+
+  function paintDeviceDetail(device) {
+    var box = $("dev-detail");
+    box.className = "dev-detail";
+    box.innerHTML = "";
+    var title = el("h3", null, "设备绑定信息 · " + device.device_code);
+    var grid = el("div", "binding");
+    [["设备码", device.device_code], ["名称", device.name || "-"],
+     ["在线状态", device.online ? "在线" : "离线"], ["最近在线", device.last_online || "-"],
+     ["绑定岗位", device.position_id ? "岗位 #" + device.position_id : "未绑定"], ["排队消息", device.queue_depth ?? 0]]
+      .forEach(function (pair) {
+        var kv = el("div", "kv");
+        kv.append(el("b", null, pair[0]), el("span", null, String(pair[1])));
+        grid.append(kv);
+      });
+    var qrPanel = el("div", "qr-panel");
+    qrPanel.append(el("h3", null, "企微登录二维码"));
+    var imgWrap = el("div");
+    imgWrap.id = "qr-img-wrap";
+    imgWrap.append(el("p", "hint", "轮询中：客户端掉登录后 30 秒内会出现二维码，手机企微扫码即可。"));
+    qrPanel.append(imgWrap);
+    box.append(title, grid, qrPanel);
+    pullQr();
+  }
+
+  async function pullQr() {
+    if (!deviceState.current || $("view-devices").hidden) return;
+    try {
+      var data = await api("GET", "/api/v1/agent/devices/" + deviceState.current + "/login-qr");
+      var wrap = $("qr-img-wrap");
+      if (!wrap) return;
+      wrap.innerHTML = "";
+      if (data.available && data.image) {
+        var img = el("img");
+        img.src = data.image;
+        img.alt = "企微登录二维码";
+        wrap.append(img, el("p", "hint", "用手机企业微信扫这个码（截图来自服务器，" + (data.captured_at || "") + "）"));
+      } else {
+        wrap.append(el("p", "hint", "当前没有待扫的二维码——设备在线时这里就是空的。"));
+      }
+    } catch (e) { /* 轮询失败不打扰 */ }
+  }
+
+  function startDeviceView() {
+    refreshDevices().catch(function (e) { toast(e.message, "error"); });
+    stopDeviceView();
+    deviceState.timer = setInterval(function () { refreshDevices().catch(function () {}); }, 8000);
+    deviceState.qrTimer = setInterval(pullQr, 5000);
+  }
 
   // ── 启动 ──
   paintWho();
