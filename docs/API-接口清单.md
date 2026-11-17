@@ -101,9 +101,10 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 |---|---|---|
 | `position_id` | 二选一 | 岗位 id |
 | `device_code` | 二选一 | 也可以传设备号，服务端反查岗位 |
+| `session_key` | 推荐 | 会话 id（客户端传企微会话 id）。传了走**服务端会话记忆**：全量上下文存 `agent_session` 表，成功一轮累积一轮，客户端不传历史；绑到别的岗位自动重置 |
 | `text` | 是 | 客户这一句 |
-| `history` | 否 | `[{role:"customer"\|"agent", text:"..."}]`，按时间正序 |
-| `dry` | 否 | `true` 只返回拼好的 messages，不调模型 |
+| `history` | 否 | 仅无状态模式（没有 `session_key`）用：`[{role:"customer"\|"agent", text:"..."}]` |
+| `dry` | 否 | `true` 只返回拼好的 messages，不调模型、不写会话 |
 
 **返回**
 
@@ -125,14 +126,23 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 }
 ```
 
-**编排（2026-11-17 信任模式）**：system = 人设（话术段落剥离）+ 岗位事实 +
-话术库（人设里 `[S1 标题]` 格式的段落）+ 输出规范。话术命中与引用方式由
-模型自行判断，**没有代码级护栏**（原 guardScript 替换、guardMoney 金额拦截
-已拆除，相信模型按 prompt 约束回答）。
+**编排（2026-11-17 信任模式 + 服务端记忆）**：system = 人设（话术段落剥离）+
+岗位事实 + 话术库（人设里 `[S1 标题]` 格式的段落）+ 输出规范。话术命中与
+引用方式由模型自行判断，**没有代码级护栏**（原 guardScript 替换、
+guardMoney 金额拦截已拆除，相信模型按 prompt 约束回答）。
 
-多轮对话按 DeepSeek 无状态 API 的约定：服务端不记上下文，客户端每轮把
-全量 history 传回来；assistant 历史由编排层装回 JSON 信封（等价于
-「append 上一轮原始输出」），保证输出格式不漂移。
+**开场序列每轮由服务端注入**：position_opening 里启用的条目装成 assistant
+历史放在最前面，模型知道「开场那串已经发过了」，能接住「你发的第二条说的
+工资是多少」这类指代。运营改开场配置，下一轮对话即生效。
+
+**会话记忆在服务端**（迁移 039 `agent_session` 表）：客户端只报
+`session_key + 这句话`；成功一轮后客户这句与模型回复才写入上下文，失败不写
+（客户端重试不会造成上下文重复）。不传 `session_key` 时退回无状态
+`history` 参数（/dev 调试台兼容）。
+
+多轮对话按 DeepSeek 无状态 API 的约定：服务端拼好完整 messages 调 API；
+assistant 历史装回 JSON 信封（等价于「append 上一轮原始输出」），保证输出
+格式不漂移。
 
 失败时统一是 `{"ok": false, "error": "原因", "code": "no_api_key"}`，
 HTTP 仍是 200——调用方按 `ok` 判断，不要按状态码。模型输出不是 JSON 时
@@ -175,6 +185,7 @@ HTTP 仍是 200——调用方按 `ok` 判断，不要按状态码。模型输�
 
 | 日期 | 改动 |
 |---|---|
+| 2026-11-17 | chat 加 session_key 服务端会话记忆（迁移 039 agent_session）；开场序列每轮由服务端注入为 assistant 历史；客户端 brain 只传 session_key+这句话，删除本地历史构建 |
 | 2026-11-17 | chat 拆除代码级护栏（guardScript 替换 / guardMoney 金额拦截 / script_used 声明），话术约束走 prompt 信任模型；assistant 历史装回 JSON 信封防格式漂移 |
 | 2026-11-17 | chat 接口：assistant 历史由编排层装回 JSON 信封（防多轮格式漂移，实测修掉 5/16 轮解析失败）；金额护栏放行话术原文里的数字；解析失败返回 code=bad_json 且带 latency_ms/usage |
 | 2026-11-17 | 删除旧「岗位话术 5 时点」接口（GET/POST/DELETE /api/v1/position-scripts）；8090 摘除 kb / kb_publish / lead / lead_board / flow / webhook 六组废弃路由；客户端 brain 切到 4222 的 agent/opening + agent/chat |

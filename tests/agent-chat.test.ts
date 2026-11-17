@@ -135,6 +135,89 @@ describe("agent chat routes", () => {
     expect(String(body.error)).toContain("AGENT_LLM_API_KEY");
   });
 
+  it("开场序列注入为 assistant 历史：客户问「第二条说的工资」时模型看得到", async () => {
+    app.db
+      .prepare(
+        `INSERT INTO position_opening(position_id, seq, kind, content, media_name, delay_ms, status)
+         VALUES (?,?,?,?,?,?,?)`,
+      )
+      .run(positionId, 1, "text", "招聘要求：男女不限，18-35岁", "", 2000, "enabled");
+    app.db
+      .prepare(
+        `INSERT INTO position_opening(position_id, seq, kind, content, media_name, delay_ms, status)
+         VALUES (?,?,?,?,?,?,?)`,
+      )
+      .run(positionId, 2, "image", "", "宿舍照片.jpg", 2000, "enabled");
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/agent/chat",
+      headers: admin,
+      payload: { position_id: positionId, text: "你发的第二条是什么", dry: true },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    // system 之后紧跟开场序列（assistant JSON 信封），再才是当前这句
+    expect(body.messages[1].role).toBe("assistant");
+    expect(body.messages[1].content).toBe(
+      JSON.stringify({ messages: [{ type: "text", content: "招聘要求：男女不限，18-35岁" }] }),
+    );
+    expect(body.messages[2].role).toBe("assistant");
+    expect(body.messages[2].content).toBe(
+      JSON.stringify({ messages: [{ type: "image", name: "宿舍照片.jpg" }] }),
+    );
+    expect(body.messages[3]).toEqual({ role: "user", content: "你发的第二条是什么" });
+  });
+
+  it("session_key 模式：上下文存服务端，成功后累积、失败不写", async () => {
+    // 没配 key：失败不入会话
+    const first = await app.inject({
+      method: "POST",
+      url: "/api/v1/agent/chat",
+      headers: admin,
+      payload: { position_id: positionId, session_key: "S:test-session", text: "多少钱" },
+    });
+    expect(first.json().ok).toBe(false);
+    expect(
+      app.db.prepare("SELECT COUNT(*) AS n FROM agent_session").get(),
+    ).toEqual({ n: 0 });
+
+    // dry 不写会话，但能看到当前（空）上下文
+    const dry = await app.inject({
+      method: "POST",
+      url: "/api/v1/agent/chat",
+      headers: admin,
+      payload: { position_id: positionId, session_key: "S:test-session", text: "在吗", dry: true },
+    });
+    expect(dry.json().session_key).toBe("S:test-session");
+    expect(
+      app.db.prepare("SELECT COUNT(*) AS n FROM agent_session").get(),
+    ).toEqual({ n: 0 });
+  });
+
+  it("session_key 绑到别的岗位时上下文重置，不串会话", async () => {
+    app.db
+      .prepare(
+        "INSERT INTO agent_session(session_key, position_id, context_json, updated_at) VALUES (?,?,?,CURRENT_TIMESTAMP)",
+      )
+      .run(
+        "S:other-pos",
+        positionId + 1,
+        JSON.stringify([{ role: "customer", text: "旧会话的这句话" }]),
+      );
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/agent/chat",
+      headers: admin,
+      payload: { position_id: positionId, session_key: "S:other-pos", text: "你好", dry: true },
+    });
+    expect(res.statusCode).toBe(200);
+    // 旧上下文不该出现：messages 里只有 system + 当前这句
+    const body = res.json();
+    expect(body.messages).toHaveLength(2);
+    expect(body.messages[1]).toEqual({ role: "user", content: "你好" });
+  });
+
   it("岗位不存在时 404", async () => {
     expect(
       (

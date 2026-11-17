@@ -1007,48 +1007,6 @@ def _prefetch_media(parts: list[str], cfg: dict) -> None:
         log(f"    [媒体] 预取异常（忽略，只发文字）：{type(exc).__name__}: {exc}")
 
 
-def build_history(store: Store, conv_id: str, limit: int = 6) -> list[str]:
-    """取该会话最近几条「对方说的」纯文本，作为知识库的上下文。"""
-    try:
-        rows = store.messages(conv_id, limit=limit * 3)
-    except Exception:  # noqa: BLE001
-        return []
-    me = store.self_id()
-    out: list[str] = []
-    for m in rows:
-        if str(m.get("sender_id")) == me:
-            continue
-        text = (m.get("text") or "").strip()
-        if text:
-            out.append(text[:200])
-    return out[-limit:]
-
-
-def build_dialogue(store: Store, conv_id: str, limit: int = 12) -> list[dict]:
-    """取最近几轮**双方**对话，给谈单状态抽取用。
-
-    和 build_history 的区别：那个只要客户说的话（喂给知识库做检索），
-    这个要成对的问与答——判断"有没有约上"，必须看我们答了什么。
-    """
-    try:
-        rows = store.messages(conv_id, limit=limit * 2)
-    except Exception:  # noqa: BLE001
-        return []
-    me = store.self_id()
-    out: list[dict] = []
-    for m in rows:
-        text = (m.get("text") or "").strip()
-        if not text:
-            continue
-        role = "agent" if str(m.get("sender_id")) == me else "customer"
-        ts = m.get("time") or 0
-        item: dict = {"role": role, "text": text[:500]}
-        if ts:
-            item["at"] = time.strftime("%m-%d %H:%M", time.localtime(ts))
-        out.append(item)
-    return out[-limit:]
-
-
 def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "online") -> dict:
     """按消息时间正序处理 pending + failed。
 
@@ -1197,8 +1155,9 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 if not hint and not dry:
                     res = {"ok": False, "detail": f"消息没有文本（type={it['in_type']}）"}
                 elif hint:
-                    # dialogue 全量带上：服务端无状态，历史每轮都要拼回去
-                    res = _brain.chat(hint, build_dialogue(store, cid, limit=500))
+                    # 会话记忆在服务端：只报 session_key（会话 id）+ 这句话。
+                    # 服务端自己持有全量上下文（含开场序列），客户端不传历史。
+                    res = _brain.chat(hint, cid)
                     agent_medias = res.get("medias") or []
                 if res.get("skip"):
                     if not dry:

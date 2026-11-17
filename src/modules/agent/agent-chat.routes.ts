@@ -3,7 +3,12 @@ import type { DatabaseSync } from "node:sqlite";
 import { authorizeProfileRequest } from "./profile.routes.js";
 import { isValidDeviceToken } from "./position-scripts.routes.js";
 import { complete, llmConfig, parseJsonObject } from "./agent-llm.js";
-import { buildOrchestration, parseScripts } from "./agent-orchestrator.js";
+import {
+  buildOrchestration,
+  parseScripts,
+  type DialogueItem,
+  type OpeningItem,
+} from "./agent-orchestrator.js";
 
 /**
  * Agent 会话接口 + 调试台的后端（迁移 038 的消费侧）。
@@ -286,21 +291,61 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
     const row = positionRow(db, positionId);
     if (!row) return reply.code(404).send({ detail: "position not found" });
 
-    const history = Array.isArray(body.history)
-      ? (body.history as Array<Record<string, unknown>>)
-          .filter((item) => item && typeof item === "object")
-          .map((item) => ({ role: text(item.role), text: text(item.text) }))
-      : [];
+    // ── 会话记忆在服务端（2026-11-17）──────────────────────────
+    // 传 session_key 时，全量上下文存 agent_session 表，客户端只报
+    // 「这个会话来了这句话」，不传历史；不传 session_key 走旧的无状态
+    // history 参数（/dev 调试台兼容）。开场序列是岗位配置，每轮现读注入。
+    const sessionKey = text(body.session_key).trim().slice(0, 120);
+    let sessionEntries: DialogueItem[] = [];
+    let sessionReset = false;
+    if (sessionKey) {
+      const sessionRow = db
+        .prepare("SELECT position_id, context_json FROM agent_session WHERE session_key=?")
+        .get(sessionKey) as { position_id: number; context_json: string } | undefined;
+      if (sessionRow && Number(sessionRow.position_id) !== positionId) {
+        // 会话绑到了别的岗位：视为换了业务，上下文清空重来
+        sessionReset = true;
+      } else if (sessionRow) {
+        try {
+          const parsed = JSON.parse(sessionRow.context_json) as unknown;
+          if (Array.isArray(parsed)) sessionEntries = parsed as DialogueItem[];
+        } catch {
+          sessionEntries = [];
+        }
+      }
+    }
+
+    const history: DialogueItem[] = sessionKey
+      ? sessionEntries
+      : Array.isArray(body.history)
+        ? (body.history as Array<Record<string, unknown>>)
+            .filter((item) => item && typeof item === "object")
+            .map((item) => ({
+              role: text(item.role),
+              text: text(item.text),
+              kind: text(item.kind) || null,
+              name: text(item.name) || null,
+            }))
+        : [];
+
     const persona = personaOf(db, positionId);
     const facts = buildFacts(row);
-    // 编排：system(人设+事实+话术库+规则) + 全量历史 + 当前这句（DeepSeek 无状态多轮拼接）
-    const { messages, scripts } = buildOrchestration({ persona, facts, history, input });
+    const opening: OpeningItem[] = openingOf(db, positionId).map((item) => ({
+      kind: String(item.kind ?? "text"),
+      content: String(item.content ?? ""),
+      media_name: String(item.media_name ?? ""),
+    }));
+    // 编排：system(人设+事实+话术库+规则) + 开场序列 + 全量历史 + 当前这句
+    // （DeepSeek 无状态多轮拼接；上下文归服务端持有）
+    const { messages, scripts } = buildOrchestration({ persona, facts, opening, history, input });
 
-    // dry：只回拼好的 prompt，不调模型。调试台用它确认「人设 + 事实 + 话术库」有没有喂对。
+    // dry：只回拼好的 prompt，不调模型、不写会话。调试台用它确认
+    // 「人设 + 事实 + 话术库 + 开场 + 历史」有没有喂对。
     if (body.dry === true) {
       return {
         ok: true,
         dry: true,
+        session_key: sessionKey || null,
         messages,
         facts,
         persona,
@@ -341,8 +386,28 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       }
 
       // 信任模式：不做代码级护栏，模型按 prompt 约束引用话术原文（2026-11-17）。
+      // 会话成功才有记忆：客户这句 + 模型回复全部落进 agent_session，失败不写
+      // ——客户端重试同一条消息不会造成上下文重复。
+      if (sessionKey) {
+        const nextEntries: DialogueItem[] = sessionReset ? [] : [...sessionEntries];
+        nextEntries.push({ role: "customer", text: input });
+        for (const item of replyPayload.messages) {
+          if (item.type === "text") {
+            nextEntries.push({ role: "agent", text: item.content });
+          } else {
+            nextEntries.push({ role: "agent", kind: item.type, name: (item as { name?: string }).name || "" });
+          }
+        }
+        db.prepare(
+          `INSERT INTO agent_session(session_key, position_id, context_json, updated_at)
+           VALUES (?,?,?,CURRENT_TIMESTAMP)
+           ON CONFLICT(session_key) DO UPDATE SET
+             context_json=excluded.context_json, updated_at=CURRENT_TIMESTAMP`,
+        ).run(sessionKey, positionId, JSON.stringify(nextEntries));
+      }
       return {
         ok: true,
+        session_key: sessionKey || null,
         reply: replyPayload,
         raw: result.content,
         model: result.model,

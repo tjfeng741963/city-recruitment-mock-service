@@ -6,8 +6,8 @@
    新会话第一次出现消息时按 seq 逐条播：文本真发，图片/视频只占位不真发；
    每条都 POST /api/v1/agent/opening/log 上报回执，失败也记。
 2. 对话：POST /api/v1/agent/chat
-   {device_code, text, history} → {reply:{messages:[...], script_used, ...}}。
-   history 是客户端本地库的全量对话（DeepSeek 无状态多轮拼接）。
+   {device_code, session_key, text} → {reply:{messages:[...], ...}}。
+   会话记忆在服务端（agent_session 表），客户端不传历史——客户端只是操作。
    图片/视频消息用文件名占位，当前阶段不真实发送。
 
 鉴权：设备 Bearer token（config.json 的 bridge_token，与心跳同一份）。
@@ -118,16 +118,17 @@ class Brain:
 
     # ── 对话 ──────────────────────────────────────────────
 
-    def chat(self, text: str, dialogue: list[dict[str, Any]]) -> dict[str, Any]:
-        """一轮受控对话。返回 {ok, parts, medias, scene, detail}。
+    def chat(self, text: str, session_key: str) -> dict[str, Any]:
+        """一轮对话。返回 {ok, parts, medias, scene, detail}。
 
-        parts 是纯文本列表（逐条发送）；medias 是 [(kind, name)] 媒体占位，
-        当前阶段不真实发送，调用方只记录。
+        会话记忆在服务端（agent_session 表）：客户端只报 session_key + 这句话，
+        不传历史。parts 是纯文本列表（逐条发送）；medias 是 [(kind, name)]
+        媒体占位，当前阶段不真实发送，调用方只记录。
         """
         payload: dict[str, Any] = {
             "device_code": self.device_code,
+            "session_key": (session_key or "").strip()[:120],
             "text": (text or "")[:2000],
-            "history": dialogue,
         }
         try:
             data = self._post("/api/v1/agent/chat", payload)
@@ -159,11 +160,7 @@ class Brain:
         if not parts and not medias:
             return {"ok": False, "parts": [], "medias": [], "detail": "模型返回了空回复"}
 
-        script_used = reply.get("script_used")
-        replaced = bool(data.get("script_replaced"))
         detail_bits = [f"{data.get('model')} {data.get('latency_ms')}ms"]
-        if script_used:
-            detail_bits.append(f"话术 {script_used}{'(已替换回原文)' if replaced else ''}")
         return {
             "ok": True,
             "reply": parts[0] if parts else "",
