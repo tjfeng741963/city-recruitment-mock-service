@@ -115,7 +115,9 @@ describe("agent chat routes", () => {
     // 事实必须真的进了 system，而不是只在接口响应里
     expect(body.messages[0].content).toContain("22元/小时");
     expect(body.messages[1]).toEqual({ role: "user", content: "多少钱一小时" });
-    expect(body.messages[2]).toEqual({ role: "assistant", content: "22 一小时" });
+    expect(body.messages[2].role).toBe("assistant");
+    // assistant 历史装回 JSON 信封（与输出格式一致，防第 2 轮格式漂移）
+    expect(body.messages[2].content).toBe(JSON.stringify({ messages: [{ type: "text", content: "22 一小时" }] }));
     expect(body.messages[3]).toEqual({ role: "user", content: "有没有夜班" });
   });
 

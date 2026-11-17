@@ -312,7 +312,22 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
 
     try {
       const result = await complete(messages);
-      const parsed = parseJsonObject(result.content);
+      // JSON 解析失败单独一档：带着耗时与 token 返回，调试台能看到
+      // 「模型花了多少毫秒、烧了多少 token 才吐出这段不合格的输出」。
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = parseJsonObject(result.content);
+      } catch (error) {
+        return {
+          ok: false,
+          error: (error as Error).message,
+          code: "bad_json",
+          raw: result.content,
+          model: result.model,
+          usage: result.usage,
+          latency_ms: result.latency_ms,
+        };
+      }
       let replyPayload: ReturnType<typeof normalizeReply>;
       try {
         replyPayload = normalizeReply(parsed);
@@ -330,7 +345,13 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       const scriptGuard = guardScript(replyPayload.messages, (parsed as Record<string, unknown>).script_used, scripts);
       replyPayload.messages = scriptGuard.messages;
 
-      const moneyIssue = guardMoney(replyPayload.messages, facts);
+      // 金额护栏：事实卡 + 话术库原文都是可信数字来源（原文是运营写的，
+      // 模型逐字引用原文里的「175/班」不算编造）；两头都没有的数字才拦。
+      const moneyIssue = guardMoney(
+        replyPayload.messages,
+        facts,
+        scripts.map((script) => script.content).join("\n"),
+      );
       return {
         ok: !moneyIssue,
         error: moneyIssue || undefined,

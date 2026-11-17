@@ -65,6 +65,7 @@ const OUTPUT_SPEC = `# 输出格式（必须是 JSON，不要代码块，不要�
 {"messages":[{"type":"text","content":"发给客户的一句话"}],"capture":{"name":"","phone":"","city":"","day":""},"script_used":null,"handoff":false,"done":false}
 
 # 硬规则
+- 历史里的 assistant 消息是之前轮次的 JSON 输出（content 是当时发给客户的文案）；你每一轮只输出一个新 JSON，不要复述历史、不要模仿纯文本
 - messages 里可以有多条：先回一句话，再补一条图片或视频（type=image/video，name 填素材文件名）；没有素材就不要输出
 - 客户话题与话术库某一类大致相似 → 用该类原文回答（可挑最相关的段落），script_used 填该编号，例如 "S2"
 - 话术库里对不上的 → script_used 填 null，自己回答，但数字只能来自岗位事实
@@ -106,9 +107,14 @@ export function buildOrchestration(options: {
   for (const item of options.history) {
     const content = String(item.text || "").trim();
     if (!content) continue;
+    const isAgent = String(item.role) === "agent";
     messages.push({
-      role: String(item.role) === "agent" ? "assistant" : "user",
-      content,
+      role: isAgent ? "assistant" : "user",
+      // assistant 历史按上一轮的 JSON 原样回填（DeepSeek 多轮指南：把上一轮
+      // assistant 输出 append 回 messages 末尾）。客户端手里只有发出去的文案，
+      // 所以由编排层重新装回 JSON 信封——格式一致，模型才不会从第 2 轮开始
+      // 模仿纯文本、丢掉 JSON 输出（2026-11-17 真调复现过 5/16 轮）。
+      content: isAgent ? JSON.stringify({ messages: [{ type: "text", content }] }) : content,
     });
   }
   messages.push({ role: "user", content: options.input });
@@ -120,13 +126,22 @@ function normalize(text: string): string {
   return String(text || "").replace(/[\s，,。.、;；:：!！?？'"「」【】\[\]（）()]/g, "");
 }
 
-/** 金额护栏：回复文本里出现的钱数必须能在事实里找到。 */
-export function guardMoney(messages: Array<{ type: string; content?: string }>, facts: Record<string, string>): string | null {
+/** 金额护栏：回复文本里出现的钱数必须能在事实里找到。
+ *
+ * trustedCorpus 是额外允许的数字来源（话术库原文全文）：原文是运营写的，
+ * 里面的「175/班」「保底3600」不属于编造——模型逐字引用原文时不应被拦，
+ * 只有原文里都没有的数字才拦。 */
+export function guardMoney(
+  messages: Array<{ type: string; content?: string }>,
+  facts: Record<string, string>,
+  trustedCorpus = "",
+): string | null {
   const prose = messages
     .filter((item) => item.type === "text")
     .map((item) => String(item.content || ""))
     .join("\n");
-  const allowed = Object.values(facts).join(" ").replace(/\s+/g, "");
+  const allowed =
+    Object.values(facts).join(" ").replace(/\s+/g, "") + trustedCorpus.replace(/\s+/g, "");
   const patterns = [/(\d+(?:\.\d+)?)\s*元/g, /(\d+(?:\.\d+)?)\s*\/\s*(?:小时|时|天|月|班)/g];
   for (const pattern of patterns) {
     let match = pattern.exec(prose);

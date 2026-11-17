@@ -56,7 +56,11 @@ describe("agent orchestrator", () => {
     expect(messages[0].content).toContain("160/班");
     expect(messages[0].content).toContain("[S1 外宿人员嫌弃面试地址远]");
     expect(messages[1]).toEqual({ role: "user", content: "多少钱" });
-    expect(messages[2]).toEqual({ role: "assistant", content: "160 一班" });
+    // assistant 历史装回 JSON 信封：与输出格式一致，模型不会从第 2 轮
+    // 开始模仿纯文本、丢掉 JSON 输出（2026-11-17 真调复现过）。
+    expect(messages[2].role).toBe("assistant");
+    const assistantEnvelope = JSON.parse(messages[2].content) as { messages?: Array<{ type?: string; content?: string }> };
+    expect(assistantEnvelope.messages?.[0]).toEqual({ type: "text", content: "160 一班" });
     expect(messages[3]).toEqual({ role: "user", content: "有夜班吗" });
     expect(scripts).toHaveLength(3);
   });
@@ -91,5 +95,14 @@ describe("agent orchestrator", () => {
     expect(guardMoney([{ type: "text", content: "这边是 180/小时" }], facts)).toContain("180");
     expect(guardMoney([{ type: "text", content: "这边是 160/班" }], facts)).toBeNull();
     expect(guardMoney([{ type: "text", content: "这里没有数字" }], facts)).toBeNull();
+  });
+
+  it("guardMoney：话术原文里的数字可信，模型逐字引用不误伤", () => {
+    const facts = { wage_text: "160/班" };
+    // S2 原文的 175/班 不在事实卡里，但属于运营原文，不能拦
+    const original = [{ type: "text", content: "咱们是转正175/班5-6小时 350/天9-10小时" }];
+    expect(guardMoney(original, facts, "早班7-15\n咱们是转正175/班5-6小时 350/天9-10小时")).toBeNull();
+    // 原文和事实里都没有的数字仍然拦
+    expect(guardMoney(original, facts, "早班7-15")).toContain("175");
   });
 });
