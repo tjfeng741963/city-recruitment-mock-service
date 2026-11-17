@@ -31,6 +31,7 @@
     style.textContent = `
       .rk-arch-entry{width:100%;height:34px;margin-top:8px;padding:0 14px;border:1px solid var(--rk-border,#e2e8f1);border-radius:var(--gl-r-control,8px);background:var(--rk-accent-soft,#d3e3fd);color:var(--rk-accent,#0b57d0);cursor:pointer;font:inherit;font-size:12.5px;font-weight:600;display:flex;align-items:center;justify-content:center;transition:opacity .15s ease}
       .rk-arch-entry:hover{opacity:.85}
+      .rk-arch-entry.is-nested{margin:4px 0 6px;height:32px;font-size:12px}
       .rk-arch-mask{position:fixed;inset:0;z-index:4000;display:flex;justify-content:flex-end;background:rgba(18,28,52,.26);backdrop-filter:blur(6px) saturate(1.2)}
       .rk-arch-panel{display:flex;flex-direction:column;width:min(640px,100%);height:100%;border:1px solid var(--gl-edge,#e2e8f1);border-radius:var(--gl-r-shell,14px) 0 0 var(--gl-r-shell);background:linear-gradient(180deg,rgba(255,255,255,.96),rgba(250,252,255,.9));backdrop-filter:var(--gl-blur,blur(14px));box-shadow:var(--gl-shadow-float,0 24px 60px -24px rgba(20,40,90,.45))}
       .rk-arch-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:16px 20px;border-bottom:1px solid var(--rk-border,#e2e8f1)}
@@ -412,14 +413,26 @@
   function mountEntry() {
     const sidebar = document.querySelector(".sidebar");
     if (!sidebar || document.getElementById(ENTRY_ID)) return;
-    const menu = sidebar.querySelector(".sidebar-menu") || sidebar;
     const entry = document.createElement("button");
     entry.id = ENTRY_ID;
     entry.type = "button";
     entry.className = "rk-arch-entry";
     entry.textContent = "面试登记";
     entry.addEventListener("click", openPanel);
-    menu.append(entry);
+    // 优先挂进「坐席运营」分组（坐席设备/对话管理旁边，用户预期位置）；
+    // 分组没渲染出来时退回整个侧栏菜单末尾。
+    let host = null;
+    for (const sub of sidebar.querySelectorAll(".el-sub-menu")) {
+      const title = sub.querySelector(".el-sub-menu__title");
+      if (title && title.textContent.includes("坐席运营")) {
+        const inner = sub.querySelector(".el-menu");
+        host = inner || null;
+        break;
+      }
+    }
+    if (!host) host = sidebar.querySelector(".sidebar-menu") || sidebar;
+    entry.classList.add("is-nested");
+    host.append(entry);
   }
 
   function start() {
