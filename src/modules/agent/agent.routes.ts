@@ -154,6 +154,26 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     const result = db.prepare("DELETE FROM agent_devices WHERE id=?").run(id);
     return result.changes ? { success: true } : reply.code(404).send({ detail: "Device not found" });
   });
+  // 后台运营总览（监控看板页注入卡片的数据源，admin-enhancements.js 调用）。
+  // 原 admin-overview 模块在接口精简时删除，这里按卡片需要的 11 个计数重建，
+  // 口径：jobs.queued=待重试 / jobs.failed=失败 / webhook_logs.rejected=拒绝回调。
+  app.get("/api/v1/admin/overview", async (request, reply) => {
+    if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin access required" });
+    const one = (sql: string) => Number((db.prepare(sql).get() as { n: number }).n);
+    return {
+      total_users: one("SELECT COUNT(*) AS n FROM users"),
+      active_users: one("SELECT COUNT(*) AS n FROM users WHERE is_active=1"),
+      recruiters: one("SELECT COUNT(*) AS n FROM recruiters"),
+      cities: one("SELECT COUNT(*) AS n FROM cities"),
+      positions: one("SELECT COUNT(*) AS n FROM service_positions"),
+      devices: one("SELECT COUNT(*) AS n FROM agent_devices"),
+      conversations: one("SELECT COUNT(*) AS n FROM agent_conversations"),
+      pending_activations: one("SELECT COUNT(*) AS n FROM activation_devices WHERE status='pending'"),
+      retry_jobs: one("SELECT COUNT(*) AS n FROM jobs WHERE status='queued'"),
+      dead_jobs: one("SELECT COUNT(*) AS n FROM jobs WHERE status='failed'"),
+      rejected_webhooks: one("SELECT COUNT(*) AS n FROM webhook_logs WHERE status='rejected'"),
+    };
+  });
   // 管理端读取设备上报的企微群聊清单（面试登记面板下拉自选绑定群聊）。
   app.get<{ Params: { code: string } }>("/api/v1/agent/devices/:code/groups", async (request, reply) => {
     const code = String(request.params.code);

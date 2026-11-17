@@ -325,7 +325,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
     const rows = db.prepare(
       `SELECT a.session_key, a.name, a.phone, a.city,
               a.interview_date, a.interview_time, a.interview_confirmed,
-              a.group_notified, a.updated_at,
+              a.group_notified, a.arrival_status, a.updated_at,
               c.nickname AS customer_nickname, c.device_code
          FROM agent_archive a
          LEFT JOIN agent_conversations c
@@ -376,12 +376,91 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         interview_date: String(row.interview_date ?? ""),
         interview_time: String(row.interview_time ?? ""),
         interview_confirmed: Boolean(row.interview_confirmed),
+        arrival_status: String(row.arrival_status ?? ""),
         notify_status: notifyStatus,
         updated_at: String(row.updated_at ?? ""),
       });
     }
     return { items };
   });
+  // 面试到达状态：运营在面试登记面板把约定时间到了的客户标记「已到达/爽约」。
+  app.put<{ Params: { key: string }; Body: Record<string, unknown> }>(
+    "/api/v1/agent/archive/:key/arrival",
+    async (request, reply) => {
+      if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin access required" });
+      const key = request.params.key;
+      const status = String((request.body ?? {}).arrival_status ?? "");
+      if (!["", "arrived", "noshow"].includes(status)) {
+        return reply.code(422).send({ detail: "arrival_status 只能是空 / arrived / noshow" });
+      }
+      const result = db.prepare(
+        "UPDATE agent_archive SET arrival_status=?, updated_at=CURRENT_TIMESTAMP WHERE session_key=?",
+      ).run(status, key);
+      return result.changes ? { ok: true } : reply.code(404).send({ detail: "登记不存在" });
+    },
+  );
+
+  // 手动新建约面试：运营自己约好的客户（没走 Agent 对话）也进登记清单，
+  // 同样享受群聊通知。session_key 用 manual: 前缀避免和真实会话混淆。
+  app.post<{ Body: Record<string, unknown> }>("/api/v1/agent/archive/manual", async (request, reply) => {
+    if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin access required" });
+    const body = request.body ?? {};
+    const text = (key: string) => String(body[key] ?? "").trim();
+    const name = text("name");
+    const phone = text("phone");
+    const interviewDate = text("interview_date");
+    const interviewTime = text("interview_time");
+    if (!name || !phone) return reply.code(422).send({ detail: "姓名和电话必填" });
+    if (!interviewDate && !interviewTime) return reply.code(422).send({ detail: "面试日期与时间至少填一项" });
+    const deviceCode = text("device_code");
+    const sessionKey = `manual:${randomUUID()}`;
+    db.prepare(
+      `INSERT INTO agent_archive(session_key, position_id, name, phone, city,
+         interview_date, interview_time, interview_confirmed, updated_at)
+       VALUES (?,?,?,NULL,?,?,?,1,CURRENT_TIMESTAMP)`,
+    ).run(sessionKey, Number(body.position_id ?? 0) || 0, name, phone, interviewDate, interviewTime);
+    if (deviceCode) {
+      db.prepare(
+        `UPDATE agent_archive SET session_key=? WHERE session_key=?`,
+      ).run(`manual:${deviceCode}:${sessionKey}`, sessionKey);
+      const groupChat = (() => {
+        const devRow = db.prepare("SELECT data_json FROM agent_devices WHERE device_code=?")
+          .get(deviceCode) as { data_json: string } | undefined;
+        try {
+          return String((JSON.parse(devRow?.data_json || "{}") as Record<string, unknown>).group_chat ?? "");
+        } catch {
+          return "";
+        }
+      })();
+      if (groupChat) {
+        const groupExists = db.prepare(
+          "SELECT id FROM agent_conversations WHERE device_code=? AND customer_id=? LIMIT 1",
+        ).get(deviceCode, groupChat);
+        if (!groupExists) {
+          db.prepare(
+            `INSERT INTO agent_conversations(device_code,customer_id,nickname,state,unread,external_conversation_id,updated_at)
+             VALUES (?,?,'群聊','active',0,?,CURRENT_TIMESTAMP)`,
+          ).run(deviceCode, groupChat, `group:${groupChat}`);
+        }
+        const finalKey = `manual:${deviceCode}:${sessionKey}`;
+        const notifyText = [
+          "【面试登记】",
+          `时间：${interviewDate} ${interviewTime}`.trimEnd(),
+          `姓名：${name}`,
+          `电话：${phone}`,
+          `客户：${text("customer_nickname") || name}`,
+          `设备：${deviceCode}`,
+        ].join("\n");
+        db.prepare(
+          `INSERT INTO bridge_commands(id,device_code,customer_id,contact_id,content,idempotency_key,created_at)
+           VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)`,
+        ).run(randomUUID(), deviceCode, groupChat, groupChat, notifyText, `group-notify:${finalKey}`);
+        db.prepare("UPDATE agent_archive SET group_notified=1 WHERE session_key=?").run(finalKey);
+      }
+    }
+    return { ok: true, session_key: sessionKey };
+  });
+
   // ── 一轮对话 ──────────────────────────────────────────────────
   app.post<{ Body: Record<string, unknown> }>("/api/v1/agent/chat", async (request, reply) => {
     // 客户端（设备令牌）与调试台（管理员 JWT）都可调：对话链路的两个调用方

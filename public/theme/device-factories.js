@@ -459,6 +459,21 @@
       // 首选 `.page`（AgentDeviceView 的根 div），万一以后包一层导致找不到，退回全页表格行 ——
       // 路由已经限定在 /agent-devices，这页只有一张表。
       const scoped = [...document.querySelectorAll(".page .el-table__row")];
+      // 「状态」开关替换为只读在线胶囊（2026-11-17 用户要求）：设备状态跟
+      // 扫码登录走（心跳上报 online），不该手动开关。原 el-switch 绑定的
+      // status 字段与登录态无关，留着会误导运营「关了就不回消息」。
+      for (const sw of document.querySelectorAll(".page .el-switch")) {
+        if (sw.dataset.rkOnline !== undefined || sw.closest("[data-rk-devf]")) continue;
+        const cell = sw.closest("td");
+        if (!cell) continue;
+        const device = deviceByRow(sw);
+        if (!device) continue;
+        sw.dataset.rkOnline = "1";
+        const pill = document.createElement("span");
+        pill.style.cssText = "display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 11px;border-radius:999px;font-size:11.5px;font-weight:600;white-space:nowrap;" + (device.online ? "background:#c4eed0;color:#146c2e" : "background:#fce8e6;color:#b3261e");
+        pill.textContent = device.online ? "在线（扫码）" : "离线";
+        sw.replaceWith(pill);
+      }
       const rows = (scoped.length ? scoped : [...document.querySelectorAll(".el-table__row")])
         .filter((row) => !row.closest(".el-dialog"));
       if (!rows.length) return;
@@ -482,6 +497,14 @@
     } finally {
       decorating = false;
     }
+  }
+
+  /** 从行文本匹配设备码，回设备对象（替换状态开关用）。 */
+  function deviceByRow(el) {
+    const row = el.closest("tr");
+    if (!row) return null;
+    const text = row.textContent;
+    return deviceCache.items.find((d) => text.includes(d.device_code)) || null;
   }
 
   // 只重画已经挂好的行内块，不动 DOM 结构（保存成功后立即生效，不整页刷新）。

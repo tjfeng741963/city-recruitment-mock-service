@@ -1203,8 +1203,17 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                     _consecutive_send_failures += 1
                                     log(f"    [开场 {seq}] 发送失败：{result['detail']}", level="warning")
                             elif kind in ("image", "video") and (item["media_name"] or "").strip():
-                                # 真实发送媒体：paste_media 是上游原有机制（会话已打开，
-                                # 抢前台 → 写剪贴板 → Ctrl+V → 回车），不新增动作。
+                                # 真实发送媒体：先检索本地 media 目录（约束 3：本地有
+                                # 就不再下载），缺了再从 4222 媒体库拉（bridge 通道，
+                                # 设备令牌鉴权）。粘贴用上游原有 paste_media，不新增动作。
+                                ok_pre, pre_detail = media_fetch.ensure_media(
+                                    item["media_name"],
+                                    "视频" if kind == "video" else "图片",
+                                    base_url=(cfg.get("bridge_server") or "").strip(),
+                                    token=(cfg.get("bridge_token") or "").strip(),
+                                    log=lambda s: log(f"    {s}"),
+                                )
+                                log(f"    [媒体] {item['media_name']} 预取：{pre_detail}")
                                 _last_reply_at = time.time()
                                 ok_m, detail_m = core_send.paste_media(
                                     item["media_name"], log=lambda s: log(f"    {s}"),

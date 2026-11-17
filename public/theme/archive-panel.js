@@ -47,6 +47,7 @@
       .rk-arch-row button{flex:0 0 auto;height:32px;padding:0 14px;border:0;border-radius:8px;background:var(--rk-grad-primary,linear-gradient(110deg,#0842a0,#0b57d0));color:#fff;cursor:pointer;font:inherit;font-size:12.5px;font-weight:600}
       .rk-arch-row button:disabled{opacity:.55;cursor:default}
       .rk-arch-hint{margin:8px 0 0;font-size:11.5px;line-height:1.6;color:var(--rk-ink-3,#5e5e5e)}
+      .rk-arch-arrival{height:26px;padding:0 6px;border:1px solid var(--rk-border-strong,rgba(31,31,31,.14));border-radius:6px;font:inherit;font-size:11.5px;color:var(--rk-ink-1,#1f1f1f);outline:none;background:#fff}
       .rk-arch-table{width:100%;border-collapse:collapse;margin-top:12px;font-size:12.5px;color:var(--rk-ink-1,#1f1f1f)}
       .rk-arch-table th{padding:8px 10px;text-align:left;background:var(--rk-panel-2,#f0f4f9);color:var(--rk-ink-2,#444746);font-weight:600;border-bottom:1px solid var(--rk-border,#e2e8f1);white-space:nowrap}
       .rk-arch-table td{padding:8px 10px;border-bottom:1px solid var(--rk-border,#e2e8f1);vertical-align:top}
@@ -169,6 +170,60 @@
       group.append(hint);
       body.append(group);
 
+      // ── 手动新建约面试 ──
+      const manual = document.createElement("div");
+      manual.className = "rk-arch-group";
+      manual.innerHTML = `<b>手动新建约面试（运营自己约好的客户，同样推送群聊）</b>`;
+      const mrow1 = document.createElement("div");
+      mrow1.className = "rk-arch-row";
+      const mName = document.createElement("input");
+      mName.placeholder = "姓名";
+      const mPhone = document.createElement("input");
+      mPhone.placeholder = "电话";
+      const mNick = document.createElement("input");
+      mNick.placeholder = "客户昵称（选填）";
+      mrow1.append(mName, mPhone, mNick);
+      const mrow2 = document.createElement("div");
+      mrow2.className = "rk-arch-row";
+      const mDate = document.createElement("input");
+      mDate.type = "date";
+      const mTime = document.createElement("input");
+      mTime.type = "time";
+      const mDevice = document.createElement("select");
+      mDevice.innerHTML = `<option value="">通知群聊（用哪个设备的绑定）</option>` + deviceList
+        .map((d) => `<option value="${escapeHtml(d.device_code)}">${escapeHtml(d.name || d.device_code)}</option>`)
+        .join("");
+      const mBtn = document.createElement("button");
+      mBtn.type = "button";
+      mBtn.textContent = "新建登记";
+      mBtn.addEventListener("click", async () => {
+        const payload = {
+          name: mName.value.trim(),
+          phone: mPhone.value.trim(),
+          customer_nickname: mNick.value.trim(),
+          interview_date: mDate.value,
+          interview_time: mTime.value,
+          device_code: mDevice.value,
+        };
+        if (!payload.name || !payload.phone) { mBtn.textContent = "姓名电话必填"; return; }
+        if (!payload.interview_date && !payload.interview_time) { mBtn.textContent = "面试时间必填"; return; }
+        mBtn.disabled = true;
+        mBtn.textContent = "登记中…";
+        try {
+          await api("POST", "/api/v1/agent/archive/manual", payload);
+          mBtn.textContent = "已登记 ✓";
+          mName.value = mPhone.value = mNick.value = "";
+          mDate.value = mTime.value = "";
+          await paintBody();
+        } catch (error) {
+          mBtn.textContent = "失败：" + error.message;
+        }
+        setTimeout(() => { mBtn.textContent = "新建登记"; mBtn.disabled = false; }, 2200);
+      });
+      mrow2.append(mDate, mTime, mDevice, mBtn);
+      manual.append(mrow1, mrow2);
+      body.append(manual);
+
       // ── 登记清单 ──
       const title = document.createElement("div");
       title.style.cssText = "margin:18px 0 0;font-size:13px;font-weight:700;color:var(--rk-ink-1,#1f1f1f)";
@@ -184,10 +239,22 @@
       }
       const table = document.createElement("table");
       table.className = "rk-arch-table";
+      table.addEventListener("change", async (event) => {
+        const select = event.target.closest("select.rk-arch-arrival");
+        if (!select) return;
+        select.disabled = true;
+        try {
+          await api("PUT", `/api/v1/agent/archive/${encodeURIComponent(select.dataset.key)}/arrival`,
+            { arrival_status: select.value });
+        } catch (error) {
+          select.value = "";
+        }
+        select.disabled = false;
+      });
       table.innerHTML = `
         <thead><tr>
           <th>面试时间</th><th>姓名</th><th>电话</th><th>客户</th>
-          <th>设备</th><th>确认</th><th>群聊通知</th><th>更新时间</th>
+          <th>设备</th><th>确认</th><th>到达状态</th><th>群聊通知</th><th>更新时间</th>
         </tr></thead>
         <tbody>` + items.map((it) => `
         <tr>
@@ -197,6 +264,11 @@
           <td>${escapeHtml(it.customer_nickname || "—")}</td>
           <td>${escapeHtml(it.device_code || "—")}</td>
           <td><span class="${it.interview_confirmed ? "rk-arch-confirmed" : "rk-arch-unconfirmed"}">${it.interview_confirmed ? "已确认" : "待确认"}</span></td>
+          <td><select class="rk-arch-arrival" data-key="${escapeHtml(it.session_key)}">
+            <option value="" ${!it.arrival_status ? "selected" : ""}>待定</option>
+            <option value="arrived" ${it.arrival_status === "arrived" ? "selected" : ""}>正常到达</option>
+            <option value="noshow" ${it.arrival_status === "noshow" ? "selected" : ""}>爽约</option>
+          </select></td>
           <td><span class="rk-arch-pill ${pillClass(it.notify_status)}">${STATUS_TEXT[pillClass(it.notify_status)] || it.notify_status}</span></td>
           <td style="color:var(--rk-ink-3,#5e5e5e)">${escapeHtml(String(it.updated_at || "").replace("T", " ").slice(0, 16))}</td>
         </tr>`).join("") + `</tbody>`;
