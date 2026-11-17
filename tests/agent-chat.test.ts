@@ -116,8 +116,17 @@ describe("agent chat routes", () => {
     expect(body.messages[0].content).toContain("22元/小时");
     expect(body.messages[1]).toEqual({ role: "user", content: "多少钱一小时" });
     expect(body.messages[2].role).toBe("assistant");
-    // assistant 历史装回 JSON 信封（与输出格式一致，防第 2 轮格式漂移）
-    expect(body.messages[2].content).toBe(JSON.stringify({ messages: [{ type: "text", content: "22 一小时" }] }));
+    // assistant 历史装回完整 JSON 信封（与输出规范同构：含 capture/interview
+    // 占位，模型才不会把字段丢掉）
+    expect(body.messages[2].content).toBe(
+      JSON.stringify({
+        messages: [{ type: "text", content: "22 一小时" }],
+        capture: {},
+        interview: {},
+        handoff: false,
+        done: false,
+      }),
+    );
     expect(body.messages[3]).toEqual({ role: "user", content: "有没有夜班" });
   });
 
@@ -160,11 +169,23 @@ describe("agent chat routes", () => {
     // system 之后紧跟开场序列（assistant JSON 信封），再才是当前这句
     expect(body.messages[1].role).toBe("assistant");
     expect(body.messages[1].content).toBe(
-      JSON.stringify({ messages: [{ type: "text", content: "招聘要求：男女不限，18-35岁" }] }),
+      JSON.stringify({
+        messages: [{ type: "text", content: "招聘要求：男女不限，18-35岁" }],
+        capture: {},
+        interview: {},
+        handoff: false,
+        done: false,
+      }),
     );
     expect(body.messages[2].role).toBe("assistant");
     expect(body.messages[2].content).toBe(
-      JSON.stringify({ messages: [{ type: "image", name: "宿舍照片.jpg" }] }),
+      JSON.stringify({
+        messages: [{ type: "image", name: "宿舍照片.jpg" }],
+        capture: {},
+        interview: {},
+        handoff: false,
+        done: false,
+      }),
     );
     expect(body.messages[3]).toEqual({ role: "user", content: "你发的第二条是什么" });
   });

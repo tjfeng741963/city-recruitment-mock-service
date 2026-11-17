@@ -77,15 +77,46 @@ const OUTPUT_SPEC = `# 输出格式（必须是 JSON，不要代码块，不要�
 /** 开场条目的最小形状（文本带 content，媒体带 media_name）。 */
 export type OpeningItem = { kind: string; content?: string | null; media_name?: string | null };
 
-/** 会话/历史条目：文本带 text，媒体占位带 kind+name。 */
-export type DialogueItem = { role: string; text?: string | null; kind?: string | null; name?: string | null };
+/** 会话/历史条目：customer 带 text；agent 带 reply（上一轮的完整 JSON 输出）。 */
+export type DialogueItem = {
+  role: string;
+  text?: string | null;
+  reply?: {
+    messages?: Array<{ type?: string; content?: string; name?: string }> | null;
+    capture?: Record<string, unknown> | null;
+    interview?: Record<string, unknown> | null;
+    handoff?: boolean | null;
+    done?: boolean | null;
+  } | null;
+};
 
-/** 把一条 agent 侧消息装回 JSON 信封（文本 → text，媒体 → image/video）。 */
-function agentEnvelope(item: { text?: string | null; kind?: string | null; name?: string | null }): string {
-  if (item.kind === "image" || item.kind === "video") {
-    return JSON.stringify({ messages: [{ type: item.kind, name: String(item.name || "") }] });
-  }
-  return JSON.stringify({ messages: [{ type: "text", content: String(item.text || "") }] });
+/** assistant 历史装回完整 JSON 信封（DeepSeek 多轮指南：append 上一轮原始输出）。
+ *
+ * 只装 messages 不够——模型会模仿历史格式，第 2 轮起就把 capture/interview
+ * 字段丢掉（2026-11-17 真调复现：改时间轮 interview 为空、档案没更新）。
+ * 信封必须与输出规范同构，模型才始终输出完整 JSON。 */
+function assistantEnvelope(item: {
+  messages?: Array<{ type?: string; content?: string; name?: string }> | null;
+  capture?: Record<string, unknown> | null;
+  interview?: Record<string, unknown> | null;
+  handoff?: boolean | null;
+  done?: boolean | null;
+}): string {
+  const messages = (item.messages || [])
+    .map((m) => {
+      const type = String(m.type || "text");
+      return type === "text"
+        ? { type, content: String(m.content || "") }
+        : { type, name: String(m.name || "") };
+    })
+    .filter((m) => (m.type === "text" ? m.content : m.name));
+  return JSON.stringify({
+    messages,
+    capture: item.capture && typeof item.capture === "object" ? item.capture : {},
+    interview: item.interview && typeof item.interview === "object" ? item.interview : {},
+    handoff: Boolean(item.handoff),
+    done: Boolean(item.done),
+  });
 }
 
 /** 组装一轮编排：system(人设+今天日期+事实+话术库+规则) + 开场序列 + 全量历史 + 当前这句。
@@ -132,37 +163,39 @@ export function buildOrchestration(options: {
   ].join("\n");
 
   const messages: ChatMessage[] = [{ role: "system", content: system }];
-  // 开场序列按 seq 已序注入，装回与输出一致的 JSON 信封，模型看到的就是
-  // 「我自己刚发过这串」。媒体条目也注入，模型才知道发过哪张图哪个视频。
+  // 开场序列按 seq 已序注入：信封与输出规范同构（capture/interview 留空），
+  // 模型看到的就是「我自己刚发过这串」。媒体条目也注入，模型才知道发过哪张图哪个视频。
   for (const item of options.opening || []) {
     const kind = String(item.kind || "text");
     if (kind === "text") {
       const content = String(item.content || "").trim();
       if (!content) continue;
-      messages.push({ role: "assistant", content: agentEnvelope({ text: content }) });
+      messages.push({
+        role: "assistant",
+        content: assistantEnvelope({ messages: [{ type: "text", content }] }),
+      });
     } else if (kind === "image" || kind === "video") {
       const name = String(item.media_name || "").trim();
       if (!name) continue;
-      messages.push({ role: "assistant", content: agentEnvelope({ kind, name }) });
+      messages.push({
+        role: "assistant",
+        content: assistantEnvelope({ messages: [{ type: kind, name }] }),
+      });
     }
   }
   for (const item of options.history) {
-    const isAgent = String(item.role) === "agent";
-    if (isAgent && (item.kind === "image" || item.kind === "video")) {
-      const name = String(item.name || "").trim();
-      if (name) messages.push({ role: "assistant", content: agentEnvelope({ kind: item.kind, name }) });
+    if (String(item.role) === "agent") {
+      // agent 历史：上一轮完整 JSON 输出原样 append（DeepSeek 多轮约定）；
+      // 旧形状 {role,text}（/dev 调试台）退回纯文本信封。
+      const reply = item.reply?.messages?.length
+        ? item.reply
+        : { messages: [{ type: "text", content: String(item.text || "") }] };
+      messages.push({ role: "assistant", content: assistantEnvelope(reply) });
       continue;
     }
     const content = String(item.text || "").trim();
     if (!content) continue;
-    messages.push({
-      role: isAgent ? "assistant" : "user",
-      // assistant 历史按上一轮的 JSON 原样回填（DeepSeek 多轮指南：把上一轮
-      // assistant 输出 append 回 messages 末尾）。客户端手里只有发出去的文案，
-      // 所以由编排层重新装回 JSON 信封——格式一致，模型才不会从第 2 轮开始
-      // 模仿纯文本、丢掉 JSON 输出（2026-11-17 真调复现过 5/16 轮）。
-      content: isAgent ? agentEnvelope({ text: content }) : content,
-    });
+    messages.push({ role: "user", content });
   }
   messages.push({ role: "user", content: options.input });
   return { messages, scripts };

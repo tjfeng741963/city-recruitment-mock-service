@@ -359,12 +359,18 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       : Array.isArray(body.history)
         ? (body.history as Array<Record<string, unknown>>)
             .filter((item) => item && typeof item === "object")
-            .map((item) => ({
-              role: text(item.role),
-              text: text(item.text),
-              kind: text(item.kind) || null,
-              name: text(item.name) || null,
-            }))
+            .map((item) => {
+              // 无状态模式兼容两种形状：纯文本 {role,text} 或带完整上一轮输出
+              // {role, reply:{messages,capture,interview,...}}（/dev 调试台用前者）。
+              const reply = (item.reply && typeof item.reply === "object" ? item.reply : null) as
+                | DialogueItem["reply"]
+                | null;
+              return {
+                role: text(item.role),
+                text: text(item.text),
+                reply: reply ?? null,
+              };
+            })
         : [];
 
     const persona = personaOf(db, positionId);
@@ -427,18 +433,22 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       }
 
       // 信任模式：不做代码级护栏，模型按 prompt 约束引用话术原文（2026-11-17）。
-      // 会话成功才有记忆：客户这句 + 模型回复全部落进 agent_session，失败不写
-      // ——客户端重试同一条消息不会造成上下文重复。
+      // 会话成功才有记忆：客户这句 + 模型完整 JSON 输出（messages/capture/
+      // interview）落进 agent_session——历史信封要装完整结构，模型才不会把
+      // capture/interview 字段丢掉。失败不写：客户端重试不会造成上下文重复。
       if (sessionKey) {
         const nextEntries: DialogueItem[] = sessionReset ? [] : [...sessionEntries];
         nextEntries.push({ role: "customer", text: input });
-        for (const item of replyPayload.messages) {
-          if (item.type === "text") {
-            nextEntries.push({ role: "agent", text: item.content });
-          } else {
-            nextEntries.push({ role: "agent", kind: item.type, name: (item as { name?: string }).name || "" });
-          }
-        }
+        nextEntries.push({
+          role: "agent",
+          reply: {
+            messages: replyPayload.messages,
+            capture: replyPayload.capture,
+            interview: replyPayload.interview,
+            handoff: replyPayload.handoff,
+            done: replyPayload.done,
+          },
+        });
         db.prepare(
           `INSERT INTO agent_session(session_key, position_id, context_json, updated_at)
            VALUES (?,?,?,CURRENT_TIMESTAMP)
