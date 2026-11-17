@@ -91,7 +91,8 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 | GET | `/api/v1/agent/context?position_id=:id` | admin | 调试台用：事实 / 人设 / 开场 / 话术库 / 模型是否配置 |
 | GET | `/api/v1/agent/opening?device_code=:code` | 设备令牌或服务令牌 | 客户端用：该设备绑的岗位 + 开场清单 + 人设 |
 | POST | `/api/v1/agent/opening/log` | 设备令牌或服务令牌 | 客户端逐条回执：`{session_key,device_code,position_id,seq,kind,status,error}` |
-| POST | `/api/v1/agent/chat` | admin | 一轮受控对话，body `{position_id,text,history,dry}` |
+| GET | `/api/v1/agent/archive?session_key=:key` | admin | 查面试档案：姓名 / 电话 / 城市 / 面试日期与时段（模型 JSON 判断结果累积） |
+| POST | `/api/v1/agent/chat` | admin | 一轮对话，body `{position_id,session_key,text,dry}` |
 
 <!-- api-check:end -->
 

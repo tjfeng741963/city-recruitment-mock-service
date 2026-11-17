@@ -58,7 +58,7 @@ function factsText(facts: Record<string, string>): string {
 }
 
 const OUTPUT_SPEC = `# 输出格式（必须是 JSON，不要代码块，不要解释）
-{"messages":[{"type":"text","content":"发给客户的一句话"}],"capture":{"name":"","phone":"","city":"","day":""},"handoff":false,"done":false}
+{"messages":[{"type":"text","content":"发给客户的一句话"}],"capture":{"name":"","phone":"","city":""},"interview":{"date":"","time":"","confirmed":false},"handoff":false,"done":false}
 
 # 硬规则
 - 历史里的 assistant 消息是之前轮次的 JSON 输出（content 是当时发给客户的文案）；你每一轮只输出一个新 JSON，不要复述历史、不要模仿纯文本
@@ -66,7 +66,13 @@ const OUTPUT_SPEC = `# 输出格式（必须是 JSON，不要代码块，不要�
 - 客户话题与话术库某一类大致相似 → 用该类原文回答（可挑最相关的段落，数字不改）
 - 话术库里对不上的 → 自己回答，但数字只能来自岗位事实
 - 不确定的事说「这个我确认一下」，不要编
-- 客户明确说不来了 → done=true，回一句客气收尾；需要人工接手 → handoff=true`;
+- 客户明确说不来了 → done=true，回一句客气收尾；需要人工接手 → handoff=true
+
+# interview 字段（面试档案，由你判断，系统不做任何抽取）
+- 双方定下面试时间才填：date 用 YYYY-MM-DD（客户说「明天/后天」时，按上面的今天日期换算成具体几月几号）；time 用 24 小时制 HH:MM，客户没指定时段就默认上午 10:00；confirmed=true 表示双方都答应了
+- 只是在问、还没定 → interview 填 {"date":"","time":"","confirmed":false}
+- 客户改了时间 → 填新的 date/time，系统会覆盖旧档
+- 回复文案里提到面试时间，必须说「X月X日上午10点」这样的完整日期+时段，不要只说「明天」——方便客户看清、也方便记录档案`;
 
 /** 开场条目的最小形状（文本带 content，媒体带 media_name）。 */
 export type OpeningItem = { kind: string; content?: string | null; media_name?: string | null };
@@ -82,16 +88,19 @@ function agentEnvelope(item: { text?: string | null; kind?: string | null; name?
   return JSON.stringify({ messages: [{ type: "text", content: String(item.text || "") }] });
 }
 
-/** 组装一轮编排：system(人设+事实+话术库+规则) + 开场序列 + 全量历史 + 当前这句。
+/** 组装一轮编排：system(人设+今天日期+事实+话术库+规则) + 开场序列 + 全量历史 + 当前这句。
  *
  * 开场序列作为 assistant 历史注入（2026-11-17）：后续对话的前提是
  * 「开场那串已经发过了」，模型必须知道开场说过什么，才能接住
  * 「你刚发的第二条工资是多少」这类指代。开场是岗位配置，每轮从
- * position_opening 现读，运营改了配置下一轮就生效。 */
+ * position_opening 现读，运营改了配置下一轮就生效。
+ * now 是今天的日期文本：模型靠它把「明天/后天」换算成具体几月几号
+ * 写进 interview 字段，系统不做任何日期抽取。 */
 export function buildOrchestration(options: {
   persona: string;
   facts: Record<string, string>;
   opening?: OpeningItem[];
+  now?: string;
   history: DialogueItem[];
   input: string;
 }): { messages: ChatMessage[]; scripts: ScriptEntry[] } {
@@ -110,6 +119,9 @@ export function buildOrchestration(options: {
   const system = [
     options.persona.replace(/\[S\d+\s*[^\]]*\][\s\S]*$/g, "").trim() ||
       "你是一家劳务中介的招聘顾问。",
+    "",
+    "# 今天日期（换算「明天/后天」、写 interview.date 都以它为准）",
+    options.now || "（未知）",
     "",
     "# 岗位事实（这一轮唯一允许使用的数字来源）",
     factsText(options.facts),
@@ -154,4 +166,48 @@ export function buildOrchestration(options: {
   }
   messages.push({ role: "user", content: options.input });
   return { messages, scripts };
+}
+
+/** 档案记录的形状（agent_archive 表一行的镜像）。 */
+export type ArchiveRecord = {
+  name: string;
+  phone: string;
+  city: string;
+  interview_date: string;
+  interview_time: string;
+  interview_confirmed: boolean;
+};
+
+/** 模型输出里的 interview 字段（无类型约束，逐字段校验）。 */
+export type InterviewOutput = { date?: unknown; time?: unknown; confirmed?: unknown };
+
+/**
+ * 档案合并：新值非空才覆盖，空值保留旧档——面试者改时间时模型输出新的
+ * date/time 直接覆盖；只聊天没提面试时旧约定不动。全部输入来自模型
+ * JSON（capture / interview），系统不做任何正则抽取。
+ */
+export function mergeArchive(
+  existing: ArchiveRecord | null,
+  capture: { name?: string; phone?: string; city?: string },
+  interview: InterviewOutput,
+): ArchiveRecord {
+  const base: ArchiveRecord = existing ?? {
+    name: "",
+    phone: "",
+    city: "",
+    interview_date: "",
+    interview_time: "",
+    interview_confirmed: false,
+  };
+  const date = typeof interview.date === "string" ? interview.date.trim() : "";
+  const time = typeof interview.time === "string" ? interview.time.trim() : "";
+  return {
+    name: capture.name?.trim() || base.name,
+    phone: capture.phone?.trim() || base.phone,
+    city: capture.city?.trim() || base.city,
+    interview_date: date || base.interview_date,
+    interview_time: time || base.interview_time,
+    interview_confirmed:
+      interview.confirmed === true ? true : Boolean(date || time) ? Boolean(date && time) : base.interview_confirmed,
+  };
 }

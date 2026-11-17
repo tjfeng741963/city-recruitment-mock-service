@@ -5,7 +5,9 @@ import { isValidDeviceToken } from "./position-scripts.routes.js";
 import { complete, llmConfig, parseJsonObject } from "./agent-llm.js";
 import {
   buildOrchestration,
+  mergeArchive,
   parseScripts,
+  type ArchiveRecord,
   type DialogueItem,
   type OpeningItem,
 } from "./agent-orchestrator.js";
@@ -135,6 +137,13 @@ function personaOf(db: DatabaseSync, positionId: number): string {
   return String(row?.content ?? "");
 }
 
+/** 今天的日期文本（供模型换算「明天/后天」写进 interview.date）。 */
+function todayLabel(): string {
+  const now = new Date();
+  const week = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"][now.getDay()];
+  return `${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日 ${week}`;
+}
+
 /** 输出结构校验：messages 必须是非空数组，每条 type 合法。 */
 function normalizeReply(parsed: Record<string, unknown>) {
   const rawMessages = parsed.messages;
@@ -167,8 +176,10 @@ function normalizeReply(parsed: Record<string, unknown>) {
       name: text(capture.name).trim(),
       phone: /^1[3-9]\d{9}$/.test(phone) ? phone : "",
       city: text(capture.city).trim(),
-      day: text(capture.day).trim(),
     },
+    interview: (parsed.interview && typeof parsed.interview === "object"
+      ? (parsed.interview as Record<string, unknown>)
+      : {}) as { date?: string; time?: string; confirmed?: boolean },
     handoff: Boolean(parsed.handoff),
     done: Boolean(parsed.done),
   };
@@ -277,6 +288,34 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
     },
   );
 
+  // ── 面试档案：由模型 JSON 判断结果累积，运营/调试台可查 ──────────
+  app.get<{ Querystring: { session_key?: string } }>(
+    "/api/v1/agent/archive",
+    async (request, reply) => {
+      if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
+      const sessionKey = text(request.query.session_key).trim().slice(0, 120);
+      if (!sessionKey) return reply.code(422).send({ detail: "session_key is required" });
+      const row = db
+        .prepare("SELECT * FROM agent_archive WHERE session_key=?")
+        .get(sessionKey) as Record<string, unknown> | undefined;
+      if (!row) return { ok: true, archive: null };
+      return {
+        ok: true,
+        archive: {
+          session_key: sessionKey,
+          position_id: Number(row.position_id),
+          name: String(row.name ?? ""),
+          phone: String(row.phone ?? ""),
+          city: String(row.city ?? ""),
+          interview_date: String(row.interview_date ?? ""),
+          interview_time: String(row.interview_time ?? ""),
+          interview_confirmed: Number(row.interview_confirmed) === 1,
+          updated_at: String(row.updated_at ?? ""),
+        },
+      };
+    },
+  );
+
   // ── 一轮对话 ──────────────────────────────────────────────────
   app.post<{ Body: Record<string, unknown> }>("/api/v1/agent/chat", async (request, reply) => {
     if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
@@ -330,14 +369,16 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
 
     const persona = personaOf(db, positionId);
     const facts = buildFacts(row);
+    // 今天的日期给模型：interview.date 的「明天/后天」由它换算成具体几月几号
+    const nowLabel = todayLabel();
     const opening: OpeningItem[] = openingOf(db, positionId).map((item) => ({
       kind: String(item.kind ?? "text"),
       content: String(item.content ?? ""),
       media_name: String(item.media_name ?? ""),
     }));
-    // 编排：system(人设+事实+话术库+规则) + 开场序列 + 全量历史 + 当前这句
+    // 编排：system(人设+今天日期+事实+话术库+规则) + 开场序列 + 全量历史 + 当前这句
     // （DeepSeek 无状态多轮拼接；上下文归服务端持有）
-    const { messages, scripts } = buildOrchestration({ persona, facts, opening, history, input });
+    const { messages, scripts } = buildOrchestration({ persona, facts, opening, now: nowLabel, history, input });
 
     // dry：只回拼好的 prompt，不调模型、不写会话。调试台用它确认
     // 「人设 + 事实 + 话术库 + 开场 + 历史」有没有喂对。
@@ -405,10 +446,42 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
              context_json=excluded.context_json, updated_at=CURRENT_TIMESTAMP`,
         ).run(sessionKey, positionId, JSON.stringify(nextEntries));
       }
+      // 档案：模型 JSON（capture + interview）判断结果合并写入，
+      // 系统不做任何硬提取；改时间/改资料时新值覆盖旧值。
+      const archiveRow = sessionKey
+        ? (db
+            .prepare("SELECT * FROM agent_archive WHERE session_key=?")
+            .get(sessionKey) as (ArchiveRecord & { position_id: number }) | undefined)
+        : undefined;
+      const archive = sessionKey
+        ? mergeArchive(archiveRow ?? null, replyPayload.capture, replyPayload.interview)
+        : null;
+      if (sessionKey && archive) {
+        db.prepare(
+          `INSERT INTO agent_archive(session_key, position_id, name, phone, city,
+             interview_date, interview_time, interview_confirmed, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+           ON CONFLICT(session_key) DO UPDATE SET
+             name=excluded.name, phone=excluded.phone, city=excluded.city,
+             interview_date=excluded.interview_date, interview_time=excluded.interview_time,
+             interview_confirmed=excluded.interview_confirmed, updated_at=CURRENT_TIMESTAMP`,
+        ).run(
+          sessionKey,
+          positionId,
+          archive.name,
+          archive.phone,
+          archive.city,
+          archive.interview_date,
+          archive.interview_time,
+          archive.interview_confirmed ? 1 : 0,
+        );
+      }
+
       return {
         ok: true,
         session_key: sessionKey || null,
         reply: replyPayload,
+        archive: archive,
         raw: result.content,
         model: result.model,
         usage: result.usage,

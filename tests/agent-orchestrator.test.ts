@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   buildOrchestration,
+  mergeArchive,
   parseScripts,
+  type ArchiveRecord,
 } from "../src/modules/agent/agent-orchestrator.js";
 
-// 编排层：话术库解析与 prompt 拼装。纯函数，不碰网络。
+// 编排层：话术库解析、prompt 拼装、档案合并。纯函数，不碰网络。
 // 代码级护栏（guardScript/guardMoney）已于 2026-11-17 按运营决定拆除：
 // 话术约束走 prompt，相信模型。
 describe("agent orchestrator", () => {
@@ -71,5 +73,55 @@ describe("agent orchestrator", () => {
     expect(messages[0].content).not.toContain("script_used");
     // 话术使用规则仍在：命中就引用原文，数字不改
     expect(messages[0].content).toContain("用该类原文回答");
+  });
+
+  it("system 注入今天日期与 interview 规范：面试档案由模型判断，无硬提取", () => {
+    const { messages } = buildOrchestration({
+      persona: PERSONA,
+      facts: {},
+      now: "2026年11月17日 星期二",
+      history: [],
+      input: "明天能面试吗",
+    });
+    const system = messages[0].content;
+    expect(system).toContain("2026年11月17日");
+    // interview 字段进入输出规范，且明确「换算具体日期、默认上午10点、改时间覆盖」
+    expect(system).toContain('"interview":{"date":"","time":"","confirmed":false}');
+    expect(system).toContain("YYYY-MM-DD");
+    expect(system).toContain("默认上午 10:00");
+    expect(system).toContain("X月X日上午10点");
+  });
+
+  it("mergeArchive：非空才覆盖，改时间覆盖旧约定，没提就保留", () => {
+    const existing: ArchiveRecord = {
+      name: "王五",
+      phone: "13711112222",
+      city: "深圳",
+      interview_date: "2026-11-18",
+      interview_time: "10:00",
+      interview_confirmed: true,
+    };
+    // 客户改时间：新 date/time 覆盖，姓名电话保留
+    const changed = mergeArchive(existing, {}, { date: "2026-11-19", time: "14:00", confirmed: true });
+    expect(changed).toEqual({
+      name: "王五",
+      phone: "13711112222",
+      city: "深圳",
+      interview_date: "2026-11-19",
+      interview_time: "14:00",
+      interview_confirmed: true,
+    });
+    // 只聊天没提面试：旧约定原样保留
+    const untouched = mergeArchive(existing, {}, {});
+    expect(untouched.interview_date).toBe("2026-11-18");
+    // 新档案：capture 与 interview 直接写入
+    const fresh = mergeArchive(
+      null,
+      { name: "李四", phone: "13912345678", city: "东莞" },
+      { date: "2026-11-20", time: "10:00", confirmed: true },
+    );
+    expect(fresh.name).toBe("李四");
+    expect(fresh.interview_date).toBe("2026-11-20");
+    expect(fresh.interview_confirmed).toBe(true);
   });
 });
