@@ -79,9 +79,18 @@
     const style = el("style");
     style.id = STYLE_ID;
     style.textContent = `
-      .rk-pa-line{display:flex;align-items:center;gap:8px;margin-top:4px;min-width:0}
-      .rk-pa-btn{flex:0 0 auto;height:22px;padding:0 10px;border:1px solid var(--rk-border-strong);border-radius:999px;background:var(--rk-bg);color:var(--rk-accent);cursor:pointer;font:inherit;font-size:12px;line-height:20px}
-      .rk-pa-btn:hover{border-color:var(--rk-accent);background:var(--rk-accent-soft)}
+      .rk-pa-line{display:flex;align-items:center;gap:8px;margin-top:5px;min-width:0}
+      .rk-pa-btn{display:inline-flex;align-items:center;gap:7px;height:26px;padding:0 11px 0 3px;border:1px solid transparent;border-radius:999px;background:var(--rk-accent-soft);cursor:pointer;font:inherit;font-size:12px;line-height:1;transition:box-shadow .18s ease,transform .18s ease,background .18s ease}
+      .rk-pa-btn .rk-pa-avatar{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:20px;height:20px;border-radius:7px;background:linear-gradient(135deg,var(--rk-accent),#3b8dd8);color:#fff;font-size:11px;font-weight:700;font-style:normal}
+      .rk-pa-btn .rk-pa-label{color:var(--rk-ink-1);font-weight:600;letter-spacing:.2px}
+      .rk-pa-btn .rk-pa-count{display:inline-flex;align-items:center;height:17px;padding:0 7px;border-radius:999px;background:var(--rk-accent);color:#fff;font-size:11px;font-weight:600;line-height:17px}
+      .rk-pa-btn .rk-pa-count i{font-style:normal;font-weight:400;margin-right:2px;font-size:10.5px;opacity:.85}
+      .rk-pa-btn:hover{transform:translateY(-1px);box-shadow:0 5px 14px -5px rgba(24,95,165,.55);background:color-mix(in srgb,var(--rk-accent-soft) 78%,#fff)}
+      .rk-pa-btn.is-none{background:var(--rk-panel-2);border-style:dashed;border-color:var(--rk-border-strong)}
+      .rk-pa-btn.is-none .rk-pa-avatar{background:linear-gradient(135deg,#d9a441,#c98a2e)}
+      .rk-pa-btn.is-none .rk-pa-label{color:var(--rk-ink-2);font-weight:500}
+      .rk-pa-btn.is-none .rk-pa-count{background:var(--rk-border-strong);color:var(--rk-ink-3)}
+      .rk-pa-btn.is-loading{opacity:.6;pointer-events:none}
       .rk-pa-mask{position:fixed;inset:0;z-index:4000;display:flex;justify-content:flex-end;background:rgba(18,28,52,.26);backdrop-filter:blur(6px) saturate(1.2);-webkit-backdrop-filter:blur(6px) saturate(1.2)}
       .rk-pa-panel{display:flex;flex-direction:column;width:min(760px,100%);height:100%;border:1px solid var(--gl-edge);border-radius:var(--gl-r-shell) 0 0 var(--gl-r-shell);background:linear-gradient(180deg,rgba(255,255,255,.94),rgba(250,252,255,.86));backdrop-filter:var(--gl-blur);-webkit-backdrop-filter:var(--gl-blur);box-shadow:var(--gl-shadow-float)}
       .rk-pa-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:16px 20px;border-bottom:1px solid var(--rk-border)}
@@ -198,8 +207,14 @@
     line = el("div", "rk-pa-line");
     line.setAttribute(MARK, String(position.id));
 
-    const button = el("button", "rk-pa-btn", "Agent");
+    const button = el("button", "rk-pa-btn is-loading");
     button.type = "button";
+    // 结构：渐变头像 + 「Agent」标签 + 计数胶囊（条目数），一次建好，paint 只改状态
+    const avatar = el("i", "rk-pa-avatar", "A");
+    const label = el("span", "rk-pa-label", "Agent");
+    const count = el("span", "rk-pa-count", "");
+    count.innerHTML = "<i>条</i>-";
+    button.append(avatar, label, count);
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -222,10 +237,17 @@
     const count = summary ? Number(summary.opening_count || 0) : 0;
     const hasPersona = Boolean(summary && summary.has_persona);
     // 值没变就不碰 DOM：本脚本也在 MutationObserver 监听范围内，无条件写会空转。
-    const next = summaryCache.ok ? `Agent ${hasPersona ? "✓" : "!"} ${count} 条` : "Agent";
-    if (button.textContent !== next) button.textContent = next;
-    const title = !summaryCache.ok
-      ? "打开配置人设与开场"
+    const ready = summaryCache.ok;
+    const state = !ready ? "is-loading" : hasPersona ? "is-ok" : "is-none";
+    if (!button.classList.contains(state) || button.dataset.count !== String(count)) {
+      button.classList.remove("is-loading", "is-ok", "is-none");
+      button.classList.add(state);
+      button.dataset.count = String(count);
+      const countEl = button.querySelector(".rk-pa-count");
+      if (countEl) countEl.innerHTML = `<i>条</i>${ready ? count : "-"}`;
+    }
+    const title = !ready
+      ? "正在读取配置…"
       : hasPersona
         ? `人设已配 · 开场 ${count} 条`
         : `还没有人设 · 开场 ${count} 条`;
