@@ -916,12 +916,29 @@ def send_info_parts(
     part2 = f"面试地点：{job.get('place', '')}\n面试时间：{day} {interview_window_of(job)}"
     part3 = _interview_ask(slots)
     # 主城没单、按后台「周边城市设置」取到隔壁城市的岗：必须先说清楚在哪，
-    # 否则客户以为是本地的，到面试地点才发现跨城。
+    # 否则客户以为是本地岗，到面试地点才发现跨城。
     asked = str(slots.get("city") or "")
     job_city = str(job.get("city") or "")
     if asked and job_city and asked != job_city:
         part1 = f"{asked}这边暂时没有合适的厂，{job_city}有岗，过去方便的话可以安排。\n{part1}"
-    return [part1, part2, part3]
+    # 岗位媒体：发卡这一轮把运营在岗位里配的图片/视频带上。
+    # 以前这些媒体只进了 api_flow 的 allowed_media 白名单，从来没被拼进正文，
+    # 所以发出去的永远只有文字（2026-11-17 灰度实测「没有发图片和视频」）。
+    # 只在发卡这一轮追加，客户后续插问不会每条都刷一遍图。
+    parts = [part1, part2, part3]
+    parts.extend(_job_media_markers(job))
+    return parts
+
+
+def _job_media_markers(job: dict[str, Any]) -> list[str]:
+    """岗位配置的媒体 → 【图片:x】【视频:x】标记（每个标记独占一段）。
+
+    标记必须原样进正文：客户端靠它调 paste_media 从本地媒体目录粘贴发送。
+    名字里带路径分隔符或空名的引用直接丢弃（与 media_guard 同一套校验）。
+    """
+    from .media_guard import markers_from_refs
+
+    return markers_from_refs((job or {}).get("media"))
 
 
 def _job_card_lines(job: dict[str, Any]) -> list[str]:
