@@ -32,8 +32,9 @@
       .rk-arch-entry{width:100%;height:34px;margin-top:8px;padding:0 14px;border:1px solid var(--rk-border,#e2e8f1);border-radius:var(--gl-r-control,8px);background:var(--rk-accent-soft,#d3e3fd);color:var(--rk-accent,#0b57d0);cursor:pointer;font:inherit;font-size:12.5px;font-weight:600;display:flex;align-items:center;justify-content:center;transition:opacity .15s ease}
       .rk-arch-entry:hover{opacity:.85}
       .rk-arch-entry.is-nested{margin:4px 0 6px;height:32px;font-size:12px}
-      .rk-arch-mask{position:fixed;inset:0;z-index:4000;display:flex;justify-content:flex-end;background:rgba(18,28,52,.26);backdrop-filter:blur(6px) saturate(1.2)}
-      .rk-arch-panel{display:flex;flex-direction:column;width:min(640px,100%);height:100%;border:1px solid var(--gl-edge,#e2e8f1);border-radius:var(--gl-r-shell,14px) 0 0 var(--gl-r-shell);background:linear-gradient(180deg,rgba(255,255,255,.96),rgba(250,252,255,.9));backdrop-filter:var(--gl-blur,blur(14px));box-shadow:var(--gl-shadow-float,0 24px 60px -24px rgba(20,40,90,.45))}
+      .rk-arch-mask{position:fixed;inset:0;z-index:4000;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(4,30,73,.32);backdrop-filter:blur(6px)}
+      .rk-arch-panel{display:flex;flex-direction:column;width:min(1100px,100%);max-height:100%;border-radius:22px;background:var(--rk-bg,#fff);box-shadow:var(--gl-shadow-float,0 24px 60px -24px rgba(20,40,90,.45));overflow:hidden}
+      html.rk-arch-locked,html.rk-arch-locked body{overflow:hidden}
       .rk-arch-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:16px 20px;border-bottom:1px solid var(--rk-border,#e2e8f1)}
       .rk-arch-head h2{margin:0;font-size:17px;font-weight:600;color:var(--rk-ink-1,#1f1f1f)}
       .rk-arch-head p{margin:4px 0 0;font-size:12px;color:var(--rk-ink-3,#5e5e5e)}
@@ -68,6 +69,7 @@
 
   function closePanel() {
     if (maskEl) { maskEl.remove(); maskEl = null; }
+    document.documentElement.classList.remove("rk-arch-locked");
   }
 
   function pillClass(status) {
@@ -89,16 +91,12 @@
     const body = document.getElementById("rk-arch-body");
     if (!body || !maskEl) return;
     try {
-      const [archive, devices, media, positions] = await Promise.all([
+      const [archive, devices] = await Promise.all([
         api("GET", "/api/v1/agent/archive/list"),
         api("GET", "/api/v1/agent/devices"),
-        api("GET", "/api/v1/media").catch(() => ({ items: [] })),
-        api("GET", "/api/v1/service-positions?page=1&page_size=100").catch(() => ({ items: [] })),
       ]);
       const items = archive.items || [];
       const deviceList = devices.items || [];
-      const mediaList = media.items || [];
-      const positionList = (positions.items || []).map((p) => ({ id: Number(p.id), name: String(p.position_name || p.id) }));
       body.innerHTML = "";
 
       // ── 群聊绑定配置 ──
@@ -175,145 +173,7 @@
       group.append(hint);
       body.append(group);
 
-      // ── 手动新建约面试 ──
-      const manual = document.createElement("div");
-      manual.className = "rk-arch-group";
-      manual.innerHTML = `<b>手动新建约面试（运营自己约好的客户，同样推送群聊）</b>`;
-      const mrow1 = document.createElement("div");
-      mrow1.className = "rk-arch-row";
-      const mName = document.createElement("input");
-      mName.placeholder = "姓名";
-      const mPhone = document.createElement("input");
-      mPhone.placeholder = "电话";
-      const mNick = document.createElement("input");
-      mNick.placeholder = "客户昵称（选填）";
-      mrow1.append(mName, mPhone, mNick);
-      const mrow2 = document.createElement("div");
-      mrow2.className = "rk-arch-row";
-      const mDate = document.createElement("input");
-      mDate.type = "date";
-      const mTime = document.createElement("input");
-      mTime.type = "time";
-      const mDevice = document.createElement("select");
-      mDevice.innerHTML = `<option value="">通知群聊（用哪个设备的绑定）</option>` + deviceList
-        .map((d) => `<option value="${escapeHtml(d.device_code)}">${escapeHtml(d.name || d.device_code)}</option>`)
-        .join("");
-      const mBtn = document.createElement("button");
-      mBtn.type = "button";
-      mBtn.textContent = "新建登记";
-      mBtn.addEventListener("click", async () => {
-        const payload = {
-          name: mName.value.trim(),
-          phone: mPhone.value.trim(),
-          customer_nickname: mNick.value.trim(),
-          interview_date: mDate.value,
-          interview_time: mTime.value,
-          device_code: mDevice.value,
-        };
-        if (!payload.name || !payload.phone) { mBtn.textContent = "姓名电话必填"; return; }
-        if (!payload.interview_date && !payload.interview_time) { mBtn.textContent = "面试时间必填"; return; }
-        mBtn.disabled = true;
-        mBtn.textContent = "登记中…";
-        try {
-          await api("POST", "/api/v1/agent/archive/manual", payload);
-          mBtn.textContent = "已登记 ✓";
-          mName.value = mPhone.value = mNick.value = "";
-          mDate.value = mTime.value = "";
-          await paintBody();
-        } catch (error) {
-          mBtn.textContent = "失败：" + error.message;
-        }
-        setTimeout(() => { mBtn.textContent = "新建登记"; mBtn.disabled = false; }, 2200);
-      });
-      mrow2.append(mDate, mTime, mDevice, mBtn);
-      manual.append(mrow1, mrow2);
-      body.append(manual);
 
-      // ── 岗位素材库（媒体分层：通用池 + 岗位专属）──
-      const mediaBox = document.createElement("div");
-      mediaBox.className = "rk-arch-group";
-      mediaBox.innerHTML = `<b>岗位素材库（图/视频发给客户用）</b>`;
-      const mediaHint = document.createElement("p");
-      mediaHint.className = "rk-arch-hint";
-      mediaHint.textContent = "通用素材（工作内容/宿舍/安检视频）所有岗位共用；面试地点图这类各城市不同的，绑定到具体岗位——Agent 只会发本岗位绑定的图。客户问路线时 Agent 自动发对应素材。";
-      mediaBox.append(mediaHint);
-      const mediaTable = document.createElement("table");
-      mediaTable.style.cssText = "width:100%;border-collapse:collapse;font-size:11.5px;margin-top:8px";
-      const bindOptions = (current) =>
-        `<option value="0" ${!current ? "selected" : ""}>通用（所有岗位）</option>` +
-        positionList
-          .map((p) => `<option value="${p.id}" ${Number(current) === p.id ? "selected" : ""}>${escapeHtml(p.name)}</option>`)
-          .join("");
-      const fmtSize = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.round(n / 1024) + " KB");
-      mediaTable.innerHTML =
-        `<thead><tr style="text-align:left;color:var(--rk-ink-3,#5e5e5e)"><th style="padding:4px 6px">素材名</th><th style="padding:4px 6px">类型</th><th style="padding:4px 6px">大小</th><th style="padding:4px 6px">绑定岗位</th></tr></thead><tbody></tbody>`;
-      const mtbody = mediaTable.querySelector("tbody");
-      for (const m of mediaList) {
-        const tr = document.createElement("tr");
-        tr.innerHTML =
-          `<td style="padding:4px 6px">${escapeHtml(m.name)}</td>` +
-          `<td style="padding:4px 6px">${m.kind === "video" ? "视频" : "图片"}</td>` +
-          `<td style="padding:4px 6px">${fmtSize(Number(m.bytes || 0))}</td>`;
-        const td = document.createElement("td");
-        td.style.cssText = "padding:4px 6px";
-        const sel = document.createElement("select");
-        sel.className = "rk-arch-arrival";
-        sel.innerHTML = bindOptions(m.position_id);
-        sel.addEventListener("change", async () => {
-          sel.disabled = true;
-          try {
-            await api("PUT", `/api/v1/media/${m.id}/binding`, { position_id: Number(sel.value) });
-          } catch (error) {
-            sel.value = String(m.position_id || 0);
-          }
-          sel.disabled = false;
-        });
-        td.append(sel);
-        tr.append(td);
-        mtbody.append(tr);
-      }
-      mediaBox.append(mediaTable);
-      // 上传行：文件 + 绑定 + 按钮
-      const mrow = document.createElement("div");
-      mrow.className = "rk-arch-row";
-      const fileInput = document.createElement("input");
-      fileInput.type = "file";
-      fileInput.accept = "image/*,video/*";
-      const upSel = document.createElement("select");
-      upSel.innerHTML = bindOptions(0);
-      const upBtn = document.createElement("button");
-      upBtn.type = "button";
-      upBtn.textContent = "上传素材";
-      upBtn.addEventListener("click", () => {
-        const file = fileInput.files && fileInput.files[0];
-        if (!file) { upBtn.textContent = "先选文件"; return; }
-        const kind = file.type.startsWith("video") ? "video" : "image";
-        if (kind === "video" && file.size > 50 * 1048576) { upBtn.textContent = "视频超 50MB"; return; }
-        upBtn.disabled = true;
-        upBtn.textContent = "上传中…";
-        const reader = new FileReader();
-        reader.onload = async () => {
-          try {
-            const base64 = String(reader.result || "").split(",")[1] || "";
-            await api("POST", "/api/v1/media", {
-              name: file.name,
-              kind,
-              data_base64: base64,
-              position_id: Number(upSel.value) || 0,
-            });
-            upBtn.textContent = "已上传 ✓";
-            fileInput.value = "";
-            await paintBody();
-          } catch (error) {
-            upBtn.textContent = "失败：" + error.message;
-          }
-          setTimeout(() => { upBtn.textContent = "上传素材"; upBtn.disabled = false; }, 2200);
-        };
-        reader.readAsDataURL(file);
-      });
-      mrow.append(fileInput, upSel, upBtn);
-      mediaBox.append(mrow);
-      body.append(mediaBox);
 
       // ── 登记清单 ──
       const title = document.createElement("div");
