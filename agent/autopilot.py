@@ -1179,11 +1179,26 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                     _brain.log_receipt(cid, seq, kind, "failed", result["detail"])
                                     _consecutive_send_failures += 1
                                     log(f"    [开场 {seq}] 发送失败：{result['detail']}", level="warning")
+                            elif kind in ("image", "video") and (item["media_name"] or "").strip():
+                                # 真实发送媒体：paste_media 是上游原有机制（会话已打开，
+                                # 抢前台 → 写剪贴板 → Ctrl+V → 回车），不新增动作。
+                                _last_reply_at = time.time()
+                                ok_m, detail_m = core_send.paste_media(
+                                    item["media_name"], log=lambda s: log(f"    {s}"),
+                                )
+                                if ok_m:
+                                    rlog.mark_sent(fake_id, cid, f"开场-{kind}", f"{kind}:{item['media_name']}")
+                                    _brain.log_receipt(cid, seq, kind, "sent")
+                                    sent_items += 1
+                                    log(f"    [开场 {seq}] {kind}:{item['media_name']} 已发送", scope="send")
+                                else:
+                                    rlog.mark_failed(fake_id, cid, f"{kind} 发送失败：{detail_m}", "开场-媒体")
+                                    _brain.log_receipt(cid, seq, kind, "failed", detail_m)
+                                    log(f"    [开场 {seq}] {kind}:{item['media_name']} 发送失败：{detail_m}", level="warning")
                             else:
-                                # 媒体占位：当前阶段不真实发送，只上报
-                                rlog.mark_sent(fake_id, cid, "开场-媒体占位", f"{kind}:{item['media_name']}")
-                                _brain.log_receipt(cid, seq, kind, "skipped", "媒体占位不真实发送")
-                                log(f"    [开场 {seq}] {kind}:{item['media_name']} 占位跳过", scope="send")
+                                # 空内容/未知类型：跳过并上报
+                                rlog.mark_skipped(fake_id, cid, f"开场项类型 {kind} 无内容")
+                                _brain.log_receipt(cid, seq, kind, "skipped", "无内容")
                         greeted.add(cid)
                         _save_greeted(greeted)
                         log(f"[开场] {name} 播完 {sent_items}/{len(ores['items'])} 条文本，之后进入 Agent 对话")
