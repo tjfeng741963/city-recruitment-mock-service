@@ -814,6 +814,7 @@
       item.append(pill);
       item.addEventListener("click", function () {
         deviceState.current = device.device_code;
+        deviceState.painted = null; // 强制重绘新选中设备的详情
         paintDeviceDetail(device);
         Array.prototype.forEach.call(box.querySelectorAll(".dev-item"), function (n) { n.classList.remove("is-active"); });
         item.classList.add("is-active");
@@ -821,7 +822,12 @@
       box.append(item);
       // 默认选中第一台
       if (!deviceState.current) deviceState.current = device.device_code;
-      if (device.device_code === deviceState.current) paintDeviceDetail(device);
+      // 只有「选中的设备变了」才重绘详情区：详情区里有验证码输入框，
+      // 轮询周期（8 秒）无条件重绘会把用户打到一半的码清掉。
+      if (device.device_code === deviceState.current && deviceState.painted !== device.device_code) {
+        deviceState.painted = device.device_code;
+        paintDeviceDetail(device);
+      }
     });
   }
 

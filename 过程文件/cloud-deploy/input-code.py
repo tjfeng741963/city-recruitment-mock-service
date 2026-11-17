@@ -44,6 +44,19 @@ KEYEVENTF_UNICODE = 0x0004
 KEYEVENTF_KEYUP = 0x0002
 INPUT_KEYBOARD = 1
 
+VK_RETURN = 0x0D
+VK_CONTROL = 0x11
+VK_A = 0x41
+VK_DELETE = 0x2E
+
+
+def _key(vk: int, down: bool) -> None:
+    ii = Input_I()
+    ii.ki = KeyBdInput(vk, 0, 0 if down else KEYEVENTF_KEYUP, 0, None)
+    arr = (Input * 1)(Input(INPUT_KEYBOARD, ii))
+    u.SendInput(1, arr, ctypes.sizeof(Input))
+    time.sleep(0.05)
+
 
 def send_char(ch: str) -> None:
     """一个 Unicode 字符 = 按下 + 抬起两个事件。"""
@@ -52,17 +65,27 @@ def send_char(ch: str) -> None:
         ii.ki = KeyBdInput(0, ord(ch), KEYEVENTF_UNICODE | flag, 0, None)
         arr = (Input * 1)(Input(INPUT_KEYBOARD, ii))
         u.SendInput(1, arr, ctypes.sizeof(Input))
-        time.sleep(0.04)
+        time.sleep(0.12)
 
 
 def send_enter() -> None:
-    VK_RETURN = 0x0D
-    for down in (True, False):
-        ii = Input_I()
-        ii.ki = KeyBdInput(VK_RETURN, 0, 0 if down else KEYEVENTF_KEYUP, 0, None)
-        arr = (Input * 1)(Input(INPUT_KEYBOARD, ii))
-        u.SendInput(1, arr, ctypes.sizeof(Input))
-        time.sleep(0.08)
+    _key(VK_RETURN, True)
+    _key(VK_RETURN, False)
+
+
+def clear_input() -> None:
+    """清空当前焦点输入框：Ctrl+A 全选 → Delete。
+
+    企微的验证码窗是自绘控件，残留的上一次输入会让新码拼成错误位数
+    （「验证码位数错误」的来源），敲码前必须先清。
+    """
+    _key(VK_CONTROL, True)
+    _key(VK_A, False)
+    _key(VK_CONTROL, False)
+    time.sleep(0.15)
+    _key(VK_DELETE, True)
+    _key(VK_DELETE, False)
+    time.sleep(0.15)
 
 
 def find_login_window() -> int:
@@ -102,13 +125,16 @@ def main() -> int:
         win32gui.SetForegroundWindow(hwnd)
     except Exception as exc:
         print("SetForegroundWindow 失败（继续尝试）:", exc)
-    time.sleep(0.8)
+    time.sleep(1.2)
+
+    # 先清掉可能残留的旧输入（上一次失败的码拼在后面 = 位数错误）
+    clear_input()
 
     for ch in code:
         send_char(ch)
         time.sleep(0.15)
-    print("已输入", code, "，等 1 秒后回车")
-    time.sleep(1.0)
+    print("已输入", code, "，等 1.5 秒后回车")
+    time.sleep(1.5)
     send_enter()
     print("已回车提交")
     return 0

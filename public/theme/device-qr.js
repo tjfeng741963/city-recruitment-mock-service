@@ -144,6 +144,12 @@
     const body = document.createElement("div");
     body.className = "rk-devqr-body";
     body.id = "rk-devqr-body";
+    // 验证码输入行只建一次、不随轮询重绘——轮询每 5 秒重建动态区，
+    // 输入行跟着重建的话，用户打到一半的码就被清掉了。
+    const dynamic = document.createElement("div");
+    dynamic.id = "rk-devqr-dynamic";
+    body.append(dynamic);
+    body.append(buildVerifyRow(code));
     panel.append(body);
     mask.append(panel);
     mask.addEventListener("click", (event) => { if (event.target === mask) closePanel(); });
@@ -181,8 +187,11 @@
       stateCell.append(pill);
       kv.append(positionCell, stateCell);
 
-      body.innerHTML = "";
-      body.append(kv);
+      // 只重建动态区：验证码输入行（body 直属子节点）不参与，输入不被轮询清掉
+      const dynamic = document.getElementById("rk-devqr-dynamic");
+      if (!dynamic) return;
+      dynamic.innerHTML = "";
+      dynamic.append(kv);
 
       if (qr.available && qr.image) {
         const frame = document.createElement("div");
@@ -192,8 +201,8 @@
         img.alt = "企微登录二维码";
         frame.append(img);
         frame.append(Object.assign(document.createElement("div"), { className: "scanline" }));
-        body.append(frame);
-        body.append(Object.assign(document.createElement("div"), {
+        dynamic.append(frame);
+        dynamic.append(Object.assign(document.createElement("div"), {
           className: "rk-devqr-stamp",
           textContent: "截图时间 " + (qr.captured_at || "") + " · 每 30 秒自动刷新",
         }));
@@ -203,13 +212,9 @@
         wait.textContent = device.online
           ? "设备在线，没有待扫的二维码。"
           : "等待客户端推送二维码……\n服务器上的企微掉登录后 30 秒内会自动出现在这里。";
-        body.append(wait);
+        dynamic.append(wait);
       }
 
-      // ── 短信验证码输入（扫码后企微可能要求）────────────────────────
-      // 提交 → 设备 5 秒内取走并在企微窗口敲入。码只有几分钟时效，输了没反应
-      // 多半是过期了，重新输一个即可。
-      body.append(buildVerifyRow(code));
     } catch (error) {
       toast("二维码读取失败：" + error.message, true);
     }
