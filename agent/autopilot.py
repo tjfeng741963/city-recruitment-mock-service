@@ -99,7 +99,7 @@ compat.apply_click_input()
 compat.apply_input_focus_retry()
 
 from wecom_io_core import send as core_send  # noqa: E402
-from wecom_io_core.store import Store  # noqa: E402
+from wecom_io_core.store import Store, find_data_dir  # noqa: E402
 
 # 企微自带的应用/系统会话，前缀命中就不回复
 SYSTEM_PREFIXES = (
@@ -125,6 +125,37 @@ DEFAULTS = {
     "register_key": "",      # 空=关闭自注册；填了就在缺 token 时自动注册
     "device_name": "",       # 注册时展示的名字，留空用 device_code
 }
+
+# 进程退出码：企微账号目录变了，需要守护进程（计划任务）用新进程重新解析。
+# 用非 0 值是为了让「正常退出」和「需要重启」在日志/计划任务里能分辨。
+ACCOUNT_SWITCH_EXIT_CODE = 3
+
+
+def account_switched(data_dir):
+    """当前生效的企微账号目录是否已经不是 data_dir 了；变了就返回新目录。
+
+    为什么需要（远端 2026-11-17 线上实测，合并时移植）：企微每个账号在
+    Documents/WXWork/<vid>/Data 下有独立数据目录，Store 只在**启动时**解析一次，
+    之后主循环一直盯着这一个目录。换账号（退登录再扫码）后旧目录不再写入，
+    wal_signature 永远不变 → 扫不到任何新消息，日志只有「上报：无新增消息」，
+    看起来像客户端在正常工作。只做判断不做热切换：换账号等于整套上下文都换，
+    直接退出（退出码 3）让计划任务重新拉起最稳。
+    """
+    if not data_dir:
+        return None
+    try:
+        current = find_data_dir()
+    except Exception:  # noqa: BLE001 目录读不到就当下次再说，绝不能因此崩掉
+        return None
+    if not current:
+        return None
+    try:
+        if Path(data_dir).resolve() == Path(current).resolve():
+            return None
+    except OSError:
+        return None
+    return current
+
 
 _last_reply_at = 0.0
 # 连续发送失败计数（自动回复 drain 用）。失败也消耗冷却，且连续失败把间隔
@@ -2004,6 +2035,17 @@ def main() -> int:
     log("开始监听（Ctrl+C 退出）")
     while True:
         try:
+            # 换账号检测：自动发现目录的机器，企微退登录再扫码后旧目录不再写入，
+            # 这里主动退出（退出码 3）交给计划任务重启重新解析。显式配了
+            # data_dir 的机器不适用——运营明确指定了盯哪个账号。
+            if data_dir is None:
+                switched = account_switched(store.data_dir)
+                if switched is not None:
+                    log(
+                        f"[账号] 企微账号目录已变化：{store.data_dir} → {switched}；"
+                        "本进程退出，由计划任务重启并重新解析"
+                    )
+                    return ACCOUNT_SWITCH_EXIT_CODE
             # 每轮开头先自检：非 online 时 drain 里一条都不发，只把心跳继续发出去
             state = detect_wecom_state()
             if state != wecom_state:
