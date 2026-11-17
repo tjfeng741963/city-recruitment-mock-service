@@ -48,16 +48,53 @@ REVIEW_SYSTEM = """你是劳务中介对话的审核员。招聘顾问每条要�
 """
 
 
+def _fabricated_action(text: str) -> str:
+    """草稿里有没有「我在现场做了什么 / 已安排人接待」这类编造的操作叙述。
+
+    系统只发文字，没有任何「谁在哪接待客户」的状态，这类第一人称动作只能来自
+    模型想象。2026-11-17 灰度实测：客户说「我在番禺钟村这边」，系统回「我在打印
+    面试表，叫了我主管去门口接你进来，你给他打个电话找他」——客户真去了会当场
+    落空，比「我确认一下」严重得多。
+
+    只拦真正的动作陈述；「我在广州」这类地点陈述、「我叫人核实一下」这类
+    （后面跟核实/确认）不算。
+    """
+    value = str(text or "")
+    for item in _FABRICATED_ACTIONS:
+        if item in value:
+            # 「我先在系统里确认一下」是允许的自我描述，排除掉
+            tail = value.split(item, 1)[1][:12]
+            if any(word in tail for word in ("确认", "核实", "查", "问一下", "了解")):
+                continue
+            return item
+    return ""
+
+
+# 编造现场动作的短语：第一人称「我在…做某事」或「已安排某人去…」
+_FABRICATED_ACTIONS = (
+    "我在打印", "正在打印", "我在门口", "我在楼下", "我在这边等", "我在等着",
+    "叫了我主管", "我叫了主管", "叫了同事", "叫了人去", "安排人去接",
+    "已经安排人", "已经叫人", "派人去接", "去门口接你", "到门口接你",
+)
+
+
 def _hard_checks(
     draft: list[str], fact_card: str, transcript: list[dict[str, str]]
 ) -> dict[str, str] | None:
-    """代码级硬伤检查：④ 占位符残留 + ② 与最近 2 轮我方内容近似判重。"""
+    """代码级硬伤检查：④ 占位符残留 + ② 与最近 2 轮我方内容近似判重 + ⑥ 编造操作。"""
     text = "\n".join(draft)
     if _PLACEHOLDER.search(text):
         return {
             "verdict": "revise",
             "reason": "草稿里有没替换掉的占位符（{{x}} 或 {x}）",
             "suggestion": "占位符必须替换成真实内容，占位符本身绝不能发给客户",
+        }
+    fabricated = _fabricated_action(text)
+    if fabricated:
+        return {
+            "verdict": "revise",
+            "reason": f"草稿编造了系统无法确认的现场动作（{fabricated}）",
+            "suggestion": "删掉「我在…/已经安排人…」这类现场描述，只答事实或说明要确认",
         }
     key = _NORMALIZE.sub("", text)
     if key:
