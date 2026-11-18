@@ -79,6 +79,7 @@ import compat  # noqa: E402
 import echo_guard  # noqa: E402
 import login_watch  # noqa: E402
 import login_qr  # noqa: E402
+import login_refresh  # noqa: E402
 import media_fetch  # noqa: E402
 import reply_store as rlog  # noqa: E402
 import client as agent_client  # noqa: E402
@@ -2075,6 +2076,9 @@ def main() -> int:
         wecom_state = detect_wecom_state()
         log(f"[自检] 企微状态 {wecom_state}（{WECOM_STATE_TEXT.get(wecom_state, '未知')}）")
         login_watch.alert_login_required(wecom_state, log=log)
+        # 登录码过期自动点「刷新」（定位窗口→相对坐标点击→截图验证），
+        # 仅未登录登录窗口、线程化不阻塞；用户 2026-11-18 明确确认。
+        login_refresh.maybe_refresh_expired_qr(log=log)
         qr_pusher.tick(wecom_state, remote_client, log=log)
         if reporter is not None:
             reporter.tick(wecom_state, pending_count(), force=True)
@@ -2090,6 +2094,9 @@ def main() -> int:
     wecom_state = detect_wecom_state()
     log(f"[自检] 企微状态 {wecom_state}（{WECOM_STATE_TEXT.get(wecom_state, '未知')}）")
     login_watch.alert_login_required(wecom_state, log=log)
+    # 登录码过期自动点「刷新」（定位窗口→相对坐标点击→截图验证），
+    # 仅未登录登录窗口、线程化不阻塞；用户 2026-11-18 明确确认。
+    login_refresh.maybe_refresh_expired_qr(log=log)
     qr_pusher.tick(wecom_state, remote_client, log=log)
     if reporter is not None:
         reporter.tick(wecom_state, pending_count(), force=True)
@@ -2121,6 +2128,9 @@ def main() -> int:
                 wecom_state = state
             # 掉登录时把企微窗口拉到前台并提示扫码（内部有 120s 冷却，非登录态不动作）
             login_watch.alert_login_required(wecom_state, log=log)
+            # 登录码过期自动点「刷新」（定位窗口→相对坐标点击→截图验证），
+            # 仅未登录登录窗口、线程化不阻塞；用户 2026-11-18 明确确认。
+            login_refresh.maybe_refresh_expired_qr(log=log)
             # 掉登录时把扫码窗截图传到网页（内部约 30s 一次；恢复后自动清除旧图）
             qr_pusher.tick(wecom_state, remote_client, log=log)
             if reporter is not None:
