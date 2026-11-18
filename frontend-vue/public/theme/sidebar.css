@@ -1,0 +1,146 @@
+/* Collapsible sidebar: 236px labelled nav <-> 76px icon rail. State class lives on <html>
+ * (set by sidebar.js before Vue mounts) so the first paint is already in the right mode. */
+
+/* Toggle is absolutely pinned: as a trailing flex child Chromium skipped painting a menu icon. */
+:root body .sidebar {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 58px;
+  overflow: hidden;
+  transition: width var(--rk-dur-3, 240ms) var(--rk-ease-out, cubic-bezier(0.2, 0, 0, 1));
+}
+:root body .sidebar-logo {
+  flex-shrink: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+:root body .sidebar-menu {
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(31, 41, 64, 0.16) transparent;
+}
+:root body .sidebar-menu .el-menu-item,
+:root body .sidebar-menu .el-sub-menu__title {
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* ---------- Toggle ---------- */
+:root body .rk-nav-toggle {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 40px;
+  margin: 6px 12px 12px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--rk-ink-3);
+  font: inherit;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: pointer;
+  transition: background var(--rk-dur-2, 160ms) var(--rk-ease, ease), color var(--rk-dur-2, 160ms) var(--rk-ease, ease);
+}
+:root body .rk-nav-toggle:hover {
+  background: rgba(31, 41, 64, 0.05);
+  color: var(--rk-ink-1);
+}
+:root body .rk-nav-toggle:focus-visible {
+  outline: 2px solid var(--rk-accent);
+  outline-offset: 2px;
+}
+:root body .rk-nav-toggle svg {
+  flex-shrink: 0;
+}
+:root body .rk-nav-chevron {
+  transform-origin: 14.5px 12px;
+  transition: transform var(--rk-dur-3, 240ms) var(--rk-ease-out, ease);
+}
+
+/* ---------- Collapsed: icon rail ---------- */
+:root.rk-nav-collapsed body .sidebar {
+  width: 76px;
+}
+:root.rk-nav-collapsed body .sidebar-logo {
+  justify-content: center;
+  padding: 20px 0 16px;
+}
+:root.rk-nav-collapsed body .sidebar-logo .logo-text,
+:root.rk-nav-collapsed body .sidebar-menu .el-menu-item > span,
+:root.rk-nav-collapsed body .sidebar-menu .el-sub-menu__title > span,
+:root.rk-nav-collapsed body .sidebar-menu .el-sub-menu__icon-arrow,
+:root.rk-nav-collapsed body .rk-nav-toggle-text {
+  display: none;
+}
+:root.rk-nav-collapsed body .sidebar-menu {
+  padding: 4px 10px 12px;
+}
+:root.rk-nav-collapsed body .sidebar-menu .el-menu-item,
+:root.rk-nav-collapsed body .sidebar-menu .el-sub-menu__title,
+:root.rk-nav-collapsed body .sidebar-menu .el-menu--inline .el-menu-item {
+  justify-content: center;
+  padding: 0 !important;
+}
+:root.rk-nav-collapsed body .sidebar-menu .el-icon {
+  margin: 0 !important;
+}
+:root.rk-nav-collapsed body .sidebar-menu .el-sub-menu.is-opened > .el-sub-menu__title {
+  background: rgba(31, 41, 64, 0.04) !important;
+}
+:root.rk-nav-collapsed body .sidebar-menu .el-sub-menu.is-opened > .el-menu--inline {
+  margin: 2px 0 8px;
+  padding-bottom: 6px !important;
+  border-bottom: 1px solid var(--gl-hairline, rgba(31, 41, 64, 0.08));
+}
+:root.rk-nav-collapsed body .rk-nav-toggle {
+  justify-content: center;
+  margin: 6px 10px 12px;
+  padding: 0;
+}
+:root.rk-nav-collapsed body .rk-nav-chevron {
+  transform: scaleX(-1);
+}
+:root.rk-nav-collapsed body .sidebar-menu .el-menu-item:hover .el-icon,
+:root.rk-nav-collapsed body .sidebar-menu .el-sub-menu__title:hover .el-icon {
+  transform: scale(1.08);
+}
+
+/* ---------- Tooltip for the rail ---------- */
+.rk-nav-tip {
+  position: fixed;
+  z-index: 3000;
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: rgba(31, 31, 31, 0.88);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transform: translate(-4px, -50%);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+.rk-nav-tip.is-visible {
+  opacity: 1;
+  transform: translate(0, -50%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root body .sidebar,
+  :root body .rk-nav-chevron,
+  .rk-nav-tip {
+    transition: none;
+  }
+}
