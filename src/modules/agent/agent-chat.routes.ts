@@ -138,6 +138,18 @@ function buildFacts(db: DatabaseSync, row: PositionRow | undefined): Record<stri
       merged.interview_video = String(media.name);
     }
   }
+  // 通用媒体清单（2026-11-18 线上实测）：客户要图/视频/说没收到时，模型
+  // 需要知道通用池里有哪些素材名（工作内容/安检视频/宿舍）——之前只有
+  // 岗位专属的 interview_address_image，通用素材名模型完全不可见，
+  // 导致「重新发一下图片」只能文字道歉。逗号分隔的名字清单。
+  const catalog = (
+    db.prepare(
+      "SELECT name FROM media_assets WHERE status='enabled' AND position_id=0 ORDER BY id",
+    ).all() as Array<{ name: string }>
+  )
+    .map((row) => row.name)
+    .join("、");
+  if (catalog) merged.media_catalog = catalog;
   // 空值不出现：prompt 里「工价：」后面空着比不写更容易让模型以为「没有限制」
   return Object.fromEntries(
     Object.entries(merged).filter(([, value]) => String(value || "").trim()),
