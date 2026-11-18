@@ -55,6 +55,9 @@ const DEVICE_KEYS = [
   // dify_url / dify_key 已随 Dify 全链路下线（2026-11-17），不再返回。
   "id", "device_code", "name", "recruiter_id", "factory_name", "city", "status", "online", "mode",
   "config", "last_online", "created_at", "last_offline", "queue_depth", "queue_stale",
+  // 群聊绑定（2026-11-18 面试登记页）：登记完成自动推送的目标群聊，
+  // 不透出则前端刷新后回显丢失，运营会以为没保存。
+  "group_chat", "position_id",
 ] as const;
 
 const DISTRIBUTION_STATES = [
