@@ -114,6 +114,7 @@
     pageEl = document.createElement("div");
     pageEl.className = "rk-media-page";
     mainScroll.append(pageEl);
+    armLeaveWatch(mainScroll);
     paintPage();
   }
 
@@ -123,17 +124,42 @@
     if (entryEl) entryEl.classList.remove("is-active");
   }
 
-  function watchLeave() {
-    document.querySelector(".sidebar")?.addEventListener(
-      "click",
-      (event) => {
-        const item = event.target.closest(".el-menu-item");
-        if (item && item.hasAttribute(MARK)) return;
-        if (item || event.target.closest(".el-sub-menu__title")) closePage();
-      },
-      true,
-    );
+  // 卸载时机（不再依赖点击事件——Vue 重渲染侧栏后点击监听会丢）：
+  // 监听内容区子节点变化——注入页存在时 Vue 渲染了新页面（路由切换）
+  // → 立即卸载注入页并解除页面模式；document 级点击委托兜底。
+  function armLeaveWatch(mainScroll) {
+    if (armLeaveWatch._observer) return;
+    armLeaveWatch._observer = new MutationObserver(() => {
+      if (!pageEl || !mainScroll.isConnected) return;
+      // 内容区里出现了不是注入页的元素子节点 → 路由已切换
+      for (const child of mainScroll.children) {
+        if (child !== pageEl && child.tagName !== "STYLE") {
+          closePage();
+          return;
+        }
+      }
+    });
+    armLeaveWatch._observer.observe(mainScroll, { childList: true });
+    document.addEventListener("click", leaveClickGuard, true);
     window.addEventListener("popstate", closePage);
+  }
+
+  function leaveClickGuard(event) {
+    if (!pageEl) return;
+    const item = event.target.closest(".el-menu-item");
+    if (item && item.hasAttribute(MARK)) return;
+    if (item || event.target.closest(".el-sub-menu__title")) closePage();
+  }
+
+  function closePage() {
+    if (pageEl) { pageEl.remove(); pageEl = null; }
+    document.querySelector(".main-scroll")?.classList.remove("rk-media-page-mode");
+    if (entryEl) entryEl.classList.remove("is-active");
+    if (armLeaveWatch._observer) {
+      armLeaveWatch._observer.disconnect();
+      armLeaveWatch._observer = null;
+    }
+    document.removeEventListener("click", leaveClickGuard, true);
   }
 
   async function paintPage() {
@@ -253,7 +279,6 @@
   function start() {
     injectStyle();
     mountEntry();
-    watchLeave();
     new MutationObserver(() => {
       if (!document.querySelector(`[${MARK}]`)) {
         try { mountEntry(); } catch {}
