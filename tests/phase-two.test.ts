@@ -4,6 +4,9 @@ import { createServer, type Server } from "node:http";
 import { buildServer } from "../src/server.js";
 
 describe("phase-two agent and activation flows", () => {
+  // 该文件验证 manual-reply 的落库与消息流（非 bridge 通道）——默认 bridge
+  // 后（2026-11-18）必须显式切回 mock，否则入队即 409（设备未配对）。
+  beforeAll(() => { process.env.REA_MESSAGE_CHANNEL_PROVIDER = "mock"; });
   let app: FastifyInstance;
   let token = "";
   beforeAll(async () => {
