@@ -324,7 +324,10 @@ def find_media(name: str) -> Path | None:
     if not name or any(ch in name for ch in ("/", "\\", ":")):
         return None
     d = ensure_media_dir()
-    for ext in MEDIA_EXTS:          # 精确匹配优先，扩展名按序
+    exact = d / name                # 名字自带后缀（开场配置的 media_name 是
+    if exact.is_file():             # 完整文件名如「工作内容(1).jpg」）直接命中
+        return exact                # ——与 media_fetch.local_file 的语义对齐
+    for ext in MEDIA_EXTS:          # 纯名字（不带后缀）按扩展名序拼接
         p = d / f"{name}{ext}"
         if p.is_file():
             return p
