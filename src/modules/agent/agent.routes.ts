@@ -33,7 +33,10 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
   // 202，由客户端 claim → 键鼠发送 → receipts 回执把状态推进到 sent。
   // 配了微信客服（WeCom）时保持原通道，不能把客服消息塞进设备队列。
   const queueBridge = (() => {
-    if ((process.env.REA_MESSAGE_CHANNEL_PROVIDER ?? "mock") !== "bridge") return null;
+    // 默认 bridge（2026-11-18 青冥实测）：本系统只有设备桥接一种真实发送
+    // 通道，env 丢失/未设时也必须走 bridge——mock 只在显式设置时用，
+    // 否则 manual-reply 会静默落到 mock 死信（线上「指令不动」的根因）。
+    if ((process.env.REA_MESSAGE_CHANNEL_PROVIDER ?? "bridge") !== "bridge") return null;
     try { return readWeComConfig() ? null : bridgeStore; } catch { return null; }
   })();
   // 人工作为 Outbound 入队：写 message_events/message_deliveries/bridge_commands，

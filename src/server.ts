@@ -310,5 +310,10 @@ function pydanticErrors(error: FastifyError) {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const app = buildServer();
-  app.listen({ host: config.host, port: config.port }).then(() => console.log(`local site listening on http://${config.host}:${config.port}`));
+  app.listen({ host: config.host, port: config.port }).then(() => {
+    console.log(`local site listening on http://${config.host}:${config.port}`);
+    // 通道模式一目了然：manual-reply 走 bridge（设备键鼠）还是 mock（simulated）
+    // 取决于 REA_MESSAGE_CHANNEL_PROVIDER——线上排查「指令不动」先看这行。
+    console.log(`[channel] REA_MESSAGE_CHANNEL_PROVIDER=${process.env.REA_MESSAGE_CHANNEL_PROVIDER ?? "mock（未设置）"}`);
+  });
 }
