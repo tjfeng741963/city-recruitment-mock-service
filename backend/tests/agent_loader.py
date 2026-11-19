@@ -30,6 +30,7 @@ def load_autopilot():
         for name in (
             "wecom_io_core", "wecom_io_core.win", "wecom_io_core.send",
             "wecom_io_core.store", "compat", "reply_store", "login_watch",
+            "login_code",
         )
     }
     # send 的媒体函数给真实签名：MagicMock 迭代默认是空的，直接解包会炸
