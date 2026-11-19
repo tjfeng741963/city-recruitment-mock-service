@@ -2083,7 +2083,10 @@ def main() -> int:
         # 登录码过期自动点「刷新」（定位窗口→相对坐标点击→截图验证），
         # 仅未登录登录窗口、线程化不阻塞；用户 2026-11-18 明确确认。
         login_refresh.maybe_refresh_expired_qr(log=log)
-        qr_pusher.tick(wecom_state, remote_client, log=log)
+        # 推码状态降级：主窗原地变登录页时 detect 仍报 online（类名不变），
+        # 但发送连续失败（焦点校验不过）= 实际未登录——降级触发推码。
+        qr_state = "login_required" if _consecutive_send_failures >= 2 else wecom_state
+        qr_pusher.tick(qr_state, remote_client, log=log)
         code_fetcher.tick(wecom_state, remote_client, log=log)
         if reporter is not None:
             reporter.tick(wecom_state, pending_count(), force=True)
@@ -2102,7 +2105,10 @@ def main() -> int:
     # 登录码过期自动点「刷新」（定位窗口→相对坐标点击→截图验证），
     # 仅未登录登录窗口、线程化不阻塞；用户 2026-11-18 明确确认。
     login_refresh.maybe_refresh_expired_qr(log=log)
-    qr_pusher.tick(wecom_state, remote_client, log=log)
+    # 推码状态降级：主窗原地变登录页时 detect 仍报 online（类名不变），
+    # 但发送连续失败（焦点校验不过）= 实际未登录——降级触发推码。
+    qr_state = "login_required" if _consecutive_send_failures >= 2 else wecom_state
+    qr_pusher.tick(qr_state, remote_client, log=log)
     code_fetcher.tick(wecom_state, remote_client, log=log)
     if reporter is not None:
         reporter.tick(wecom_state, pending_count(), force=True)
@@ -2138,7 +2144,10 @@ def main() -> int:
             # 仅未登录登录窗口、线程化不阻塞；用户 2026-11-18 明确确认。
             login_refresh.maybe_refresh_expired_qr(log=log)
             # 掉登录时把扫码窗截图传到网页（内部约 30s 一次；恢复后自动清除旧图）
-            qr_pusher.tick(wecom_state, remote_client, log=log)
+            # 推码状态降级：主窗原地变登录页时 detect 仍报 online（类名不变），
+            # 但发送连续失败（焦点校验不过）= 实际未登录——降级触发推码。
+            qr_state = "login_required" if _consecutive_send_failures >= 2 else wecom_state
+            qr_pusher.tick(qr_state, remote_client, log=log)
             code_fetcher.tick(wecom_state, remote_client, log=log)
             if reporter is not None:
                 reporter.tick(wecom_state, pending_count())
