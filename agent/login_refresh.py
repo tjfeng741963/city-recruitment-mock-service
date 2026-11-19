@@ -78,8 +78,11 @@ def _find_login_window():
         return None
     width = rect.right - rect.left
     height = rect.bottom - rect.top
-    if width < 200 or height < 300:
-        return None  # 尺寸不对，不是登录窗口
+    # 只认登录小窗（实测 300x420）。主窗口（~1180x760）标题相同——
+    # 点错主窗会误触聊天界面（2026-11-19 14:33 实测点击落在主窗中部），
+    # 必须按尺寸白名单拦截，超出范围一律跳过不点。
+    if not (240 <= width <= 360 and 380 <= height <= 480):
+        return None
     return hwnd, rect.left, rect.top, width, height
 
 
