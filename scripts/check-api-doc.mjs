@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DOC = path.join(ROOT, "docs", "API-接口清单.md");
 const CODE_FILES = [
+  path.join(ROOT, "src", "modules", "agent", "agent-flow.routes.ts"),
   path.join(ROOT, "src", "modules", "agent", "agent-persona.routes.ts"),
   path.join(ROOT, "src", "modules", "agent", "agent-chat.routes.ts"),
 ];
