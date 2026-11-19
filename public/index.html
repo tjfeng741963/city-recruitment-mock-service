@@ -7,10 +7,10 @@
     <!-- 实时注入层：必须是普通脚本且先于 Vue 主体执行，才能抢在轮询器创建前劫持 setInterval -->
     <script src="/theme/realtime.js"></script>
     <!-- 扩展入口安装候选人列，沿用现有 bundle 的应用与路由。 -->
-    <link rel="modulepreload" crossorigin href="/assets/index-BGyFQL9Q.js">
+    <link rel="modulepreload" crossorigin href="/assets/index-C6QTH-aK.js">
     <script type="module" crossorigin src="/theme/candidate-registration.js"></script>
     <script type="module" src="/admin-enhancements.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-CmyDhzRL.css">
+    <link rel="stylesheet" crossorigin href="/assets/index-BU7ZV6Gd.css">
     <link rel="preload" href="/theme/fonts/google-sans-flex-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="stylesheet" href="/theme/theme.css">
     <link rel="stylesheet" href="/theme/motion.css">
@@ -19,27 +19,14 @@
     <link rel="stylesheet" href="/theme/candidate-registration.css">
     <script src="/theme/sidebar.js"></script>
     <script src="/theme/device-code.js"></script>
-    <!-- 知识库配置页：挂在「知识管理」下，路由 /knowledge，占满主内容区（原来是弹层） -->
     <script src="/theme/kb-console.js"></script>
-    <!-- 城市页合并厂区：隐藏「厂区管理」一级入口，城市行加「厂区」抽屉 -->
     <script src="/theme/city-factories.js"></script>
-    <!-- 设备页绑定工厂：设备行显示已绑厂名，多选抽屉维护 factory_ids -->
     <script src="/theme/device-factories.js"></script>
     <script src="/theme/device-qr.js"></script>
-    <!-- 岗位页 Agent 配置：岗位行加「Agent」，抽屉配人设 + 有序开场（文本/图片/视频）。
-         旧的 position-scripts.js（5 个时点话术）已停用，不再加载。 -->
     <script src="/theme/position-agent.js"></script>
-    <!-- 接口调试 / Agent 对话已迁到独立页面 /dev（自己的布局和路由），后台不再注入入口。
-         旧的 theme/agent-lab.js 与 theme/api-console.js 保留在仓库里备查，不再加载。 -->
-    <!-- 工厂配置总览：侧栏加入口，每工厂一张卡汇总设备/岗位/话术/知识库配置 -->
     <script src="/theme/factory-overview.js"></script>
-    <!-- 内部邀约群：侧栏加入口，配群名/城市简写，查看名单发送记录（R1） -->
-    <!-- invite-group.js 已随旧链路下线：后端 /agent/invite-group 路由已删除，脚本不再加载 -->
     <script src="/theme/position-factory.js"></script>
-    <!-- 侧栏文案调整：「郎职师运营」还原为「运营汇总」，隐藏重复的「节假日管理」入口 -->
-    <!-- 面试登记面板：侧栏入口 + 抽屉（登记清单 / 设备绑定群聊） -->
     <script src="/theme/archive-panel.js"></script>
-    <!-- 基础配置面板：侧栏入口 + 居中面板（岗位素材库/后续系统配置） -->
     <script src="/theme/media-panel.js"></script>
     <script src="/theme/nav-adjust.js"></script>
     <script type="module" src="/theme/login-motion.js"></script>

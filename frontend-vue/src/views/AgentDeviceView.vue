@@ -253,6 +253,9 @@
         <p v-if="qrResult?.captured_at" class="dialog-hint">
           二维码更新时间：{{ formatDateTime(qrResult.captured_at) }}
         </p>
+        <div class="qr-refresh-row">
+          <el-button :loading="qrLoading" @click="fetchQr" size="small">刷新二维码</el-button>
+        </div>
         <div class="verify-row">
           <el-input
             v-model="verifyCode"
@@ -267,8 +270,6 @@
         <p class="dialog-hint">扫码后如企微要求短信验证码，在此提交，设备端会取走并自动输入。</p>
       </div>
       <template #footer>
-        <el-button @click="qrVisible = false">关闭</el-button>
-        <el-button :loading="qrLoading" @click="fetchQr">刷新二维码</el-button>
       </template>
     </el-dialog>
 
