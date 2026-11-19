@@ -1,5 +1,5 @@
 import http from './http'
-import type { AgentDevice, Factory, OkResult, PageQuery, PageResult } from './types'
+import type { AgentDevice, Factory, OkResult, PageQuery, PageResult, ServicePosition } from './types'
 
 /** ---------- 坐席设备 ---------- */
 export interface AgentDeviceFactory {
@@ -12,6 +12,7 @@ export interface AgentDeviceFactory {
 export interface AgentDeviceItem extends AgentDevice {
   factory_ids?: number[]
   factories?: AgentDeviceFactory[]
+  position_id?: number | null
   group_chat?: string
   queue_depth?: number
   queue_stale?: string
@@ -78,6 +79,8 @@ export const devicesApi = {
   /** 设备表单的工厂多选选项（基础配置域接口，仅在坐席域内聚合使用） */
   factoryOptions: () =>
     http.get<PageResult<Factory>>('/api/v1/factories', { params: { page: 1, page_size: 1000 } }),
+  positionOptions: () =>
+    http.get<PageResult<ServicePosition>>('/api/v1/service-positions', { params: { page: 1, page_size: 1000 } }),
 }
 
 /** ---------- 会话与消息 ---------- */

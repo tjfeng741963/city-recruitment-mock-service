@@ -68,6 +68,46 @@ export function deviceFactoryIds(db: DatabaseSync, deviceCode: string): number[]
   return readDeviceFactoryIds(db, parseDeviceData(row.data_json).factory_ids);
 }
 
+/**
+ * Resolve the single service position used by a device.
+ *
+ * Older device records only stored position_id.  If an operator later changes
+ * factory_ids, that stale id must not keep serving the old factory.  When the
+ * stored position belongs to one of the bound factories it remains authoritative;
+ * otherwise we select the first enabled position under the bound factories.
+ * With no factory binding we preserve the legacy position_id behaviour.
+ */
+export function devicePositionId(db: DatabaseSync, deviceCode: string): number {
+  const code = deviceCode.trim();
+  if (!code) return 0;
+  const row = db
+    .prepare("SELECT data_json FROM agent_devices WHERE json_extract(data_json,'$.device_code')=? AND status='enabled'")
+    .get(code) as { data_json: string } | undefined;
+  if (!row) return 0;
+  const data = parseDeviceData(row.data_json);
+  const rawPositionId = typeof data.position_id === "number" || typeof data.position_id === "string"
+    ? Number(data.position_id)
+    : 0;
+  const storedPositionId = Number.isSafeInteger(rawPositionId) && rawPositionId > 0 ? rawPositionId : 0;
+  const factoryIds = readDeviceFactoryIds(db, data.factory_ids);
+
+  if (!factoryIds.length) return storedPositionId;
+  if (storedPositionId > 0) {
+    const stored = db
+      .prepare("SELECT factory_id FROM service_positions WHERE id=? AND status='enabled'")
+      .get(storedPositionId) as { factory_id: number | null } | undefined;
+    if (stored && (stored.factory_id === null || factoryIds.includes(Number(stored.factory_id)))) {
+      return storedPositionId;
+    }
+  }
+
+  const placeholders = factoryIds.map(() => "?").join(",");
+  const replacement = db
+    .prepare(`SELECT id FROM service_positions WHERE status='enabled' AND factory_id IN (${placeholders}) ORDER BY id LIMIT 1`)
+    .get(...factoryIds) as { id: number } | undefined;
+  return Number(replacement?.id ?? 0);
+}
+
 /** 按 id 查厂名与所属城市；结果顺序跟随传入的 id 顺序，查不到的 id 直接跳过。 */
 export function loadFactories(db: DatabaseSync, ids: number[]): DeviceFactory[] {
   if (!ids.length) return [];

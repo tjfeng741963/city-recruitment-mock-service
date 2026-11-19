@@ -13,6 +13,7 @@ import {
   type DialogueItem,
   type OpeningItem,
 } from "./agent-orchestrator.js";
+import { devicePositionId } from "../../shared/device-factories.js";
 
 /**
  * Agent 会话接口 + 调试台的后端（迁移 038 的消费侧）。
@@ -86,16 +87,9 @@ function positionRow(db: DatabaseSync, positionId: number): PositionRow | undefi
     .get(positionId) as PositionRow | undefined;
 }
 
-/** 设备 → 岗位。设备绑定在 agent_devices.data_json.position_id。 */
+/** 设备 → 岗位。绑定工厂变化后自动淘汰不属于该工厂的旧岗位。 */
 function positionOfDevice(db: DatabaseSync, deviceCode: string): number {
-  const row = db
-    .prepare(
-      `SELECT json_extract(data_json,'$.position_id') AS position_id
-         FROM agent_devices
-        WHERE json_extract(data_json,'$.device_code')=? AND status='enabled'`,
-    )
-    .get(deviceCode) as { position_id: number | null } | undefined;
-  return Number(row?.position_id ?? 0);
+  return devicePositionId(db, deviceCode);
 }
 
 function buildFacts(db: DatabaseSync, row: PositionRow | undefined): Record<string, string> {
