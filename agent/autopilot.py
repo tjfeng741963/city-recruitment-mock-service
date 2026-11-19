@@ -80,6 +80,7 @@ import echo_guard  # noqa: E402
 import login_watch  # noqa: E402
 import login_qr  # noqa: E402
 import login_refresh  # noqa: E402
+import login_code  # noqa: E402
 import media_fetch  # noqa: E402
 import reply_store as rlog  # noqa: E402
 import client as agent_client  # noqa: E402
@@ -2071,6 +2072,9 @@ def main() -> int:
     # 登录二维码上传器：企微掉登录时把扫码窗截图送到服务端，网页上就能扫。
     # 机器在云端，没人看得到那块屏幕——这是唯一能让用户自己扫码的路径。
     qr_pusher = login_qr.LoginQrPusher()
+    # 短信验证码取码器：扫码后企微偶尔要求短信验证码，运营在网页上填，
+    # 这里自动取走并敲进验证码弹窗（WXworkWindow）。
+    code_fetcher = login_code.LoginCodeFetcher()
 
     if not args.watch:
         wecom_state = detect_wecom_state()
@@ -2080,6 +2084,7 @@ def main() -> int:
         # 仅未登录登录窗口、线程化不阻塞；用户 2026-11-18 明确确认。
         login_refresh.maybe_refresh_expired_qr(log=log)
         qr_pusher.tick(wecom_state, remote_client, log=log)
+        code_fetcher.tick(wecom_state, remote_client, log=log)
         if reporter is not None:
             reporter.tick(wecom_state, pending_count(), force=True)
         scan(store, cfg)
@@ -2098,6 +2103,7 @@ def main() -> int:
     # 仅未登录登录窗口、线程化不阻塞；用户 2026-11-18 明确确认。
     login_refresh.maybe_refresh_expired_qr(log=log)
     qr_pusher.tick(wecom_state, remote_client, log=log)
+    code_fetcher.tick(wecom_state, remote_client, log=log)
     if reporter is not None:
         reporter.tick(wecom_state, pending_count(), force=True)
     scan(store, cfg)
@@ -2133,6 +2139,7 @@ def main() -> int:
             login_refresh.maybe_refresh_expired_qr(log=log)
             # 掉登录时把扫码窗截图传到网页（内部约 30s 一次；恢复后自动清除旧图）
             qr_pusher.tick(wecom_state, remote_client, log=log)
+            code_fetcher.tick(wecom_state, remote_client, log=log)
             if reporter is not None:
                 reporter.tick(wecom_state, pending_count())
 
