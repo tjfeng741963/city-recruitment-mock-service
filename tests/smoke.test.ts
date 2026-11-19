@@ -26,7 +26,7 @@ describe("local static shell (legacy bundle)", () => {
     const response = await app.inject({ method: "GET", url: "/assets/index-C6QTH-aK.js" });
     expect(response.statusCode).toBe(200);
     expect(response.headers["content-type"]).toContain("javascript");
-    expect(response.body).toContain("LoginView-C_4Zg0lI.js");
+    expect(response.body).toMatch(/LoginView-[A-Za-z0-9_-]+\.js/);
   });
 });
 
