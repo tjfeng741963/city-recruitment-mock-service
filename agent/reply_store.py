@@ -201,6 +201,58 @@ def record_incoming(m: dict) -> bool:
         con.close()
 
 
+def record_unread(m: dict, *, allow_requeue: bool = True) -> bool:
+    """Enqueue a current unread message, or requeue a known unsent skip.
+
+    Sent and unknown outcomes are deliberately left alone: a UI unread badge
+    does not prove that the sender did not already deliver a reply.
+    """
+    if record_incoming(m):
+        return True
+    if not allow_requeue:
+        return False
+
+    message_id = str(m.get("id"))
+    conv_id = str(m.get("conv_id") or "")
+    con = _conn()
+    try:
+        row = con.execute(
+            "SELECT id,status,error,last_step FROM reply_log WHERE conv_id=? AND message_id=?",
+            (conv_id, message_id),
+        ).fetchone()
+        if row is None:
+            return False
+
+        error = str(row["error"] or "")
+        requeue = (
+            row["status"] == "skipped"
+            and (error.startswith("历史消息") or error.startswith("同会话合并到最新一条"))
+        ) or (
+            row["status"] == "void"
+            and row["last_step"] == "failed"
+            and ("焦点未落在输入框" in error or "抢不到前台" in error)
+        )
+        if not requeue:
+            return False
+        active_welcome = con.execute(
+            "SELECT 1 FROM welcome_deliveries WHERE conv_id=? "
+            "AND state NOT IN ('sent','cancelled') LIMIT 1",
+            (conv_id,),
+        ).fetchone()
+        if active_welcome:
+            return False
+
+        cur = con.execute(
+            "UPDATE reply_log SET status='pending',error=NULL,scene=NULL,reply_text=NULL,"
+            "replied_at=NULL,last_step='unread-requeued' WHERE id=? AND status=?",
+            (row["id"], row["status"]),
+        )
+        con.commit()
+        return cur.rowcount == 1
+    finally:
+        con.close()
+
+
 def pending(include_failed: bool = True, limit: int = 200) -> list[dict]:
     """待发送的条目，按消息时间正序（失败的可一起补发）。"""
     statuses = ("pending", "failed") if include_failed else ("pending",)

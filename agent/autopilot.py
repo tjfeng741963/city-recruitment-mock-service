@@ -958,6 +958,108 @@ def scan(store: Store, cfg: dict) -> int:
             continue
         if rlog.record_incoming(m):
             added += 1
+    return added + scan_unread(store, cfg)
+
+
+def scan_unread(store: Store, cfg: dict) -> int:
+    """補掃企微未讀游標，避免舊會話未讀消息落在全局最近 60 條之外。"""
+    session_db = store._conn("session.db")
+    message_db = store._conn("message.db")
+    if session_db is None or message_db is None:
+        if session_db is not None:
+            session_db.close()
+        if message_db is not None:
+            message_db.close()
+        return 0
+
+    added = 0
+    cursor_message_count = 0
+    cursor_fallback_count = 0
+    selected_count = 0
+    unmatched_count = 0
+    try:
+        try:
+            unread_rows = session_db.execute(
+                "SELECT conversation_id,begin_cursor,current_cursor,unread_count "
+                "FROM unread_conversation_table WHERE unread_count>0"
+            ).fetchall()
+        except Exception:  # noqa: BLE001 - 企微不同版本可能没有未读游标表
+            return 0
+
+        names = {str(row.get("id") or ""): str(row.get("name") or "") for row in store.sessions()}
+        self_id = str(store.self_id() or "")
+        if not self_id:
+            return 0  # Cannot distinguish customer messages from our own sends.
+        for unread in unread_rows:
+            cid = str(unread["conversation_id"] or "")
+            if not cid:
+                continue
+            try:
+                cursor_rows = message_db.execute(
+                    "SELECT message_id FROM message_table "
+                    "WHERE conversation_id=? AND server_id>=? AND server_id<=? "
+                    "ORDER BY server_id",
+                    (cid, int(unread["begin_cursor"]), int(unread["current_cursor"])),
+                ).fetchall()
+            except Exception:  # noqa: BLE001 - skip an unsupported/corrupt conversation row
+                continue
+            ids = {str(row["message_id"]) for row in cursor_rows}
+            id_order = {str(row["message_id"]): index for index, row in enumerate(cursor_rows)}
+
+            count = max(1, int(unread["unread_count"] or 1))
+            messages = store.messages(cid, limit=min(5000, max(100, count * 8 + 20)))
+            inbound = [
+                message for message in messages
+                if not (self_id and str(message.get("sender_id") or "") == self_id)
+            ]
+            if ids:
+                cursor_message_count += len(ids)
+                incoming = [message for message in inbound if str(message.get("id")) in ids]
+            else:
+                # Some client builds store unread cursors and message server_id
+                # in different domains. Fall back to this conversation's newest
+                # inbound rows, bounded by its unread count and reply ledger.
+                cursor_fallback_count += 1
+                incoming = inbound[-count:]
+            if not incoming:
+                unmatched_count += 1
+                continue
+
+            # Match drain(): prefer the newest readable text to system/non-text
+            # records that can follow a customer's message in the unread cursor.
+            readable = [message for message in incoming if str(message.get("text") or "").strip()]
+            candidates = readable or incoming
+            latest = max(
+                candidates,
+                key=lambda message: (
+                    id_order.get(str(message.get("id")), -1),
+                    int(message.get("time") or 0), inbound.index(message),
+                ),
+            )
+            selected_count += 1
+            item = {
+                "id": latest.get("id"),
+                "conv_id": cid,
+                "conv_name": names.get(cid, "") or cid,
+                "text": latest.get("text") or "",
+                "type": latest.get("type") or 0,
+                "time": latest.get("time") or 0,
+            }
+            if not match_target(item, cfg["target"]):
+                continue
+            # An unread badge cannot revive an already consumed flow trigger.
+            has_flow = _flow_state is not None and _flow_state.get(cid) is not None
+            if rlog.record_unread(item, allow_requeue=not has_flow):
+                added += 1
+    finally:
+        session_db.close()
+        message_db.close()
+    if unread_rows:
+        log(
+            f"[未读扫描] 会话 {len(unread_rows)}，游标消息 {cursor_message_count}，"
+            f"游标回退 {cursor_fallback_count}，"
+            f"可处理 {selected_count}，入队/重排 {added}，未匹配 {unmatched_count}"
+        )
     return added
 
 
@@ -1705,7 +1807,11 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                         verify_db=True,
                         log=lambda s: log(f"    {s}", scope="send", message_id=mid, trace_id=trace),
                     )
-                    if not result["ok"]:
+                    if (
+                        not result["ok"]
+                        or "回读失败" in str(result.get("detail") or "")
+                        or (result.get("conversation_id") and str(result["conversation_id"]) != cid)
+                    ):
                         break
                 else:
                     result = {"ok": True, "detail": "纯媒体段，无文本"}
@@ -1725,7 +1831,8 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     time.sleep(2.0)
             duration_ms = int((time.time() - send_started) * 1000)
             detail_text = str(result.get("detail") or "")
-            if result["ok"] and "回读失败" in detail_text:
+            wrong_conversation = bool(result.get("conversation_id")) and str(result["conversation_id"]) != cid
+            if (result["ok"] and "回读失败" in detail_text) or wrong_conversation:
                 # 回车已按但回读解密库确认不了落点：结果不明。不能记 sent
                 #（可能静默丢失），也不能记 failed（下轮自动补发可能重复发送）。
                 # 记 unknown 不参与自动补发，--retry-held 由人工核对后重新入队。
@@ -1733,9 +1840,10 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 _last_error = detail_text[:200]
                 _consecutive_send_failures += 1
                 stats["unknown"] += 1
-                log("    回读未确认：按 unknown 记账，不自动重发，待人工核对（--retry-held 可重新入队）",
+                log("    发送落点未确认：按 unknown 记账，不自动重发，本批停止，待人工核对",
                     level="warning", scope="send", message_id=mid, trace_id=trace,
                     duration_ms=duration_ms)
+                break
             elif result["ok"]:
                 rlog.mark_sent(mid, cid, scene, text, duration_ms=duration_ms)
                 _consecutive_send_failures = 0
