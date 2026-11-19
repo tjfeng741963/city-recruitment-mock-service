@@ -17,6 +17,8 @@
 from __future__ import annotations
 
 import time
+import json
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -38,12 +40,18 @@ class Brain:
         device_token: str,
         *,
         timeout: float = 45.0,
+        flow_cache_path: str | Path | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.device_code = device_code
         self.device_token = device_token
         self.timeout = timeout
         self._opening: dict[str, Any] | None = None
+        self._flow: dict[str, Any] | None = None
+        self._flow_checked_at = 0.0
+        # Kept separate from RemoteConfig's file: two writers must never replace
+        # each other's config.remote.json keys. Cache is bound to server+device.
+        self._flow_cache_path = Path(flow_cache_path) if flow_cache_path else Path(__file__).parent / "state" / "flow.remote.json"
         # trust_env=False：不读 HTTP_PROXY/HTTPS_PROXY，本机回环直连
         self._client = httpx.Client(timeout=timeout, trust_env=False)
 
@@ -54,8 +62,7 @@ class Brain:
         response = self._client.get(
             f"{self.base_url}{path}", params=params, headers=self._headers()
         )
-        if response.status_code != 200:
-            raise RuntimeError(f"HTTP {response.status_code}: {response.text[:120]}")
+        response.raise_for_status()
         return response.json()
 
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -118,7 +125,56 @@ class Brain:
 
     # ── 对话 ──────────────────────────────────────────────
 
-    def chat(self, text: str, session_key: str) -> dict[str, Any]:
+    def flow(self, force: bool = False) -> dict[str, Any]:
+        """Poll at most once a minute, fall back to a scoped durable cache."""
+        if self._flow is None:
+            try:
+                cached = json.loads(self._flow_cache_path.read_text(encoding="utf-8"))
+                if cached.get("base_url") == self.base_url and cached.get("device_code") == self.device_code:
+                    self._flow = cached.get("flow")
+            except (OSError, ValueError, AttributeError):
+                pass
+        if force or not self._flow_checked_at or time.monotonic() - self._flow_checked_at >= 60:
+            self._flow_checked_at = time.monotonic()
+            try:
+                data = self._get("/api/v1/agent/flow", {"device_code": self.device_code})
+                self._flow = data if isinstance(data, dict) else {"nodes": [], "edges": [], "version": 0}
+                self._flow_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = self._flow_cache_path.with_suffix(".tmp")
+                tmp.write_text(json.dumps({"base_url": self.base_url, "device_code": self.device_code, "flow": self._flow}, ensure_ascii=False), encoding="utf-8")
+                tmp.replace(self._flow_cache_path)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in (401, 403):
+                    self._flow = {"ok": False, "blocked": True, "nodes": [], "edges": [], "version": 0, "detail": "设备鉴权失效"}
+                elif self._flow is None:
+                    self._flow = {"ok": False, "nodes": [], "edges": [], "version": 0, "detail": "流程服务暂不可用"}
+            except Exception as exc:  # noqa: BLE001
+                if self._flow is None:
+                    self._flow = {"ok": False, "nodes": [], "edges": [], "version": 0,
+                                  "detail": f"{type(exc).__name__}: {exc}"}
+        return self._flow
+
+    def states(self) -> list[dict[str, Any]] | None:
+        """None means mirror unavailable; an empty list is a confirmed empty mirror."""
+        try:
+            data = self._get("/api/v1/agent/state", {"device_code": self.device_code})
+            return data.get("items") if isinstance(data.get("items"), list) else None
+        except Exception as exc:
+            log(f"    [流程状态] 对账失败：{type(exc).__name__}")
+            return None
+
+    def report_state(self, items: list[dict[str, Any]]) -> bool:
+        """批量上报会话镜像；状态上报失败不阻断本地发送。"""
+        if not items:
+            return True
+        try:
+            data = self._post("/api/v1/agent/state", {"device_code": self.device_code, "items": items})
+            return bool(data.get("ok"))
+        except Exception as exc:  # noqa: BLE001
+            log(f"    [流程状态] 上报失败：{exc}")
+            return False
+
+    def chat(self, text: str, session_key: str, *, sent_summary: list[str] | None = None) -> dict[str, Any]:
         """一轮对话。返回 {ok, parts, medias, scene, detail}。
 
         会话记忆在服务端（agent_session 表）：客户端只报 session_key + 这句话，
@@ -130,6 +186,8 @@ class Brain:
             "session_key": (session_key or "").strip()[:120],
             "text": (text or "")[:2000],
         }
+        if sent_summary is not None:
+            payload["sent_summary"] = [str(item)[:500] for item in sent_summary[:50]]
         try:
             data = self._post("/api/v1/agent/chat", payload)
         except httpx.TimeoutException:

@@ -89,13 +89,19 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 | 方法 | 路径 | 鉴权 | 说明 |
 |---|---|---|---|
 | GET | `/api/v1/agent/context?position_id=:id` | admin | 调试台用：事实 / 人设 / 开场 / 话术库 / 模型是否配置 |
-| GET | `/api/v1/agent/opening?device_code=:code` | 设备令牌或服务令牌 | 客户端用：该设备绑的岗位 + 开场清单 + 人设 |
+| GET | `/api/v1/agent/opening?device_code=:code` | 设备令牌或服务令牌 | 默认保持旧开场；显式加 `mode=flow` 只展开首个等待闸门前的流程消息 |
 | POST | `/api/v1/agent/opening/log` | 设备令牌或服务令牌 | 客户端逐条回执：`{session_key,device_code,position_id,seq,kind,status,error}` |
 | GET | `/api/v1/agent/archive?session_key=:key` | admin | 查面试档案：姓名 / 电话 / 城市 / 面试日期与时段（模型 JSON 判断结果累积） |
 | GET | `/api/v1/agent/archive/list` | admin | 面试登记清单：时间/姓名/电话/客户/设备/确认态/到达状态/群聊通知状态 |
 | POST | `/api/v1/agent/archive/manual` | admin | 手动新建约面试（没走 Agent 对话的客户），绑了群聊自动推送 |
 | PUT | `/api/v1/agent/archive/:key/arrival` | admin | 到达状态标记，body `{arrival_status: ""/arrived/noshow}` |
-| POST | `/api/v1/agent/chat` | admin | 一轮对话，body `{position_id,session_key,text,dry}` |
+| POST | `/api/v1/agent/chat` | admin/设备令牌 | 一轮对话，body `{position_id,session_key,text,dry,sent_summary?}` |
+| GET | `/api/v1/agent-flow?position_id=:id` | admin | 读取岗位节点流程、节点、边和画布视口 |
+| PUT | `/api/v1/agent-flow` | admin | 事务保存整张流程图并递增 version |
+| POST | `/api/v1/agent-flow/migrate` | admin | 从旧 `position_opening` 生成停用的初始流程 |
+| GET | `/api/v1/agent/flow?device_code=:code` | 设备令牌 | 客户端读取设备岗位的启用流程 |
+| GET | `/api/v1/agent/state?device_code=:code` | 设备令牌 | 客户端读取会话状态用于重连对账 |
+| POST | `/api/v1/agent/state` | 设备令牌 | 客户端批量上报会话阶段和流程快照 |
 
 <!-- api-check:end -->
 
@@ -109,6 +115,16 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 | `text` | 是 | 客户这一句 |
 | `history` | 否 | 仅无状态模式（没有 `session_key`）用：`[{role:"customer"\|"agent", text:"..."}]` |
 | `dry` | 否 | `true` 只返回拼好的 messages，不调模型、不写会话 |
+| `sent_summary` | 否 | 已真实发送的流程摘要数组，最多 50 项；显式传空数组也会停止注入完整旧开场，省略则保持旧客户端兼容 |
+
+**节点流程配置与状态（2026-11-19）**
+
+- `PUT /agent-flow`：传 `position_id, version, entry_key, status, nodes, edges, canvas`。`version` 不匹配返回 409；前端必须携带读取时版本，重新载入后再编辑。`status=disabled` 保存草稿，启用时校验文本数字是否存在于本岗位事实字段。数字集合校验只能挡住未知数字，不能替代工价含义与单位的人工审核。
+- 节点 `node_type` 仅为 `text/image/video/followup/branch/end`；等待使用独立布尔 `await_reply`。`parts` 为数组，每节点 1–6 条，文本每条最多 2000 字；`followup` 仅允许一条文本且 `max_times` 固定为 1。`branch/end` 不带消息。媒体必须来自本岗位或通用池。
+- 边字段 `from_key,to_key,trigger,condition_value,priority`；`to_key=""` 表示结束。等待节点用 `any_reply/keyword` 进入后续节点；`timeout` 只指向一次性复聊；分支需要 `default` 兜底。孤儿节点、循环、非法出口均拒绝保存。
+- `/agent/flow`、`/agent/state` 只接受对应 `device_code` 的设备令牌。流程停用时下发空节点阻止新会话，已开始会话保留本地快照。
+- `POST /agent/state`：`{device_code,items:[{session_key,position_id,flow_version,node_key,step_index,phase,revision,await_since,followup_sent_at,followup_round,snapshot,conv_name,wait_minutes,last_inbound_at,last_error}]}`，每批最多 200 条。两个等待/复聊时间字段使用 ISO 时间或 null，`last_inbound_at` 为 Unix 秒。游标按 `(device_code,session_key)` 隔离，仅接受更大的 `revision`；返回 `stale` 标识被拒绝的旧镜像。
+- `phase` 只接受 `idle/running/awaiting/followup_due/followup_sent/replied/expired/held`。发件箱投递结果在客户端 SQLite 中记录，不用 `phase` 代替。服务端 `agent_flow_outbox` 是预留表，本轮没有投递明细上报接口。
 
 **返回**
 

@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
 import { authorizeProfileRequest } from "./profile.routes.js";
 import { isValidDeviceToken } from "./position-scripts.routes.js";
+import { firstFlowSegment } from "./agent-flow.routes.js";
 import { complete, llmConfig, parseJsonObject } from "./agent-llm.js";
 import {
   buildOrchestration,
@@ -268,7 +269,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
 
   // ── 客户端：开场清单 + 人设 ────────────────────────────────────
   // 鉴权与媒体下载同一套：X-Profile-Token（服务间）或设备 Bearer token。
-  app.get<{ Querystring: { device_code?: string } }>(
+  app.get<{ Querystring: { device_code?: string; mode?: string } }>(
     "/api/v1/agent/opening",
     async (request, reply) => {
       if (!authorizeProfileRequest(request) && !isValidDeviceToken(db, request)) {
@@ -283,7 +284,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       return {
         position_id: positionId,
         persona: personaOf(db, positionId),
-        items: openingOf(db, positionId).map((item) => ({
+        items: request.query.mode === "flow" ? firstFlowSegment(db, positionId) : openingOf(db, positionId).map((item) => ({
           seq: Number(item.seq),
           kind: String(item.kind),
           content: String(item.content ?? ""),
@@ -511,6 +512,9 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
 
     const input = text(body.text).trim();
     if (!input) return reply.code(422).send({ detail: "text is required" });
+    const sentSummary = Array.isArray(body.sent_summary)
+      ? body.sent_summary.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).slice(0, 50)
+      : undefined;
 
     const row = positionRow(db, positionId);
     if (!row) return reply.code(404).send({ detail: "position not found" });
@@ -569,7 +573,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
     }));
     // 编排：system(人设+今天日期+事实+话术库+规则) + 开场序列 + 全量历史 + 当前这句
     // （DeepSeek 无状态多轮拼接；上下文归服务端持有）
-    const { messages, scripts } = buildOrchestration({ persona, facts, opening, now: nowLabel, history, input });
+    const { messages, scripts } = buildOrchestration({ persona, facts, opening, now: nowLabel, history, input, sentSummary });
 
     // dry：只回拼好的 prompt，不调模型、不写会话。调试台用它确认
     // 「人设 + 事实 + 话术库 + 开场 + 历史」有没有喂对。
