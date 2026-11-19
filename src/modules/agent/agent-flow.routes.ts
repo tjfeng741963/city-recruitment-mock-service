@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
 import { DeviceBridgeStore } from "../messaging/device-bridge.js";
+import { devicePositionId } from "../../shared/device-factories.js";
 
 const NODE_TYPES = new Set(["text", "image", "video", "followup", "branch", "end"]);
 const EDGE_TRIGGERS = new Set(["default", "any_reply", "timeout", "keyword", "giveup"]);
@@ -265,8 +266,7 @@ export async function registerAgentFlowRoutes(app: FastifyInstance, db: Database
   app.get<{ Querystring: { device_code?: string } }>("/api/v1/agent/flow", async (request, reply) => {
     const code = str(request.query.device_code).trim();
     if (!deviceAllowed(request, code)) return reply.code(403).send({ detail: "Device token or scope invalid" });
-    const row = db.prepare("SELECT data_json FROM agent_devices WHERE json_extract(data_json,'$.device_code')=?").get(code) as {data_json: string};
-    const positionId = finiteInt(jsonObject(row.data_json).position_id, 0, 1);
+    const positionId = devicePositionId(db, code);
     const result = readFlow(db, positionId);
     // 停用只阻止新会话；在途会话使用本地持久化快照。
     return result.status === "enabled" ? result : { ...result, nodes: [], edges: [] };

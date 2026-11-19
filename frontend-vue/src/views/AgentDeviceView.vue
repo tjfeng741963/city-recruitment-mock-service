@@ -70,6 +70,9 @@
               </el-tag>
             </div>
             <span v-else class="muted factory-empty">未绑定工厂</span>
+            <div v-if="row.position_id" class="position-label">
+              岗位：{{ positionName(row.position_id) }}
+            </div>
           </template>
         </el-table-column>
 
@@ -203,6 +206,23 @@
               :value="factory.id"
             />
           </el-select>
+        </el-form-item>
+        <el-form-item label="绑定岗位">
+          <el-select
+            v-model="form.position_id"
+            filterable
+            clearable
+            placeholder="请选择设备实际使用的岗位"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="position in positionOptionsForForm"
+              :key="position.id"
+              :label="positionLabel(position)"
+              :value="position.id"
+            />
+          </el-select>
+          <div class="form-hint">工厂改变后必须同步选择岗位；留空时系统会自动选该工厂的第一个启用岗位。</div>
         </el-form-item>
         <el-form-item label="登记群聊">
           <el-input
@@ -338,7 +358,8 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh, Search } from '@element-plus/icons-vue'
 import { devicesApi, type AgentDeviceItem, type DeviceGroup } from '../api/agent'
-import type { Factory } from '../api/types'
+import { positionsApi } from '../api/core'
+import type { Factory, ServicePosition } from '../api/types'
 import { formatDateTime } from '../utils/format'
 
 const devices = ref<AgentDeviceItem[]>([])
@@ -350,6 +371,7 @@ const onlineFilter = ref('')
 const page = ref(1)
 const pageSize = ref(20)
 const factoryOptions = ref<Factory[]>([])
+const positionOptions = ref<ServicePosition[]>([])
 
 const onlineCount = computed(() => devices.value.filter((device) => isOnline(device)).length)
 const inviteCount = computed(() => devices.value.filter((device) => device.mode === 'invite').length)
@@ -407,6 +429,32 @@ async function loadFactories(): Promise<void> {
   }
 }
 
+async function loadPositions(): Promise<void> {
+  try {
+    const { data } = await positionsApi.list({ page: 1, page_size: 1000 })
+    positionOptions.value = (data.items || []).filter((position) => position.is_active !== false)
+  } catch {
+    positionOptions.value = []
+  }
+}
+
+const positionOptionsForForm = computed(() => {
+  if (!form.factory_ids.length) return positionOptions.value
+  const selected = new Set(form.factory_ids)
+  return positionOptions.value.filter((position) => position.factory_id == null || selected.has(Number(position.factory_id)))
+})
+
+function positionLabel(position: ServicePosition): string {
+  const factory = factoryOptions.value.find((item) => Number(item.id) === Number(position.factory_id))
+  return `${position.position_name || `岗位 ${position.id}`}${factory ? ` · ${factory.factory_name}` : ''}${position.city_name ? `（${position.city_name}）` : ''}`
+}
+
+function positionName(positionId: number | null | undefined): string {
+  if (!positionId) return ''
+  const position = positionOptions.value.find((item) => Number(item.id) === Number(positionId))
+  return position ? positionLabel(position) : `岗位 ${positionId}`
+}
+
 /* ---------- 新增 / 编辑 ---------- */
 interface DeviceForm {
   device_code: string
@@ -414,6 +462,7 @@ interface DeviceForm {
   mode: string
   recruiter_id: string
   factory_ids: number[]
+  position_id: number | null
   group_chat: string
 }
 
@@ -440,6 +489,7 @@ function emptyForm(): DeviceForm {
     mode: 'followup',
     recruiter_id: '',
     factory_ids: [],
+    position_id: null,
     group_chat: '',
   }
 }
@@ -462,6 +512,7 @@ function openEdit(row: AgentDeviceItem): void {
     mode: row.mode || 'followup',
     recruiter_id: row.recruiter_id || '',
     factory_ids: [...(row.factory_ids || [])],
+    position_id: row.position_id ? Number(row.position_id) : null,
     group_chat: row.group_chat || '',
   })
   formVisible.value = true
@@ -480,6 +531,7 @@ async function saveDevice(): Promise<void> {
     mode: form.mode,
     recruiter_id: form.recruiter_id.trim(),
     factory_ids: form.factory_ids,
+    position_id: form.position_id,
     group_chat: form.group_chat.trim(),
   }
   try {
@@ -528,6 +580,7 @@ async function confirmCopy(): Promise<void> {
       mode: source.mode || 'followup',
       recruiter_id: source.recruiter_id || '',
       factory_ids: source.factory_ids || [],
+      position_id: source.position_id || null,
       group_chat: source.group_chat || '',
       config: source.config || {},
     })
@@ -785,6 +838,7 @@ async function removeWorkflow(): Promise<void> {
 onMounted(() => {
   void load()
   void loadFactories()
+  void loadPositions()
 })
 </script>
 
@@ -828,6 +882,12 @@ onMounted(() => {
 .factory-empty {
   display: inline-block;
   margin-top: 3px;
+  font-size: 11px;
+}
+
+.position-label {
+  margin-top: 4px;
+  color: var(--bd-text-secondary);
   font-size: 11px;
 }
 
