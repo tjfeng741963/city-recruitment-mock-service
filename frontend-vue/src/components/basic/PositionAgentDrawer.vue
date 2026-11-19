@@ -162,7 +162,7 @@
             />
             <div v-else class="opening-body">媒体节点：{{ node.parts?.[0]?.media_name || '未设置素材' }}</div>
             <div v-if="node.node_type !== 'end'" class="flow-options">
-              <el-checkbox v-model="node.await_reply" @change="flowDirty = true">发完后等待客户回复</el-checkbox>
+              <el-checkbox v-model="node.await_reply" @change="onAwaitReplyChange(node)">发完后等待客户回复</el-checkbox>
               <el-input-number
                 v-if="node.await_reply"
                 v-model="node.wait_minutes"
@@ -188,7 +188,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { agentApi, type AgentFlow } from '../../api/agent'
+import { agentApi, type AgentFlow, type AgentFlowNode } from '../../api/agent'
 import { mediaApi } from '../../api/core'
 import type { ServicePosition } from '../../api/types'
 
@@ -291,6 +291,17 @@ function createBlankFlow(): void {
     nodes: [{ node_key: 'intro', node_type: 'text', title: '招聘介绍', parts: [{ kind: 'text', body: '请填写招聘介绍', delay_ms: 2000 }], await_reply: true, wait_minutes: 15, max_times: 1, status: 'enabled' }],
     edges: [{ from_key: 'intro', to_key: '', trigger: 'any_reply', priority: 0 }],
   }
+  flowDirty.value = true
+}
+
+function onAwaitReplyChange(node: AgentFlowNode): void {
+  if (!flow.value) return
+  // The API requires a default edge for continuous nodes and an any_reply
+  // fallback for waiting nodes. Keep the migrated edge valid as the operator
+  // switches the gate in the editor.
+  const fallback = flow.value.edges.find((edge) =>
+    edge.from_key === node.node_key && (edge.trigger === 'default' || edge.trigger === 'any_reply'))
+  if (fallback) fallback.trigger = node.await_reply ? 'any_reply' : 'default'
   flowDirty.value = true
 }
 
