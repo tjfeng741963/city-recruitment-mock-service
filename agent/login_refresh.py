@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import ctypes
+import sys
 import threading
 import time
 
@@ -32,8 +33,28 @@ _VERIFY_DELAY = 4.0
 # 单次截图尺寸（验证用，缩小体积）
 _SHOT_PATH = r"C:\agent\logs\qr-refresh-verify.png"
 
-_user32 = ctypes.windll.user32
-_gdi32 = ctypes.windll.gdi32
+# 惰性加载：CI/非 Windows 上 import 本模块必须不炸。
+# autopilot.py 在模块顶层 `import login_refresh`，而 Linux 的 ctypes 没有 windll，
+# 导入期取 user32 会让所有加载 autopilot 的用例在 setup 阶段就 ERROR（CI 就是这么红的）。
+_user32 = None
+_gdi32 = None
+
+
+def _u():
+    """惰性拿 user32；非 Windows 返回 None，由调用方判定后跳过。"""
+    global _user32
+    if _user32 is None and sys.platform == "win32":
+        _user32 = ctypes.windll.user32
+    return _user32
+
+
+def _g():
+    """惰性拿 gdi32；非 Windows 返回 None。"""
+    global _gdi32
+    if _gdi32 is None and sys.platform == "win32":
+        _gdi32 = ctypes.windll.gdi32
+    return _gdi32
+
 
 _lock = threading.Lock()
 _last_click_ts = 0.0
@@ -41,16 +62,19 @@ _last_click_ts = 0.0
 
 def _find_login_window():
     """定位企微登录窗口，返回 (hwnd, left, top, width, height) 或 None。"""
-    hwnd = _user32.FindWindowW(None, "企业微信")
+    user32 = _u()
+    if user32 is None:
+        return None
+    hwnd = user32.FindWindowW(None, "企业微信")
     if not hwnd:
         return None
-    if not _user32.IsWindowVisible(hwnd):
+    if not user32.IsWindowVisible(hwnd):
         return None
     class RECT(ctypes.Structure):
         _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
                     ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
     rect = RECT()
-    if not _user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+    if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
         return None
     width = rect.right - rect.left
     height = rect.bottom - rect.top
@@ -61,13 +85,16 @@ def _find_login_window():
 
 def _click_at(x, y):
     """移动鼠标到绝对坐标并左键单击（mouse_event，与主链路 keybd_event 同代 API）。"""
-    _user32.SetCursorPos(int(x), int(y))
+    user32 = _u()
+    if user32 is None:
+        return
+    user32.SetCursorPos(int(x), int(y))
     time.sleep(0.15)
     MOUSEEVENTF_LEFTDOWN = 0x0002
     MOUSEEVENTF_LEFTUP = 0x0004
-    _user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, None)
+    user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, None)
     time.sleep(0.08)
-    _user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, None)
+    user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, None)
 
 
 def _save_screen_crop(path):
@@ -75,14 +102,17 @@ def _save_screen_crop(path):
     class RECT(ctypes.Structure):
         _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
                     ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
-    user32 = ctypes.windll.user32
+    user32 = _u()
+    gdi32 = _g()
+    if user32 is None or gdi32 is None:
+        return False
     width = user32.GetSystemMetrics(0)
     height = user32.GetSystemMetrics(1)
     hdc_screen = user32.GetDC(0)
-    hdc_mem = _gdi32.CreateCompatibleDC(hdc_screen)
-    hbm = _gdi32.CreateCompatibleBitmap(hdc_screen, width, height)
-    _gdi32.SelectObject(hdc_mem, hbm)
-    _gdi32.BitBlt(hdc_mem, 0, 0, width, height, hdc_screen, 0, 0, 0x00CC0020)
+    hdc_mem = gdi32.CreateCompatibleDC(hdc_screen)
+    hbm = gdi32.CreateCompatibleBitmap(hdc_screen, width, height)
+    gdi32.SelectObject(hdc_mem, hbm)
+    gdi32.BitBlt(hdc_mem, 0, 0, width, height, hdc_screen, 0, 0, 0x00CC0020)
     # 保存为 BMP（无 GDI+ 依赖，PIL 可选读）
     class BMPINFOHEADER(ctypes.Structure):
         _fields_ = [("biSize", ctypes.c_uint32), ("biWidth", ctypes.c_int32),
@@ -94,10 +124,10 @@ def _save_screen_crop(path):
     bmi = BMPINFOHEADER(ctypes.sizeof(BMPINFOHEADER), width, -height, 1, 24, 0, 0, 0, 0, 0, 0)
     row_size = (width * 3 + 3) // 4 * 4
     buf = ctypes.create_string_buffer(row_size * height)
-    _gdi32.GetDIBits(hdc_mem, hbm, 0, height, buf, ctypes.byref(bmi), 0)
+    gdi32.GetDIBits(hdc_mem, hbm, 0, height, buf, ctypes.byref(bmi), 0)
     user32.ReleaseDC(0, hdc_screen)
-    _gdi32.DeleteDC(hdc_mem)
-    _gdi32.DeleteObject(hbm)
+    gdi32.DeleteDC(hdc_mem)
+    gdi32.DeleteObject(hbm)
     file_header = b"BM" + (54 + len(buf.raw)).to_bytes(4, "little") + b"\0\0\0\0" + (54).to_bytes(4, "little")
     with open(path, "wb") as f:
         f.write(file_header)
@@ -112,6 +142,8 @@ def maybe_refresh_expired_qr(log=None) -> bool:
     返回 True 表示本次执行了点击动作。线程化执行，立即返回，不阻塞主循环。
     """
     global _last_click_ts
+    if sys.platform != "win32":
+        return False
     now = time.time()
     if now - _last_click_ts < REFRESH_COOLDOWN_SECONDS:
         return False
