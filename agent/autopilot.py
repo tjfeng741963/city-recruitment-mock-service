@@ -826,6 +826,22 @@ class Reporter:
                     }
         return self._save() if self._bridge_pending else True
 
+    def _advance_cursor_locked(self, event: dict) -> None:
+        """按已成功上报的事件推进会话游标（调用方必须已持 self._lock）。
+
+        event_id 形如 "<conv_id>:<msg_id>"，conv_id 自己也带冒号
+        （S:1688..._7881...），所以只能从右边切一次。
+        """
+        cid = str(event.get("contact_id") or "")
+        if not cid:
+            return
+        try:
+            mid = int(str(event.get("event_id") or "").rsplit(":", 1)[-1])
+        except (TypeError, ValueError):
+            return
+        if mid > self._cursor.get(cid, 0):
+            self._cursor[cid] = mid
+
     def _send_bridge_messages(self) -> None:
         """Retry pending records; the bridge deduplicates stable event IDs."""
         bridge = self.bridge
@@ -843,6 +859,12 @@ class Reporter:
                 bridge._request("POST", f"/api/v1/bridge/devices/{quote(bridge.device_code, safe='')}/{direction}", event)
                 with self._lock:
                     self._bridge_pending.pop(key, None)
+                    # 桥接上报成功也要推进游标。以前只有 _send_ingest 成功才推进，
+                    # 而云端机器没配 server/device_token（api=None），那条路从不执行，
+                    # 游标就永远停在旧值：_collect 每轮都挑出同一批「最早」的消息，
+                    # 正序截断 50 条后，新消息永远排不进去——网页端于是一直看不到
+                    # 新对话（2026-11-19 实测：15:52 之后的消息一条都没到 4222）。
+                    self._advance_cursor_locked(event)
                 self._save()
                 sent += 1
             except Exception as exc:  # noqa: BLE001
