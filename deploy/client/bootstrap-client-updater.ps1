@@ -155,6 +155,7 @@ try {
     } | ConvertTo-Json -Depth 4
 } catch {
     $bootstrapFailure = $_
+    try {
     if ($shortcutChanged) {
         $savedShortcut = Join-Path $backup 'manager-shortcut.lnk'
         if (Test-Path -LiteralPath $savedShortcut -PathType Leaf) {
@@ -178,6 +179,9 @@ try {
         Enable-ScheduledTask -TaskName $taskName -TaskPath $taskPath | Out-Null
     } else {
         Disable-ScheduledTask -TaskName $taskName -TaskPath $taskPath | Out-Null
+    }
+    } catch {
+        throw "Bootstrap failed: $($bootstrapFailure.Exception.Message); rollback also failed: $($_.Exception.Message)"
     }
     throw $bootstrapFailure
 }
