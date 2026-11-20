@@ -44,47 +44,20 @@
 
       <el-tab-pane :label="`开场（${openings.length}）`" name="opening">
         <div class="opening-toolbar">
-          <el-button size="small" type="primary" plain @click="startAdd('text')">+ 文本</el-button>
-          <el-button size="small" type="primary" plain @click="startAdd('image')">+ 图片</el-button>
-          <el-button size="small" type="primary" plain @click="startAdd('video')">+ 视频</el-button>
+          <el-button size="small" class="pill-btn" @click="startAdd('text')">+ 文本</el-button>
+          <el-button size="small" class="pill-btn" @click="startAdd('image')">+ 图片</el-button>
+          <el-button size="small" class="pill-btn" @click="startAdd('video')">+ 视频</el-button>
           <span class="opening-hint">按顺序发送；每条至少间隔 2 秒</span>
         </div>
 
-        <div v-if="loading" class="opening-empty">加载中…</div>
-        <div v-else-if="!openings.length" class="opening-empty">
-          还没有开场。客户首次对话时 Agent 会按顺序发送这里的内容。
-        </div>
-
-        <div v-for="(entry, index) in openings" :key="entry.id" class="opening-card">
-          <div class="opening-head">
-            <span class="kind-tag" :class="entry.kind">{{ KIND_LABEL[entry.kind] }} · 第 {{ index + 1 }} 条</span>
-            <div class="opening-tools">
-              <el-button link size="small" :disabled="index === 0" title="上移" @click="move(index, -1)">↑</el-button>
-              <el-button
-                link
-                size="small"
-                :disabled="index === openings.length - 1"
-                title="下移"
-                @click="move(index, 1)"
-              >
-                ↓
-              </el-button>
-              <el-button link size="small" @click="startEdit(entry)">编辑</el-button>
-              <el-button link size="small" type="danger" @click="removeEntry(entry)">删除</el-button>
-            </div>
+        <div v-if="draft" ref="editorRef" class="opening-edit">
+          <div class="edit-head">
+            <span class="kind-tag">
+              {{ KIND_LABEL[draft.kind] }} ·
+              {{ draft.id ? `编辑第 ${draft.seq ?? ''} 条` : '新增一条' }}
+            </span>
+            <el-button link size="small" @click="draft = null">取消</el-button>
           </div>
-          <div class="opening-body">
-            <template v-if="entry.kind === 'text'">{{ entry.content }}</template>
-            <template v-else>
-              素材：<b>{{ entry.media_name || '未设置' }}</b>
-              <span v-if="entry.content" class="opening-caption">配文：{{ entry.content }}</span>
-            </template>
-          </div>
-          <div class="opening-delay">间隔 {{ Math.round((entry.delay_ms || 0) / 1000) }} 秒后发下一条</div>
-        </div>
-
-        <div v-if="draft" class="opening-edit">
-          <div class="kind-tag">{{ KIND_LABEL[draft.kind] }} · {{ draft.id ? `第 ${draft.seq ?? ''} 条` : '新' }}</div>
           <el-input
             v-if="draft.kind === 'text'"
             v-model="draft.content"
@@ -111,9 +84,46 @@
             <el-input-number v-model="delaySeconds" :min="2" :max="120" controls-position="right" />
           </el-form-item>
           <div class="edit-tools">
-            <el-button @click="draft = null">取消</el-button>
             <el-button type="primary" :loading="savingOpening" @click="saveDraft">保存</el-button>
           </div>
+        </div>
+
+        <div v-if="loading" class="opening-empty">加载中…</div>
+        <div v-else-if="!openings.length" class="opening-empty">
+          还没有开场。客户首次对话时 Agent 会按顺序发送这里的内容。
+        </div>
+
+        <div
+          v-for="(entry, index) in openings"
+          :key="entry.id"
+          class="opening-card"
+          :class="{ 'is-editing': draft?.id === entry.id }"
+        >
+          <div class="opening-head">
+            <span class="kind-tag" :class="entry.kind">{{ KIND_LABEL[entry.kind] }} · 第 {{ index + 1 }} 条</span>
+            <div class="opening-tools">
+              <el-button link size="small" :disabled="index === 0" title="上移" @click="move(index, -1)">↑</el-button>
+              <el-button
+                link
+                size="small"
+                :disabled="index === openings.length - 1"
+                title="下移"
+                @click="move(index, 1)"
+              >
+                ↓
+              </el-button>
+              <el-button link size="small" @click="startEdit(entry)">编辑</el-button>
+              <el-button link size="small" type="danger" @click="removeEntry(entry)">删除</el-button>
+            </div>
+          </div>
+          <div class="opening-body">
+            <template v-if="entry.kind === 'text'">{{ entry.content }}</template>
+            <template v-else>
+              素材：<b>{{ entry.media_name || '未设置' }}</b>
+              <span v-if="entry.content" class="opening-caption">配文：{{ entry.content }}</span>
+            </template>
+          </div>
+          <div class="opening-delay">间隔 {{ Math.round((entry.delay_ms || 0) / 1000) }} 秒后发下一条</div>
         </div>
       </el-tab-pane>
 
@@ -147,13 +157,33 @@
               <el-option label="启用（仅新会话）" value="enabled" />
             </el-select>
           </div>
+          <div class="flow-add-row">
+            <el-button size="small" class="pill-btn" @click="addFlowNode('text')">+ 发送节点</el-button>
+            <el-button size="small" class="pill-btn" @click="addFlowNode('end')">+ 结束节点</el-button>
+            <span class="opening-hint">新节点接在当前流程末尾，保存后才生效</span>
+          </div>
           <div v-for="(node, index) in flow.nodes" :key="node.node_key" class="flow-card">
             <div class="opening-head">
               <span class="kind-tag">{{ index + 1 }} · {{ node.title || node.node_key }}</span>
-              <el-tag size="small" effect="plain">{{ node.node_type }}</el-tag>
+              <div class="opening-tools">
+                <el-tag size="small" effect="plain">{{ NODE_TYPE_LABEL[node.node_type] || node.node_type }}</el-tag>
+                <el-button
+                  link
+                  size="small"
+                  type="danger"
+                  :disabled="flow.nodes.length <= 1 || node.node_key === flow.entry_key"
+                  :title="node.node_key === flow.entry_key ? '入口节点不能删除' : '删除节点'"
+                  @click="removeFlowNode(index)"
+                >
+                  删除
+                </el-button>
+              </div>
+            </div>
+            <div v-if="node.node_type === 'end'" class="opening-body flow-end">
+              结束节点：流程到此停止，不发送消息
             </div>
             <el-input
-              v-if="node.parts?.[0]?.kind === 'text' || node.node_type === 'text'"
+              v-else-if="node.parts?.[0]?.kind === 'text'"
               v-model="node.parts![0].body"
               type="textarea"
               :rows="3"
@@ -186,9 +216,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { agentApi, type AgentFlow, type AgentFlowNode } from '../../api/agent'
+import { addFlowNode as appendFlowNode, normalizeFlow, removeFlowNode as dropFlowNode } from './flow-graph'
 import { mediaApi } from '../../api/core'
 import type { ServicePosition } from '../../api/types'
 
@@ -222,6 +253,14 @@ interface OpeningDraft {
 }
 
 const KIND_LABEL: Record<string, string> = { text: '文本', image: '图片', video: '视频' }
+const NODE_TYPE_LABEL: Record<string, string> = {
+  text: '发送文本',
+  image: '发送图片',
+  video: '发送视频',
+  followup: '一次性复聊',
+  branch: '分支',
+  end: '结束',
+}
 const MIN_DELAY_MS = 2000
 const MAX_BYTES = 20 * 1024 * 1024
 
@@ -239,6 +278,7 @@ const savingOpening = ref(false)
 const uploading = ref(false)
 const draft = ref<OpeningDraft | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
+const editorRef = ref<HTMLElement | null>(null)
 const flow = ref<AgentFlow | null>(null)
 const flowLoading = ref(false)
 const savingFlow = ref(false)
@@ -276,13 +316,17 @@ async function load(): Promise<void> {
     persona.value = String(data.persona?.content || '')
     savedPersona.value = persona.value
     openings.value = (Array.isArray(data.openings) ? data.openings : []) as unknown as PersonaOpening[]
-    flow.value = flowResult.data?.version ? flowResult.data : null
+    flow.value = flowResult.data?.version ? normalizeFlow(flowResult.data) : null
   } catch (error: any) {
     ElMessage.error(error?.response?.data?.detail || 'Agent 配置加载失败')
   } finally {
     loading.value = false
     flowLoading.value = false
   }
+}
+
+function normalizeFlowDraft(raw: AgentFlow): AgentFlow {
+  return normalizeFlow(raw)
 }
 
 function createBlankFlow(): void {
@@ -302,7 +346,48 @@ function onAwaitReplyChange(node: AgentFlowNode): void {
   const fallback = flow.value.edges.find((edge) =>
     edge.from_key === node.node_key && (edge.trigger === 'default' || edge.trigger === 'any_reply'))
   if (fallback) fallback.trigger = node.await_reply ? 'any_reply' : 'default'
+  else {
+    flow.value.edges.push({
+      from_key: node.node_key,
+      to_key: '',
+      trigger: node.await_reply ? 'any_reply' : 'default',
+      condition_value: '',
+      priority: 0,
+    })
+  }
   flowDirty.value = true
+}
+
+/** 在流程末尾追加节点；图的合法性由 flow-graph.ts 保证。 */
+function addFlowNode(kind: 'text' | 'end'): void {
+  if (!flow.value) return
+  flow.value = appendFlowNode(flow.value, kind)
+  flowDirty.value = true
+}
+
+/** 删除节点：前驱边改指向被删节点的后继，入口节点与最后一个节点不可删。 */
+function removeFlowNode(index: number): void {
+  const current = flow.value
+  const node = current?.nodes[index]
+  if (!current || !node) return
+  const result = dropFlowNode(current, node.node_key)
+  if (result.blocked === 'last') {
+    ElMessage.warning('流程至少要保留一个节点')
+    return
+  }
+  if (result.blocked === 'entry') {
+    ElMessage.warning('入口节点不能删除')
+    return
+  }
+  if (result.blocked) return
+  flow.value = result.flow
+  flowDirty.value = true
+}
+
+function revealEditor(): void {
+  void nextTick(() => {
+    editorRef.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  })
 }
 
 async function migrateFlow(): Promise<void> {
@@ -363,6 +448,7 @@ async function savePersona(): Promise<void> {
 function startAdd(kind: 'text' | 'image' | 'video'): void {
   void loadMedia()
   draft.value = { id: null, kind, content: '', media_name: '', delay_ms: MIN_DELAY_MS }
+  revealEditor()
 }
 
 function startEdit(entry: PersonaOpening): void {
@@ -375,6 +461,7 @@ function startEdit(entry: PersonaOpening): void {
     delay_ms: entry.delay_ms || MIN_DELAY_MS,
     seq: entry.seq,
   }
+  revealEditor()
 }
 
 function pickMedia(): void {
@@ -526,6 +613,44 @@ async function move(index: number, offset: number): Promise<void> {
   align-items: center;
   gap: 8px;
   margin-bottom: 10px;
+}
+
+/* 主题层的 .el-button.is-plain 把背景刷成实心、文字压成同色，
+   这里直接写死配色，不依赖 Element Plus 的 variant 级联。 */
+.pill-btn {
+  background: #ffffff !important;
+  border: 1px solid #c4c7c5 !important;
+  color: #0b57d0 !important;
+  font-weight: 600;
+}
+
+.pill-btn:hover:not(.is-disabled) {
+  background: #f0f4f9 !important;
+  border-color: #0b57d0 !important;
+  color: #0842a0 !important;
+}
+
+.flow-add-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.edit-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.flow-end {
+  color: var(--bd-text-secondary, #5f6b7a);
+}
+
+.opening-card.is-editing {
+  border-color: var(--bd-primary, #0b57d0);
+  box-shadow: 0 0 0 2px rgba(11, 87, 208, 0.12);
 }
 
 .opening-hint {
