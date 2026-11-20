@@ -38,6 +38,9 @@ CLIENT_FILES = frozenset({
 BOOTSTRAP_FILES = {
     "deploy/client/client_updater.py": "client_updater.py",
     "deploy/client/client-startup.cmd": "client-startup.cmd",
+    "deploy/client/client_manager.py": "client_manager.py",
+    "deploy/client/client_manager_service.py": "client_manager_service.py",
+    "deploy/client/client-manager.vbs": "client-manager.vbs",
 }
 
 
@@ -149,6 +152,7 @@ def build_package(repo: Path, *, commit: str, base: str, output: Path) -> dict:
     }
     manifest = {
         "schema": 1,
+        "manager_protocol": 1,
         "commit": commit,
         "protected_core": protected_core,
         "dependencies": APPROVED_DEPENDENCIES,

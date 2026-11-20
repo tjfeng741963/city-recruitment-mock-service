@@ -38,7 +38,9 @@ CLIENT_PATHS = frozenset({
     "compat.py", "echo_guard.py", "flow_state.py", "login_qr.py", "login_refresh.py", "login_watch.py",
     "main.py", "media_fetch.py", "register.py", "remote_config.py", "reply_store.py",
     "screenshot.py", "sender.py", "wecomcracker.py", "client_updater.py", "client-startup.cmd",
+    "client_manager.py", "client_manager_service.py", "client-manager.vbs",
 })
+MANAGER_FILES = frozenset({"client_manager.py", "client_manager_service.py", "client-manager.vbs"})
 
 
 class UpdateError(RuntimeError):
@@ -91,6 +93,7 @@ def _verify_zip(
     expected_commit: str,
     expected_sha256: str,
     root: Path,
+    require_manager: bool = False,
 ) -> tuple[dict[str, Any], dict[str, bytes]]:
     if len(package) > MAX_ARCHIVE_BYTES:
         raise UpdateError("client archive exceeds size limit")
@@ -184,6 +187,10 @@ def _verify_zip(
             raise UpdateError("archive and manifest file lists differ")
         if "client_updater.py" not in payload or "client-startup.cmd" not in payload:
             raise UpdateError("client bootstrap files are missing from the package")
+        has_manager = bool(MANAGER_FILES & payload.keys())
+        if require_manager or (root / "client_manager.py").is_file() or has_manager:
+            if manifest.get("manager_protocol") != 1 or not MANAGER_FILES.issubset(payload):
+                raise UpdateError("client manager protocol is missing or incompatible; refusing downgrade")
         return manifest, payload
 
 
@@ -194,6 +201,7 @@ def apply_package(
     expected_sha256: str,
     root: Path,
     fail_after: int | None = None,
+    require_manager: bool = False,
 ) -> dict[str, Any]:
     root = Path(root)
     manifest, payload = _verify_zip(
@@ -201,6 +209,7 @@ def apply_package(
         expected_commit=expected_commit,
         expected_sha256=expected_sha256,
         root=root,
+        require_manager=require_manager,
     )
     version_file = root / ".client-version.json"
     try:
@@ -321,6 +330,7 @@ def _download(url: str, limit: int, timeout: int) -> bytes:
                      "--proto", "=https", "--proto-redir", "=https", "--max-time", str(timeout),
                      "--max-filesize", str(limit), "--user-agent", "city-recruitment-client-updater",
                      "--output", str(target), url], check=True, capture_output=True, timeout=timeout + 5,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
             except (OSError, subprocess.SubprocessError) as exc:
                 raise UpdateError("HTTPS download failed") from exc
@@ -337,13 +347,20 @@ def _download(url: str, limit: int, timeout: int) -> bytes:
     return data
 
 
-def fetch_release_package() -> tuple[str, bytes, str]:
+def check_release() -> dict[str, str]:
     main = _request_json(f"{API_BASE}/commits/main")
     commit = str(main.get("sha", ""))
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise UpdateError("GitHub main returned an invalid commit SHA")
     release = _request_json(f"{API_BASE}/releases/tags/{TAG_PREFIX}{commit}")
     package_url, checksum_url = release_asset_urls(commit, release)
+    return {"commit": commit, "package_url": package_url, "checksum_url": checksum_url}
+
+
+def fetch_release_package(release: dict[str, str] | None = None) -> tuple[str, bytes, str]:
+    release = release if release is not None else check_release()
+    commit = release["commit"]
+    package_url, checksum_url = release["package_url"], release["checksum_url"]
     try:
         package = _download(package_url, MAX_ARCHIVE_BYTES, 60)
         checksum_text = _download(checksum_url, 1024, 15).decode("ascii").strip()
@@ -365,6 +382,7 @@ def _running_autopilot() -> bool:
         text=True,
         check=False,
         timeout=20,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     if result.returncode:
         raise UpdateError("could not verify whether autopilot is running")
@@ -400,6 +418,12 @@ def _start_existing_client(root: Path) -> None:
     )
 
 
+def _release_mutex(handle: Any) -> None:
+    if handle:
+        ctypes.windll.kernel32.ReleaseMutex(handle)
+        ctypes.windll.kernel32.CloseHandle(handle)
+
+
 def main() -> int:
     handle = None
     commit = "unknown"
@@ -425,9 +449,7 @@ def main() -> int:
         print(f"client update stopped: {exc}", file=sys.stderr)
         return 1
     finally:
-        if handle:
-            ctypes.windll.kernel32.ReleaseMutex(handle)
-            ctypes.windll.kernel32.CloseHandle(handle)
+        _release_mutex(handle)
 
 
 if __name__ == "__main__":

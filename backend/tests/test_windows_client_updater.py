@@ -32,7 +32,7 @@ def core_hashes() -> dict[str, str]:
     return {name: value.lower() for name, value in raw.items()}
 
 
-def archive_bytes(files: dict[str, bytes], *, commit: str = COMMIT) -> bytes:
+def archive_bytes(files: dict[str, bytes], *, commit: str = COMMIT, manager_protocol=None) -> bytes:
     files = {
         "client_updater.py": b"# verified updater\n",
         "client-startup.cmd": b"@echo off\r\n",
@@ -48,6 +48,8 @@ def archive_bytes(files: dict[str, bytes], *, commit: str = COMMIT) -> bytes:
             for name, data in sorted(files.items())
         ],
     }
+    if manager_protocol is not None:
+        manifest["manager_protocol"] = manager_protocol
     output = BytesIO()
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for name, data in files.items():
@@ -345,3 +347,31 @@ def test_rolls_back_replaced_files_if_later_replace_fails(tmp_path, monkeypatch)
 
     assert {name: (root / name).read_bytes() for name in before} == before
     assert not (root / ".client-version.json").exists()
+
+
+def test_gui_client_rejects_legacy_package_before_overwriting_updater(tmp_path):
+    root = installed_root(tmp_path)
+    (root / "client_manager.py").write_bytes(b"# installed GUI\n")
+    (root / "client_updater.py").write_bytes(b"# new compatible updater\n")
+    package = archive_bytes({"autopilot.py": b"# legacy package\n"})
+    with pytest.raises(UPDATER.UpdateError, match="manager protocol"):
+        UPDATER.apply_package(package, expected_commit=COMMIT, expected_sha256=hashlib.sha256(package).hexdigest(), root=root)
+    assert (root / "client_updater.py").read_bytes() == b"# new compatible updater\n"
+
+
+def test_compatible_manager_package_applies_and_can_be_reapplied(tmp_path):
+    root = installed_root(tmp_path)
+    package = archive_bytes({"client_manager.py": b"# manager\n", "client_manager_service.py": b"# manager service\n", "client-manager.vbs": b"Option Explicit\n"}, manager_protocol=1)
+    digest = hashlib.sha256(package).hexdigest()
+    first = UPDATER.apply_package(package, expected_commit=COMMIT, expected_sha256=digest, root=root, require_manager=True)
+    assert "client_manager.py" in first["changed"]
+    second = UPDATER.apply_package(package, expected_commit=COMMIT, expected_sha256=digest, root=root, require_manager=True)
+    assert second["changed"] == []
+
+
+def test_manager_protocol_requires_all_components_before_writing(tmp_path):
+    root = installed_root(tmp_path)
+    package = archive_bytes({"client_manager.py": b"# manager\n"}, manager_protocol=1)
+    with pytest.raises(UPDATER.UpdateError, match="manager protocol"):
+        UPDATER.apply_package(package, expected_commit=COMMIT, expected_sha256=hashlib.sha256(package).hexdigest(), root=root, require_manager=True)
+    assert not (root / "client_manager.py").exists()

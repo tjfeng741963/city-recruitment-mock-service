@@ -18,22 +18,26 @@
 
 ## Task 1: 更新与进程控制服务
 
-- [ ] 在 `backend/tests/test_windows_client_manager.py` 写测试：`check_release()` 仅读取元数据，`ManagerService.update(expected_commit)` 持互斥、核对版本、复查进程、安装后不启动；`is_client_process(row, root)` 只匹配本目录 Python autopilot。
-- [ ] 执行 focused pytest，确认新增 API 缺失而失败。
-- [ ] 修改 `deploy/client/client_updater.py` 提供 `check_release()`；保留既有 `fetch_release_package()` / 自动登录行为。
-- [ ] 新建 `deploy/client/client_manager_service.py`，实现 `status/check/update/start/stop`；PowerShell 超时和错误 fail closed。进程停止重新核对创建时间和路径；启动等待进程出现，失败输出本地日志位置。
-- [ ] focused 测试通过，包括已有 updater 测试；更新 bootstrap 哈希。
+- [x] 在 `backend/tests/test_windows_client_manager.py` 写测试：`check_release()` 仅读取元数据，`ManagerService.update(expected_commit)` 持互斥、核对版本、复查进程、安装后不启动；`is_client_process(row, root)` 只匹配本目录 Python autopilot。
+- [x] 执行 focused pytest，确认新增 API 缺失而失败。
+- [x] 修改 `deploy/client/client_updater.py` 提供 `check_release()`；保留既有 `fetch_release_package()` / 自动登录行为。
+- [x] 新建 `deploy/client/client_manager_service.py`，实现 `status/check/update/start/stop`；PowerShell 超时和错误 fail closed。进程停止重新核对创建时间和路径；启动等待进程出现，失败输出本地日志位置。
+- [x] focused 测试通过，包括已有 updater 测试；更新 bootstrap 哈希。
 
 ## Task 2: 窗口与分发
 
-- [ ] GUI 行为测试先断言 ManagerWindow 无自动网络/发送、按钮检查/更新分离、操作忙碌时阻止重入、错误可见。
-- [ ] 新建 `deploy/client/client_manager.py`，中文标签、版本状态、独立更新与启动/停止、阶段进度、日志入口；网络后台线程，Tk 只在主线程更新。
-- [ ] 新建 `deploy/client/客户端管理.vbs`；更新 package builder、updater allowlist 和 bootstrap 资产，创建唯一桌面快捷方式。全流程无运行任务动作。
-- [ ] 打包测试包含管理文件；PowerShell fixture 同步模拟快捷方式，干跑不创建文件。
-- [ ] 本地和 Windows 隔离目录验证 GUI。实机只部署管理文件、打开窗口及检查状态，不发送。
+- [x] GUI 行为测试先断言 ManagerWindow 无自动网络/发送、按钮检查/更新分离、操作忙碌时阻止重入、错误可见。
+- [x] 新建 `deploy/client/client_manager.py`，中文标签、版本状态、独立更新与启动/停止、阶段进度、日志入口；网络后台线程，Tk 只在主线程更新。
+- [x] 新建 `deploy/client/client-manager.vbs`；更新 package builder、updater allowlist 和 bootstrap 资产，创建唯一桌面快捷方式。全流程无运行任务动作。
+- [x] 打包测试包含管理文件；PowerShell fixture 同步模拟快捷方式，干跑不创建文件。
+- [x] 本地和 Windows 隔离目录验证 GUI。实机只部署管理文件、打开窗口及检查状态，不发送。
 
 ## Task 3: 验收与 PR
 
-- [ ] 运行 npm ci、迁移/API 文档检查、tsc、前端构建、vitest、完整 pytest、workflow 检查。
-- [ ] 独立代码复核并解决阻塞；显式路径提交，构建提交对应包，验证 GUI 文件入包及运行数据保留。
-- [ ] 更新 PR72 描述、推送并等待 Ubuntu/Windows/package 检查全绿；记录桌面入口、操作步骤和未发布限制。
+- [x] 运行 npm ci、迁移/API 文档检查、tsc、前端构建、vitest、完整 pytest、workflow 检查。
+- [x] 独立代码复核并解决阻塞；显式路径提交，构建提交对应包，验证 GUI 文件入包及运行数据保留。
+- [x] 更新 PR72 描述、推送并等待 Ubuntu/Windows/package 检查全绿；记录桌面入口、操作步骤和未发布限制。
+
+## Verification checkpoint (2026-11-20)
+
+Focused manager/updater/package/bootstrap/release tests: 68 passed. Full Python suite: 1016 passed; Node suite: 362 passed; frontend build, TypeScript, migration/API checks, PowerShell parser and actionlint passed. Windows GUI-only smoke confirmed 900x760 window, disabled CloudPilot, zero autopilot processes, no-release failure leaves install disabled, and desktop shortcut creation.

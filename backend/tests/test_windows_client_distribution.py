@@ -59,6 +59,9 @@ def make_repo(tmp_path: Path) -> tuple[Path, str]:
     write_file(repo, "agent/uv.lock", subprocess.check_output(['git', 'show', 'HEAD:agent/uv.lock'], cwd=REPO_ROOT))
     write_file(repo, "deploy/client/client_updater.py", b"UPDATER = 1\n")
     write_file(repo, "deploy/client/client-startup.cmd", b"@echo off\r\n")
+    write_file(repo, "deploy/client/client_manager.py", b"MANAGER = 1\n")
+    write_file(repo, "deploy/client/client_manager_service.py", b"SERVICE = 1\n")
+    write_file(repo, "deploy/client/client-manager.vbs", b"Option Explicit\n")
     write_file(repo, "agent/config.json", b"{\"token\":\"never-package\"}\n")
     run_git(repo, "add", "agent", "deploy/client")
     run_git(repo, "commit", "-qm", "base")
@@ -88,12 +91,16 @@ def test_package_uses_exact_commit_allowlist_and_pins_frozen_core(tmp_path):
         assert "brain.py" in names
         assert "client_updater.py" in names
         assert "client-startup.cmd" in names
+        assert "client_manager.py" in names
+        assert "client_manager_service.py" in names
+        assert "client-manager.vbs" in names
         assert "identity.py" not in names
         assert "vendor/key_extract.py" not in names
         assert "config.json" not in names
         assert "login_code.py" not in names
         assert "wecom_io_core/send.py" not in names
         assert manifest["commit"] == target
+        assert manifest["manager_protocol"] == 1
         assert manifest["protected_core"] == {
             Path(name).name: hashlib.sha256(
                 (repo / name).read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")

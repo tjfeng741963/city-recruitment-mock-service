@@ -83,7 +83,7 @@ def test_legacy_internal_apply_rejected_before_network(tmp_path, monkeypatch):
 def test_bootstrap_asset_pins_match_checked_in_sources():
     text = BOOTSTRAP.read_text(encoding="utf-8")
     assets = re.findall(r"Name = '([^']+)'; Sha256 = '([0-9a-f]{64})'", text)
-    assert len(assets) == 3
+    assert len(assets) == 6
     for name, digest in assets:
         data = (BOOTSTRAP.parent / name).read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
         assert hashlib.sha256(data).hexdigest() == digest, name
@@ -94,6 +94,8 @@ def test_bootstrap_asset_pins_match_checked_in_sources():
 def test_powershell_bootstrap_keeps_disabled_task_without_launch(tmp_path, dry_run):
     target = tmp_path / "agent"
     target.mkdir()
+    desktop = tmp_path / "desktop"
+    desktop.mkdir()
     for name in ("login_code.py", "start-pilot.cmd", "pilot-hidden.vbs"):
         (target / name).write_text("# local prerequisite", encoding="utf-8")
     core = target / "wecom_io_core"
@@ -102,7 +104,7 @@ def test_powershell_bootstrap_keeps_disabled_task_without_launch(tmp_path, dry_r
         shutil.copy2(REPO_ROOT / "agent/wecom_io_core" / name, core / name)
     harness = tmp_path / "harness.ps1"
     harness.write_text(r'''
-param([string]$Bootstrap, [string]$Target, [switch]$Dry)
+param([string]$Bootstrap, [string]$Target, [string]$Desktop, [switch]$Dry)
 $ErrorActionPreference = 'Stop'
 $tokens = $null
 $errors = $null
@@ -126,9 +128,9 @@ function Disable-ScheduledTask { param($TaskName, $TaskPath) $global:MockTask.Se
 function Enable-ScheduledTask { throw 'must not enable disabled task' }
 function Start-ScheduledTask { throw 'must not run task' }
 function Register-ScheduledTask { throw 'unexpected rollback' }
-& $Bootstrap -TargetRoot $Target -DryRun:$Dry
+& $Bootstrap -TargetRoot $Target -ShortcutDirectory $Desktop -DryRun:$Dry
 ''', encoding="utf-8")
-    args = ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(harness), "-Bootstrap", str(BOOTSTRAP), "-Target", str(target)]
+    args = ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(harness), "-Bootstrap", str(BOOTSTRAP), "-Target", str(target), "-Desktop", str(desktop)]
     if dry_run:
         args.append("-Dry")
     result = subprocess.run(args, capture_output=True, text=True, timeout=30)
@@ -139,6 +141,8 @@ function Register-ScheduledTask { throw 'unexpected rollback' }
     if dry_run:
         assert output["WillRemainEnabled"] is False
         assert not (target / "client_updater.py").exists()
+        assert not list(desktop.iterdir())
     else:
         assert output["RemainsEnabled"] is False
         assert (target / "client_updater.py").read_bytes() == (BOOTSTRAP.parent / "client_updater.py").read_bytes()
+        assert (desktop / "城市招聘客户端管理.lnk").is_file()
