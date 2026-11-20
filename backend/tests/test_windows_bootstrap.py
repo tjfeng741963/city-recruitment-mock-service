@@ -127,7 +127,7 @@ function Set-ScheduledTask {
 function Disable-ScheduledTask { param($TaskName, $TaskPath) $global:MockTask.Settings.Enabled = $false }
 function Enable-ScheduledTask { throw 'must not enable disabled task' }
 function Start-ScheduledTask { throw 'must not run task' }
-function Register-ScheduledTask { throw 'unexpected rollback' }
+function Register-ScheduledTask { throw ('unexpected rollback: ' + $global:Error[0].Exception.Message) }
 & $Bootstrap -TargetRoot $Target -ShortcutDirectory $Desktop -DryRun:$Dry
 ''', encoding="utf-8")
     args = ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(harness), "-Bootstrap", str(BOOTSTRAP), "-Target", str(target), "-Desktop", str(desktop)]

@@ -154,6 +154,7 @@ try {
         DesktopShortcut = $shortcutPath
     } | ConvertTo-Json -Depth 4
 } catch {
+    $bootstrapFailure = $_
     if ($shortcutChanged) {
         $savedShortcut = Join-Path $backup 'manager-shortcut.lnk'
         if (Test-Path -LiteralPath $savedShortcut -PathType Leaf) {
@@ -178,5 +179,5 @@ try {
     } else {
         Disable-ScheduledTask -TaskName $taskName -TaskPath $taskPath | Out-Null
     }
-    throw
+    throw $bootstrapFailure
 }
