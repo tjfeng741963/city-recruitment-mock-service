@@ -58,7 +58,6 @@ class ManagerWindow:
         self._build()
         self.window.protocol("WM_DELETE_WINDOW", self.close)
         self._poll_id = self.window.after(50, self._poll)
-        self._refresh_id = self.window.after(5000, self._auto_refresh)
         self.refresh()
 
     def _build(self):
@@ -229,12 +228,6 @@ class ManagerWindow:
             self._buttons()
         self._poll_id = self.window.after(50, self._poll)
 
-    def _auto_refresh(self):
-        if not self.closed:
-            if not self.busy:
-                self.refresh()
-            self._refresh_id = self.window.after(5000, self._auto_refresh)
-
     def refresh(self):
         self._run("status", self.service.status)
 
@@ -273,7 +266,6 @@ class ManagerWindow:
             return
         self.closed = True
         self.window.after_cancel(self._poll_id)
-        self.window.after_cancel(self._refresh_id)
         self.window.destroy()
 
 
