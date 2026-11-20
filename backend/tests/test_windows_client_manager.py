@@ -115,7 +115,16 @@ def test_status_does_not_start_or_check_network(tmp_path, monkeypatch):
     module = service_module()
     monkeypatch.setattr(module, "system_snapshot", lambda: {"processes": [], "task_enabled": False})
     monkeypatch.setattr(updater, "check_release", lambda: pytest.fail("status must be local"))
-    assert module.ManagerService(tmp_path).status() == {"commit": None, "running": 0, "task_enabled": False, "other_running": 0}
+    assert module.ManagerService(tmp_path).status() == {
+        "commit": None,
+        "running": 0,
+        "task_enabled": False,
+        "other_running": 0,
+        "startup_status": "stopped",
+        "startup_detail": "",
+        "wecom_state": None,
+        "updated_at": None,
+    }
 
 
 def test_stop_only_targets_owned_processes_and_revalidates(tmp_path, monkeypatch):

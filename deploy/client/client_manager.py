@@ -179,8 +179,22 @@ class ManagerWindow:
             return
         self.current_text.set(state["commit"] or "尚未登记版本（本地部署）")
         count = state["running"]
-        self.runtime_text.set(f"自动回复运行中 · {count} 个进程" if count else "自动回复已停止")
-        self.runtime_label.configure(fg="#15724a" if count else INK)
+        startup_status = state.get("startup_status")
+        status_text = {
+            "starting": "自动回复启动中…",
+            "waiting_wecom": "等待打开企业微信",
+            "waiting_login": "等待扫码登录企业微信",
+            "initializing": "企业微信已登录，正在初始化数据库…",
+            "ready": f"自动回复可用 · {count} 个进程",
+            "failed": "自动回复启动失败",
+            "stopped": "自动回复已停止",
+        }
+        if not startup_status:
+            startup_status = "ready" if count else "stopped"
+        self.runtime_text.set(status_text.get(startup_status, "自动回复状态未知"))
+        if state.get("startup_detail"):
+            self.message_text.set(state["startup_detail"])
+        self.runtime_label.configure(fg="#15724a" if startup_status == "ready" and count else INK)
         enabled = state["task_enabled"]
         schedule = "登录自动启动已启用" if enabled is True else "登录自动启动已暂停" if enabled is False else "未能读取登录自动启动任务"
         if state.get("other_running"):
@@ -222,7 +236,15 @@ class ManagerWindow:
                     self.message_text.set(f"更新完成，校验安装了 {len(result['changed'])} 个变更文件。自动回复未启动。")
                     self._record(f"已安装 {result['commit']}；再次打开窗口可加载新版管理界面。")
                 elif operation == "start":
-                    self.message_text.set("已发现自动回复进程。请在业务后台核对在线状态与回复结果。")
+                    start_status = (self.state or {}).get("startup_status")
+                    if start_status == "waiting_login":
+                        self.message_text.set("企业微信尚未登录，请扫码；二维码会继续按节流周期上传。")
+                    elif start_status == "waiting_wecom":
+                        self.message_text.set("请先打开企业微信，客户端会继续等待，不会初始化数据库。")
+                    elif start_status == "initializing":
+                        self.message_text.set("已启动，正在初始化数据库；初始化完成后才会处理消息。")
+                    else:
+                        self.message_text.set("自动回复已进入可用状态。请在业务后台核对在线状态与回复结果。")
                 elif operation == "stop":
                     self.message_text.set("自动回复进程已停止。请核对停止时正在处理的消息，避免重复发送。")
             self._buttons()
