@@ -46,10 +46,6 @@
             <el-icon><Grid /></el-icon>
             <template #title>工厂配置总览</template>
           </el-menu-item>
-          <el-menu-item index="/factory-overview">
-            <el-icon><Grid /></el-icon>
-            <template #title>工厂配置总览</template>
-          </el-menu-item>
 <!-- 节假日管理入口按旧版 nav-adjust 补丁隐藏（与「工厂配置总览」重复）；路由 /holidays 保留 -->
         </el-sub-menu>
 
