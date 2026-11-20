@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -62,8 +63,10 @@ def test_image_type_keeps_the_old_skip_behaviour(agent):
 
 
 def test_location_is_recorded_and_yields_a_hint_end_to_end(agent):
-    store = type("S", (), {})()
-    store.recent = lambda limit=60: [inbound()]
+    store = MagicMock()
+    store.recent.return_value = [inbound()]
+    # scan() 末尾会走 scan_unread()；这里不给未读游标数据库，让它直接返回 0。
+    store._conn.return_value = None
     assert agent.scan(store, {"target": "all"}) == 1
 
     row = agent.rlog.pending()[0]
