@@ -23,7 +23,12 @@ describe("local static shell (legacy bundle)", () => {
   });
 
   it("serves the captured root JavaScript bundle", async () => {
-    const response = await app.inject({ method: "GET", url: "/assets/index-C6QTH-aK.js" });
+    // 入口 bundle 的 hash 每次构建都会变，从 SPA 壳里读出来再取，避免写死。
+    const shell = await app.inject({ method: "GET", url: "/login" });
+    const bundle = shell.body.match(/\/assets\/index-[A-Za-z0-9_-]+\.js/)?.[0];
+    expect(bundle, "SPA 壳必须引用构建产出的入口 bundle").toBeTruthy();
+
+    const response = await app.inject({ method: "GET", url: bundle as string });
     expect(response.statusCode).toBe(200);
     expect(response.headers["content-type"]).toContain("javascript");
     expect(response.body).toMatch(/LoginView-[A-Za-z0-9_-]+\.js/);
@@ -44,7 +49,7 @@ describe("local static shell (default)", () => {
 
   it("serves the re-themed legacy bundle without configuration", async () => {
     const response = await app.inject({ method: "GET", url: "/login" });
-    expect(response.body).toContain("/assets/index-C6QTH-aK.js");
+    expect(response.body).toMatch(/\/assets\/index-[A-Za-z0-9_-]+\.js/);
     expect(response.body).toContain('src="/theme/candidate-registration.js"');
     expect(response.body).toContain("/theme/theme.css");
     expect(response.body).toContain("/theme/motion.css");

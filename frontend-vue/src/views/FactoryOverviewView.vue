@@ -71,7 +71,7 @@
             <span :class="row.online_count ? 'online' : 'muted'">{{ row.online_count }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="岗位示例" min-width="150">
+        <el-table-column label="岗位示例" min-width="240" show-overflow-tooltip>
           <template #default="{ row }">
             <span class="muted">{{ row.sample || '-' }}</span>
           </template>
