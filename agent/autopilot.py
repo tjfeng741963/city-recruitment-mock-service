@@ -1037,16 +1037,15 @@ def scan_added_contacts(store: Store, cfg: dict) -> int:
         contact_id, name = str(contact_id or ""), str(name or "").strip()
         if not contact_id or contact_id == self_id or not name:
             continue
-        # 企微不同版本把单聊成员顺序写反；从现有单聊 id 推断当前账号在前还是在后，
-        # 再为尚未产生消息的新联系人生成同样格式的会话 id。
-        self_last = any(value.endswith(f"_{self_id}") for value in sessions)
-        ordered_id = f"S:{contact_id}_{self_id}" if self_last else f"S:{self_id}_{contact_id}"
+        # 已有会话直接沿用数据库中的真实 id；尚未产生消息的新单聊按当前
+        # 企微版本的实际写法先用 S:<self>_<contact>，发送后仍会回读校验。
+        candidates = [f"S:{self_id}_{contact_id}", f"S:{contact_id}_{self_id}"]
+        ordered_id = next((value for value in candidates if value in sessions), candidates[0])
         candidate = {"conv_id": ordered_id, "conv_name": name}
         if not match_target(candidate, target):
             continue
         # Different客户端版本可能把单聊成员顺序写反；已有会话优先沿用实际 id。
-        candidates = [candidate["conv_id"], f"S:{self_id}_{contact_id}", f"S:{contact_id}_{self_id}"]
-        conv_id = next((value for value in candidates if value in sessions), candidates[0])
+        conv_id = candidate["conv_id"]
         if is_system_conv(conv_id, name) or not _is_first_contact(conv_id, greeted):
             continue
         trigger = {
