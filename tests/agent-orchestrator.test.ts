@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildOrchestration,
+  guessCustomerName,
   mergeArchive,
   parseScripts,
   type ArchiveRecord,
@@ -123,5 +124,37 @@ describe("agent orchestrator", () => {
     expect(fresh.name).toBe("李四");
     expect(fresh.interview_date).toBe("2026-11-20");
     expect(fresh.interview_confirmed).toBe(true);
+  });
+});
+
+// 姓名兜底抽取（2026-11-20）：模型漏填 capture.name 时，从客户原话补一次。
+// 线上 3 条登记姓名全空，导致「推群」条件永远不成立，群聊一条都没收到。
+describe("guessCustomerName", () => {
+  it("抽取「我叫X」", () => {
+    expect(guessCustomerName("我叫张三")).toBe("张三");
+    expect(guessCustomerName("你好，我叫李小明，想问问安检员")).toBe("李小明");
+  });
+
+  it("抽取「我是X」", () => {
+    expect(guessCustomerName("我是王五，想了解一下")).toBe("王五");
+  });
+
+  it("抽取「叫我X」和「姓名：X」", () => {
+    expect(guessCustomerName("叫我小赵就行")).toBe("小赵");
+    expect(guessCustomerName("姓名：陈六")).toBe("陈六");
+    expect(guessCustomerName("姓名: 周七")).toBe("周七");
+  });
+
+  it("地名/状态词不当姓名", () => {
+    // 「我是深圳的」如果被抽成「深圳的」，推群就会写错名字
+    expect(guessCustomerName("我是深圳的")).toBe("");
+    expect(guessCustomerName("我是来找工作的")).toBe("");
+    expect(guessCustomerName("我是老师")).toBe("");
+  });
+
+  it("无关文本返回空", () => {
+    expect(guessCustomerName("")).toBe("");
+    expect(guessCustomerName("你好")).toBe("");
+    expect(guessCustomerName("多少钱一个月")).toBe("");
   });
 });

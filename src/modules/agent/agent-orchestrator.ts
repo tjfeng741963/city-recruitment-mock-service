@@ -247,3 +247,65 @@ export function mergeArchive(
       interview.confirmed === true ? true : Boolean(date || time) ? Boolean(date && time) : base.interview_confirmed,
   };
 }
+
+/**
+ * 从客户原话里兜底抽姓名（2026-11-20）。
+ *
+ * 为什么需要：档案字段完全依赖模型输出的 `capture.name`，模型漏填时姓名一直是空，
+ * 连带「姓名 + 电话 + 面试时间齐全才推群」的条件永远不成立。线上实测 3 条登记
+ * 姓名全空，全部卡在「信息未齐」，群聊一条都没收到。
+ *
+ * 只在模型没给姓名时兜一层，并且只认「我叫 / 叫我 / 我是 / 姓名：」这几种明确说法：
+ * 宁可留空，也不要往群里推一个错名字。
+ */
+const NAME_STOPWORDS = new Set([
+  "你好", "老师", "先生", "女士", "小姐", "老板", "客服", "工作", "招聘",
+  "面试", "报名", "咨询", "了解", "看看", "请问", "公司", "工厂",
+]);
+
+/** 明显是地名/状态词而不是姓名的后缀，命中就放弃。 */
+const NAME_REJECT_SUFFIX = ["的", "了", "啊", "吧", "呢", "吗"];
+
+/** 姓名里不会出现的动词/疑问/语气字，命中说明抽到的是半句话。 */
+const NAME_REJECT_CHARS = ["来", "找", "想", "要", "做", "干", "求", "问", "看", "说", "就", "是"];
+
+/** 单个候选串是否像一个姓名。 */
+function isValidName(name: string): boolean {
+  if (!name) return false;
+  if (NAME_STOPWORDS.has(name)) return false;
+  if (NAME_REJECT_SUFFIX.includes(name.slice(-1))) return false;
+  return !NAME_REJECT_CHARS.some((char) => name.includes(char));
+}
+
+/**
+ * 从候选串里挑一个像姓名的片段：长度 4→3→2 逐个试，第一个通过过滤的就是它。
+ * 「叫我小赵就行」先试「小赵就行」（含「就」被拒）→「小赵就」（被拒）→「小赵」✓。
+ */
+function pickName(candidate: string): string {
+  for (const len of [4, 3, 2]) {
+    if (candidate.length < len) continue;
+    const name = candidate.slice(0, len);
+    if (isValidName(name)) return name;
+  }
+  return "";
+}
+
+export function guessCustomerName(text: string): string {
+  const raw = String(text ?? "").trim();
+  if (!raw) return "";
+  // shrink=false 的形（「我是X」）不逐长度回退：
+  // 「我是深圳的」整体是「深圳的」，回退成「深圳」就会把地名当人名推到群里。
+  const patterns: Array<{ re: RegExp; shrink: boolean }> = [
+    { re: /我叫([一-龥]{2,4})/, shrink: true },
+    { re: /叫我([一-龥]{2,4})/, shrink: true },
+    { re: new RegExp(`我是([一-龥]{2,3})(?=[，,。！!？?\\s]|$)`), shrink: false },
+    { re: /姓名[：:]\s*([一-龥]{2,4})/, shrink: true },
+  ];
+  for (const { re, shrink } of patterns) {
+    const hit = raw.match(re);
+    if (!hit) continue;
+    const name = shrink ? pickName(hit[1]) : isValidName(hit[1]) ? hit[1] : "";
+    if (name) return name;
+  }
+  return "";
+}

@@ -6,6 +6,7 @@ import { isValidDeviceToken } from "./position-scripts.routes.js";
 import { complete, llmConfig, parseJsonObject } from "./agent-llm.js";
 import {
   buildOrchestration,
+  guessCustomerName,
   mergeArchive,
   parseScripts,
   type ArchiveRecord,
@@ -386,7 +387,8 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       } catch {
         groupChat = "";
       }
-      const complete = Boolean(row.name && row.phone && (row.interview_date || row.interview_time));
+      // 与推送判定保持一致：电话 + 面试时间齐全即算「可推送」，姓名缺失不再阻断。
+      const complete = Boolean(row.phone && (row.interview_date || row.interview_time));
       let notifyStatus = !complete ? "incomplete" : !groupChat ? "no-group" : "pending";
       if (complete && groupChat) {
         const stampCandidates = [
@@ -420,6 +422,128 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
     }
     return { items };
   });
+  // 候选人员管理（2026-11-20）：把面试登记聚合成前端 CandidateView 需要的行。
+  // 之前前端明确写着「后端 /api/v1/agent/candidates 返回 404」，页面一直是空壳、
+  // 不发起任何请求，所以登记数据和候选页是两套完全不通的东西。
+  app.get<{ Querystring: Record<string, string> }>(
+    "/api/v1/agent/candidates",
+    async (request, reply) => {
+      if (request.auth?.role !== "admin") {
+        return reply.code(403).send({ detail: "Admin access required" });
+      }
+      const q = request.query ?? {};
+      const status = String(q.status ?? "invited");
+      const recruiterFilter = String(q.recruiter_id ?? "").trim();
+      const eventDate = String(q.event_date ?? "").trim();
+      const interviewDate = String(q.interview_date ?? "").trim();
+      const page = Math.max(1, Number(q.page ?? 1) || 1);
+      const pageSize = Math.min(200, Math.max(1, Number(q.page_size ?? 50) || 50));
+
+      const rows = db
+        .prepare(
+          `SELECT a.session_key, a.name, a.phone, a.city,
+                  a.interview_date, a.interview_time, a.interview_confirmed,
+                  a.arrival_status, a.updated_at,
+                  c.nickname AS customer_nickname, c.device_code,
+                  c.recruit_status, c.created_at AS conv_created_at,
+                  sp.position_name AS position_name,
+                  f.factory_name AS factory_name
+             FROM agent_archive a
+             LEFT JOIN agent_conversations c
+               ON c.external_conversation_id = a.session_key
+             LEFT JOIN service_positions sp ON sp.id = a.position_id
+             LEFT JOIN factories f ON f.id = sp.factory_id
+            WHERE a.name != '' OR a.phone != '' OR a.interview_date != ''
+            ORDER BY a.updated_at DESC
+            LIMIT 1000`,
+        )
+        .all() as Array<Record<string, unknown>>;
+
+      const deviceStmt = db.prepare(
+        "SELECT data_json FROM agent_devices WHERE json_extract(data_json,'$.device_code')=?",
+      );
+      const recruiterCache = new Map<string, string>();
+      const recruiterOf = (deviceCode: string): string => {
+        const cached = recruiterCache.get(deviceCode);
+        if (cached !== undefined) return cached;
+        let value = "";
+        try {
+          const row = deviceStmt.get(deviceCode) as { data_json: string } | undefined;
+          const data = JSON.parse(row?.data_json || "{}") as Record<string, unknown>;
+          value = String(data.recruiter_id ?? "").trim();
+        } catch {
+          value = "";
+        }
+        recruiterCache.set(deviceCode, value);
+        return value;
+      };
+
+      type CandidateStatus = "invited" | "disqualified" | "checked_in";
+      const statusOf = (row: Record<string, unknown>): CandidateStatus => {
+        if (String(row.arrival_status ?? "") === "arrived") return "checked_in";
+        if (String(row.recruit_status ?? "") === "disqualified") return "disqualified";
+        return "invited";
+      };
+
+      const all = rows.map((row) => {
+        const deviceCode = String(row.device_code ?? "");
+        const name = String(row.name ?? "");
+        const phone = String(row.phone ?? "");
+        const interviewDateValue = String(row.interview_date ?? "");
+        const interviewTimeValue = String(row.interview_time ?? "");
+        const updatedAt = String(row.updated_at ?? "");
+        const summary = [
+          name ? `姓名 ${name}` : "姓名待补",
+          phone ? `电话 ${phone}` : "",
+          interviewDateValue || interviewTimeValue
+            ? `面试 ${`${interviewDateValue} ${interviewTimeValue}`.trim()}`
+            : "",
+          Boolean(row.interview_confirmed) ? "已确认" : "待确认",
+        ]
+          .filter(Boolean)
+          .join(" · ");
+        return {
+          id: String(row.session_key ?? ""),
+          device_name: deviceCode,
+          recruiter_id: recruiterOf(deviceCode),
+          nickname: String(row.customer_nickname ?? ""),
+          name,
+          phone,
+          event_at: updatedAt,
+          interview_date: interviewDateValue,
+          factory_name: String(row.factory_name ?? ""),
+          interview_time: interviewTimeValue,
+          city: String(row.city ?? ""),
+          summary,
+          created_at: String(row.conv_created_at ?? updatedAt),
+          status: statusOf(row),
+        };
+      });
+
+      const stats = {
+        total: all.length,
+        invited: all.filter((item) => item.status === "invited").length,
+        disqualified: all.filter((item) => item.status === "disqualified").length,
+        checked_in: all.filter((item) => item.status === "checked_in").length,
+      };
+
+      const filtered = all.filter((item) => {
+        if (item.status !== status) return false;
+        if (recruiterFilter && item.recruiter_id !== recruiterFilter) return false;
+        if (eventDate && !item.event_at.startsWith(eventDate)) return false;
+        if (interviewDate && item.interview_date !== interviewDate) return false;
+        return true;
+      });
+
+      const start = (page - 1) * pageSize;
+      return {
+        items: filtered.slice(start, start + pageSize),
+        total: filtered.length,
+        stats,
+      };
+    },
+  );
+
   // 面试到达状态：运营在面试登记面板把约定时间到了的客户标记「已到达/爽约」。
   app.put<{ Params: { key: string }; Body: Record<string, unknown> }>(
     "/api/v1/agent/archive/:key/arrival",
@@ -683,6 +807,11 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       const archive = sessionKey
         ? mergeArchive(archiveRow ?? null, replyPayload.capture, replyPayload.interview)
         : null;
+      // 模型漏填姓名时按客户原话兜底一次：姓名是推群的硬条件之一，
+      // 一直空着就永远卡在「信息未齐」（2026-11-20 线上 3 条登记全卡在这里）。
+      if (archive && !archive.name) {
+        archive.name = guessCustomerName(input);
+      }
       if (sessionKey && archive) {
         db.prepare(
           `INSERT INTO agent_archive(session_key, position_id, name, phone, city,
@@ -706,8 +835,10 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         // 推送到设备绑定的群聊（agent_devices.data_json.group_chat，设备页可配）。
         // 群聊名没配就保留 group_notified=0——配好群聊后下一轮对话自动补推。
         // 设备端按 agent_conversations.nickname 搜索会话发送，群聊也占一行记录。
+        // 姓名缺失不再阻断推群：电话 + 面试时间是硬条件，姓名用「（待补）」占位。
+        // 之前要求 name 非空，模型漏填一次就永久卡住（2026-11-20 实测 3 条姓名全空）。
         const archiveComplete = Boolean(
-          archive.name && archive.phone && (archive.interview_date || archive.interview_time),
+          archive.phone && (archive.interview_date || archive.interview_time),
         );
         const notifiedRow = db
           .prepare("SELECT group_notified FROM agent_archive WHERE session_key=?")
@@ -746,7 +877,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
               const notifyText = [
                 "【面试登记】",
                 `时间：${archive.interview_date || ""} ${archive.interview_time || ""}`.trimEnd(),
-                `姓名：${archive.name}`,
+                `姓名：${archive.name || "（待补）"}`,
                 `电话：${archive.phone}`,
                 `客户：${convRow.nickname}`,
                 `设备：${convRow.device_code}`,
