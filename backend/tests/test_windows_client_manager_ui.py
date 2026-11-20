@@ -76,6 +76,18 @@ def test_opening_window_only_reads_local_status(window):
     assert "停止" in app.runtime_text.get()
 
 
+def test_status_does_not_auto_refresh_and_leave_start_button_busy(window):
+    app, service = window
+    settle(app)
+    deadline = time.monotonic() + 5.5
+    while time.monotonic() < deadline:
+        app.window.update()
+        time.sleep(0.01)
+    assert service.calls.count("status") == 1
+    assert not app.busy
+    assert not app.start_button.instate(["disabled"])
+
+
 def test_check_and_install_never_start_sender(window):
     app, service = window
     settle(app)
