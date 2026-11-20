@@ -4,7 +4,7 @@
 
 **Goal:** A successful merge to `main` deploys Linux and publishes a verified Windows package from the same commit; the existing Windows client installs that exact package at its next interactive logon before starting autopilot.
 
-**Architecture:** GitHub Actions builds a deterministic commit-addressed ZIP from Git-tracked, allowlisted client sources, validates it before the Linux deployment job, then publishes it as a public GitHub Release after deployment succeeds. A Windows startup updater compares the current `main` SHA with its `win-client-<sha>` release, verifies hashes and frozen-core pins, backs up and atomically applies the package, and invokes the existing `start-pilot.cmd`. The one-time task bootstrap preserves the current disabled state.
+**Architecture:** GitHub Actions builds a deterministic commit-addressed ZIP from Git-tracked, allowlisted client sources, validates it before the Linux deployment job, then publishes it as a public GitHub Release after deployment succeeds. A Windows logon updater compares the current `main` SHA with its `win-client-<sha>` release, verifies hashes and frozen-core pins, backs up and atomically applies the package, and invokes the existing hidden `pilot-hidden.vbs` → `start-pilot.cmd` chain. The one-time task bootstrap preserves the current disabled state.
 
 **Tech Stack:** GitHub Actions, Python 3.11 standard library, PowerShell ScheduledTasks, pytest.
 
@@ -25,7 +25,7 @@
 - Create `deploy/client/frozen-core-sha256.json`: four approved immutable core file hashes.
 - Create `scripts/package_windows_client.py`: deterministic ZIP and manifest builder for an exact commit.
 - Create `deploy/client/client_updater.py`: public release lookup, validation, backup, atomic apply, rollback, installed-version record, and guarded launch.
-- Create `deploy/client/client-startup.cmd`: stable task entry that runs the updater and stops on error.
+- Create `deploy/client/client-startup.cmd`: stable task entry that uses provisioned Python 3.11, runs the updater, and stops on error.
 - Create `deploy/client/bootstrap-client-updater.ps1`: one-time installation and CloudPilot action/logon-trigger migration; supports dry-run and preserves Enabled state.
 - Create `backend/tests/test_windows_client_distribution.py`: package allowlist, hashes, deterministic output, dependency gate.
 - Create `backend/tests/test_windows_client_updater.py`: release selection, path safety, hashes, rollback, local-data preservation, missing prerequisite.
@@ -61,7 +61,7 @@
 
 **Interfaces:** `bootstrap-client-updater.ps1 [-DryRun] -TargetRoot C:\agent` returns a proposed/current task configuration and, without `-DryRun`, installs reviewed bootstrap files and sets CloudPilot action to `client-startup.cmd` with one interactive logon trigger. It preserves the task's existing Enabled value.
 
-- [ ] Write tests asserting the bootstrap action contains no broad `taskkill`, the trigger is AtLogOn, multiple-instance policy is IgnoreNew, and disabled remains disabled.
+- [ ] Write tests asserting the bootstrap action contains no broad `taskkill`, verifies required local modules and normalized frozen-core hashes, uses an AtLogOn trigger and IgnoreNew policy, and preserves disabled state.
 - [ ] Run `uv run --project backend pytest backend/tests/test_windows_bootstrap.py -q`; confirm expected RED.
 - [ ] Implement backup/export of existing updater files and CloudPilot XML, install updater assets, update only the action/trigger, and restore prior files/XML if task registration fails.
 - [ ] Implement `client-startup.cmd` to call the Python updater and return nonzero without launching autopilot on updater failure.
@@ -73,7 +73,7 @@
 - [ ] Add a package-validation job/step that runs after tests but before Linux deploy on main, branch pushes, and PR checks. Use push-before SHA or PR base SHA to check client dependency lock changes.
 - [ ] Make Linux deploy depend on package validation as well as tests, so packaging/protected-core/dependency-gate failures prevent server deployment.
 - [ ] Add a main-only Windows release job that depends on tests, package validation, and successful Linux health checks. Grant `contents: write` only to this job.
-- [ ] Publish immutable tag `win-client-<GITHUB_SHA>` with `windows-client.zip`, `windows-client.sha256`, and manifest. Re-running the same workflow for that SHA must verify assets and no-op; conflicting existing release assets fail without overwrite.
+- [ ] Publish immutable tag `win-client-<GITHUB_SHA>` with `windows-client.zip` (embedded manifest) and `windows-client.sha256`. Re-running the same workflow for that SHA must verify assets and no-op; conflicting existing release assets fail without overwrite.
 - [ ] Add workflow/package integration tests for PR/non-main no-publish behavior, job dependency ordering, exact SHA propagation, and narrow permissions.
 - [ ] Run the package builder locally for the current feature commit and inspect only manifest paths/hash summaries. Validate Workflow YAML and run `git diff --check`.
 
@@ -83,5 +83,9 @@
 - [ ] Copy the reviewed updater/bootstrap to Win through the already-used authenticated transfer path and verify file hashes.
 - [ ] Run bootstrap `-DryRun`; verify the intended task action and one logon trigger. Apply bootstrap configuration while preserving Disabled; do not start or enable the task.
 - [ ] Run a local synthetic-release smoke test and a Win dry-run against a staging directory. Verify database/config/log/media hashes and `login_code.py` hash are unchanged.
-- [ ] Run the full Python test suite and applicable workflow checks. Prepare an explicit-path commit and a PR on `codex/windows-client-pipeline-update`; do not merge `main`.
+- [ ] Run the full Python test suite and applicable workflow checks. Prepare an explicit-path commit and a PR on `codex/win-client-release`; do not merge `main`.
 - [ ] Report that merging main deploys Linux and publishes the matching Win package, while Win applies it on the next authorized interactive logon. The currently disabled CloudPilot stays disabled until the wrong-destination incident is reviewed and the user resumes it.
+
+## Implementation checkpoint (2026-11-20)
+
+Package, updater, bootstrap and workflow are implemented. Fresh local validation: 985 Python tests pass, including 37 updater/package/bootstrap tests; frontend builds; backend typecheck, migration/API-doc checks and actionlint pass. Node verification and final Windows/bootstrap/committed-package smoke evidence are recorded in `docs/客户端流水线更新-20261120.md` after rollout. Earlier unchecked boxes above preserve the original execution checklist; this checkpoint records actual completed work. The first main Release and live sender launch are deliberately deferred until merge and separately authorized resumption.

@@ -82,8 +82,61 @@ jobs:
       # 新链路的覆盖：vitest 351 + pytest 915 + tsc + 迁移序号检查。
       # 脚本保留在 scripts/，需要时手工跑。
 
-  deploy:
+  windows-client-package:
     needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Select exact commit and comparison base
+        id: revision
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_BEFORE: ${{ github.event.before }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          SHA: ${{ github.sha }}
+        run: |
+          if [ "$EVENT_NAME" = pull_request ]; then
+            base="$PR_BASE"
+          elif [ "$EVENT_NAME" = workflow_dispatch ]; then
+            base="$(git rev-parse "$SHA^" 2>/dev/null || git rev-parse "$SHA")"
+          elif [ -n "$EVENT_BEFORE" ] && ! echo "$EVENT_BEFORE" | grep -Eq '^0+$'; then
+            base="$EVENT_BEFORE"
+          else
+            base="$(git rev-parse "$SHA^" 2>/dev/null || git rev-parse "$SHA")"
+          fi
+          echo "commit=$SHA" >> "$GITHUB_OUTPUT"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+
+      - name: Validate and package the Windows client
+        env:
+          COMMIT: ${{ steps.revision.outputs.commit }}
+          BASE: ${{ steps.revision.outputs.base }}
+        run: |
+          mkdir -p dist/windows-client
+          python scripts/package_windows_client.py \
+            --repo "$GITHUB_WORKSPACE" \
+            --commit "$COMMIT" \
+            --base "$BASE" \
+            --output dist/windows-client/windows-client.zip
+          (cd dist/windows-client && sha256sum windows-client.zip > windows-client.sha256)
+
+      - name: Upload the exact-commit client package
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-client-${{ steps.revision.outputs.commit }}
+          path: dist/windows-client/
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy:
+    needs: [test, windows-client-package]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
@@ -310,3 +363,77 @@ jobs:
             sleep 2
           done
           REMOTE
+
+  publish-windows-client:
+    needs: [test, deploy, windows-client-package]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download the package built from this workflow SHA
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-client-${{ github.sha }}
+          path: dist/windows-client
+
+      - name: Verify or publish the immutable client release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          tag="win-client-$SHA"
+          cd dist/windows-client
+          sha256sum --check windows-client.sha256
+          if ! gh api "repos/$GH_REPO/git/ref/tags/$tag" >/dev/null 2>&1; then
+            gh api --method POST "repos/$GH_REPO/git/refs" \
+              -f "ref=refs/tags/$tag" -f "sha=$SHA" >/dev/null
+          fi
+          tag_ref=$(gh api "repos/$GH_REPO/git/ref/tags/$tag" --jq '.object | [.type,.sha] | @tsv')
+          tag_type=${tag_ref%%$'\t'*}
+          tag_sha=${tag_ref#*$'\t'}
+          if [ "$tag_type" = tag ]; then
+            tag_sha=$(gh api "repos/$GH_REPO/git/tags/$tag_sha" --jq '.object.sha')
+          fi
+          if [ "$tag_sha" != "$SHA" ]; then
+            echo "release tag points at the wrong commit: $tag -> $tag_sha" >&2
+            exit 1
+          fi
+          if ! gh release view "$tag" --repo "$GH_REPO" >/dev/null 2>&1; then
+            # Stage privately until both uploaded assets have been verified.
+            gh release create "$tag" windows-client.zip windows-client.sha256 \
+              --repo "$GH_REPO" --draft \
+              --target "$SHA" \
+              --title "Windows client $SHA" \
+              --notes "Client package built from main commit $SHA. The client checks this immutable release at interactive startup."
+          fi
+          is_draft=$(gh release view "$tag" --repo "$GH_REPO" --json isDraft --jq .isDraft)
+          if [ "$(gh release view "$tag" --repo "$GH_REPO" --json isPrerelease --jq .isPrerelease)" = true ]; then
+            echo "client release must not be a prerelease" >&2
+            exit 1
+          fi
+          assets=$(gh release view "$tag" --repo "$GH_REPO" --json assets --jq '.assets[].name')
+          mkdir existing
+          # Check every existing asset before recovering an interrupted draft.
+          for asset in windows-client.zip windows-client.sha256; do
+            if echo "$assets" | grep -Fxq "$asset"; then
+              gh release download "$tag" --repo "$GH_REPO" --pattern "$asset" --dir existing
+              cmp "$asset" "existing/$asset"
+            elif [ "$is_draft" != true ]; then
+              echo "published release is missing $asset; refusing mutation" >&2
+              exit 1
+            fi
+          done
+          for asset in windows-client.zip windows-client.sha256; do
+            if ! echo "$assets" | grep -Fxq "$asset"; then
+              gh release upload "$tag" "$asset" --repo "$GH_REPO"
+              gh release download "$tag" --repo "$GH_REPO" --pattern "$asset" --dir existing
+              cmp "$asset" "existing/$asset"
+            fi
+          done
+          if [ "$is_draft" = true ]; then
+            gh release edit "$tag" --repo "$GH_REPO" --draft=false
+          fi
+          echo "release $tag contains the exact verified package"

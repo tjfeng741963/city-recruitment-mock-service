@@ -1,23 +1,7 @@
-"""客户端从 git 取代码并更新（不需要本机装 git）。
+"""Legacy source-tarball preview; writes are disabled.
 
-背景：客户端机器 `C:\\agent` 一直是「别人手工拷文件」更新的，结果代码与
-`origin/main` 漂移（2026-11-15 实测：autopilot/client/screenshot 三个文件比
-main 旧一个提交，缺扫码上传）。这个脚本把更新动作固定成：
-
-    从 GitHub 取指定 ref 的 tar 包 → 只覆盖 agent/ 下的 .py
-    → 覆盖前逐文件备份 → 不动运行期文件 → 打印差异清单
-
-运行期文件一律不碰：`config.json`、`.greeted.json`、`reply_log.db`、
-`media/`、`logs/`、`_decrypted/`。`wecom_io_core/` 只按字节覆盖（冻结区，
-内容必须与 git 完全一致，不做任何"优化"）。
-
-用法（在客户端机器上跑）：
-    python sync_from_github.py --target C:/agent --ref main --dry-run
-    python sync_from_github.py --target C:/agent --ref main --apply
-
-单实例：更新本身不启动进程。`run.cmd` 的 `:loop` 会在进程退出后 5 秒自动
-拉起新代码；需要立即生效时加 `--restart`（只结束那一个 python 进程，
-autopilot 内的命名互斥体会阻止第二个实例）。
+Windows client writes are installed only by client_updater.py from the
+commit-matched GitHub Release produced by the main deployment workflow.
 """
 
 from __future__ import annotations
@@ -84,6 +68,8 @@ def _iter_members(archive: tarfile.TarFile):
 
 
 def sync(target: Path, ref: str, apply: bool) -> int:
+    if apply:
+        raise ValueError("Legacy client writes are disabled; use client_updater.py")
     archive = _fetch(ref)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     changed: list[str] = []
@@ -127,11 +113,18 @@ def main() -> int:
     if not args.apply and not args.dry_run:
         print("需要 --apply 或 --dry-run（默认不写盘）", file=sys.stderr)
         return 2
+    if args.apply:
+        print(
+            "手动覆盖更新已禁用。请使用流水线发布的 commit 对应客户端包；"
+            "由 client_updater.py 校验并应用。",
+            file=sys.stderr,
+        )
+        return 2
     target = Path(args.target)
     if not target.is_dir():
         print(f"目标目录不存在：{target}", file=sys.stderr)
         return 2
-    return sync(target, args.ref, apply=args.apply)
+    return sync(target, args.ref, apply=False)
 
 
 if __name__ == "__main__":
