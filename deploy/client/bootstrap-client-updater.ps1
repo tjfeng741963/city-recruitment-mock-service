@@ -134,15 +134,19 @@ try {
     if ([bool]$current.Settings.Enabled -ne $wasEnabled) {
         throw 'CloudPilot enabled state changed unexpectedly'
     }
-    $shortcutChanged = $true
     $shell = New-Object -ComObject WScript.Shell
-    $shortcut = $shell.CreateShortcut($shortcutPath)
+    # WScript's save path uses the system ANSI code page on some Windows builds.
+    # Save under an ASCII name, then let PowerShell copy to the Unicode desktop name.
+    $stagedShortcut = Join-Path $backup 'manager-new.lnk'
+    $shortcut = $shell.CreateShortcut($stagedShortcut)
     $shortcut.TargetPath = Join-Path $env:SystemRoot 'System32\wscript.exe'
     $shortcut.Arguments = '"' + (Join-Path $TargetRoot 'client-manager.vbs') + '"'
     $shortcut.WorkingDirectory = $TargetRoot
     $shortcut.Description = 'City Recruitment Client Manager'
     $shortcut.IconLocation = Join-Path $env:SystemRoot 'System32\shell32.dll,21'
     $shortcut.Save()
+    $shortcutChanged = $true
+    Copy-Item -LiteralPath $stagedShortcut -Destination $shortcutPath -Force
     [pscustomobject]@{
         Mode = 'APPLIED'
         Task = "$taskPath$taskName"
