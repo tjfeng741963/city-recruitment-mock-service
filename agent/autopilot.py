@@ -1010,6 +1010,59 @@ def match_target(m: dict, target: str) -> bool:
     return target in name or target in cid
 
 
+def scan_added_contacts(store: Store, cfg: dict) -> int:
+    """把已加入通讯录、但还没有入站消息的目标联系人登记为欢迎触发。
+
+    企微在「加好友后对方不说话」时只更新 user.db，不一定马上写
+    conversation_table/message_table。只扫描消息会漏掉这个场景，因此按联系人
+    名称和 target 做一次幂等登记。target=all 时刻意跳过，避免升级后给所有历史
+    联系人批量发送欢迎语；指定 target 的测试/单账号配置才允许触发。
+    """
+    target = str(cfg.get("target") or "all")
+    if target == "all":
+        return 0
+    try:
+        contacts = store.contacts()
+        self_id = str(store.self_id() or "")
+        if not self_id:
+            return 0
+        sessions = {str(row.get("id") or "") for row in store.sessions(with_names=False)}
+    except Exception as exc:  # noqa: BLE001 - 联系人读取失败不影响消息扫描
+        log(f"[加好友] 联系人读取失败（忽略）：{type(exc).__name__}: {exc}", level="warning")
+        return 0
+
+    greeted = _load_greeted()
+    added = 0
+    for contact_id, name in contacts.items():
+        contact_id, name = str(contact_id or ""), str(name or "").strip()
+        if not contact_id or contact_id == self_id or not name:
+            continue
+        # 企微不同版本把单聊成员顺序写反；从现有单聊 id 推断当前账号在前还是在后，
+        # 再为尚未产生消息的新联系人生成同样格式的会话 id。
+        self_last = any(value.endswith(f"_{self_id}") for value in sessions)
+        ordered_id = f"S:{contact_id}_{self_id}" if self_last else f"S:{self_id}_{contact_id}"
+        candidate = {"conv_id": ordered_id, "conv_name": name}
+        if not match_target(candidate, target):
+            continue
+        # Different客户端版本可能把单聊成员顺序写反；已有会话优先沿用实际 id。
+        candidates = [candidate["conv_id"], f"S:{self_id}_{contact_id}", f"S:{contact_id}_{self_id}"]
+        conv_id = next((value for value in candidates if value in sessions), candidates[0])
+        if is_system_conv(conv_id, name) or not _is_first_contact(conv_id, greeted):
+            continue
+        trigger = {
+            "id": f"contact-added:{conv_id}",
+            "conv_id": conv_id,
+            "conv_name": name,
+            "text": "",
+            "type": 1011,
+            "time": int(time.time()),
+        }
+        if rlog.record_incoming(trigger):
+            added += 1
+            log(f"[加好友] 发现目标联系人 {name}，登记欢迎流程", scope="flow")
+    return added
+
+
 def scan(store: Store, cfg: dict) -> int:
     """把新的对方消息登记进 reply_log。返回新增条数。"""
     added = 0
@@ -2671,6 +2724,7 @@ def main() -> int:
         write_client_state("ready", detail="数据库初始化完成，可处理消息", wecom_state=wecom_state)
         if reporter is not None:
             reporter.tick(wecom_state, pending_count(), force=True)
+        scan_added_contacts(store, cfg)
         scan(store, cfg)
         result = drain(store, cfg, dry=cfg["dry_run"], wecom_state=wecom_state)
         _flow_tick(store, cfg, wecom_state)
@@ -2683,6 +2737,7 @@ def main() -> int:
         return 0
 
     write_client_state("ready", detail="数据库初始化完成，可处理消息", wecom_state=wecom_state)
+    scan_added_contacts(store, cfg)
     scan(store, cfg)
     drain(store, cfg, dry=cfg["dry_run"], wecom_state=wecom_state)
     _flow_tick(store, cfg, wecom_state)
@@ -2738,7 +2793,8 @@ def main() -> int:
             if sig != last_sig:
                 store.refresh()
                 last_sig = sig
-            n = scan(store, cfg)
+            n = scan_added_contacts(store, cfg)
+            n += scan(store, cfg)
             if n:
                 log(f"新登记 {n} 条")
             drain(store, cfg, dry=cfg["dry_run"], wecom_state=wecom_state)
