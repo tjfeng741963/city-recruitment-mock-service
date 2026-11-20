@@ -93,6 +93,21 @@ def test_check_and_install_never_start_sender(window):
     assert "未启动" in app.message_text.get()
 
 
+def test_matching_current_and_latest_versions_disable_update(window):
+    app, service = window
+    service.installed = COMMIT
+    settle(app)
+    app.check_button.invoke()
+    settle(app)
+    assert app.current_text.get() == COMMIT
+    assert app.latest_text.get() == COMMIT
+    assert app.install_button.instate(["disabled"])
+    assert app.install_button.cget("text") == "已是最新版本"
+    assert "已是该发布版本" in app.message_text.get()
+    app.install_button.invoke()
+    assert not any(isinstance(call, tuple) and call[0] == "update" for call in service.calls)
+
+
 def test_network_failure_is_visible_without_changing_current_version(window):
     app, service = window
     settle(app)

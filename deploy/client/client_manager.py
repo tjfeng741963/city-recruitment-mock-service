@@ -132,9 +132,16 @@ class ManagerWindow:
 
     def _buttons(self):
         stopped = self.state is not None and not self.state["running"] and not self.state.get("other_running")
+        up_to_date = bool(
+            self.release
+            and self.state
+            and self.state.get("commit") == self.release.get("commit")
+        )
         self.check_button.state(["disabled"] if self.busy else ["!disabled"])
         self.refresh_button.state(["disabled"] if self.busy else ["!disabled"])
-        self.install_button.state(["!disabled"] if not self.busy and stopped and self.release else ["disabled"])
+        self.install_button.configure(text="已是最新版本" if up_to_date else "下载并更新")
+        can_install = not self.busy and stopped and self.release and not up_to_date
+        self.install_button.state(["!disabled"] if can_install else ["disabled"])
         self.start_button.state(["!disabled"] if not self.busy and stopped else ["disabled"])
         self.stop_button.state(["!disabled"] if not self.busy and self.state and self.state["running"] else ["disabled"])
 
@@ -211,7 +218,7 @@ class ManagerWindow:
                     self.release = result
                     self.latest_text.set(result["commit"])
                     current = self.state.get("commit") if self.state else None
-                    self.message_text.set("当前已是该发布版本，可重新校验安装。" if current == result["commit"] else "发现已发布版本。停止回复后点击「下载并更新」。")
+                    self.message_text.set("当前已是该发布版本，无需重复安装。" if current == result["commit"] else "发现已发布版本。停止回复后点击「下载并更新」。")
                 elif operation == "update":
                     self.message_text.set(f"更新完成，校验安装了 {len(result['changed'])} 个变更文件。自动回复未启动。")
                     self._record(f"已安装 {result['commit']}；再次打开窗口可加载新版管理界面。")
