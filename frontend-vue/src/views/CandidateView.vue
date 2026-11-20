@@ -6,34 +6,25 @@
         <p class="page-desc">查看不符合、已邀约、已签到的人员记录</p>
       </div>
       <div class="header-actions">
-        <el-button :icon="Refresh" :loading="loading" @click="loadDevices">刷新招聘经理</el-button>
+        <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
       </div>
     </div>
 
-    <el-alert
-      class="degrade-alert"
-      type="warning"
-      show-icon
-      :closable="false"
-      title="后端未提供 /api/v1/agent/candidates，页面结构已就绪"
-      description="该接口当前返回 404，页面保留旧版统计卡、招聘经理筛选、导出与 13 列表头，不展示任何伪造数据。接口恢复后即可直接接入。"
-    />
-
     <div class="stats-row">
       <div class="stat-card">
-        <div class="stat-value muted-value">—</div>
+        <div class="stat-value">{{ stats.total }}</div>
         <div class="stat-label">候选总数</div>
       </div>
       <div class="stat-card">
-        <div class="stat-value muted-value">—</div>
+        <div class="stat-value">{{ stats.invited }}</div>
         <div class="stat-label">报名成功</div>
       </div>
       <div class="stat-card">
-        <div class="stat-value muted-value">—</div>
+        <div class="stat-value">{{ stats.disqualified }}</div>
         <div class="stat-label">不符合</div>
       </div>
       <div class="stat-card">
-        <div class="stat-value muted-value">—</div>
+        <div class="stat-value">{{ stats.checked_in }}</div>
         <div class="stat-label">已签到</div>
       </div>
     </div>
@@ -68,12 +59,12 @@
         placeholder="筛选面试日期"
         class="date-select"
       />
-      <el-tooltip content="接口返回 404，暂无可导出数据" placement="top">
+      <el-tooltip content="导出功能待接入" placement="top">
         <span>
           <el-button :icon="Download" disabled>导出 CSV</el-button>
         </span>
       </el-tooltip>
-      <span class="count-note">共 <strong>0</strong> 条</span>
+      <span class="count-note">共 <strong>{{ total }}</strong> 条</span>
     </div>
 
     <div class="table-wrapper">
@@ -97,7 +88,7 @@
         </el-table-column>
 
         <template #empty>
-          <el-empty description="后端未提供 /api/v1/agent/candidates，页面结构已就绪" />
+          <el-empty description="暂无候选记录，Agent 对话登记信息后会自动出现在这里" />
         </template>
       </el-table>
     </div>
@@ -105,16 +96,17 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { onMounted, reactive, ref, watch } from 'vue'
 import { Download, Refresh } from '@element-plus/icons-vue'
-import { devicesApi, type AgentDeviceItem } from '../api/agent'
+import { ElMessage } from 'element-plus'
+import http from '../api/http'
 
 /**
- * 后端 /api/v1/agent/candidates 明确 404：
- * 这里只保留旧版页面结构，不发起请求、不展示伪造数据。
+ * 2026-11-20：接上 /api/v1/agent/candidates。
+ * 该接口由面试登记（agent_archive）聚合而来，之前一直 404，页面是空壳。
  */
 interface CandidateRow {
-  id: number | string
+  id: string
   device_name: string
   recruiter_id: string
   nickname: string
@@ -129,39 +121,66 @@ interface CandidateRow {
   created_at: string
 }
 
+interface CandidateStats {
+  total: number
+  invited: number
+  disqualified: number
+  checked_in: number
+}
+
 const loading = ref(false)
-const devices = ref<AgentDeviceItem[]>([])
 const activeTab = ref('invited')
 const recruiterFilter = ref('')
 const eventDate = ref('')
 const interviewDate = ref('')
 const rows = ref<CandidateRow[]>([])
+const total = ref(0)
+const stats = reactive<CandidateStats>({ total: 0, invited: 0, disqualified: 0, checked_in: 0 })
+const recruiterOptions = ref<Array<{ label: string; value: string }>>([])
+const page = ref(1)
+const pageSize = ref(50)
 
-const recruiterOptions = computed(() => {
-  const seen = new Set<string>()
-  const options: Array<{ label: string; value: string }> = []
-  for (const device of devices.value) {
-    const value = String(device.recruiter_id || '').trim()
-    if (!value || seen.has(value)) continue
-    seen.add(value)
-    options.push({ label: value, value })
-  }
-  return options
-})
-
-async function loadDevices(): Promise<void> {
+async function load(): Promise<void> {
   loading.value = true
   try {
-    const { data } = await devicesApi.list({ page: 1, page_size: 1000 })
-    devices.value = data.items || []
-  } catch {
-    devices.value = []
+    const { data } = await http.get<{
+      items?: CandidateRow[]
+      total?: number
+      stats?: CandidateStats
+    }>('/api/v1/agent/candidates', {
+      params: {
+        status: activeTab.value,
+        recruiter_id: recruiterFilter.value || undefined,
+        event_date: eventDate.value || undefined,
+        interview_date: interviewDate.value || undefined,
+        page: page.value,
+        page_size: pageSize.value,
+      },
+    })
+    rows.value = data.items || []
+    total.value = Number(data.total || 0)
+    if (data.stats) Object.assign(stats, data.stats)
+    const seen = new Set<string>()
+    for (const row of rows.value) {
+      const value = String(row.recruiter_id || '').trim()
+      if (value) seen.add(value)
+    }
+    for (const option of recruiterOptions.value) seen.add(option.value)
+    recruiterOptions.value = [...seen].map((value) => ({ label: value, value }))
+  } catch (error: any) {
+    rows.value = []
+    ElMessage.error(error?.response?.data?.detail || '候选人员加载失败')
   } finally {
     loading.value = false
   }
 }
 
-onMounted(loadDevices)
+watch([activeTab, recruiterFilter, eventDate, interviewDate], () => {
+  page.value = 1
+  load()
+})
+
+onMounted(load)
 </script>
 
 <style scoped>
