@@ -58,10 +58,49 @@ _CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 LOG_DIR = ROOT / "logs"
 LOG_PATH = LOG_DIR / "run.log"
+# Small local protocol consumed by the Windows management window.  It is kept
+# next to the existing logs so it survives code updates but is never packaged
+# as source or sent to the server.
+CLIENT_STATE_PATH = LOG_DIR / "client-state.json"
 # 单文件 20MB，保留 5 份（run.log.1 .. run.log.5），总上限约 120MB。
 LOG_MAX_BYTES = int(os.environ.get("AGENT_LOG_MAX_BYTES", 20 * 1024 * 1024))
 LOG_BACKUP_COUNT = max(1, int(os.environ.get("AGENT_LOG_BACKUPS", 5)))
 _log_lock = threading.Lock()
+
+
+def write_client_state(
+    status: str,
+    *,
+    detail: str = "",
+    wecom_state: str | None = None,
+    error: str = "",
+) -> None:
+    """Publish startup/business readiness for the local Windows manager.
+
+    The file is deliberately written atomically.  A manager reading during a
+    transition sees either the previous complete state or the new complete
+    state, never a half-written JSON document.  State writes are best effort:
+    they must not turn a login or database problem into a second crash.
+    """
+    if status not in {"starting", "waiting_wecom", "waiting_login", "initializing", "ready", "failed", "stopped"}:
+        raise ValueError(f"invalid client state: {status}")
+    payload = {
+        "status": status,
+        "pid": os.getpid(),
+        "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "detail": str(detail or ""),
+    }
+    if wecom_state:
+        payload["wecom_state"] = wecom_state
+    if error:
+        payload["error"] = str(error)
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = CLIENT_STATE_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        os.replace(tmp, CLIENT_STATE_PATH)
+    except Exception:  # noqa: BLE001
+        pass
 
 # pythonw.exe 启动时没有控制台，sys.stdout / sys.stderr 是 None：print、reconfigure
 # 都会抛异常。2026-11-16 实测这样跑一轮日志就全丢、drain 循环还会被日志异常打断。
@@ -2340,18 +2379,19 @@ def load_config(args: argparse.Namespace, config_path: Path | None = None) -> di
     return cfg
 
 
-def configured_data_dir(cfg: dict) -> Path | None:
+def configured_data_dir(cfg: dict, *, require_files: bool = True) -> Path | None:
     value = cfg["data_dir"]
     if not value:
         return None
     directory = Path(value)
     if not directory.is_absolute():
         raise ValueError("data_dir must be an absolute path")
-    try:
-        if not directory.is_dir() or not all((directory / name).is_file() for name in ("message.db", "session.db")):
-            raise ValueError("data_dir must contain message.db and session.db")
-    except OSError as exc:
-        raise ValueError("data_dir could not be inspected") from exc
+    if require_files:
+        try:
+            if not directory.is_dir() or not all((directory / name).is_file() for name in ("message.db", "session.db")):
+                raise ValueError("data_dir must contain message.db and session.db")
+        except OSError as exc:
+            raise ValueError("data_dir could not be inspected") from exc
     return directory
 
 
@@ -2494,21 +2534,80 @@ def main() -> int:
         print_history()
         return 0
 
+    write_client_state("starting", detail="正在检查企业微信登录状态")
+    try:
+        # Validate the shape of an explicit path now, but defer file existence
+        # until after the login probe.  A logged-out WXWork may not have opened
+        # its database files yet; that must still reach the QR wait state.
+        data_dir = configured_data_dir(cfg, require_files=False)
+    except ValueError as exc:
+        write_client_state("failed", detail="配置中的企业微信数据目录不可用", error=str(exc))
+        log(f"Configuration error: {exc}")
+        return 2
+
+    # Establish QR/code handling before Store.refresh().  Database key
+    # extraction is allowed to fail while WXWork is still on its login page;
+    # that must not prevent the QR from reaching the web console.
+    remote_client = _make_bridge(cfg, resolve_device_code(cfg))
+    qr_pusher = login_qr.LoginQrPusher()
+    code_fetcher = login_code.LoginCodeFetcher()
+
+    def probe_wecom() -> str:
+        state = detect_wecom_state()
+        log(f"[自检] 企微状态 {state}（{WECOM_STATE_TEXT.get(state, '未知')}）")
+        login_watch.alert_login_required(state, log=log)
+        login_refresh.maybe_refresh_expired_qr(log=log)
+        qr_state = "login_required" if _consecutive_send_failures >= 2 else state
+        qr_pusher.tick(qr_state, remote_client, log=log)
+        code_fetcher.tick(state, remote_client, log=log)
+        return state
+
+    wecom_state = probe_wecom()
+    if wecom_state != "online":
+        startup_status = "waiting_login" if wecom_state == "login_required" else "waiting_wecom"
+        detail = "等待扫码登录企业微信" if startup_status == "waiting_login" else "等待打开企业微信"
+        write_client_state(startup_status, detail=detail, wecom_state=wecom_state)
+        if not args.watch:
+            log(detail)
+            return 0
+        log(f"{detail}；数据库初始化将在登录成功后开始")
+        while wecom_state != "online":
+            try:
+                time.sleep(cfg["interval"])
+                wecom_state = probe_wecom()
+                startup_status = "waiting_login" if wecom_state == "login_required" else "waiting_wecom"
+                detail = "等待扫码登录企业微信" if startup_status == "waiting_login" else "等待打开企业微信"
+                write_client_state(startup_status, detail=detail, wecom_state=wecom_state)
+            except KeyboardInterrupt:
+                write_client_state("stopped", detail="用户停止启动")
+                return 0
+
     try:
         data_dir = configured_data_dir(cfg)
     except ValueError as exc:
+        write_client_state("failed", detail="企业微信数据库文件不可用", wecom_state=wecom_state, error=str(exc))
         log(f"Configuration error: {exc}")
         return 2
+    write_client_state("initializing", detail="企业微信已登录，正在初始化本地数据库", wecom_state=wecom_state)
     store = Store(data_dir=data_dir) if data_dir is not None else Store()
     if not store.data_dir:
-        print("没找到企业微信数据目录")
+        detail = "没找到企业微信数据目录"
+        write_client_state("failed", detail=detail, wecom_state=wecom_state, error=detail)
+        log(detail)
         return 1
     log(f"数据目录 {store.data_dir}")
     scope = "全部会话（排除系统会话）" if cfg["target"] == "all" else f"仅 {cfg['target']!r}"
     log(f"监听范围 {scope} / 首次 {cfg['reply_first']!r} · 后续 {cfg['reply_next']!r} / "
         f"冷却 {cfg['cooldown']}s" + (" / DRY-RUN" if cfg["dry_run"] else ""))
 
-    store.refresh()
+    try:
+        store.refresh()
+    except Exception as exc:  # noqa: BLE001
+        detail = f"数据库初始化失败：{type(exc).__name__}: {exc}"
+        write_client_state("failed", detail=detail, wecom_state=wecom_state, error=str(exc))
+        log(detail)
+        traceback.print_exc(limit=2)
+        return 1
 
     if args.reset:
         n = 0
@@ -2544,25 +2643,8 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001
         log(f"[流程状态] 启动对账失败：{exc}", level="warning")
 
-    # 登录二维码上传器：企微掉登录时把扫码窗截图送到服务端，网页上就能扫。
-    # 机器在云端，没人看得到那块屏幕——这是唯一能让用户自己扫码的路径。
-    qr_pusher = login_qr.LoginQrPusher()
-    # 短信验证码取码器：扫码后企微偶尔要求短信验证码，运营在网页上填，
-    # 这里自动取走并敲进验证码弹窗（WXworkWindow）。
-    code_fetcher = login_code.LoginCodeFetcher()
-
     if not args.watch:
-        wecom_state = detect_wecom_state()
-        log(f"[自检] 企微状态 {wecom_state}（{WECOM_STATE_TEXT.get(wecom_state, '未知')}）")
-        login_watch.alert_login_required(wecom_state, log=log)
-        # 登录码过期自动点「刷新」（定位窗口→相对坐标点击→截图验证），
-        # 仅未登录登录窗口、线程化不阻塞；用户 2026-11-18 明确确认。
-        login_refresh.maybe_refresh_expired_qr(log=log)
-        # 推码状态降级：主窗原地变登录页时 detect 仍报 online（类名不变），
-        # 但发送连续失败（焦点校验不过）= 实际未登录——降级触发推码。
-        qr_state = "login_required" if _consecutive_send_failures >= 2 else wecom_state
-        qr_pusher.tick(qr_state, remote_client, log=log)
-        code_fetcher.tick(wecom_state, remote_client, log=log)
+        write_client_state("ready", detail="数据库初始化完成，可处理消息", wecom_state=wecom_state)
         if reporter is not None:
             reporter.tick(wecom_state, pending_count(), force=True)
         scan(store, cfg)
@@ -2576,19 +2658,7 @@ def main() -> int:
         print_history(10)
         return 0
 
-    wecom_state = detect_wecom_state()
-    log(f"[自检] 企微状态 {wecom_state}（{WECOM_STATE_TEXT.get(wecom_state, '未知')}）")
-    login_watch.alert_login_required(wecom_state, log=log)
-    # 登录码过期自动点「刷新」（定位窗口→相对坐标点击→截图验证），
-    # 仅未登录登录窗口、线程化不阻塞；用户 2026-11-18 明确确认。
-    login_refresh.maybe_refresh_expired_qr(log=log)
-    # 推码状态降级：主窗原地变登录页时 detect 仍报 online（类名不变），
-    # 但发送连续失败（焦点校验不过）= 实际未登录——降级触发推码。
-    qr_state = "login_required" if _consecutive_send_failures >= 2 else wecom_state
-    qr_pusher.tick(qr_state, remote_client, log=log)
-    code_fetcher.tick(wecom_state, remote_client, log=log)
-    if reporter is not None:
-        reporter.tick(wecom_state, pending_count(), force=True)
+    write_client_state("ready", detail="数据库初始化完成，可处理消息", wecom_state=wecom_state)
     scan(store, cfg)
     drain(store, cfg, dry=cfg["dry_run"], wecom_state=wecom_state)
     _flow_tick(store, cfg, wecom_state)
@@ -2619,6 +2689,12 @@ def main() -> int:
                 if state == "online":
                     _flow_reconcile(cfg)
                 wecom_state = state
+                if state == "online":
+                    write_client_state("ready", detail="数据库初始化完成，可处理消息", wecom_state=state)
+                else:
+                    waiting_status = "waiting_login" if state == "login_required" else "waiting_wecom"
+                    waiting_detail = "等待扫码登录企业微信" if waiting_status == "waiting_login" else "等待打开企业微信"
+                    write_client_state(waiting_status, detail=waiting_detail, wecom_state=state)
             # 掉登录时把企微窗口拉到前台并提示扫码（内部有 120s 冷却，非登录态不动作）
             login_watch.alert_login_required(wecom_state, log=log)
             # 登录码过期自动点「刷新」（定位窗口→相对坐标点击→截图验证），
@@ -2647,6 +2723,7 @@ def main() -> int:
             pump_safely(store, cfg, reporter, wecom_state)
         except KeyboardInterrupt:
             log("已停止")
+            write_client_state("stopped", detail="用户停止自动回复", wecom_state=wecom_state)
             return 0
         except Exception as exc:  # noqa: BLE001
             log(f"本轮失败：{type(exc).__name__}: {exc}")
