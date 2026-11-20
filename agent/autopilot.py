@@ -388,6 +388,30 @@ def _media_label(content_type: object) -> str:
     return "[媒体]"
 
 
+# 入站非文本消息的可读提示。定位（48）是客户最常用的替代打字方式：
+# 问「在哪里面试」时直接把当前位置甩过来。store 只对文本类型（2/573）提取
+# 正文，这类消息的 in_text 恒为空，于是被当成「空系统事件」跳过——客户明明
+# 发了东西，Agent 既不推进流程也不回话，界面上只剩「消息没有文本（type=48）」
+# （2026-11-20 线上反馈）。
+# 只映射语义明确的类型；加好友、撤回这类系统提示（type≈1011）不在表里，
+# 仍旧按空事件跳过，不会突然开始回复系统消息。
+_INBOUND_HINTS = {
+    48: "客户发来一个定位，可能是在问面试地点或确认自己的位置。",
+}
+
+
+def _inbound_hint(item: dict) -> str:
+    """取入站消息文本；已登记的非文本类型退化成可读提示，其余返回空串。"""
+    text = str(item.get("in_text") or "").strip()
+    if text:
+        return text
+    try:
+        kind = int(item.get("in_type") or 0)
+    except (TypeError, ValueError):
+        return ""
+    return _INBOUND_HINTS.get(kind, "")
+
+
 # ── 企微状态自检（只读探测，绝不激活窗口）─────────────────────────────────────
 def _wxwork_pids() -> set[int]:
     """进程探测：tasklist 查 WXWork.exe 的 pid。
@@ -1585,7 +1609,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
 
         # 新节点流程拥有当前会话时，流程是这一轮的唯一出口：首次接触和
         # await_reply 的客户消息都只推进节点，不再同时调用 chat。
-        hint = (it["in_text"] or "").strip()
+        hint = _inbound_hint(it)
         flow_state = _flow_store() if not dry else None
         flow_row = flow_state.get(cid) if flow_state is not None else None
         flow = _flow_for_row(flow_row, _load_flow())
@@ -1661,7 +1685,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     flow_state.set_phase(cid, "replied")
 
         if _brain is not None:
-            hint = (it["in_text"] or "").strip()
+            hint = _inbound_hint(it)
             agent_medias: list[tuple[str, str]] = []
             res = {"ok": False, "detail": "Agent 未初始化"}
             try:
