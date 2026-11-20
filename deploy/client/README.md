@@ -65,6 +65,16 @@ deploy/client/
 验证连上了：打开看板 <http://119.91.113.100:8090/api/v1/leads/board>，
 **顶部红条消失 = 设备在线**。细节与排查看 `客户端模式说明.md`。
 
+### 流水线更新
+
+Win 端不是 Git checkout。合并到 `main` 后，CI 通过测试与 Linux 部署才会发布同一提交 SHA 对应的不可变 Windows client Release。Win 更新器在 `CloudPilot` 的交互登录任务触发时查询当前 main SHA，只安装该 SHA 的包，并逐文件校验哈希。
+
+一次性迁移任务定义需使用 `bootstrap-client-updater.ps1`。先在停止客户端时运行 `-DryRun`，确认 action 和交互登录触发；应用后保留原来的 Enabled 状态。当前事故处置中的 `CloudPilot` 为 Disabled，bootstrap 不会启用它；是否恢复任务需另行人工决定。没有对应 Release、校验失败、冻结 core 不符、autopilot 仍运行或本机 `login_code.py` 缺失时，更新器停止且不启动 autopilot。
+
+更新过程日志写在 `C:\agent\logs\update.log`，只记录提交 SHA、变更文件数和阶段结果，不写配置或客户聊天内容。
+
+`sync_from_github.py` 保留只读预览，手动 `--apply` 已禁用，避免绕过流水线提交 SHA、核心校验和备份流程。
+
 `register-autostart.bat` 现在二选一：客户端模式（默认）或旧的
 单机模式（`start-all.bat`）。两种自启任务**只注册一个**，别同时开。
 
