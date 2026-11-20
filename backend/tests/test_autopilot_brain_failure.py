@@ -108,3 +108,26 @@ def test_retry_held_cli_requeues_and_exits_without_initializing_store(agent, tmp
     assert agent.rlog.pending()[0]["message_id"] == "10"
     agent.core_send.send.assert_not_called()
     agent.Store.assert_not_called()
+
+
+@pytest.mark.parametrize("outcome", [
+    {"ok": False, "detail": "发到了别的会话", "conversation_id": "S:other"},
+    {"ok": True, "detail": "sent", "conversation_id": "S:other"},
+    {"ok": True, "detail": "回读失败"},
+])
+def test_uncertain_landing_stops_parts_media_and_batch_without_requeue(agent, outcome):
+    agent.rlog.record_incoming({"id": 11, "conv_id": "S:next", "conv_name": "Next", "text": "hello", "type": 2, "time": 101})
+    agent._brain.chat.return_value = {"ok": True, "parts": ["first", "second"], "medias": [], "scene": "Agent"}
+    agent.core_send.split_media_marks.side_effect = lambda text: (text, [("image", "test.png")])
+    agent.core_send.send.return_value = outcome
+
+    result = agent.drain(MagicMock(), CFG)
+
+    assert result["unknown"] == 1
+    agent.core_send.send.assert_called_once()
+    agent.core_send.paste_media.assert_not_called()
+    rows = {r["conv_id"]: r for r in agent.rlog.recent()}
+    assert rows["S:customer"]["status"] == "unknown"
+    assert rows["S:next"]["status"] == "pending"
+    agent.rlog.init()
+    assert [r["conv_id"] for r in agent.rlog.pending()] == ["S:next"]

@@ -14,6 +14,40 @@ import { loadFactories, parseDeviceData, readDeviceFactoryIds } from "../../shar
 
 const ADMIN_REQUIRED = { detail: "Admin access required" } as const;
 
+function normalizeDevicePosition(
+  db: DatabaseSync,
+  data: Record<string, unknown>,
+  factoryIds: number[],
+  positionWasSubmitted: boolean,
+): void {
+  const raw = data.position_id;
+  const requested = raw === null || raw === "" || raw === undefined ? 0 : Number(raw);
+  if (!Number.isSafeInteger(requested) || requested < 0) {
+    if (positionWasSubmitted) throw new Error("position_id 必须是正整数或留空");
+    delete data.position_id;
+    return;
+  }
+  let positionId = requested;
+  if (positionId > 0) {
+    const position = db.prepare("SELECT factory_id FROM service_positions WHERE id=? AND status='enabled'")
+      .get(positionId) as { factory_id: number | null } | undefined;
+    if (!position) throw new Error("绑定的岗位不存在或已停用");
+    if (factoryIds.length && position.factory_id !== null && !factoryIds.includes(Number(position.factory_id))) {
+      if (positionWasSubmitted) throw new Error("绑定岗位必须属于已绑定工厂");
+      positionId = 0;
+    }
+  }
+  if (!positionId && factoryIds.length) {
+    const placeholders = factoryIds.map(() => "?").join(",");
+    const replacement = db.prepare(
+      `SELECT id FROM service_positions WHERE status='enabled' AND factory_id IN (${placeholders}) ORDER BY id LIMIT 1`,
+    ).get(...factoryIds) as { id: number } | undefined;
+    positionId = Number(replacement?.id ?? 0);
+  }
+  if (positionId > 0) data.position_id = positionId;
+  else delete data.position_id;
+}
+
 /**
  * 待输入的企微验证码（内存态，不必落库）。
  *
@@ -114,6 +148,13 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     // 与 /bridge/devices/:code/register 的自注册路径保持一致：那里也写 true。
     // 只有调用方明确传 observe_only:false 时（企微官方客服 API 通道）才放行。
     const data = { observe_only: true, ...(request.body ?? {}) } as Record<string, unknown>;
+    const factoryIds = readDeviceFactoryIds(db, data.factory_ids);
+    try {
+      normalizeDevicePosition(db, data, factoryIds, "position_id" in (request.body ?? {}));
+    } catch (error) {
+      return reply.code(422).send({ detail: error instanceof Error ? error.message : String(error) });
+    }
+    if ("factory_ids" in (request.body ?? {})) data.factory_ids = factoryIds;
     return db.prepare("INSERT INTO agent_devices(device_name,status,data_json) VALUES (?,?,?) RETURNING *")
       .get(deviceName, String(request.body?.status ?? "enabled"), JSON.stringify(data));
   });
@@ -132,6 +173,16 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     // 没提交这个键时保持原值，老客户端不受影响（与 vertical_id 的按需校验同一思路）。
     if ("factory_ids" in (request.body ?? {})) {
       merged.factory_ids = readDeviceFactoryIds(db, (request.body as Record<string, unknown>).factory_ids);
+    }
+    try {
+      normalizeDevicePosition(
+        db,
+        merged,
+        readDeviceFactoryIds(db, merged.factory_ids),
+        "position_id" in (request.body ?? {}),
+      );
+    } catch (error) {
+      return reply.code(422).send({ detail: error instanceof Error ? error.message : String(error) });
     }
     // 品类必填（2026-11-13 与 HR 对齐）：一个微信号只做一个板块，没有综合号。
     // 只在本次请求显式提交了 vertical_id 时校验，避免老客户端改别的字段被挡。

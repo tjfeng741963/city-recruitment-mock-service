@@ -116,6 +116,71 @@
           </div>
         </div>
       </el-tab-pane>
+
+      <el-tab-pane label="流程" name="flow">
+        <el-alert
+          class="persona-note"
+          type="info"
+          show-icon
+          :closable="false"
+          title="节点流程默认停用"
+          description="先把招聘介绍拆成阶段并保存为停用草稿；只有集中验收通过后，才考虑启用正式岗位。"
+        />
+        <div v-if="flowLoading" class="opening-empty">流程加载中…</div>
+        <template v-else-if="!flow">
+          <div class="opening-empty">
+            还没有节点流程。可以从当前 7 条开场生成停用草稿，再逐节点检查等待闸门。
+            <div class="flow-actions">
+              <el-button type="primary" @click="migrateFlow">从当前开场生成停用草稿</el-button>
+              <el-button @click="createBlankFlow">创建空白停用草稿</el-button>
+            </div>
+          </div>
+        </template>
+        <template v-else>
+          <div class="flow-toolbar">
+            <el-tag :type="flow.status === 'enabled' ? 'success' : 'info'">
+              {{ flow.status === 'enabled' ? '新会话已启用' : '已停用' }}
+            </el-tag>
+            <span class="opening-hint">版本 v{{ flow.version }} · {{ flow.nodes.length }} 个节点</span>
+            <el-select v-model="flow.status" size="small" class="flow-status" @change="flowDirty = true">
+              <el-option label="停用（不启动新会话）" value="disabled" />
+              <el-option label="启用（仅新会话）" value="enabled" />
+            </el-select>
+          </div>
+          <div v-for="(node, index) in flow.nodes" :key="node.node_key" class="flow-card">
+            <div class="opening-head">
+              <span class="kind-tag">{{ index + 1 }} · {{ node.title || node.node_key }}</span>
+              <el-tag size="small" effect="plain">{{ node.node_type }}</el-tag>
+            </div>
+            <el-input
+              v-if="node.parts?.[0]?.kind === 'text' || node.node_type === 'text'"
+              v-model="node.parts![0].body"
+              type="textarea"
+              :rows="3"
+              class="flow-body"
+              @input="flowDirty = true"
+            />
+            <div v-else class="opening-body">媒体节点：{{ node.parts?.[0]?.media_name || '未设置素材' }}</div>
+            <div v-if="node.node_type !== 'end'" class="flow-options">
+              <el-checkbox v-model="node.await_reply" @change="onAwaitReplyChange(node)">发完后等待客户回复</el-checkbox>
+              <el-input-number
+                v-if="node.await_reply"
+                v-model="node.wait_minutes"
+                :min="1"
+                :max="10080"
+                size="small"
+                controls-position="right"
+                @change="flowDirty = true"
+              />
+              <span v-if="node.await_reply" class="opening-hint">分钟后可进入复聊/结束</span>
+            </div>
+          </div>
+          <div class="foot">
+            <span v-if="flowDirty" class="dirty-hint">未保存</span>
+            <el-button type="primary" :loading="savingFlow" :disabled="!flowDirty" @click="saveFlow">保存流程</el-button>
+          </div>
+        </template>
+      </el-tab-pane>
     </el-tabs>
   </el-drawer>
 </template>
@@ -123,7 +188,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { agentApi } from '../../api/agent'
+import { agentApi, type AgentFlow, type AgentFlowNode } from '../../api/agent'
 import { mediaApi } from '../../api/core'
 import type { ServicePosition } from '../../api/types'
 
@@ -163,7 +228,7 @@ const MAX_BYTES = 20 * 1024 * 1024
 const props = defineProps<{ modelValue: boolean; position: ServicePosition | null }>()
 const emit = defineEmits<{ (e: 'update:modelValue', value: boolean): void; (e: 'changed'): void }>()
 
-const tab = ref<'persona' | 'opening'>('persona')
+const tab = ref<'persona' | 'opening' | 'flow'>('persona')
 const loading = ref(false)
 const persona = ref('')
 const savedPersona = ref('')
@@ -174,6 +239,10 @@ const savingOpening = ref(false)
 const uploading = ref(false)
 const draft = ref<OpeningDraft | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
+const flow = ref<AgentFlow | null>(null)
+const flowLoading = ref(false)
+const savingFlow = ref(false)
+const flowDirty = ref(false)
 
 const personaDirty = computed(() => persona.value !== savedPersona.value)
 const delaySeconds = computed({
@@ -195,15 +264,75 @@ async function load(): Promise<void> {
   if (!props.position) return
   loading.value = true
   draft.value = null
+  flowLoading.value = true
+  flowDirty.value = false
+  tab.value = 'persona'
   try {
-    const { data } = await agentApi.personaGet(props.position.id)
+    const [personaResult, flowResult] = await Promise.all([
+      agentApi.personaGet(props.position.id),
+      agentApi.flowGet(props.position.id),
+    ])
+    const { data } = personaResult
     persona.value = String(data.persona?.content || '')
     savedPersona.value = persona.value
     openings.value = (Array.isArray(data.openings) ? data.openings : []) as unknown as PersonaOpening[]
+    flow.value = flowResult.data?.version ? flowResult.data : null
   } catch (error: any) {
     ElMessage.error(error?.response?.data?.detail || 'Agent 配置加载失败')
   } finally {
     loading.value = false
+    flowLoading.value = false
+  }
+}
+
+function createBlankFlow(): void {
+  flow.value = {
+    position_id: Number(props.position?.id || 0), version: 0, status: 'disabled', entry_key: 'intro', canvas: {},
+    nodes: [{ node_key: 'intro', node_type: 'text', title: '招聘介绍', parts: [{ kind: 'text', body: '请填写招聘介绍', delay_ms: 2000 }], await_reply: true, wait_minutes: 15, max_times: 1, status: 'enabled' }],
+    edges: [{ from_key: 'intro', to_key: '', trigger: 'any_reply', priority: 0 }],
+  }
+  flowDirty.value = true
+}
+
+function onAwaitReplyChange(node: AgentFlowNode): void {
+  if (!flow.value) return
+  // The API requires a default edge for continuous nodes and an any_reply
+  // fallback for waiting nodes. Keep the migrated edge valid as the operator
+  // switches the gate in the editor.
+  const fallback = flow.value.edges.find((edge) =>
+    edge.from_key === node.node_key && (edge.trigger === 'default' || edge.trigger === 'any_reply'))
+  if (fallback) fallback.trigger = node.await_reply ? 'any_reply' : 'default'
+  flowDirty.value = true
+}
+
+async function migrateFlow(): Promise<void> {
+  if (!props.position) return
+  flowLoading.value = true
+  try {
+    const { data } = await agentApi.flowMigrate(props.position.id)
+    flow.value = data
+    flowDirty.value = false
+    ElMessage.success('已生成停用流程草稿')
+  } catch (error: any) {
+    ElMessage.error(error?.response?.data?.detail || '流程草稿生成失败')
+  } finally {
+    flowLoading.value = false
+  }
+}
+
+async function saveFlow(): Promise<void> {
+  if (!flow.value) return
+  savingFlow.value = true
+  try {
+    const { data } = await agentApi.flowSave(flow.value)
+    flow.value = data
+    flowDirty.value = false
+    ElMessage.success(data.status === 'enabled' ? '流程已启用' : '流程已保存并保持停用')
+    emit('changed')
+  } catch (error: any) {
+    ElMessage.error(error?.response?.data?.detail || '流程保存失败')
+  } finally {
+    savingFlow.value = false
   }
 }
 
@@ -492,6 +621,44 @@ async function move(index: number, offset: number): Promise<void> {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.flow-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.flow-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.flow-status {
+  width: 190px;
+  margin-left: auto;
+}
+
+.flow-card {
+  border: 1px solid var(--bd-border, #e8ecf3);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+}
+
+.flow-body {
+  margin-top: 8px;
+}
+
+.flow-options {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
 }
 
 .hidden-input {

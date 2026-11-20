@@ -86,6 +86,7 @@ import reply_store as rlog  # noqa: E402
 import client as agent_client  # noqa: E402
 import register as agent_register  # noqa: E402
 import remote_config as remote_cfg  # noqa: E402
+import flow_state as flow_state_mod  # noqa: E402
 
 # 剪贴板兼容 + 长消息解析 + 进会话后点输入框。
 # 抢前台仍用 core/win.py 原版（ShowWindow + AttachThreadInput）；compat 里
@@ -826,6 +827,22 @@ class Reporter:
                     }
         return self._save() if self._bridge_pending else True
 
+    def _advance_cursor_locked(self, event: dict) -> None:
+        """按已成功上报的事件推进会话游标（调用方必须已持 self._lock）。
+
+        event_id 形如 "<conv_id>:<msg_id>"，conv_id 自己也带冒号
+        （S:1688..._7881...），所以只能从右边切一次。
+        """
+        cid = str(event.get("contact_id") or "")
+        if not cid:
+            return
+        try:
+            mid = int(str(event.get("event_id") or "").rsplit(":", 1)[-1])
+        except (TypeError, ValueError):
+            return
+        if mid > self._cursor.get(cid, 0):
+            self._cursor[cid] = mid
+
     def _send_bridge_messages(self) -> None:
         """Retry pending records; the bridge deduplicates stable event IDs."""
         bridge = self.bridge
@@ -843,6 +860,12 @@ class Reporter:
                 bridge._request("POST", f"/api/v1/bridge/devices/{quote(bridge.device_code, safe='')}/{direction}", event)
                 with self._lock:
                     self._bridge_pending.pop(key, None)
+                    # 桥接上报成功也要推进游标。以前只有 _send_ingest 成功才推进，
+                    # 而云端机器没配 server/device_token（api=None），那条路从不执行，
+                    # 游标就永远停在旧值：_collect 每轮都挑出同一批「最早」的消息，
+                    # 正序截断 50 条后，新消息永远排不进去——网页端于是一直看不到
+                    # 新对话（2026-11-19 实测：15:52 之后的消息一条都没到 4222）。
+                    self._advance_cursor_locked(event)
                 self._save()
                 sent += 1
             except Exception as exc:  # noqa: BLE001
@@ -935,6 +958,108 @@ def scan(store: Store, cfg: dict) -> int:
             continue
         if rlog.record_incoming(m):
             added += 1
+    return added + scan_unread(store, cfg)
+
+
+def scan_unread(store: Store, cfg: dict) -> int:
+    """補掃企微未讀游標，避免舊會話未讀消息落在全局最近 60 條之外。"""
+    session_db = store._conn("session.db")
+    message_db = store._conn("message.db")
+    if session_db is None or message_db is None:
+        if session_db is not None:
+            session_db.close()
+        if message_db is not None:
+            message_db.close()
+        return 0
+
+    added = 0
+    cursor_message_count = 0
+    cursor_fallback_count = 0
+    selected_count = 0
+    unmatched_count = 0
+    try:
+        try:
+            unread_rows = session_db.execute(
+                "SELECT conversation_id,begin_cursor,current_cursor,unread_count "
+                "FROM unread_conversation_table WHERE unread_count>0"
+            ).fetchall()
+        except Exception:  # noqa: BLE001 - 企微不同版本可能没有未读游标表
+            return 0
+
+        names = {str(row.get("id") or ""): str(row.get("name") or "") for row in store.sessions()}
+        self_id = str(store.self_id() or "")
+        if not self_id:
+            return 0  # Cannot distinguish customer messages from our own sends.
+        for unread in unread_rows:
+            cid = str(unread["conversation_id"] or "")
+            if not cid:
+                continue
+            try:
+                cursor_rows = message_db.execute(
+                    "SELECT message_id FROM message_table "
+                    "WHERE conversation_id=? AND server_id>=? AND server_id<=? "
+                    "ORDER BY server_id",
+                    (cid, int(unread["begin_cursor"]), int(unread["current_cursor"])),
+                ).fetchall()
+            except Exception:  # noqa: BLE001 - skip an unsupported/corrupt conversation row
+                continue
+            ids = {str(row["message_id"]) for row in cursor_rows}
+            id_order = {str(row["message_id"]): index for index, row in enumerate(cursor_rows)}
+
+            count = max(1, int(unread["unread_count"] or 1))
+            messages = store.messages(cid, limit=min(5000, max(100, count * 8 + 20)))
+            inbound = [
+                message for message in messages
+                if not (self_id and str(message.get("sender_id") or "") == self_id)
+            ]
+            if ids:
+                cursor_message_count += len(ids)
+                incoming = [message for message in inbound if str(message.get("id")) in ids]
+            else:
+                # Some client builds store unread cursors and message server_id
+                # in different domains. Fall back to this conversation's newest
+                # inbound rows, bounded by its unread count and reply ledger.
+                cursor_fallback_count += 1
+                incoming = inbound[-count:]
+            if not incoming:
+                unmatched_count += 1
+                continue
+
+            # Match drain(): prefer the newest readable text to system/non-text
+            # records that can follow a customer's message in the unread cursor.
+            readable = [message for message in incoming if str(message.get("text") or "").strip()]
+            candidates = readable or incoming
+            latest = max(
+                candidates,
+                key=lambda message: (
+                    id_order.get(str(message.get("id")), -1),
+                    int(message.get("time") or 0), inbound.index(message),
+                ),
+            )
+            selected_count += 1
+            item = {
+                "id": latest.get("id"),
+                "conv_id": cid,
+                "conv_name": names.get(cid, "") or cid,
+                "text": latest.get("text") or "",
+                "type": latest.get("type") or 0,
+                "time": latest.get("time") or 0,
+            }
+            if not match_target(item, cfg["target"]):
+                continue
+            # An unread badge cannot revive an already consumed flow trigger.
+            has_flow = _flow_state is not None and _flow_state.get(cid) is not None
+            if rlog.record_unread(item, allow_requeue=not has_flow):
+                added += 1
+    finally:
+        session_db.close()
+        message_db.close()
+    if unread_rows:
+        log(
+            f"[未读扫描] 会话 {len(unread_rows)}，游标消息 {cursor_message_count}，"
+            f"游标回退 {cursor_fallback_count}，"
+            f"可处理 {selected_count}，入队/重排 {added}，未匹配 {unmatched_count}"
+        )
     return added
 
 
@@ -968,6 +1093,261 @@ def pick_reply(conv_id: str, cfg: dict) -> tuple[str, str]:
 
 
 _brain = None  # 由 main() 注入；None 表示用固定文本
+_flow_state: flow_state_mod.FlowState | None = None
+_flow_cache: dict | None = None
+_last_flow_followup_at = 0.0
+
+
+def _flow_store() -> flow_state_mod.FlowState:
+    """Lazy-open the durable flow cursor; tests can replace the module global."""
+    global _flow_state
+    if _flow_state is None:
+        _flow_state = flow_state_mod.FlowState(ROOT / "state" / "flow_state.db")
+    return _flow_state
+
+
+def _load_flow(*, force: bool = False) -> dict | None:
+    global _flow_cache
+    if _brain is None or not hasattr(_brain, "flow"):
+        return None
+    data = _brain.flow(force=force)
+    if isinstance(data, dict) and data.get("blocked"):
+        raise RuntimeError("设备流程鉴权失效，暂停自动发送")
+    _flow_cache = data if isinstance(data, dict) and data.get("ok", True) and data.get("nodes") else None
+    return _flow_cache
+
+
+def _flow_node(flow: dict, key: str) -> dict | None:
+    return next((node for node in flow.get("nodes", []) if node.get("node_key") == key), None)
+
+
+def _flow_for_row(row: dict | None, fallback: dict | None) -> dict | None:
+    """Use the per-conversation snapshot so publishing a new flow cannot rewrite an in-flight chat."""
+    if row:
+        raw = row.get("snapshot_json")
+        if raw:
+            try:
+                snapshot = json.loads(raw) if isinstance(raw, str) else raw
+                if isinstance(snapshot, dict) and snapshot.get("nodes"):
+                    return snapshot
+            except (TypeError, ValueError):
+                pass
+    return fallback
+
+
+def _flow_next(flow: dict, from_key: str, trigger: str, hint: str = "") -> dict | None:
+    edges = sorted([edge for edge in flow.get("edges", []) if edge.get("from_key") == from_key],
+                   key=lambda edge: int(edge.get("priority") or 0), reverse=True)
+    if trigger == "reply":
+        lowered = hint.casefold()
+        keyword = [edge for edge in edges if edge.get("trigger") == "keyword" and str(edge.get("condition_value") or "").casefold() in lowered]
+        if keyword:
+            return _flow_node(flow, keyword[0].get("to_key", ""))
+        edges = [edge for edge in edges if edge.get("trigger") == "any_reply"]
+    elif trigger == "timeout":
+        edges = [edge for edge in edges if edge.get("trigger") == "timeout"]
+    else:
+        edges = [edge for edge in edges if edge.get("trigger") == "default"]
+    return _flow_node(flow, edges[0].get("to_key", "")) if edges and edges[0].get("to_key") else None
+
+
+def _send_flow_part(store: Store, name: str, cid: str, part: dict, log_fn) -> tuple[str, str]:
+    """Send one flow part through the existing guarded core sender."""
+    kind = str(part.get("kind") or "text")
+    body = str(part.get("body") or "").strip()
+    media = str(part.get("media_name") or "").strip()
+    if kind == "text" and body:
+        result = core_send.send(store, name, body, expect_id=cid if cid.startswith(("S:", "R:")) else "",
+                                verify_db=True, log=log_fn)
+        detail = str(result.get("detail") or "发送失败")
+        if result.get("ok") and result.get("conversation_id") != cid:
+            return "unknown", detail
+        return ("sent" if result.get("ok") else "failed"), detail
+    if kind in ("image", "video") and media:
+        # paste_media() deliberately assumes the guarded text sender has already
+        # opened and verified the target conversation. A media-only node cannot
+        # establish that target safely, so hold it for an operator instead of
+        # risking a paste into whichever chat currently has focus.
+        if not part.get("target_verified"):
+            return "failed", "媒体节点前必须在本轮先发送已验证落点的文本消息，待人工核对"
+        ok, detail = core_send.paste_media(media, log=log_fn)
+        return ("sent" if ok else "unknown"), str(detail)
+    return "failed", "流程节点内容为空"
+
+
+def _run_flow(store: Store, cfg: dict, cid: str, name: str, flow: dict, *, node_key: str, step_index: int = 0, hint: str = "") -> str:
+    """Run from a node until the next await gate; no chat call is made here."""
+    global _last_reply_at, _last_error, _consecutive_send_failures
+    state = _flow_store()
+    current = _flow_node(flow, node_key)
+    if current is None:
+        state.set_phase(cid, "held", error="流程节点不存在，待人工核对")
+        return "held"
+    state.set_phase(cid, "running")
+    verified_target = False
+    visited = set()
+    backoff = 1 + min(_consecutive_send_failures, 3)
+    wait = float(cfg.get("cooldown", 8)) * backoff - (time.time() - _last_reply_at)
+    if wait > 0:
+        time.sleep(wait)
+    while current:
+        key = str(current.get("node_key"))
+        if key in visited:
+            state.set_phase(cid, "held", error="流程快照存在循环")
+            return "held"
+        visited.add(key)
+        state.set_step(cid, key, int(step_index))
+        state.update(cid, wait_minutes=max(1, int(current.get("wait_minutes") or 15)))
+        parts = current.get("parts") or []
+        idx = int(step_index)
+        while idx < len(parts):
+            part = parts[idx] if isinstance(parts[idx], dict) else {}
+            if not state.claim_step(cid, key, idx, body=str(part.get("body") or ""), media_name=str(part.get("media_name") or "")):
+                prior = next((row for row in state.outbox(cid, key) if row["part_index"] == idx), {})
+                if prior.get("status") != "sent":
+                    state.set_phase(cid, "held", error="当前条目未确认送达，不自动跳过或重发")
+                    return "held"
+                idx += 1
+                state.set_step(cid, key, idx)
+                continue
+            try:
+                if part.get("kind") in ("image", "video"):
+                    ok, detail = media_fetch.ensure_media(str(part.get("media_name") or ""),
+                        "视频" if part.get("kind") == "video" else "图片",
+                        base_url=str(cfg.get("bridge_server") or ""), token=str(cfg.get("bridge_token") or ""), log=log)
+                    if not ok:
+                        raise ValueError(f"媒体预取失败：{detail}")
+                _last_reply_at = time.time()
+                status, detail = _send_flow_part(store, name, cid, {**part, "target_verified": verified_target},
+                                               lambda msg: log(f"    [流程] {msg}"))
+            except Exception as exc:  # a crash after Enter has an unknown result
+                status, detail = "unknown", f"{type(exc).__name__}: {exc}"
+            state.mark_outbox(cid, key, idx, status, detail if status != "sent" else "")
+            if status != "sent":
+                state.set_phase(cid, "held", error=detail)
+                _last_error = detail[:200]
+                _consecutive_send_failures += 1
+                log(f"[流程] {name} 暂停：{detail}", level="warning", scope="flow")
+                return "held"
+            if part.get("kind", "text") == "text":
+                verified_target = True
+            _last_error, _consecutive_send_failures = "", 0
+            idx += 1
+            state.set_step(cid, key, idx)
+            # Also keep the configured delay between two adjacent nodes.
+            time.sleep(max(0.0, float(part.get("delay_ms", current.get("delay_ms", 2000))) / 1000.0))
+        if current.get("node_type") == "followup":
+            state.mark_followup_sent(cid)
+            return "followup_sent"
+        if bool(current.get("await_reply")):
+            state.set_phase(cid, "awaiting", await_since=time.time())
+            return "awaiting"
+        nxt = _flow_next(flow, key, "reply" if current.get("node_type") == "branch" else "default", hint)
+        if nxt is None and current.get("node_type") == "branch":
+            nxt = _flow_next(flow, key, "default")
+        if nxt is None:
+            state.set_phase(cid, "expired")
+            return "expired"
+        current, step_index = nxt, 0
+    state.set_phase(cid, "expired")
+    return "expired"
+
+
+def _flow_summary(cid: str) -> list[str]:
+    rows = _flow_store().outbox(cid)
+    return [str(row.get("body") or row.get("media_name") or "").strip() for row in rows if row.get("status") == "sent" and (row.get("body") or row.get("media_name"))]
+
+
+def _flow_tick(store: Store, cfg: dict, wecom_state: str) -> None:
+    """Run at most one due follow-up per minute, then close stale follow-ups."""
+    global _last_flow_followup_at
+    if cfg.get("dry_run"):
+        return
+    now = time.time()
+    state = _flow_store()
+    for row in state.stale_followups(now):
+        state.set_phase(str(row["session_key"]), "expired", error="复聊后未回复")
+    state.daily_snapshot(now)
+    if wecom_state != "online" or _brain is None or _consecutive_send_failures:
+        return
+    # Recovery must not require a fresh customer message to finish an interrupted
+    # node. Only rows whose local outbox was reconciled can reach running here.
+    for row in state.list(limit=10000):
+        cid, name = str(row["session_key"]), str(row.get("conv_name") or "")
+        if row["phase"] != "running" or cid in remote_cfg.takeover_sessions() or cid in remote_cfg.abandoned_sessions():
+            continue
+        if not name or name == cid or is_system_conv(cid, name):
+            state.set_phase(cid, "held", error="流程续发缺少会话名")
+            continue
+        saved = _flow_for_row(row, None)
+        if saved is None:
+            state.set_phase(cid, "held", error="流程续发缺少快照")
+            continue
+        _run_flow(store, cfg, cid, name, saved, node_key=str(row["node_key"]), step_index=int(row["step_index"]))
+        return
+    if now - _last_flow_followup_at < 60:
+        return
+    # Windows may be configured for UTC; business quiet hours are always UTC+8.
+    china_hour = (datetime.fromtimestamp(now, timezone.utc).hour + 8) % 24
+    if china_hour >= 21 or china_hour < 9:
+        return
+    flow = _load_flow()
+    for row in state.due_followups(now):
+        cid = str(row["session_key"])
+        name = str(row.get("conv_name") or "")
+        if cid in remote_cfg.takeover_sessions() or cid in remote_cfg.abandoned_sessions():
+            continue
+        if not name or name == cid or is_system_conv(cid, name):
+            state.set_phase(cid, "held", error="复聊目标没有可验证的会话名")
+            continue
+        row_flow = _flow_for_row(row, flow)
+        if row_flow is None:
+            state.set_phase(str(row["session_key"]), "expired", error="流程快照不存在")
+            continue
+        current = _flow_node(row_flow, str(row.get("node_key") or ""))
+        nxt = _flow_next(row_flow, str(row.get("node_key") or ""), "timeout")
+        if current is None or nxt is None:
+            state.set_phase(str(row["session_key"]), "expired", error="没有可用的复聊节点")
+            continue
+        if not state.claim_device_followup(now):
+            break
+        if not state.claim_followup(cid):
+            continue
+        _last_flow_followup_at = now  # failed attempts also consume the minute
+        result = _run_flow(store, cfg, cid, name, row_flow, node_key=str(nxt.get("node_key")), step_index=0)
+        log(f"[流程] {cid} 复聊结果：{result}", scope="flow")
+        break
+
+
+def _flow_report(cfg: dict) -> None:
+    if _brain is None or not hasattr(_brain, "report_state") or _flow_state is None:
+        return
+    try:
+        def iso(value):
+            return datetime.fromtimestamp(float(value), timezone.utc).isoformat().replace("+00:00", "Z") if value else None
+        rows = _flow_state.list(resolve_device_code(cfg))
+        _brain.report_state([{
+            "session_key": row.get("session_key"), "position_id": row.get("position_id", 0),
+            "flow_version": row.get("flow_version", 0), "node_key": row.get("node_key", ""),
+            "step_index": row.get("step_index", 0), "phase": row.get("phase", "idle"),
+            "await_since": iso(row.get("await_since")), "followup_sent_at": iso(row.get("followup_sent_at")),
+            "followup_round": row.get("followup_round", 0), "revision": row.get("revision", 1),
+            "snapshot": json.loads(row.get("snapshot_json") or "{}"), "conv_name": row.get("conv_name", ""),
+            "wait_minutes": row.get("wait_minutes", 15), "last_inbound_at": row.get("last_inbound_at", 0),
+            "last_error": row.get("last_error", ""),
+        } for row in rows])
+    except Exception as exc:  # noqa: BLE001
+        log(f"[流程状态] 本地汇总失败：{exc}", level="warning")
+
+
+def _flow_reconcile(cfg: dict) -> None:
+    state = _flow_store()
+    if _brain is not None and hasattr(_brain, "states"):
+        rows = _brain.states()
+        if rows is not None:
+            state.restore_mirror(rows, resolve_device_code(cfg))
+    state.reconcile(time.time())
+    state.daily_snapshot()
 
 
 def build_brain(cfg: dict, log_fn=print):
@@ -1164,6 +1544,83 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             log(f"跳过 {cid}：会话没有可搜索的名字")
             continue
 
+        # 新节点流程拥有当前会话时，流程是这一轮的唯一出口：首次接触和
+        # await_reply 的客户消息都只推进节点，不再同时调用 chat。
+        hint = (it["in_text"] or "").strip()
+        flow_state = _flow_store() if not dry else None
+        flow_row = flow_state.get(cid) if flow_state is not None else None
+        flow = _flow_for_row(flow_row, _load_flow())
+        if flow_row is not None and (flow_row.get("phase") == "held" or
+                (flow is None and flow_row.get("phase") in ("running", "awaiting", "followup_due"))):
+            flow_state.set_phase(cid, "held", error=str(flow_row.get("last_error") or "流程快照缺失"))
+            rlog.mark_held(mid, cid, "流程待人工核对")
+            stats["blocked"] += 1
+            continue
+        if flow_row is not None and flow_row.get("phase") != "running" and str(mid) == flow_row.get("last_inbound_id"):
+            rlog.mark_skipped(mid, cid, "此入站消息已经推进过流程，重启后不重复消费")
+            stats["skipped"] += 1
+            continue
+        # Old contacts stay in free conversation after the upgrade.
+        first_contact = _is_first_contact(cid, greeted) if flow_row is None and not dry else False
+        if flow is not None and not dry and flow_state is not None and (
+            (flow_row is None and first_contact) or
+            (flow_row is not None and flow_row.get("phase") in ("idle", "running", "awaiting", "followup_due", "held"))
+        ):
+            if flow_row is None or flow_row.get("phase") == "idle":
+                entry = _flow_node(flow, str(flow.get("entry_key") or "")) or (flow.get("nodes") or [None])[0]
+                if entry is not None:
+                    flow_state.upsert(cid, device_code=resolve_device_code(cfg), position_id=int(flow.get("position_id") or 0),
+                                      flow_version=int(flow.get("version") or 0), node_key=str(entry.get("node_key")),
+                                      phase="running", conv_name=name, snapshot_json=json.dumps(flow, ensure_ascii=False))
+                    flow_state.update(cid, last_inbound_at=float(it["msg_time"] or 0), last_inbound_id=str(mid))
+                    result = _run_flow(store, cfg, cid, name, flow, node_key=str(entry.get("node_key")), step_index=0, hint=hint)
+                    rlog.mark_skipped(mid, cid, "节点流程启动，首次消息不再同轮调用 chat")
+                    stats["skipped"] += 1
+                    if result == "held":
+                        break  # do not expand a wrong-target failure to another contact
+                    continue
+            elif flow_row.get("phase") == "running":
+                result = _run_flow(store, cfg, cid, name, flow, node_key=str(flow_row.get("node_key")), step_index=int(flow_row.get("step_index") or 0), hint=hint)
+                # Keep the new inbound pending; only the interrupted output ran.
+                if str(mid) == flow_row.get("last_inbound_id"):
+                    rlog.mark_skipped(mid, cid, "恢复已消费入站触发的流程，不重复推进")
+                if result == "held":
+                    break
+                continue
+            elif flow_row.get("phase") in ("awaiting", "followup_due"):
+                if not hint:
+                    rlog.mark_skipped(mid, cid, "空系统事件不推进等待节点")
+                    stats["skipped"] += 1
+                    continue
+                flow_state.update(cid, last_inbound_at=float(it["msg_time"] or 0), last_inbound_id=str(mid))
+                current = _flow_node(flow, str(flow_row.get("node_key")))
+                nxt = _flow_next(flow, str(flow_row.get("node_key")), "reply", hint)
+                result = "replied"
+                if current is not None and nxt is not None:
+                    flow_state.set_phase(cid, "replied")
+                    flow_state.set_step(cid, str(nxt.get("node_key")), 0)
+                    result = _run_flow(store, cfg, cid, name, flow, node_key=str(nxt.get("node_key")), step_index=0, hint=hint)
+                else:
+                    flow_state.set_phase(cid, "replied")
+                rlog.mark_skipped(mid, cid, "客户回复推进节点，跳过 chat")
+                stats["skipped"] += 1
+                if result == "held":
+                    break
+                continue
+            else:  # held：只保留给人工，不自动推进
+                rlog.mark_held(mid, cid, "流程发送失败，待人工处理")
+                stats["skipped"] += 1
+                continue
+
+        if flow_row is not None:
+            # Never fall through to the legacy opening after a completed flow.
+            greeted.add(cid)
+            _save_greeted(greeted)
+            if not dry and flow_state is not None:
+                flow_state.update(cid, last_inbound_at=float(it["msg_time"] or 0))
+                if flow_row.get("phase") == "followup_sent":
+                    flow_state.set_phase(cid, "replied")
+
         if _brain is not None:
             hint = (it["in_text"] or "").strip()
             agent_medias: list[tuple[str, str]] = []
@@ -1204,6 +1661,9 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                     _brain.log_receipt(cid, seq, kind, "failed", result["detail"])
                                     _consecutive_send_failures += 1
                                     log(f"    [开场 {seq}] 发送失败：{result['detail']}", level="warning")
+                                    rlog.mark_held(mid, cid, "开场发送失败，暂停本轮，待人工核对")
+                                    stats["blocked"] += 1
+                                    return stats
                             elif kind in ("image", "video") and (item["media_name"] or "").strip():
                                 # 真实发送媒体：先检索本地 media 目录（约束 3：本地有
                                 # 就不再下载），缺了再从 4222 媒体库拉（bridge 通道，
@@ -1236,6 +1696,9 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                         greeted.add(cid)
                         _save_greeted(greeted)
                         log(f"[开场] {name} 播完 {sent_items}/{len(ores['items'])} 条文本，之后进入 Agent 对话")
+                        rlog.mark_skipped(mid, cid, "首次接触只播开场，不再同轮调用 chat")
+                        stats["skipped"] += 1
+                        continue
                     else:
                         log(f"    [开场] 没取到清单（{ores.get('detail')}），直接进对话")
                 if not hint and not dry:
@@ -1243,7 +1706,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 elif hint:
                     # 会话记忆在服务端：只报 session_key（会话 id）+ 这句话。
                     # 服务端自己持有全量上下文（含开场序列），客户端不传历史。
-                    res = _brain.chat(hint, cid)
+                    res = _brain.chat(hint, cid, sent_summary=_flow_summary(cid) if flow is not None else None)
                     agent_medias = res.get("medias") or []
                 if res.get("skip"):
                     if not dry:
@@ -1344,7 +1807,11 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                         verify_db=True,
                         log=lambda s: log(f"    {s}", scope="send", message_id=mid, trace_id=trace),
                     )
-                    if not result["ok"]:
+                    if (
+                        not result["ok"]
+                        or "回读失败" in str(result.get("detail") or "")
+                        or (result.get("conversation_id") and str(result["conversation_id"]) != cid)
+                    ):
                         break
                 else:
                     result = {"ok": True, "detail": "纯媒体段，无文本"}
@@ -1364,7 +1831,8 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     time.sleep(2.0)
             duration_ms = int((time.time() - send_started) * 1000)
             detail_text = str(result.get("detail") or "")
-            if result["ok"] and "回读失败" in detail_text:
+            wrong_conversation = bool(result.get("conversation_id")) and str(result["conversation_id"]) != cid
+            if (result["ok"] and "回读失败" in detail_text) or wrong_conversation:
                 # 回车已按但回读解密库确认不了落点：结果不明。不能记 sent
                 #（可能静默丢失），也不能记 failed（下轮自动补发可能重复发送）。
                 # 记 unknown 不参与自动补发，--retry-held 由人工核对后重新入队。
@@ -1372,9 +1840,10 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 _last_error = detail_text[:200]
                 _consecutive_send_failures += 1
                 stats["unknown"] += 1
-                log("    回读未确认：按 unknown 记账，不自动重发，待人工核对（--retry-held 可重新入队）",
+                log("    发送落点未确认：按 unknown 记账，不自动重发，本批停止，待人工核对",
                     level="warning", scope="send", message_id=mid, trace_id=trace,
                     duration_ms=duration_ms)
+                break
             elif result["ok"]:
                 rlog.mark_sent(mid, cid, scene, text, duration_ms=duration_ms)
                 _consecutive_send_failures = 0
@@ -2069,6 +2538,12 @@ def main() -> int:
         if reporter is not None:
             reporter.remote_config = remote
 
+    # 流程状态先对账，再开始扫描；未知发送结果永不自动重放。
+    try:
+        _flow_reconcile(cfg)
+    except Exception as exc:  # noqa: BLE001
+        log(f"[流程状态] 启动对账失败：{exc}", level="warning")
+
     # 登录二维码上传器：企微掉登录时把扫码窗截图送到服务端，网页上就能扫。
     # 机器在云端，没人看得到那块屏幕——这是唯一能让用户自己扫码的路径。
     qr_pusher = login_qr.LoginQrPusher()
@@ -2083,12 +2558,17 @@ def main() -> int:
         # 登录码过期自动点「刷新」（定位窗口→相对坐标点击→截图验证），
         # 仅未登录登录窗口、线程化不阻塞；用户 2026-11-18 明确确认。
         login_refresh.maybe_refresh_expired_qr(log=log)
-        qr_pusher.tick(wecom_state, remote_client, log=log)
+        # 推码状态降级：主窗原地变登录页时 detect 仍报 online（类名不变），
+        # 但发送连续失败（焦点校验不过）= 实际未登录——降级触发推码。
+        qr_state = "login_required" if _consecutive_send_failures >= 2 else wecom_state
+        qr_pusher.tick(qr_state, remote_client, log=log)
         code_fetcher.tick(wecom_state, remote_client, log=log)
         if reporter is not None:
             reporter.tick(wecom_state, pending_count(), force=True)
         scan(store, cfg)
         result = drain(store, cfg, dry=cfg["dry_run"], wecom_state=wecom_state)
+        _flow_tick(store, cfg, wecom_state)
+        _flow_report(cfg)
         pump_safely(store, cfg, reporter, wecom_state)
         if reporter is not None:
             reporter.wait(25)  # 等心跳/上报发完再退出，最多 25 秒
@@ -2102,12 +2582,17 @@ def main() -> int:
     # 登录码过期自动点「刷新」（定位窗口→相对坐标点击→截图验证），
     # 仅未登录登录窗口、线程化不阻塞；用户 2026-11-18 明确确认。
     login_refresh.maybe_refresh_expired_qr(log=log)
-    qr_pusher.tick(wecom_state, remote_client, log=log)
+    # 推码状态降级：主窗原地变登录页时 detect 仍报 online（类名不变），
+    # 但发送连续失败（焦点校验不过）= 实际未登录——降级触发推码。
+    qr_state = "login_required" if _consecutive_send_failures >= 2 else wecom_state
+    qr_pusher.tick(qr_state, remote_client, log=log)
     code_fetcher.tick(wecom_state, remote_client, log=log)
     if reporter is not None:
         reporter.tick(wecom_state, pending_count(), force=True)
     scan(store, cfg)
     drain(store, cfg, dry=cfg["dry_run"], wecom_state=wecom_state)
+    _flow_tick(store, cfg, wecom_state)
+    _flow_report(cfg)
     pump_safely(store, cfg, reporter, wecom_state)
     last_sig = wal_signature(store.data_dir)
     log("开始监听（Ctrl+C 退出）")
@@ -2131,6 +2616,8 @@ def main() -> int:
                     f"[自检] 企微状态 {wecom_state} → {state}"
                     f"（{WECOM_STATE_TEXT.get(state, '未知')}）"
                 )
+                if state == "online":
+                    _flow_reconcile(cfg)
                 wecom_state = state
             # 掉登录时把企微窗口拉到前台并提示扫码（内部有 120s 冷却，非登录态不动作）
             login_watch.alert_login_required(wecom_state, log=log)
@@ -2138,7 +2625,10 @@ def main() -> int:
             # 仅未登录登录窗口、线程化不阻塞；用户 2026-11-18 明确确认。
             login_refresh.maybe_refresh_expired_qr(log=log)
             # 掉登录时把扫码窗截图传到网页（内部约 30s 一次；恢复后自动清除旧图）
-            qr_pusher.tick(wecom_state, remote_client, log=log)
+            # 推码状态降级：主窗原地变登录页时 detect 仍报 online（类名不变），
+            # 但发送连续失败（焦点校验不过）= 实际未登录——降级触发推码。
+            qr_state = "login_required" if _consecutive_send_failures >= 2 else wecom_state
+            qr_pusher.tick(qr_state, remote_client, log=log)
             code_fetcher.tick(wecom_state, remote_client, log=log)
             if reporter is not None:
                 reporter.tick(wecom_state, pending_count())
@@ -2152,6 +2642,8 @@ def main() -> int:
             if n:
                 log(f"新登记 {n} 条")
             drain(store, cfg, dry=cfg["dry_run"], wecom_state=wecom_state)
+            _flow_tick(store, cfg, wecom_state)
+            _flow_report(cfg)
             pump_safely(store, cfg, reporter, wecom_state)
         except KeyboardInterrupt:
             log("已停止")

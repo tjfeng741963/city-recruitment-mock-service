@@ -1,5 +1,5 @@
 import http from './http'
-import type { AgentDevice, Factory, OkResult, PageQuery, PageResult } from './types'
+import type { AgentDevice, Factory, OkResult, PageQuery, PageResult, ServicePosition } from './types'
 
 /** ---------- 坐席设备 ---------- */
 export interface AgentDeviceFactory {
@@ -12,6 +12,7 @@ export interface AgentDeviceFactory {
 export interface AgentDeviceItem extends AgentDevice {
   factory_ids?: number[]
   factories?: AgentDeviceFactory[]
+  position_id?: number | null
   group_chat?: string
   queue_depth?: number
   queue_stale?: string
@@ -78,6 +79,8 @@ export const devicesApi = {
   /** 设备表单的工厂多选选项（基础配置域接口，仅在坐席域内聚合使用） */
   factoryOptions: () =>
     http.get<PageResult<Factory>>('/api/v1/factories', { params: { page: 1, page_size: 1000 } }),
+  positionOptions: () =>
+    http.get<PageResult<ServicePosition>>('/api/v1/service-positions', { params: { page: 1, page_size: 1000 } }),
 }
 
 /** ---------- 会话与消息 ---------- */
@@ -219,6 +222,46 @@ export const oldFriendsApi = {
 }
 
 /** ---------- 开场白 / 人设 / 聊天 ---------- */
+export interface AgentFlowPart {
+  kind: 'text' | 'image' | 'video' | string
+  body?: string
+  media_name?: string
+  delay_ms?: number
+}
+
+export interface AgentFlowNode {
+  node_key: string
+  node_type: 'text' | 'image' | 'video' | 'followup' | 'branch' | 'end' | string
+  title?: string
+  body?: string
+  parts?: AgentFlowPart[]
+  await_reply?: boolean
+  wait_minutes?: number
+  max_times?: number
+  status?: string
+  [key: string]: unknown
+}
+
+export interface AgentFlowEdge {
+  from_key: string
+  to_key: string
+  trigger: string
+  condition_value?: string
+  priority?: number
+  [key: string]: unknown
+}
+
+export interface AgentFlow {
+  position_id: number
+  version: number
+  status: 'disabled' | 'enabled' | string
+  entry_key: string
+  canvas?: Record<string, unknown>
+  nodes: AgentFlowNode[]
+  edges: AgentFlowEdge[]
+  [key: string]: unknown
+}
+
 export const agentApi = {
   persona: () => http.get<Record<string, unknown>>('/api/v1/agent-persona'),
   personaGet: (positionId: number | string) =>
@@ -240,6 +283,12 @@ export const agentApi = {
     http.delete<OkResult>(`/api/v1/agent-opening/${id}`),
   reorderOpenings: (payload: Record<string, unknown>) =>
     http.post<OkResult>('/api/v1/agent-opening/reorder', payload),
+  flowGet: (positionId: number | string) =>
+    http.get<AgentFlow>(`/api/v1/agent-flow`, { params: { position_id: positionId } }),
+  flowMigrate: (positionId: number | string) =>
+    http.post<AgentFlow>('/api/v1/agent-flow/migrate', { position_id: positionId }),
+  flowSave: (payload: AgentFlow) =>
+    http.put<AgentFlow>('/api/v1/agent-flow', payload),
   logOpening: (payload: Record<string, unknown>) =>
     http.post<OkResult>('/api/v1/agent/opening/log', payload),
   chat: (payload: Record<string, unknown>) =>

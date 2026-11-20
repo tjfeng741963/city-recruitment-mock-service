@@ -30,6 +30,7 @@ import { registerPositionScriptRoutes } from "./modules/agent/position-scripts.r
 import { registerAgentPersonaRoutes } from "./modules/agent/agent-persona.routes.js";
 import { registerAgentChatRoutes } from "./modules/agent/agent-chat.routes.js";
 import { registerApiDebugRoutes } from "./modules/agent/api-debug.routes.js";
+import { registerAgentFlowRoutes } from "./modules/agent/agent-flow.routes.js";
 import { EventBus, createStreamNotifier } from "./modules/messaging/stream-events.js";
 
 declare module "fastify" {
@@ -53,6 +54,9 @@ const DEVICE_TOKEN_ROUTES = new Set(["heartbeat", "claim", "receipts", "inbound"
     // 媒体下载由设备 token 或 X-Profile-Token 鉴权（路由内校验），
     // 因此这里的 Bearer 不能当用户 JWT 解析，否则设备 token 会被判 401。
     "GET /api/v1/agent/media/:name",
+    "GET /api/v1/agent/flow",
+    "GET /api/v1/agent/state",
+    "POST /api/v1/agent/state",
     // 开场清单与回执也是设备调的：设备令牌在路由内校验（与媒体下载同一套）。
     "GET /api/v1/agent/opening",
     "POST /api/v1/agent/opening/log",
@@ -190,6 +194,7 @@ export function buildServer() {
   // Agent 会话 + 调试台：开场清单、开场回执、一轮对话（人设 + 事实 + 历史）
   registerAgentChatRoutes(app, db);
   // 接口调试台的后端：把 onRoute 收集到的真实路由原样吐出来
+  registerAgentFlowRoutes(app, db);
   registerApiDebugRoutes(app, routeCatalog);
   registerPositionFactoryRoutes(app, db);
   registerRelationRoutes(app, db);

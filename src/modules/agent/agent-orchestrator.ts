@@ -137,6 +137,7 @@ export function buildOrchestration(options: {
   now?: string;
   history: DialogueItem[];
   input: string;
+  sentSummary?: string[];
 }): { messages: ChatMessage[]; scripts: ScriptEntry[] } {
   const scripts = parseScripts(options.persona);
   const scriptSection = scripts.length
@@ -166,9 +167,17 @@ export function buildOrchestration(options: {
   ].join("\n");
 
   const messages: ChatMessage[] = [{ role: "system", content: system }];
+  const sentSummary = (options.sentSummary || []).map((item) => String(item).trim()).filter(Boolean).slice(0, 50);
+  if (sentSummary.length) {
+    messages.push({
+      role: "system",
+      content: "# 已经发送过的流程内容\n" + sentSummary.map((item) => `- ${item}`).join("\n") +
+        "\n这些内容已经真实发给客户；回答时不要把整段再次复述，只有客户明确追问其中字段时才简短回答。",
+    });
+  }
   // 开场序列按 seq 已序注入：信封与输出规范同构（capture/interview 留空），
   // 模型看到的就是「我自己刚发过这串」。媒体条目也注入，模型才知道发过哪张图哪个视频。
-  for (const item of options.opening || []) {
+  for (const item of options.sentSummary === undefined ? options.opening || [] : []) {
     const kind = String(item.kind || "text");
     if (kind === "text") {
       const content = String(item.content || "").trim();

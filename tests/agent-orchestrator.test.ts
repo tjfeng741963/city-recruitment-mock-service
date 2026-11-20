@@ -76,6 +76,20 @@ describe("agent orchestrator", () => {
     expect(messages[0].content).toContain("用该类原文回答");
   });
 
+  it("sentSummary 只注入真实已发送内容，并要求模型避免整段复述", () => {
+    const { messages } = buildOrchestration({
+      persona: PERSONA,
+      facts: { wage_text: "160/班" },
+      history: [],
+      sentSummary: ["招聘要求：18-45 岁", "薪资：160/班"],
+      opening: [{kind:"text",content:"这段从未真正发送过"}],
+      input: "工资多少",
+    });
+    expect(messages.some((message) => message.content.includes("已经发送过的流程内容"))).toBe(true);
+    expect(messages.find((message) => message.content.includes("已经发送过的流程内容"))?.content).toContain("不要把整段再次复述");
+    expect(messages.some(message => message.content.includes("这段从未真正发送过"))).toBe(false);
+  });
+
   it("system 注入今天日期与 interview 规范：面试档案由模型判断，无硬提取", () => {
     const { messages } = buildOrchestration({
       persona: PERSONA,

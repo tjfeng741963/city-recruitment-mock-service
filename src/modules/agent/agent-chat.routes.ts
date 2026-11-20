@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
 import { authorizeProfileRequest } from "./profile.routes.js";
 import { isValidDeviceToken } from "./position-scripts.routes.js";
+import { firstFlowSegment } from "./agent-flow.routes.js";
 import { complete, llmConfig, parseJsonObject } from "./agent-llm.js";
 import {
   buildOrchestration,
@@ -13,6 +14,7 @@ import {
   type DialogueItem,
   type OpeningItem,
 } from "./agent-orchestrator.js";
+import { devicePositionId } from "../../shared/device-factories.js";
 
 /**
  * Agent 会话接口 + 调试台的后端（迁移 038 的消费侧）。
@@ -86,16 +88,9 @@ function positionRow(db: DatabaseSync, positionId: number): PositionRow | undefi
     .get(positionId) as PositionRow | undefined;
 }
 
-/** 设备 → 岗位。设备绑定在 agent_devices.data_json.position_id。 */
+/** 设备 → 岗位。绑定工厂变化后自动淘汰不属于该工厂的旧岗位。 */
 function positionOfDevice(db: DatabaseSync, deviceCode: string): number {
-  const row = db
-    .prepare(
-      `SELECT json_extract(data_json,'$.position_id') AS position_id
-         FROM agent_devices
-        WHERE json_extract(data_json,'$.device_code')=? AND status='enabled'`,
-    )
-    .get(deviceCode) as { position_id: number | null } | undefined;
-  return Number(row?.position_id ?? 0);
+  return devicePositionId(db, deviceCode);
 }
 
 function buildFacts(db: DatabaseSync, row: PositionRow | undefined): Record<string, string> {
@@ -269,7 +264,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
 
   // ── 客户端：开场清单 + 人设 ────────────────────────────────────
   // 鉴权与媒体下载同一套：X-Profile-Token（服务间）或设备 Bearer token。
-  app.get<{ Querystring: { device_code?: string } }>(
+  app.get<{ Querystring: { device_code?: string; mode?: string } }>(
     "/api/v1/agent/opening",
     async (request, reply) => {
       if (!authorizeProfileRequest(request) && !isValidDeviceToken(db, request)) {
@@ -284,7 +279,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       return {
         position_id: positionId,
         persona: personaOf(db, positionId),
-        items: openingOf(db, positionId).map((item) => ({
+        items: request.query.mode === "flow" ? firstFlowSegment(db, positionId) : openingOf(db, positionId).map((item) => ({
           seq: Number(item.seq),
           kind: String(item.kind),
           content: String(item.content ?? ""),
@@ -635,6 +630,9 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
 
     const input = text(body.text).trim();
     if (!input) return reply.code(422).send({ detail: "text is required" });
+    const sentSummary = Array.isArray(body.sent_summary)
+      ? body.sent_summary.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).slice(0, 50)
+      : undefined;
 
     const row = positionRow(db, positionId);
     if (!row) return reply.code(404).send({ detail: "position not found" });
@@ -693,7 +691,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
     }));
     // 编排：system(人设+今天日期+事实+话术库+规则) + 开场序列 + 全量历史 + 当前这句
     // （DeepSeek 无状态多轮拼接；上下文归服务端持有）
-    const { messages, scripts } = buildOrchestration({ persona, facts, opening, now: nowLabel, history, input });
+    const { messages, scripts } = buildOrchestration({ persona, facts, opening, now: nowLabel, history, input, sentSummary });
 
     // dry：只回拼好的 prompt，不调模型、不写会话。调试台用它确认
     // 「人设 + 事实 + 话术库 + 开场 + 历史」有没有喂对。

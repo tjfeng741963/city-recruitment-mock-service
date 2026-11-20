@@ -271,9 +271,16 @@
     document.body.append(mask);
 
     const close = () => {
+      if (state.flowDirty && !window.confirm("流程尚未保存，确定关闭并放弃修改？")) return;
       document.removeEventListener("keydown", onKey);
+      window.removeEventListener("beforeunload", onBeforeUnload);
       mask.remove();
     };
+    function onBeforeUnload(event) {
+      if (!state.flowDirty) return;
+      event.preventDefault(); event.returnValue = "";
+    }
+    window.addEventListener("beforeunload", onBeforeUnload);
     function onKey(event) {
       if (event.key === "Escape") close();
     }
@@ -312,6 +319,8 @@
       editing: 0, // 正在编辑的条目 id，0 = 不在编辑
       draft: null, // 新条目草稿 {kind, content, media_name, delay_ms}
       error: "",
+      flow: null,
+      flowDirty: false,
       loading: true,
     };
 
@@ -326,6 +335,7 @@
     const tabButtons = [
       { key: "persona", label: "人设" },
       { key: "opening", label: "开场" },
+      { key: "flow", label: "流程" },
     ].map((item) => {
       const button = el("button", "rk-pa-tab", item.label);
       button.type = "button";
@@ -346,6 +356,8 @@
       const left = el("div", "left");
       if (state.tab === "opening") {
         left.textContent = `共 ${state.openings.length} 条 · 每条至少间隔 2 秒，上一条发送成功才发下一条`;
+      } else if (state.tab === "flow") {
+        left.textContent = state.flow?.version ? `流程 v${state.flow.version} · ${state.flow.nodes.length} 个节点` : "还没有节点流程";
       } else {
         left.textContent = state.savedPersona ? "人设已保存" : "还没有人设";
       }
@@ -372,6 +384,21 @@
             save.disabled = false;
             toast(`保存失败：${error.message}`, "error");
           }
+        });
+        foot.append(save);
+      } else if (state.tab === "flow" && state.flow) {
+        const save = el("button", "primary", "保存流程");
+        save.type = "button";
+        save.disabled = !state.flowDirty;
+        save.addEventListener("click", async () => {
+          save.disabled = true;
+          try {
+            const saved = await api("/api/v1/agent-flow", { method: "PUT", body: JSON.stringify(state.flow) });
+            state.flow = saved;
+            state.flowDirty = false;
+            toast(`流程已保存 v${saved.version}`);
+            render();
+          } catch (error) { save.disabled = false; toast(`保存失败：${error.message}`, "error"); }
         });
         foot.append(save);
       }
@@ -548,6 +575,166 @@
       state.persona = String(result.persona?.content || "");
       state.savedPersona = state.persona;
       state.personaStatus = String(result.persona?.status || "enabled");
+    }
+
+    async function reloadFlow() {
+      const result = await api(`/api/v1/agent-flow?position_id=${position.id}`);
+      state.flow = result && result.version ? result : null;
+      state.flowDirty = false;
+    }
+
+    async function migrateFlow() {
+      const result = await api("/api/v1/agent-flow/migrate", { method: "POST", body: JSON.stringify({ position_id: position.id }) });
+      state.flow = result;
+      state.flowDirty = false;
+      toast("已从旧开场生成停用流程草稿，请检查等待闸门后再启用");
+      render();
+    }
+
+    function renderFlow() {
+      body.innerHTML = "";
+      body.append(el("p", "rk-pa-note", "节点流程把招聘介绍分成可等待的阶段。勾选“发完等客户回复”后，当前节点完成才会停下；客户回复才推进下一节点。复聊节点最多自动发送一次。"));
+      if (!state.flow) {
+        const empty = el("div", "rk-pa-empty");
+        empty.append(el("b", null, "还没有节点流程"), document.createTextNode("可以先从当前开场条目生成一份停用草稿。"));
+        const migrate = el("button", "primary", "从当前开场生成流程草稿");
+        migrate.type = "button";
+        migrate.addEventListener("click", () => migrateFlow().catch((error) => toast(`生成失败：${error.message}`, "error")));
+        empty.append(document.createElement("br"), migrate);
+        const create = el("button", null, "创建空白流程草稿"); create.type = "button";
+        create.addEventListener("click", () => {
+          state.flow = {position_id:Number(position.id),version:0,status:"disabled",entry_key:"intro",canvas:{},
+            nodes:[{node_key:"intro",node_type:"text",title:"招聘介绍",parts:[{kind:"text",body:"请填写招聘介绍",delay_ms:2000}],await_reply:true,wait_minutes:15,max_times:1,status:"enabled"}],
+            edges:[{from_key:"intro",to_key:"",trigger:"any_reply",priority:0}]};
+          state.flowDirty = true; render();
+        });
+        empty.append(create);
+        body.append(empty);
+        return;
+      }
+      body.append(el("div", "rk-pa-hint", `版本 v${state.flow.version} · ${state.flow.status === "enabled" ? "新会话已启用" : "已停用"}`));
+      body.append(el("p", "rk-pa-hint", "媒体前请在本轮安排一条文本确认目标会话；中断恢复到纯媒体时会暂停待人工核对。启用时会校验数字是否来自本岗位事实。"));
+      const dirty = () => { state.flowDirty = true; renderFoot(); };
+      const field = (label, input) => {
+        const wrap = el("label", "rk-pa-field"); wrap.append(el("span", "rk-pa-hint", label), input); return wrap;
+      };
+      const select = (values, value, change) => {
+        const input = el("select", "rk-pa-input");
+        values.forEach(([key, label]) => { const option = el("option", null, label); option.value = key; input.append(option); });
+        input.value = value;
+        input.addEventListener("change", () => { change(input.value); dirty(); });
+        return input;
+      };
+      const destinations = () => [["", "流程结束"], ...state.flow.nodes.map(node => [node.node_key, node.title || node.node_key])];
+      const settings = el("div", "rk-pa-tools");
+      settings.append(field("状态", select([["disabled", "停用（不启动新会话）"], ["enabled", "启用（仅新会话）"]], state.flow.status, value => { state.flow.status = value; })));
+      settings.append(field("入口", select(destinations().filter(([key]) => key), state.flow.entry_key, value => { state.flow.entry_key = value; })));
+      body.append(settings);
+      state.flow.nodes.forEach((node, index) => {
+        const card = el("div", "rk-pa-card");
+        const title = el("input", "rk-pa-input");
+        title.value = String(node.title || node.node_key || `节点 ${index + 1}`);
+        title.addEventListener("input", () => { node.title = title.value; state.flowDirty = true; renderFoot(); });
+        const head = el("div", "rk-pa-card-head");
+        head.append(el("div", "rk-pa-seq", String(index + 1)), el("div", "rk-pa-kind", String(node.node_type || "text")), title);
+        card.append(head);
+        card.append(el("div", "rk-pa-hint", `节点标识：${node.node_key}${node.node_type === "followup" ? " · 复聊只发一次" : ""}`));
+        if (!["branch", "end"].includes(node.node_type)) {
+          (Array.isArray(node.parts) ? node.parts : []).forEach((part, partIndex) => {
+            const section = el("div", "rk-pa-field");
+            if (part.kind === "text") {
+              const area = el("textarea", "rk-pa-area");
+              area.style.minHeight = "80px"; area.maxLength = 2000;
+              area.value = String(part.body || "");
+              area.addEventListener("input", () => { part.body = area.value; dirty(); });
+              section.append(area);
+            } else {
+              section.append(mediaSelect(part.kind, part.media_name, value => { part.media_name = value; dirty(); }));
+            }
+            const delay = el("input", "rk-pa-input"); delay.type = "number"; delay.min = "0"; delay.max = "60"; delay.step = "0.1";
+            delay.value = String(Number(part.delay_ms ?? 2000) / 1000);
+            delay.addEventListener("input", () => { part.delay_ms = Math.min(60000, Math.max(0, Number(delay.value) * 1000)); dirty(); });
+            section.append(field("本条完成后的间隔（秒；不含客户端发送耗时）", delay));
+            const remove = el("button", "danger", "删除此条"); remove.type = "button";
+            remove.addEventListener("click", () => { node.parts.splice(partIndex, 1); dirty(); render(); });
+            section.append(remove); card.append(section);
+          });
+          if (node.node_type !== "followup" && node.parts.length < 6) {
+            const partsTools = el("div", "rk-pa-tools");
+            [["text", "＋文本"], ["image", "＋图片"], ["video", "＋视频"]].forEach(([kind, label]) => {
+              const add = el("button", null, label); add.type = "button";
+              add.addEventListener("click", () => { node.parts.push({kind, body:"", media_name:"", delay_ms:2000}); dirty(); render(); });
+              partsTools.append(add);
+            });
+            card.append(partsTools);
+          }
+          if (node.node_type !== "followup") {
+          const row = el("div", "rk-pa-tools");
+          const awaitLabel = el("label", null, "发完等客户回复 ");
+          const awaitBox = el("input");
+          awaitBox.type = "checkbox"; awaitBox.checked = Boolean(node.await_reply);
+          awaitBox.addEventListener("change", () => {
+            node.await_reply = awaitBox.checked;
+            state.flow.edges.filter(edge => edge.from_key === node.node_key).forEach(edge => {
+              if (edge.trigger === "default" && node.await_reply) edge.trigger = "any_reply";
+              else if (edge.trigger === "any_reply" && !node.await_reply) edge.trigger = "default";
+            });
+            dirty(); render();
+          });
+          awaitLabel.prepend(awaitBox); row.append(awaitLabel);
+          if (node.await_reply) {
+            const wait = el("input", "rk-pa-input");
+            wait.type = "number"; wait.min = "1"; wait.value = String(node.wait_minutes || 15); wait.style.width = "90px";
+            wait.addEventListener("input", () => { node.wait_minutes = Math.max(1, Number(wait.value) || 15); state.flowDirty = true; renderFoot(); });
+            row.append(el("span", "rk-pa-hint", "无回复分钟"), wait);
+          }
+          card.append(row);
+          }
+        }
+        state.flow.edges.filter(edge => edge.from_key === node.node_key).forEach(edge => {
+          const row = el("div", "rk-pa-tools");
+          row.append(select([["default","发送后继续"],["any_reply","客户任意回复"],["keyword","回复包含关键词"],["timeout","等待超时复聊"]], edge.trigger, value => {edge.trigger=value; dirty(); render();}));
+          row.append(select(destinations(), edge.to_key, value => {edge.to_key=value;}));
+          if (edge.trigger === "keyword") {
+            const keyword = el("input", "rk-pa-input"); keyword.value = edge.condition_value || ""; keyword.placeholder = "要匹配的一个词";
+            keyword.addEventListener("input", () => {edge.condition_value=keyword.value; dirty();}); row.append(keyword);
+          }
+          const del = el("button", "danger", "删除连线"); del.type = "button";
+          del.addEventListener("click", () => {state.flow.edges.splice(state.flow.edges.indexOf(edge),1); dirty(); render();});
+          row.append(del); card.append(row);
+        });
+        const tools = el("div", "rk-pa-tools");
+        if (node.node_type !== "end") {
+          const addEdge = el("button", null, "＋出口"); addEdge.type = "button";
+          addEdge.addEventListener("click", () => {state.flow.edges.push({from_key:node.node_key,to_key:"",trigger:node.await_reply?"any_reply":"default",priority:0,condition_value:""});dirty();render();});
+          tools.append(addEdge);
+        }
+        if (node.await_reply && !state.flow.edges.some(edge => edge.from_key === node.node_key && edge.trigger === "timeout")) {
+          const followup = el("button", null, "＋一次性复聊"); followup.type = "button";
+          followup.addEventListener("click", () => {
+            const key = `followup_${Date.now()}`;
+            state.flow.nodes.push({node_key:key,node_type:"followup",title:"一次性复聊",parts:[{kind:"text",body:"看完了吗？有不清楚的可以问我。",delay_ms:2000}],await_reply:false,max_times:1,status:"enabled"});
+            state.flow.edges.push({from_key:node.node_key,to_key:key,trigger:"timeout",priority:0},{from_key:key,to_key:"",trigger:"default",priority:0});
+            dirty(); render();
+          });
+          tools.append(followup);
+        }
+        const remove = el("button", "danger", "删除节点"); remove.type = "button";
+        remove.addEventListener("click", () => {
+          if (!window.confirm("删除此节点和与它关联的连线？")) return;
+          state.flow.nodes.splice(index,1);
+          state.flow.edges = state.flow.edges.filter(edge => edge.from_key !== node.node_key && edge.to_key !== node.node_key);
+          dirty(); render();
+        }); tools.append(remove); card.append(tools);
+        body.append(card);
+      });
+      const add = el("button", null, "＋新增文本节点"); add.type = "button";
+      add.addEventListener("click", () => {
+        const key = `text_${Date.now()}`;
+        state.flow.nodes.push({node_key:key,node_type:"text",title:"新节点",parts:[{kind:"text",body:"请填写招聘介绍",delay_ms:2000}],await_reply:true,wait_minutes:15,max_times:1,status:"enabled"});
+        state.flow.edges.push({from_key:key,to_key:"",trigger:"any_reply",priority:0});
+        dirty(); render();
+      }); body.append(add);
     }
 
     async function addOpening(kind) {
@@ -738,13 +925,15 @@
       renderTabs();
       renderFoot();
       if (state.tab === "persona") renderPersona();
-      else renderOpening();
+      else if (state.tab === "opening") renderOpening();
+      else renderFlow();
     }
 
     // 首次加载：人设 + 开场一次取回
     body.append(el("div", "rk-pa-loading", "加载中…"));
     try {
       await reloadOpenings();
+      await reloadFlow();
     } catch (error) {
       body.innerHTML = "";
       body.append(el("p", "rk-pa-error", `读取失败：${error.message}`));

@@ -1,0 +1,200 @@
+"""Workflow orchestration regression tests; every desktop input API is stubbed."""
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from unittest.mock import MagicMock
+
+import pytest
+
+from tests.agent_loader import load_autopilot, load_reply_store
+
+
+FLOW = {
+    "position_id": 1, "version": 1, "status": "enabled", "entry_key": "qualify",
+    "nodes": [
+        {"node_key": "qualify", "node_type": "text", "parts": [{"kind": "text", "body": "先看要求", "delay_ms": 0}], "await_reply": True, "wait_minutes": 2},
+        {"node_key": "wage", "node_type": "text", "parts": [{"kind": "text", "body": "岗位薪资", "delay_ms": 0}], "await_reply": True, "wait_minutes": 15},
+        {"node_key": "followup", "node_type": "followup", "parts": [{"kind": "text", "body": "看明白了吗？", "delay_ms": 0}]},
+        {"node_key": "end", "node_type": "end", "parts": []},
+    ],
+    "edges": [
+        {"from_key": "qualify", "to_key": "wage", "trigger": "any_reply"},
+        {"from_key": "qualify", "to_key": "followup", "trigger": "timeout"},
+        {"from_key": "wage", "to_key": "end", "trigger": "any_reply"},
+        {"from_key": "followup", "to_key": "end", "trigger": "default"},
+    ],
+}
+CFG = {"cooldown": 0, "device_code": "pc", "dry_run": False}
+
+
+@pytest.fixture
+def agent(tmp_path, monkeypatch):
+    module = load_autopilot()
+    module._brain = MagicMock()
+    module._brain.flow.return_value = json.loads(json.dumps(FLOW))
+    module._brain.chat.return_value = {"ok": True, "reply": "这是答疑", "parts": ["这是答疑"], "medias": []}
+    module._flow_state = module.flow_state_mod.FlowState(tmp_path / "flow_state.db", now=lambda: module.time.time())
+    module._last_reply_at = module._last_flow_followup_at = 0
+    module._consecutive_send_failures = 0
+    monkeypatch.setattr(module, "GREET_STATE", tmp_path / ".greeted.json")
+    monkeypatch.setattr(module, "log", MagicMock())
+    monkeypatch.setattr(module, "rlog", load_reply_store(tmp_path / "reply.db"))
+    monkeypatch.setattr(module.time, "sleep", lambda _: None)
+    monkeypatch.setattr(module.remote_cfg, "takeover_sessions", lambda: set())
+    monkeypatch.setattr(module.remote_cfg, "abandoned_sessions", lambda: set())
+    module.core_send.send.return_value = {"ok": True, "conversation_id": "S:customer", "detail": "已发送并回读确认"}
+    module.media_fetch.ensure_media = MagicMock(return_value=(True, "ready"))
+    return module
+
+
+def incoming(agent, mid=1, text="你好"):
+    agent.rlog.record_incoming({"id": mid, "conv_id": "S:customer", "conv_name": "Customer", "text": text, "type": 2, "time": 100})
+
+
+def start(agent):
+    incoming(agent)
+    agent.drain(MagicMock(), CFG)
+
+
+def test_first_contact_and_reply_each_have_one_output_without_chat(agent):
+    start(agent)
+    assert agent._flow_state.get("S:customer")["phase"] == "awaiting"
+    assert agent._flow_state.get("S:customer")["wait_minutes"] == 2
+    assert agent.core_send.send.call_count == 1
+    incoming(agent, 2, "可以")  # same second, different message ID must be processed
+    agent.drain(MagicMock(), CFG)
+    assert agent.core_send.send.call_count == 2
+    assert agent.core_send.send.call_args.args[2] == "岗位薪资"
+    assert agent._flow_state.get("S:customer")["node_key"] == "wage"
+    agent._brain.chat.assert_not_called()
+
+
+def test_system_event_does_not_open_gate_and_completed_flow_does_not_replay_opening(agent):
+    start(agent)
+    incoming(agent, 2, "")
+    agent.drain(MagicMock(), CFG)
+    assert agent.core_send.send.call_count == 1
+    incoming(agent, 3, "好")
+    agent.drain(MagicMock(), CFG)
+    incoming(agent, 4, "好")
+    agent.drain(MagicMock(), CFG)
+    assert agent._flow_state.get("S:customer")["phase"] == "expired"
+    incoming(agent, 5, "包住吗")
+    agent.drain(MagicMock(), CFG)
+    agent._brain.opening.assert_not_called()
+    assert agent._brain.chat.call_args.kwargs["sent_summary"] == ["先看要求", "岗位薪资"]
+
+
+def test_existing_contacts_stay_in_normal_chat(agent, monkeypatch):
+    monkeypatch.setattr(agent, "_is_first_contact", lambda cid, seen: False)
+    incoming(agent)
+    agent.drain(MagicMock(), CFG)
+    agent._brain.chat.assert_called_once()
+    assert agent._flow_state.get("S:customer") is None
+
+
+def test_legacy_first_contact_does_not_call_chat_after_opening(agent):
+    agent._brain.flow.return_value = {"nodes": [], "version": 0}
+    agent._brain.opening.return_value = {"ok": True, "items": [
+        {"seq": 1, "kind": "text", "content": "旧开场介绍", "media_name": "", "delay_ms": 2000}
+    ]}
+    start(agent)
+    agent._brain.chat.assert_not_called()
+    assert agent.core_send.send.call_args.args[2] == "旧开场介绍"
+    incoming(agent, 2, "工资多少")
+    agent.drain(MagicMock(), CFG)
+    agent._brain.chat.assert_called_once()
+
+
+@pytest.mark.parametrize("result,status", [
+    ({"ok": False, "detail": "发到了别的会话"}, "failed"),
+    ({"ok": True, "detail": "回读失败", "conversation_id": ""}, "unknown"),
+])
+def test_failed_or_unconfirmed_delivery_holds_without_advancing(agent, result, status):
+    agent.core_send.send.return_value = result
+    start(agent)
+    assert agent._flow_state.get("S:customer")["phase"] == "held"
+    assert agent._flow_state.outbox("S:customer")[0]["status"] == status
+    incoming(agent, 2, "多少钱")
+    agent.drain(MagicMock(), CFG)
+    assert agent.core_send.send.call_count == 1
+    agent._brain.chat.assert_not_called()
+
+
+def test_sent_part_does_not_replay_but_unknown_part_never_skips_forward(agent):
+    state = agent._flow_state
+    state.upsert("S:customer", node_key="qualify", phase="running")
+    state.claim_step("S:customer", "qualify", 0, body="先看要求")
+    assert agent._run_flow(MagicMock(), CFG, "S:customer", "Customer", FLOW, node_key="qualify") == "held"
+    agent.core_send.send.assert_not_called()
+    # An operator confirmed the result; reopening the state leaves the outbox intact.
+    state.mark_outbox("S:customer", "qualify", 0, "sent")
+    assert agent._run_flow(MagicMock(), CFG, "S:customer", "Customer", FLOW, node_key="qualify") == "awaiting"
+    assert state.get("S:customer")["step_index"] == 1
+    agent.core_send.send.assert_not_called()
+
+
+def test_old_snapshot_wins_and_disabled_latest_flow_does_not_break_active_chat(agent):
+    start(agent)
+    agent._brain.flow.return_value = {"version": 2, "nodes": [], "edges": []}
+    incoming(agent, 2, "符合")
+    agent.drain(MagicMock(), CFG)
+    assert agent.core_send.send.call_args.args[2] == "岗位薪资"
+    assert agent._flow_state.get("S:customer")["flow_version"] == 1
+
+
+def test_followup_once_has_durable_rate_limit_and_failure_stays_held(agent, monkeypatch):
+    now = datetime(2026, 11, 19, 4, tzinfo=timezone.utc).timestamp()
+    monkeypatch.setattr(agent.time, "time", lambda: now)
+    start(agent)
+    state = agent._flow_state
+    state.set_phase("S:customer", "awaiting", await_since=now - 121)
+    agent._flow_tick(MagicMock(), CFG, "online")
+    assert state.get("S:customer")["phase"] == "followup_sent"
+    assert state.get("S:customer")["followup_round"] == 1
+    assert agent.core_send.send.call_count == 2
+    agent._flow_tick(MagicMock(), CFG, "online")
+    assert agent.core_send.send.call_count == 2
+    now += 1801
+    agent._flow_tick(MagicMock(), CFG, "online")
+    assert state.get("S:customer")["phase"] == "expired"
+
+
+def test_followup_failure_never_marked_sent(agent, monkeypatch):
+    now = datetime(2026, 11, 19, 4, tzinfo=timezone.utc).timestamp()
+    monkeypatch.setattr(agent.time, "time", lambda: now)
+    start(agent)
+    agent._flow_state.set_phase("S:customer", "awaiting", await_since=now - 121)
+    agent.core_send.send.return_value = {"ok": False, "detail": "没找到会话"}
+    agent._flow_tick(MagicMock(), CFG, "online")
+    assert agent._flow_state.get("S:customer")["phase"] == "held"
+    assert agent._flow_state.get("S:customer")["followup_sent_at"] is None
+
+
+def test_media_without_verified_text_never_pastes(agent):
+    media_flow = {"nodes": [{"node_key": "photo", "parts": [{"kind": "image", "media_name": "宿舍.jpg"}]}], "edges": []}
+    agent._flow_state.upsert("S:customer", node_key="photo", phase="running")
+    assert agent._run_flow(MagicMock(), CFG, "S:customer", "Customer", media_flow, node_key="photo") == "held"
+    agent.core_send.paste_media.assert_not_called()
+
+
+@pytest.mark.parametrize("dry,online", [(True, "online"), (False, "offline")])
+def test_followup_dry_and_offline_never_send(agent, dry, online):
+    agent._flow_tick(MagicMock(), {**CFG, "dry_run": dry}, online)
+    agent.core_send.send.assert_not_called()
+
+
+@pytest.mark.parametrize("reason", ["quiet", "takeover", "abandoned"])
+def test_followup_quiet_and_operator_controls_are_respected(agent, monkeypatch, reason):
+    now = datetime(2026, 11, 19, 15 if reason == "quiet" else 4, tzinfo=timezone.utc).timestamp()
+    monkeypatch.setattr(agent.time, "time", lambda: now)
+    start(agent)
+    agent._flow_state.set_phase("S:customer", "awaiting", await_since=now - 121)
+    if reason == "takeover":
+        monkeypatch.setattr(agent.remote_cfg, "takeover_sessions", lambda: {"S:customer"})
+    if reason == "abandoned":
+        monkeypatch.setattr(agent.remote_cfg, "abandoned_sessions", lambda: {"S:customer"})
+    agent._flow_tick(MagicMock(), CFG, "online")
+    assert agent.core_send.send.call_count == 1
+    assert agent._flow_state.get("S:customer")["phase"] == "awaiting"

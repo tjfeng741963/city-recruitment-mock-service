@@ -15,6 +15,7 @@ reply_log.db
 *.db
 *.db-wal
 *.db-shm
+state/
 
 # Python
 .venv/
