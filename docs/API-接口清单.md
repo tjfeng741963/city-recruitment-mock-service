@@ -95,6 +95,7 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 | GET | `/api/v1/agent/archive/list` | admin | 面试登记清单：时间/姓名/电话/客户/设备/确认态/到达状态/群聊通知状态 |
 | POST | `/api/v1/agent/archive/manual` | admin | 手动新建约面试（没走 Agent 对话的客户），绑了群聊自动推送 |
 | PUT | `/api/v1/agent/archive/:key/arrival` | admin | 到达状态标记，body `{arrival_status: ""/arrived/noshow}` |
+| GET | `/api/v1/agent/candidates?status=&recruiter_id=&event_date=&interview_date=&page=&page_size=` | admin | 候选人员管理：由面试登记聚合出候选行 + 分页统计 |
 | POST | `/api/v1/agent/chat` | admin | 一轮对话，body `{position_id,session_key,text,dry}` |
 
 <!-- api-check:end -->
