@@ -183,8 +183,16 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
       if (boundFactoryIds.length > 1) return 0;
       return resolveEmployerId();
     };
+    // 启动前只读核对人工队列：覆盖全部任务，不领取、不回收过期租约。
+    // 队列变化不推动配置 version；运维应读取每次响应中的实时计数。
+    const commandQueue = { queued: 0, claimed: 0, unknown: 0 };
+    const commandCounts = db.prepare(
+      "SELECT status,COUNT(*) AS count FROM bridge_commands WHERE device_code=? AND status IN ('queued','claimed','unknown') GROUP BY status",
+    ).all(code) as Array<{ status: keyof typeof commandQueue; count: number }>;
+    for (const row of commandCounts) commandQueue[row.status] = row.count;
     return {
       version: newer,
+      command_queue: commandQueue,
       interval_seconds: positive(params.interval_seconds, 20),
       cooldown: positive(params.cooldown, 8),
       merge_delay_seconds: positive(params.merge_delay_seconds, 0),

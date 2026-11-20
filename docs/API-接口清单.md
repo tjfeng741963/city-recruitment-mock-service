@@ -36,6 +36,12 @@ curl -X POST http://127.0.0.1:8080/api/v1/auth/login \
 
 ---
 
+## 设备人工发送队列的只读检查
+
+`GET /api/v1/bridge/devices/:code/config` 使用对应设备的 Bearer token（服务间调用沿用 `X-Profile-Token`）。响应新增 `command_queue: {queued: number, claimed: number, unknown: number}`，默认均为 0。统计仅覆盖该设备、包含全部历史记录，不受最近 50 条列表限制，不返回客户或消息正文。
+
+该 GET 不领取任务、不回收过期租约、不改变任何任务状态；队列计数为实时值，不参与配置 `version`。启动前应读取本次响应的计数，不能复用旧缓存；`queued` 或 `claimed` 非零时先核对原任务，`unknown` 需人工核对送达结果，不应盲目重发。字段缺失表示服务尚未支持统计，不能当作队列为空。此字段仅用于检查，不会自动启动或暂停客户端。
+
 ## 二、人设与开场（后台配置）
 
 一个岗位一份人设；开场是这个岗位下按 `seq` 排序的条目，支持文本、图片、视频。

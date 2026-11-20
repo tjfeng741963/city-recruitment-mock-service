@@ -54,6 +54,7 @@ describe("device config distribution", () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({
       version: "2026-11-10 12:00:00",
+      command_queue: { queued: 0, claimed: 0, unknown: 0 },
       interval_seconds: 35,
       cooldown: 12,
       merge_delay_seconds: 0,
@@ -74,6 +75,32 @@ describe("device config distribution", () => {
     // 话术更新时间更晚 → version 取较新者
     app.db.prepare("UPDATE device_scripts SET updated_at='2026-11-11T00:00:00Z' WHERE device_code='local-device-001'").run();
     expect((await configOf("local-device-001")).json().version).toBe("2026-11-11T00:00:00Z");
+  });
+
+  it("counts the entire device command queue without claiming or expiring tasks", async () => {
+    const before = (await configOf("local-device-001")).json();
+    expect(before.command_queue).toEqual({ queued: 0, claimed: 0, unknown: 0 });
+    const insert = app.db.prepare(`INSERT INTO bridge_commands
+      (id,device_code,customer_id,contact_id,content,idempotency_key,status,lease_token,lease_until,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`);
+    for (let i = 0; i < 61; i++) {
+      insert.run(`queued-${i}`, "local-device-001", 9001, "S:test", "test", `queued-${i}`, "queued", "", 0, i);
+    }
+    for (const status of ["claimed", "unknown", "succeeded", "failed"]) {
+      insert.run(status, "local-device-001", 9001, "S:test", "test", status, status, "preserve-lease", 1, 100);
+    }
+    insert.run("other", "other-device", 9002, "S:other", "test", "other", "queued", "", 0, 101);
+    const snapshot = app.db.prepare("SELECT * FROM bridge_commands ORDER BY id").all();
+    for (let i = 0; i < 2; i++) {
+      const after = (await configOf("local-device-001")).json();
+      expect(after.command_queue).toEqual({ queued: 61, claimed: 1, unknown: 1 });
+      expect(after.version).toBe(before.version);
+      expect(app.db.prepare("SELECT * FROM bridge_commands ORDER BY id").all()).toEqual(snapshot);
+    }
+    app.db.prepare("UPDATE bridge_commands SET status='succeeded' WHERE id='queued-0'").run();
+    const changed = (await configOf("local-device-001")).json();
+    expect(changed.command_queue.queued).toBe(60);
+    expect(changed.version).toBe(before.version);
   });
 
   // 契约：docs/对齐-设备工厂绑定与资料导入.md §1
