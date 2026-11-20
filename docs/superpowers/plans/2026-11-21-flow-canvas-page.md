@@ -29,6 +29,8 @@
 - `updateFlowEdge<T extends FlowLike>(source: T, index: number, patch: Partial<FlowEdgeLike>): T`
 - `addBranchNode<T extends FlowLike>(source: T, fromKey: string): T`
 - `addFollowupNode<T extends FlowLike>(source: T, awaitNodeKey: string): T`
+- `addFlowEdge<T extends FlowLike>(source: T, fromKey: string): T`
+- `removeFlowEdge<T extends FlowLike>(source: T, index: number): { flow: T; blocked?: "missing" | "required-fallback" }`
 - `addFlowNode<T extends FlowLike>(source: T, kind: "text" | "image" | "video" | "end"): T`
 - `dragFlowPoint(nodeOrigin, pointerOrigin, pointerCurrent, zoom): { x: number; y: number }`
 - `flowRequiresEnableConfirmation(previousStatus, nextStatus): boolean`
@@ -82,6 +84,25 @@ it("updates only the selected edge", () => {
   const edited = updateFlowEdge(flow, 0, { trigger: "keyword", condition_value: "工资", priority: 3 });
   expect(edited.edges[0]).toMatchObject({ trigger: "keyword", condition_value: "工资", priority: 3 });
   expect(edited.edges.slice(1)).toEqual(flow.edges.slice(1));
+});
+
+it("adds an optional keyword edge without removing the waiting fallback", () => {
+  const flow = migratedFlow();
+  const edited = addFlowEdge(flow, "opening_3");
+  expect(edited.edges).toContainEqual(expect.objectContaining({
+    from_key: "opening_3", to_key: "", trigger: "keyword", condition_value: expect.any(String),
+  }));
+  expect(edited.edges).toContainEqual(expect.objectContaining({ from_key: "opening_3", trigger: "any_reply" }));
+});
+
+it("refuses to remove required fallback edges and removes an optional keyword edge", () => {
+  const withKeyword = addFlowEdge(migratedFlow(), "opening_3");
+  const requiredIndex = withKeyword.edges.findIndex((edge) => edge.from_key === "opening_3" && edge.trigger === "any_reply");
+  expect(removeFlowEdge(withKeyword, requiredIndex).blocked).toBe("required-fallback");
+  const keywordIndex = withKeyword.edges.findIndex((edge) => edge.from_key === "opening_3" && edge.trigger === "keyword");
+  const removed = removeFlowEdge(withKeyword, keywordIndex);
+  expect(removed.blocked).toBeUndefined();
+  expect(removed.flow.edges).toHaveLength(withKeyword.edges.length - 1);
 });
 
 it("converts pointer movement into graph coordinates at the current zoom", () => {
@@ -139,7 +160,7 @@ Run `npx vitest run tests/agent-flow-editor.test.ts tests/agent-flow.test.ts`. E
 
 - [ ] **Step 1: Add the failing enable-confirmation test in Task 1 before implementing `flowRequiresEnableConfirmation`.**
 - [ ] **Step 2: Run `npx vitest run tests/agent-flow-editor.test.ts`; verify RED, implement the helper, then rerun to GREEN.**
-- [ ] **Step 3: Implement the page with a top position/status/version toolbar, graph canvas, and right-side inspector. The inspector edits node title/status, 1–6 parts, part kind/body/media/delay, `await_reply`, `wait_minutes`, `max_times`, and selected-edge `trigger/to_key/condition_value/priority`. Enforce backend enums and only offer enabled media for the selected position or common pool.**
+- [ ] **Step 3: Implement the page with a top position/status/version toolbar, graph canvas, and right-side inspector. The inspector edits node title/status, 1–6 parts, part kind/body/media/delay, `await_reply`, `wait_minutes`, `max_times`, and selected-edge `trigger/to_key/condition_value/priority`. Add/remove optional keyword edges with `addFlowEdge`/`removeFlowEdge`; keep required fallback edges visible and non-removable. Enforce backend enums and only offer enabled media for the selected position or common pool.**
 - [ ] **Step 4: Add toolbar actions for text/image/video, branch, followup, and end nodes. Message nodes append through `addFlowNode`; branch and followup use the selected source node through `addBranchNode`/`addFollowupNode`. Show helper validation errors beside the toolbar and do not mutate the graph on an invalid operation.**
 - [ ] **Step 5: Add an empty state with “create disabled draft” and “migrate opening to disabled draft” actions. Initialize a new flow with one text node and a terminal `any_reply` edge; never auto-enable a new or migrated flow.**
 - [ ] **Step 6: Save with the loaded `version`; preserve dirty edits on HTTP 409, show an explicit reload action, and call `flowRequiresEnableConfirmation` before changing `disabled` to `enabled`.**
