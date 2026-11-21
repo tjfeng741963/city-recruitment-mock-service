@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { navigationForRole, positionLink, activeNavigationPath } from '../frontend-vue/src/layouts/navigation.js';
+import { navigationForRole, positionLink, activeNavigationPath, cityPositionsLink } from '../frontend-vue/src/layouts/navigation.js';
 
 describe('招聘导航', () => {
   it('groups real tasks and keeps the two core windows accessible', () => {
@@ -31,6 +31,9 @@ describe('招聘导航', () => {
   it('only exposes account administration to admins and keeps role-specific recommendations reachable', () => {
     expect(navigationForRole('customer').some(group => group.key === 'system')).toBe(false);
     expect(navigationForRole('recruiter').flatMap(group => group.items).some(item => item.path === '/recruiter-featured')).toBe(true);
+  });
+  it('opens recruitment positions using the city ID', () => {
+    expect(cityPositionsLink(42)).toEqual({ path: '/service-positions', query: { city_id: '42' } });
   });
   it('carries the selected position to each AI workspace', () => {
     expect(positionLink('/knowledge', 28)).toEqual({ path: '/knowledge', query: { position_id: '28' } });

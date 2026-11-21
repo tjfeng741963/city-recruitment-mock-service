@@ -28,6 +28,10 @@ export function activeNavigationPath(path: string): string {
   return path === '/device-report' ? '/dashboard' : path;
 }
 
+export function cityPositionsLink(cityId: number) {
+  return { path: '/service-positions', query: { city_id: String(cityId) } };
+}
+
 export function positionLink(path: string, id: number) {
   return { path, query: id > 0 ? { position_id: String(id) } : {} };
 }

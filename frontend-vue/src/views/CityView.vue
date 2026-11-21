@@ -3,11 +3,18 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">城市</h2>
-        <p class="page-desc">管理各城市招聘配置，包括薪资、面试、线路等信息</p>
+        <p class="page-desc">管理城市与区县，打开对应的招聘岗位。</p>
       </div>
       <div class="header-actions">
-        <el-button @click="$router.push('/factory-overview')">招聘配置检查</el-button>
-        <el-button @click="$router.push('/city-links')">地域与周边城市</el-button>
+        <el-dropdown trigger="click" @command="openCityTool">
+          <el-button>更多工具 <el-icon class="el-icon--right"><ArrowDown /></el-icon></el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="/city-links">地域与周边城市</el-dropdown-item>
+              <el-dropdown-item command="/factory-overview">招聘配置检查</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
         <el-button :icon="Refresh" @click="load">刷新</el-button>
         <el-button type="primary" :icon="Plus" @click="openCreate">添加城市</el-button>
       </div>
@@ -63,27 +70,23 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="主线路" min-width="140">
-          <template #default="{ row }">
-            <span class="muted">{{ linesOf(row) }}</span>
-          </template>
-        </el-table-column>
+        <el-table-column prop="province" label="省份" min-width="110" />
         <el-table-column label="更新时间" width="180">
           <template #default="{ row }">
             <span class="muted">{{ formatDateTime(row.updated_at) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="300" fixed="right">
+        <el-table-column label="操作" width="250" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
-            <el-button link type="primary" @click="openCopy(row)">复制</el-button>
-            <el-button link type="primary" @click="openFactories(row)">厂区 {{ row.factory_count }}</el-button>
-            <el-button link type="primary" @click="openHistory(row)">历史</el-button>
+            <el-button link type="primary" @click="router.push(cityPositionsLink(row.id))">查看岗位</el-button>
+            <el-button link @click="openEdit(row)">编辑城市</el-button>
             <el-dropdown trigger="click" @command="(cmd: string) => onCommand(cmd, row)">
               <el-button link type="primary">更多</el-button>
               <template #dropdown>
                 <el-dropdown-menu>
-                  <el-dropdown-item command="status">切换状态</el-dropdown-item>
+                  <el-dropdown-item command="factories">厂区（{{ row.factory_count }}）</el-dropdown-item>
+                  <el-dropdown-item command="history">历史记录</el-dropdown-item>
+                  <el-dropdown-item command="copy">复制城市</el-dropdown-item>
                   <el-dropdown-item command="delete" divided>删除城市</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
@@ -127,10 +130,12 @@
 <script setup lang="ts">
 import {  computed, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh, Search } from '@element-plus/icons-vue'
+import { Plus, Refresh, Search, ArrowDown } from '@element-plus/icons-vue'
 import { citiesApi, factoriesApi, apiErrorMessage } from '../api/core'
 import type { City, Factory } from '../api/core'
 import { formatDateTime, toArray } from '../utils/format'
+import { useRouter } from 'vue-router'
+import { cityPositionsLink } from '../layouts/navigation'
 import CityFormDrawer from '../components/basic/CityFormDrawer.vue'
 import CityFactoryDrawer from '../components/basic/CityFactoryDrawer.vue'
 import CityHistoryDrawer from '../components/basic/CityHistoryDrawer.vue'
@@ -139,6 +144,7 @@ interface CityRow extends City {
   factory_count: number
 }
 
+const router = useRouter()
 const cities = ref<CityRow[]>([])
 const loading = ref(false)
 const keyword = ref('')
@@ -176,9 +182,8 @@ watch([[keyword], [statusFilter]], () => {
   page.value = 1
 })
 
-function linesOf(row: CityRow): string {
-  const lines = Array.isArray(row.available_lines) ? row.available_lines : []
-  return lines.length ? lines.join('、') : '-'
+function openCityTool(path: string): void {
+  if (path === '/city-links' || path === '/factory-overview') void router.push(path)
 }
 
 async function load(): Promise<void> {
@@ -237,21 +242,10 @@ function openHistory(row: CityRow): void {
 }
 
 async function onCommand(command: string, row: CityRow): Promise<void> {
-  if (command === 'status') await toggleStatus(row)
+  if (command === 'factories') openFactories(row)
+  if (command === 'history') openHistory(row)
+  if (command === 'copy') openCopy(row)
   if (command === 'delete') await removeCity(row)
-}
-
-async function toggleStatus(row: CityRow): Promise<void> {
-  const next = row.recruitment_status === 'active' ? 'inactive' : 'active'
-  try {
-    await citiesApi.setStatus(row.id, next)
-    ElMessage.success('城市状态已更新')
-    await load()
-  } catch (error: any) {
-    // 后端按设备绑定自动推导状态，PATCH 固定返回 422，属于已知降级点
-    const detail = apiErrorMessage(error, '状态切换失败')
-    ElMessage.warning(detail)
-  }
 }
 
 async function removeCity(row: CityRow): Promise<void> {
