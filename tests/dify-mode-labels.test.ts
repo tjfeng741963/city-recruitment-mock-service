@@ -9,6 +9,7 @@ describe('distinct reply mode labels',()=>{
   expect(script).toContain('模式一 · 系统 Agent');
   expect(script).toContain('模式二 · Dify 工作流');
   expect(script).toContain('/dify-connection');
+  expect(script).not.toContain('/recruitment-flow');
  });
  it('labels the separate connection page and selector consistently',()=>{
   const html=readFileSync('public/dify-connection.html','utf8');

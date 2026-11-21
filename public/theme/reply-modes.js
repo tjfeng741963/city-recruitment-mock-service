@@ -13,9 +13,15 @@
       section.dataset.replyModeNavigation='1';section.setAttribute('aria-label','两套回复模式');
       section.style.cssText='margin:10px 12px;padding:12px;border:1px solid #d4def0;border-radius:10px;font-size:12px;line-height:1.7;background:rgba(255,255,255,.65)';
       const title=document.createElement('strong');title.textContent='回复模式';section.append(title);
-      for(const [label,url] of [['模式一 · 系统 Agent','/recruitment-flow'],['模式二 · Dify 工作流','/dify-connection']]){
-        const link=document.createElement('a');link.textContent=label;link.href=url;link.style.cssText='display:block;margin-top:7px;color:#174fcb;text-decoration:none';section.append(link);
-      }
+      const systemMode=document.createElement('div');
+      systemMode.textContent='模式一 · 系统 Agent';
+      systemMode.style.marginTop='7px';
+      section.append(systemMode);
+      const difyLink=document.createElement('a');
+      difyLink.textContent='模式二 · Dify 工作流';
+      difyLink.href='/dify-connection';
+      difyLink.style.cssText='display:block;margin-top:7px;color:#174fcb;text-decoration:none';
+      section.append(difyLink);
       const note=document.createElement('small');note.textContent='两套独立配置，按微信账号选择';section.append(note);menu.after(section);
     }
     if(location.pathname==='/agent-devices'){

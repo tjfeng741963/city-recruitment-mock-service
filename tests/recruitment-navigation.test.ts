@@ -12,6 +12,10 @@ describe('招聘导航', () => {
     expect(new Set(items.map(item => item.path)).size).toBe(items.length);
     expect(items.some(item => item.path === '/city-links')).toBe(false);
   });
+  it('lists one AI configuration entry in the sidebar', () => {
+    const group = navigationForRole('admin').find(group => group.key === 'knowledge');
+    expect(group?.items.map(item => item.path)).toEqual(['/recruitment-flow']);
+  });
   it('only exposes account administration to admins and keeps role-specific recommendations reachable', () => {
     expect(navigationForRole('customer').some(group => group.key === 'system')).toBe(false);
     expect(navigationForRole('recruiter').flatMap(group => group.items).some(item => item.path === '/recruiter-featured')).toBe(true);

@@ -16,13 +16,23 @@ describe("招聘流程图入口接线", () => {
     expect(read("frontend-vue/src/layouts/navigation.ts")).toContain("label: '话术流程'");
   });
 
-  it("sends the current drawer position to the unified flow page instead of editing a second graph", () => {
-    const drawer = read("frontend-vue/src/components/basic/PositionAgentDrawer.vue");
+  it("routes the job list to the same position configuration page", () => {
+    const list = read("frontend-vue/src/views/ServicePositionView.vue");
+    expect(list).toContain("positionLink('/recruitment-flow', row.id)");
+    expect(list).not.toContain("PositionAgentDrawer");
+    expect(list).not.toContain("aiLinks");
+  });
 
-    expect(drawer).toContain("router.push({ name: 'recruitment-flow', query: { position_id: String(props.position.id) } })");
-    expect(drawer).toContain("打开流程图");
-    expect(drawer).not.toContain("function saveFlow()");
-    expect(drawer).not.toContain("function addFlowNode(");
+  it("opens the canvas only on request and keeps edits behind one configuration menu", () => {
+    const page = read("frontend-vue/src/views/AgentFlowView.vue");
+    const inspector = read("frontend-vue/src/components/agent/FlowRuntimeInspector.vue");
+    expect(page).toContain("const fullscreen = ref(false)");
+    expect(page).toContain("const canvasExpanded = ref(false)");
+    expect(page).toContain('v-if="canvasExpanded"');
+    expect(page).toContain("岗位配置");
+    expect(page).toContain('@command="openConfiguration"');
+    expect(inspector).not.toContain("edit-opening");
+    expect(inspector).not.toContain("manage-knowledge");
   });
 
   it("keeps the selected position in the flow page route and reads its real graph", () => {
@@ -72,7 +82,7 @@ describe("招聘流程图入口接线", () => {
   it('connects the existing opening editor, reports actual sync evidence and removes the unused node delay',()=>{
     const page=read('frontend-vue/src/views/AgentFlowView.vue');
     expect(page).toContain('PositionAgentDrawer');
-    expect(page).toContain('@edit-opening="openOpeningEditor"');
+    expect(page).toContain('command="opening"');
     expect(page).toContain('agentApi.configSync');
     expect(page).not.toContain('label="节点间隔（秒）"');
     expect(page).not.toContain('function setNodeDelay');
