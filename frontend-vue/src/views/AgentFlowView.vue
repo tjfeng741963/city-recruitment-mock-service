@@ -62,6 +62,13 @@
       <el-button link type="primary" @click="runtimeDetails = !runtimeDetails">{{ runtimeDetails ? '收起运行说明' : '查看运行说明与状态' }}</el-button>
     </div>
 
+    <div v-if="viewMode === 'runtime' && savedFlow && !loading" class="runtime-media-summary">
+      <span>固定{{ savedFlow.status === 'enabled' ? '节点' : '开场' }}：{{ fixedMediaCounts.images }} 张图片、{{ fixedMediaCounts.videos }} 个视频</span>
+      <span>AI 按需可选：{{ aiMediaBranches.filter(item => item.kind === 'image').length }} 张图片、{{ aiMediaBranches.filter(item => item.kind === 'video').length }} 个视频</span>
+      <span v-if="!aiContextAvailable" class="field-note">AI 素材上下文读取失败，按需分支未知</span>
+      <span v-else-if="!fixedMediaCounts.images && aiMediaBranches.some(item => item.kind === 'image')" class="field-note">当前没有固定图片步骤；下方图片属于 AI 按需分支，不会每次开场都发。</span>
+    </div>
+
     <div v-if="runtimeDetails && savedFlow" class="runtime-details">
       <p>这里显示按服务器配置推导的路径。没有运行客户端、企微未登录或没有客户触发时，不会自动发送。网页点击节点只查看配置。</p>
       <p v-if="isDirty">编辑器有未保存修改；实际执行路径仍使用上次保存的 v{{ savedFlow.version }}。</p>
@@ -242,6 +249,7 @@
                         :value="media.name"
                       />
                     </el-select>
+                    <FlowMediaPreview v-if="part.kind !== 'text' && part.media_name" :name="part.media_name" :kind="part.kind" />
                     <el-form-item label="发送后间隔（秒）" class="compact-item">
                       <el-input-number
                         :model-value="millisecondsToSeconds(part.delay_ms)"
@@ -351,7 +359,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown, Check, CircleClose, Clock, Connection, Delete, FullScreen, Plus, Refresh, Share, Upload } from '@element-plus/icons-vue'
 import AgentFlowCanvas from '../components/agent/AgentFlowCanvas.vue'
 import FlowRuntimeInspector from '../components/agent/FlowRuntimeInspector.vue'
-import { activeOpenings, buildRuntimeFlow, compareOpeningContents, describeRuntimeNode, type LegacyOpening } from '../components/agent/flow-runtime'
+import FlowMediaPreview from '../components/agent/FlowMediaPreview.vue'
+import { activeOpenings, buildAiMediaBranches, buildRuntimeFlow, compareOpeningContents, describeRuntimeNode, type LegacyOpening } from '../components/agent/flow-runtime'
 import { availableFlowMedia, normalizeFlowMediaOptions, type FlowMediaOption } from '../components/agent/flow-media-options'
 import { agentApi, devicesApi, type AgentDeviceItem, type AgentFlow, type AgentFlowEdge, type AgentFlowNode, type AgentFlowPart, type FlowStateSummary } from '../api/agent'
 import { mediaApi, positionsApi } from '../api/core'
@@ -396,6 +405,8 @@ const viewMode = ref<'runtime' | 'edit'>('runtime')
 const runtimeDetails = ref(false)
 const savedFlow = ref<AgentFlow | null>(null)
 const legacyOpenings = ref<LegacyOpening[]>([])
+const aiFacts = ref<Record<string, string>>({})
+const aiContextAvailable = ref(false)
 const devices = ref<AgentDeviceItem[]>([])
 const devicesAvailable = ref(false)
 const mirrors = ref<Array<FlowStateSummary & { device_code: string }>>([])
@@ -406,7 +417,14 @@ let loadSequence = 0
 let inspectorDrag: { pointerId: number; x: number; width: number } | null = null
 
 const boundDevices = computed(() => devices.value.filter(device => Number(device.position_id) === positionId.value))
-const runtimeFlow = computed(() => buildRuntimeFlow(savedFlow.value || { position_id: positionId.value, version: 0, status: 'disabled', entry_key: '', nodes: [], edges: [] }, legacyOpenings.value))
+const aiMediaBranches = computed(() => buildAiMediaBranches(mediaItems.value, aiFacts.value, positionId.value))
+const runtimeFlow = computed(() => buildRuntimeFlow(savedFlow.value || { position_id: positionId.value, version: 0, status: 'disabled', entry_key: '', nodes: [], edges: [] }, legacyOpenings.value, aiMediaBranches.value))
+const fixedMediaCounts = computed(() => {
+  const parts = savedFlow.value?.status === 'enabled'
+    ? savedFlow.value.nodes.filter(node => node.status !== 'disabled').flatMap(node => node.parts || [])
+    : legacyOpenings.value.map(item => ({kind:item.kind}))
+  return {images:parts.filter(part => part.kind === 'image').length,videos:parts.filter(part => part.kind === 'video').length}
+})
 const displayFlow = computed(() => viewMode.value === 'runtime' ? runtimeFlow.value : flow.value!)
 const displayNodeKey = computed(() => viewMode.value === 'runtime' ? runtimeNodeKey.value : selectedNodeKey.value)
 const displayEdgeIndex = computed(() => viewMode.value === 'runtime' ? runtimeEdgeIndex.value : selectedEdgeIndex.value)
@@ -473,16 +491,19 @@ async function loadFlow(id: number): Promise<void> {
   pageError.value = ''
   conflict.value = false
   try {
-    const [flowResult, personaResult, mediaResult, devicesResult] = await Promise.all([
+    const [flowResult, personaResult, mediaResult, devicesResult, contextResult] = await Promise.all([
       agentApi.flowGet(id),
       agentApi.personaGet(id),
       mediaApi.list({ page: 1, page_size: 1000 }).catch(() => null),
       devicesApi.list({ page: 1, page_size: 1000 }).catch(() => null),
+      agentApi.context({ position_id: id }).catch(() => null),
     ])
     if (sequence !== loadSequence) return
     flow.value = normalizeFlow(flowResult.data)
     savedFlow.value = JSON.parse(JSON.stringify(flow.value))
     legacyOpenings.value = activeOpenings((personaResult.data.openings || []) as unknown as LegacyOpening[])
+    aiFacts.value = (contextResult?.data.facts || {}) as Record<string, string>
+    aiContextAvailable.value = contextResult !== null
     devicesAvailable.value = devicesResult !== null
     devices.value = toArray<AgentDeviceItem>(devicesResult?.data)
     mirrors.value = []
@@ -499,6 +520,8 @@ async function loadFlow(id: number): Promise<void> {
     pageError.value = errorText(error, '流程加载失败')
     flow.value = null
     savedFlow.value = null
+    aiFacts.value = {}
+    aiContextAvailable.value = false
     openingsAvailable.value = false
     mediaItems.value = []
     baseline.value = ''
@@ -982,6 +1005,7 @@ onBeforeUnmount(() => { loadSequence += 1; window.removeEventListener('keydown',
 .is-fullscreen .flow-toolbar { flex-shrink: 0; margin-bottom: 8px; }
 .runtime-status-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; flex-shrink: 0; padding: 6px 4px 10px; font-size: 12px; color: var(--el-text-color-regular); }
 .runtime-status-bar .el-button { margin-left: auto; }
+.runtime-media-summary { display: flex; flex-wrap: wrap; flex-shrink: 0; gap: 5px 18px; margin-bottom: 8px; color: var(--el-text-color-regular); font-size: 12px; }
 .flow-page :deep(.el-button.is-link) { background: transparent !important; border-color: transparent !important; }
 .flow-page :deep(.el-button.is-link:hover) { background: var(--el-fill-color-light) !important; }
 .runtime-details { flex-shrink: 0; max-height: 220px; overflow-y: auto; padding: 10px 14px; margin-bottom: 10px; border: 1px solid var(--el-border-color); border-radius: 6px; background: var(--el-bg-color); font-size: 12px; line-height: 1.65; }

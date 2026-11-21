@@ -130,6 +130,55 @@ describe("agent chat routes", () => {
     expect(body.messages[3]).toEqual({ role: "user", content: "有没有夜班" });
   });
 
+  it("dry prompt 包含可用素材和完整面试事实，不混入其他岗位素材", async () => {
+    const interviewFacts = {
+      interview_time_text: "周一至周六上午9点到下午4点，周日休息",
+      interview_address: "深圳测试基地一楼面试室",
+      interview_material: "携带身份证和无犯罪证明",
+      basic_requirements: "身体健康，无外露纹身",
+      onboarding_notes: "面试通过后统一安排住宿",
+    };
+    app.db.prepare("UPDATE service_positions SET data_json=? WHERE id=?")
+      .run(JSON.stringify({ wage_text: "22元/小时", ...interviewFacts }), positionId);
+    const otherPosition = app.db.prepare("INSERT INTO service_positions(position_name,status) VALUES (?,?) RETURNING id")
+      .get("其他城市安检员", "enabled") as { id: number };
+    const addMedia = app.db.prepare(`INSERT INTO media_assets(name,kind,storage_path,sha256,position_id,status)
+      VALUES (?,?,?,?,?,?)`);
+    for (const [name, kind] of [["通用工作照片.jpg", "image"], ["通用宿舍照片.jpg", "image"], ["通用安检视频.mp4", "video"]]) {
+      addMedia.run(name, kind, `test/${name}`, "test-sha", 0, "enabled");
+    }
+    addMedia.run("深圳专属面试地点.jpg", "image", "test/shenzhen.jpg", "test-sha", positionId, "enabled");
+    addMedia.run("深圳专属面试说明.mp4", "video", "test/shenzhen.mp4", "test-sha", positionId, "enabled");
+    addMedia.run("其他岗位面试地点.jpg", "image", "test/other.jpg", "test-sha", Number(otherPosition.id), "enabled");
+    addMedia.run("已停用通用图片.jpg", "image", "test/disabled.jpg", "test-sha", 0, "disabled");
+
+    const response = await app.inject({
+      method: "POST", url: "/api/v1/agent/chat", headers: admin,
+      payload: { position_id: positionId, session_key: "S:dry-full-facts", text: "发下宿舍和面试地点图，什么时候面试？", dry: true },
+    });
+    expect(response.statusCode).toBe(200);
+    const result = response.json();
+    expect(result.dry).toBe(true);
+    expect(result.facts).toMatchObject({
+      ...interviewFacts,
+      media_catalog: "通用工作照片.jpg、通用宿舍照片.jpg、通用安检视频.mp4",
+      interview_address_image: "深圳专属面试地点.jpg",
+      interview_video: "深圳专属面试说明.mp4",
+    });
+    const systemPrompt = result.messages[0].content as string;
+    for (const [field, value] of Object.entries({
+      ...interviewFacts,
+      media_catalog: result.facts.media_catalog,
+      interview_address_image: result.facts.interview_address_image,
+      interview_video: result.facts.interview_video,
+    })) {
+      expect(systemPrompt).toContain(`（${field}）：${value}`);
+    }
+    expect(systemPrompt).not.toContain("其他岗位面试地点.jpg");
+    expect(systemPrompt).not.toContain("已停用通用图片.jpg");
+    expect(app.db.prepare("SELECT COUNT(*) AS n FROM agent_session").get()).toEqual({ n: 0 });
+  });
+
   it("没配 key 时返回结构化失败，不抛 500", async () => {
     const res = await app.inject({
       method: "POST",

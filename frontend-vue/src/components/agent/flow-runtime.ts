@@ -13,12 +13,36 @@ export interface LegacyOpening {
 export const START_KEY = '__runtime_start'
 export const AI_KEY = '__runtime_ai'
 
+export interface AiMediaBranch {
+  name: string
+  kind: string
+  position_id: number
+  condition: string
+  source: string
+}
+
+/** Only expose media present in the same facts used by the AI prompt. */
+export function buildAiMediaBranches(
+  assets: Array<{name: string; kind: string; position_id: number; status?: string}>,
+  facts: Record<string, string>,
+  positionId: number,
+): AiMediaBranch[] {
+  const catalog = new Set(String(facts.media_catalog || '').split('、').map(name => name.trim()).filter(Boolean))
+  return assets.filter(asset => asset.status !== 'disabled' && asset.status !== 'deleted' && ['image', 'video'].includes(asset.kind) &&
+    ((asset.position_id === 0 && catalog.has(asset.name)) || (asset.position_id === positionId &&
+      [facts.interview_address_image, facts.interview_video].includes(asset.name))))
+    .map(asset => ({ ...asset,
+      condition: asset.position_id === 0 ? '按需：客户问相关内容，AI选择素材' : '按需：客户询问面试地点或指引',
+      source: asset.position_id === 0 ? '通用素材库' : '本岗位专属素材',
+    }))
+}
+
 export function activeOpenings(items: LegacyOpening[]): LegacyOpening[] {
   return items.filter(item => item.status !== 'disabled').slice().sort((a, b) => a.seq - b.seq)
 }
 
 /** A presentation graph only: never submit its system stages to the flow API. */
-export function buildRuntimeFlow(saved: AgentFlow, openings: LegacyOpening[]): AgentFlow {
+export function buildRuntimeFlow(saved: AgentFlow, openings: LegacyOpening[], aiMedia: AiMediaBranch[] = []): AgentFlow {
   const usesFlow = saved.status === 'enabled' && saved.nodes.length > 0
   const nodes: AgentFlowNode[] = usesFlow
     ? saved.nodes.map(node => ({ ...node, parts: node.parts?.map(part => ({ ...part })) }))
@@ -69,24 +93,36 @@ export function buildRuntimeFlow(saved: AgentFlow, openings: LegacyOpening[]): A
   nodes.unshift({ node_key: START_KEY, node_type: 'system_start', title: '客户进入', body: 'Windows 检测到客户入站消息；仅指定测试目标还支持无消息的加好友触发。已有客户与新客户分开处理。', parts: [], status: 'enabled' })
   nodes.push({ node_key: AI_KEY, node_type: 'system_ai', title: 'AI 按客户问题答疑', body: '岗位事实 + 人设与话术 + 历史对话 + 已发送流程摘要 → 生成回复；Windows 负责实际发送。', parts: [], status: 'enabled' })
 
+  for (const [index, media] of aiMedia.entries()) {
+    const key = `__runtime_media_${index}`
+    nodes.push({ node_key: key, node_type: 'system_media', title: media.name,
+      body: `${media.condition}；不是开场必发`, status: 'enabled',
+      parts: [{kind: media.kind, media_name: media.name, body: ''}], media_source: media.source,
+      media_condition: media.condition, media_position_id: media.position_id,
+    })
+    edges.push({ from_key: AI_KEY, to_key: key, trigger: 'keyword', runtime_label: media.condition })
+  }
+
   // Compute a readable DAG layout without changing the saved node coordinates.
   const levels = new Map<string, number>([[START_KEY, 0]])
   for (let pass = 0; pass < nodes.length; pass += 1) {
     let changed = false
     for (const edge of edges) {
       const from = levels.get(edge.from_key)
-      if (from === undefined || edge.to_key === AI_KEY || edge.to_key === START_KEY) continue
+      if (from === undefined || edge.to_key === AI_KEY || edge.to_key === START_KEY || edge.from_key === AI_KEY) continue
       const next = Math.min(nodes.length, from + 1)
       if (next > (levels.get(edge.to_key) ?? -1)) { levels.set(edge.to_key, next); changed = true }
     }
     if (!changed) break
   }
-  levels.set(AI_KEY, Math.max(1, ...levels.values()) + 1)
+  const aiDepth = Math.max(1, ...levels.values()) + 1
+  levels.set(AI_KEY, aiDepth)
   const slots = new Map<number, number>()
   const levelCounts = new Map<number, number>()
-  for (const node of nodes) { const level = levels.get(node.node_key) ?? 1; levelCounts.set(level, (levelCounts.get(level) || 0) + 1) }
+  for (const node of nodes.filter(node => node.node_type !== 'system_media')) { const level = levels.get(node.node_key) ?? 1; levelCounts.set(level, (levelCounts.get(level) || 0) + 1) }
   const bandHeight = 240 + (Math.max(1, ...levelCounts.values()) - 1) * 208
   for (const node of nodes) {
+    if (node.node_type === 'system_media') continue
     const level = levels.get(node.node_key) ?? 1
     const slot = slots.get(level) ?? 0
     slots.set(level, slot + 1)
@@ -94,6 +130,13 @@ export function buildRuntimeFlow(saved: AgentFlow, openings: LegacyOpening[]): A
     const column = band % 2 === 0 ? level % 3 : 2 - level % 3
     node.x = 48 + column * 372
     node.y = 48 + band * bandHeight + slot * 208
+  }
+  if (aiMedia.length) {
+    const mediaTop = Math.max(...nodes.filter(node => node.node_type !== 'system_media').map(node => Number(node.y || 0))) + 240
+    nodes.filter(node => node.node_type === 'system_media').forEach((node, index) => {
+      node.x = 48 + (index % 3) * 372
+      node.y = mediaTop + Math.floor(index / 3) * 208
+    })
   }
   return { ...saved, entry_key: START_KEY, nodes, edges, presentation_only: true }
 }
@@ -119,6 +162,11 @@ export function compareOpeningContents(saved: AgentFlow, openings: LegacyOpening
 }
 
 export function describeRuntimeNode(node: AgentFlowNode, graph: AgentFlow, legacy: boolean): string[] {
+  if (node.node_type === 'system_media') return [
+    `${node.media_source || '素材库'}；${node.media_condition || '客户问相关内容时，AI选择素材'}。不是开场必发，也不会按图上顺序依次发送所有素材。`,
+    '这是当前 AI 上下文中可选择的真实素材。AI 根据客户问题、人设话术和历史记录生成 image/video 消息，Windows 再下载并发送。',
+    '画布不把“素材可用”当成“已经发送”。如需每位新客户固定收到此素材，应在启用的节点流程中配置媒体消息。',
+  ]
   if (node.node_type === 'system_start') return [
     '新客户：Windows 检测到入站消息，且账本中没有已发送记录，才开始欢迎介绍。',
     '仅指定 target 的测试范围支持“加好友但尚未发消息”触发；全部联系人模式不会据此批量欢迎历史好友。',

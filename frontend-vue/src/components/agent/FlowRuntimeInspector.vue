@@ -1,17 +1,20 @@
 <template>
   <div class="runtime-inspector">
-    <div class="inspector-label">{{ legacy ? '当前旧开场路径 · 只读' : '已保存的运行路径 · 只读' }}</div>
+    <div class="inspector-label">{{ node?.node_type === 'system_media' ? 'AI 可选媒体分支 · 只读' : legacy ? '当前旧开场路径 · 只读' : '已保存的运行路径 · 只读' }}</div>
     <template v-if="node">
       <h3>{{ node.title || node.node_key }}</h3>
       <el-button v-if="editable" link type="primary" @click="$emit('edit-node', node.node_key)">编辑此节点</el-button>
       <h4>这个节点实际做什么</h4>
       <p v-for="line in explanations" :key="line">{{ line }}</p>
       <template v-if="node.parts?.length">
-        <h4>客户会收到的内容</h4>
+        <h4>{{ node.node_type === 'system_media' ? 'AI 可选素材 · 按需发送' : '此步骤配置的发送内容' }}</h4>
         <div v-for="(part, index) in node.parts" :key="index" class="message-preview">
           <span class="message-kind">第 {{ index + 1 }} 条 · {{ part.kind === 'text' ? '文本' : part.kind === 'video' ? '视频' : '图片' }}</span>
           <p v-if="part.kind === 'text'" class="verbatim">{{ part.body || '未填写文本' }}</p>
-          <template v-else><strong>{{ part.media_name || '未选素材' }}</strong><p>Windows 读取素材文件后发送，媒体不会变成这段文件名文字。</p></template>
+          <template v-else><strong>{{ part.media_name || '未选素材' }}</strong>
+            <FlowMediaPreview v-if="part.media_name" :name="part.media_name" :kind="part.kind" />
+            <p>Windows 读取素材文件后发送，媒体不会变成这段文件名文字。</p>
+          </template>
         </div>
       </template>
       <template v-if="outgoing.length">
@@ -38,6 +41,7 @@
 import { computed } from 'vue'
 import type { AgentFlow, AgentFlowEdge, AgentFlowNode } from '../../api/agent'
 import { describeRuntimeNode } from './flow-runtime'
+import FlowMediaPreview from './FlowMediaPreview.vue'
 const props = defineProps<{ graph: AgentFlow; node: AgentFlowNode | null; edge: AgentFlowEdge | null; legacy: boolean; editable: boolean }>()
 defineEmits<{ (event: 'edit-node', key: string): void; (event: 'select-node', key: string): void }>()
 const explanations = computed(() => props.node ? describeRuntimeNode(props.node, props.graph, props.legacy) : [])

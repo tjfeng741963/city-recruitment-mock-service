@@ -60,4 +60,12 @@ describe("招聘流程图入口接线", () => {
     expect(page).toContain('agentApi.flowStateSummary');
     expect(page).toContain('FlowRuntimeInspector');
   });
+
+  it('uses real media previews and shows the optional AI media sources', () => {
+    const page=read('frontend-vue/src/views/AgentFlowView.vue');
+    const inspector=read('frontend-vue/src/components/agent/FlowRuntimeInspector.vue');
+    expect(page).toContain('buildAiMediaBranches');
+    expect(page).toContain('agentApi.context');
+    expect(inspector).toContain('FlowMediaPreview');
+  });
 });

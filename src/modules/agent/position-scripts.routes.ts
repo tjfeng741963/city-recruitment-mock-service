@@ -3,7 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { authorizeProfileRequest } from "./profile.routes.js";
+import { isProfileTokenValid } from "./profile.routes.js";
 import {
   MEDIA_MAX_BYTES,
   mediaAbsolutePath,
@@ -18,12 +18,12 @@ import {
  *
  * 旧的「岗位话术 5 时点」接口已随 2026-11-17 的 Agent 重构废弃删除
  * （人设与开场改用 agent-persona.routes.ts 的 agent-persona / agent-opening）。
- * 本文件只保留媒体：上传 / 列表 / 删除 / 设备下载。
+ * 本文件只保留媒体：上传 / 列表 / 删除 / 管理员预览与设备下载。
  *
  * 接口分两类鉴权：
  * - 后台配置类（/api/v1/media）→ 仅管理员，风格同 kb-v3；
- * - 媒体下载（GET /api/v1/agent/media/:name）→ 设备 token 或 X-Profile-Token，
- *   因为下载方是客户端（设备）与 8090（服务间），它们都没有用户 JWT。
+ * - 媒体下载（GET /api/v1/agent/media/:name）→ 管理员 JWT、设备 token 或
+ *   X-Profile-Token，供后台预览、Windows 客户端与 8090 服务读取。
  *
  * 大文件：base64 解码后超过 20MB 直接 413。视频真实体积常到几十 MB，
  * 这里先给一个能覆盖「门头照 + 30 秒短视频」的上限，超了请运营先压缩。
@@ -176,12 +176,12 @@ export async function registerPositionScriptRoutes(app: FastifyInstance, db: Dat
   });
 
   /**
-   * 媒体下载：设备 token 或 X-Profile-Token。
+   * 媒体下载：管理员 JWT、设备 token 或 X-Profile-Token。
    * 响应头带 X-Content-SHA256 让客户端校验；Content-Type 按扩展名给，
    * 客户端保存到本地时不必再猜类型。
    */
   app.get<{ Params: { name: string } }>("/api/v1/agent/media/:name", async (request, reply) => {
-    if (!authorizeProfileRequest(request) && !isValidDeviceToken(db, request)) {
+    if (!isAdmin(request) && !isProfileTokenValid(request.headers["x-profile-token"]) && !isValidDeviceToken(db, request)) {
       return reply.code(403).send({ detail: "Not authenticated" });
     }
     const name = request.params.name;
@@ -197,12 +197,13 @@ export async function registerPositionScriptRoutes(app: FastifyInstance, db: Dat
     } catch {
       return reply.code(404).send({ detail: "Media file missing" });
     }
+    const storageMime = mimeOfName(row.storage_path);
     return reply
       .code(200)
       .header("X-Content-SHA256", String(row.sha256))
       .header("Content-Length", String(buffer.length))
       .header("Cache-Control", "private, max-age=3600")
-      .type(mimeOfName(row.name))
+      .type(storageMime === "application/octet-stream" ? mimeOfName(row.name) : storageMime)
       .send(buffer);
   });
 }
