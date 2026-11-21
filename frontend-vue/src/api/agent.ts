@@ -72,6 +72,11 @@ export const devicesApi = {
       `/api/v1/agent/devices/${encodeURIComponent(code)}/verify-code`,
       payload,
     ),
+  replyProvider: (code: string, signal?: AbortSignal) =>
+    http.get<{provider: 'agent' | 'dify'; configured: boolean}>(`/api/v1/agent/devices/${encodeURIComponent(code)}/reply-provider`, { signal }),
+  saveReplyProvider: (code: string, provider: 'agent' | 'dify', confirmed: boolean) =>
+    http.put<{provider: 'agent' | 'dify'; configured: boolean}>(`/api/v1/agent/devices/${encodeURIComponent(code)}/reply-provider`,
+      { provider, fresh_client_state_confirmed: confirmed }),
   clearUnread: (id: number | string) =>
     http.post<OkResult>(`/api/v1/agent/device/${id}/clear-unread`),
   workflowGet: (id: number | string) =>
@@ -312,6 +317,15 @@ export const agentApi = {
     http.post<OkResult>('/api/v1/agent/opening/log', payload),
   chat: (payload: Record<string, unknown>) =>
     http.post<Record<string, unknown>>('/api/v1/agent/chat', payload),
+  difyPreview: (payload: { position_id: number; text: string; dry?: true; session_key?: string }, signal?: AbortSignal) =>
+    http.post<{
+      ok: boolean
+      code?: string
+      error?: string
+      inputs?: { position_data: string }
+      reply?: { messages: Array<{content: string}> }
+      latency_ms?: number
+    }>('/api/v1/dify/preview', payload, { timeout: 40000, signal }),
   context: (params: PageQuery = {}) =>
     http.get<Record<string, unknown>>('/api/v1/agent/context', { params }),
   reminderTasks: (params: PageQuery = {}) =>

@@ -37,6 +37,7 @@
       <span v-if="flow" class="flow-version">版本 v{{ flow.version }} · {{ flow.nodes.length }} 节点 · {{ flow.edges.length }} 连接</span>
       <span v-if="isDirty" class="dirty-hint">未保存</span>
       <span class="toolbar-spacer" />
+      <el-button v-if="auth.user?.role === 'admin'" @click="testVisible = true">接待测试</el-button>
       <el-button :icon="Refresh" :disabled="!positionId || saving || migrating" :loading="loading" @click="reloadFlow">刷新</el-button>
       <el-dropdown trigger="click" :disabled="positionsLoading || loading || saving || migrating" @command="openConfiguration">
         <el-button type="primary" :disabled="positionsLoading || loading || saving || migrating">
@@ -78,7 +79,6 @@
     </div>
 
     <div v-if="runtimeDetails && savedFlow" class="runtime-details">
-      <PositionQa :position-id="positionId" />
       <p>这里显示按服务器配置推导的路径。没有运行客户端、企微未登录或没有客户触发时，不会自动发送。网页点击节点只查看配置。</p>
       <p v-if="isDirty">编辑器有未保存修改；实际执行路径仍使用上次保存的 v{{ savedFlow.version }}。</p>
       <p v-if="contentMatches">节点内容与旧开场逐条一致；等待方式仍以节点连接为准，内容一致不代表发送节奏一致。</p>
@@ -371,12 +371,16 @@
         </template>
       </div>
     </template>
+    <ReceptionTestDrawer v-if="auth.user?.role === 'admin'" v-model="testVisible"
+      :position-id="positionId" :positions="positions" :positions-loading="positionsLoading"
+      :initial-engine="route.query.test_engine === 'dify' ? 'dify' : 'agent'"
+      :initial-device="typeof route.query.device_code === 'string' ? route.query.device_code : ''" />
     <PositionAgentDrawer v-model="agentDrawerVisible" :position="currentPosition" :initial-tab="agentDrawerTab" @changed="refreshOpeningContext" />
   </section>
 </template>
 
 <script setup lang="ts">
-import PositionQa from '../components/agent/PositionQa.vue'
+import ReceptionTestDrawer from '../components/agent/ReceptionTestDrawer.vue'
 import PositionAgentDrawer from '../components/basic/PositionAgentDrawer.vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
@@ -437,6 +441,7 @@ const exitFullscreenButton = ref<{ $el: HTMLElement } | null>(null)
 const inspectorWidth = ref(360)
 const viewMode = ref<'runtime' | 'edit'>('runtime')
 const runtimeDetails = ref(false)
+const testVisible = ref(route.query.test_engine === 'dify' || route.query.test_engine === 'agent')
 const savedFlow = ref<AgentFlow | null>(null)
 const legacyOpenings = ref<LegacyOpening[]>([])
 const openingVersion = ref<string | null>(null)
@@ -511,7 +516,15 @@ async function loadPositions(): Promise<void> {
   try {
     const { data } = await positionsApi.list({ page: 1, page_size: 1000 })
     positions.value = toArray<ServicePosition>(data)
-    const selection = workflowPositionSelection(route.query.position_id, readPositionContext(userKey()), positions.value.map(position => position.id))
+    let requestedPosition = route.query.position_id
+    const requestedDevice = route.query.device_code
+    if (!requestedPosition && route.query.test_engine === 'dify' && typeof requestedDevice === 'string' && requestedDevice) {
+      const accounts = await devicesApi.list()
+      const account = accounts.data.items.find(device => device.device_code === requestedDevice)
+      if (!account?.position_id) return
+      requestedPosition = String(account.position_id)
+    }
+    const selection = workflowPositionSelection(requestedPosition, readPositionContext(userKey()), positions.value.map(position => position.id))
     if (selection.error) { positionId.value = 0; pageError.value = selection.error; return }
     const nextId = selection.id
     positionId.value = nextId
@@ -691,7 +704,7 @@ function endInspectorResize(event: PointerEvent): void {
   if (target.hasPointerCapture(event.pointerId)) target.releasePointerCapture(event.pointerId)
 }
 function onWorkspaceKey(event: KeyboardEvent): void {
-  if (event.key === 'Escape' && fullscreen.value && !agentDrawerVisible.value) exitFullscreen()
+  if (event.key === 'Escape' && fullscreen.value && !agentDrawerVisible.value && !testVisible.value) exitFullscreen()
 }
 
 watch(canvas, value => { if (value) nextTick(() => value.fitToCanvas()) }, { flush: 'post' })

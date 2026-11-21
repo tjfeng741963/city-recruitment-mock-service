@@ -1,5 +1,5 @@
 <template>
-  <el-collapse class="position-qa"><el-collapse-item title="模拟提问 · 查看岗位回答依据" name="qa">
+  <section class="position-qa">
     <p>只生成预览，不发送给真实客户，也不推进真实流程。普通节点消息与等待分支请在流程图核对。</p>
     <el-input v-model="question" placeholder="例如：工资多少？包住吗？面试在哪里？" :disabled="busy" />
     <el-button :disabled="!positionId || !question.trim()" :loading="busy" type="primary" @click="preview(false)">查看回答依据</el-button>
@@ -10,7 +10,7 @@
       <dl><template v-for="(value,key) in facts" :key="key"><dt>{{ factLabels[String(key)] || '岗位补充资料' }}</dt><dd>{{ value }}</dd></template></dl>
       <div v-for="item in knowledge" :key="item.id" class="qa-faq"><b>{{ item.question }}</b><p>{{ item.answer }}</p></div>
     </template>
-  </el-collapse-item></el-collapse>
+  </section>
 </template>
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
@@ -37,5 +37,5 @@ async function preview(generate:boolean) {
 }
 </script>
 <style scoped>
-.position-qa{margin:0 0 16px}.position-qa p{font-size:12px;color:var(--bd-text-secondary)}.position-qa .el-input{margin-bottom:10px}.qa-answer,.qa-faq{white-space:pre-wrap;padding:12px;margin-top:10px;background:var(--el-fill-color-light);border-radius:8px}dl{display:grid;grid-template-columns:180px 1fr;font-size:12px;gap:6px}dd{margin:0;white-space:pre-wrap}
+.position-qa{margin:0 0 16px}.position-qa p{font-size:12px;color:var(--bd-text-secondary)}.position-qa .el-input{margin-bottom:10px}.qa-answer,.qa-faq{white-space:pre-wrap;overflow-wrap:anywhere;padding:12px;margin-top:10px;background:var(--el-fill-color-light);border-radius:8px}dl{display:grid;grid-template-columns:minmax(70px, 1fr) 2fr;font-size:12px;gap:6px}dd{margin:0;white-space:pre-wrap}
 </style>
