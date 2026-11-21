@@ -17,7 +17,7 @@
           <form class="test-form" @submit.prevent="preview(true)">
             <label for="dify-question">求职者问题</label>
             <el-input id="dify-question" v-model="question" type="textarea" :rows="3" maxlength="2000"
-              placeholder="例如，工资和班次是什么？" />
+              placeholder="例如，推荐岗位、查看面试安排。报名试填请使用虚构姓名和手机号。" />
             <div class="actions">
               <el-button type="primary" native-type="submit" :disabled="!canPreview" :loading="busy === 'answer'">生成模拟回答</el-button>
               <el-button :disabled="!canPreview" :loading="busy === 'evidence'" @click="preview(false)">查看回答依据</el-button>
@@ -131,7 +131,7 @@ async function preview(generate: boolean): Promise<void> {
   testError.value = ''
   testNotice.value = ''
   try {
-    const { data } = await agentApi.difyPreview({ position_id: position, text, dry: true }, controller.signal)
+    const { data } = await agentApi.difyPreview({ position_id: position, text, session_key: session, dry: true }, controller.signal)
     if (!current()) return
     if (!data.ok || !data.inputs) throw new Error(data.error || '读取 Dify 岗位资料失败')
     const input = JSON.parse(data.inputs.position_data)
@@ -139,7 +139,7 @@ async function preview(generate: boolean): Promise<void> {
     const wage = wageSource === 'city' ? '城市资料' : wageSource === 'position_fallback' ? '岗位补充' : '未提供'
     const knowledge = Array.isArray(input.knowledge) ? input.knowledge.length : 0
     const omitted = Number(input.retrieval?.omitted) || 0
-    evidenceSummary.value = [`城市 ${input.city || '未提供'}`, `工资来源 ${wage}`, `${knowledge} 条适用问答`,
+    evidenceSummary.value = [input.job_title ? `岗位 ${input.job_title}` : '', `城市 ${input.city || '未提供'}`, `工资来源 ${wage}`, `${knowledge} 条适用问答`,
       omitted ? `${omitted} 条资料未纳入本次输入` : ''].filter(Boolean).join(' · ')
     evidence.value = JSON.stringify(input, null, 2)
     if (!generate) return

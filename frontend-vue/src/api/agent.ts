@@ -11,6 +11,8 @@ export interface AgentDeviceFactory {
 }
 
 export interface AgentDeviceItem extends AgentDevice {
+  bridge_state?: 'online' | 'offline' | 'scanning'
+  last_heartbeat_at?: string | null
   reply_provider?: 'agent' | 'dify'
   factory_ids?: number[]
   factories?: AgentDeviceFactory[]

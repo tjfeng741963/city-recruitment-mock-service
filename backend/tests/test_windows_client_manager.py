@@ -35,7 +35,7 @@ def test_check_release_reads_metadata_without_downloading_or_starting(monkeypatc
     calls = []
     def request(url):
         calls.append(url)
-        return {"sha": COMMIT} if url.endswith("commits/main") else {"fixture": True}
+        return {"sha": COMMIT} if url.endswith("commits/main") else {"assets": [{"name": "windows-client.zip"}, {"name": "windows-client.sha256"}]}
     monkeypatch.setattr(updater, "_request_json", request)
     monkeypatch.setattr(updater, "release_asset_urls", lambda sha, data: ("package", "checksum"))
     monkeypatch.setattr(updater, "_download", lambda *a: pytest.fail("check must not download"))
@@ -184,14 +184,69 @@ def test_windows_stop_revalidates_identity_and_preserves_foreign_process(tmp_pat
             children.append(subprocess.Popen([getattr(sys, "_base_executable", sys.executable), str(script)], creationflags=subprocess.CREATE_NO_WINDOW))
         rows = module.system_snapshot()["processes"]
         own = next(row for row in rows if row["ProcessId"] == children[0].pid)
+        assert module.is_process_alive(children[0].pid, own["CreationDate"])
         with pytest.raises(updater.UpdateError):
             module.terminate_verified_process({**own, "CreationDate": "wrong creation time"}, roots[0])
         assert children[0].poll() is None
         assert module.ManagerService(roots[0]).stop() == 1
         assert children[0].poll() is not None
+        assert not module.is_process_alive(children[0].pid, own["CreationDate"])
         assert children[1].poll() is None
     finally:
         for child in children:
             if child.poll() is None:
                 child.terminate()
             child.wait(timeout=10)
+
+
+def test_restart_holds_one_lock_across_stop_and_start(tmp_path, monkeypatch):
+    module, service, events = fixture_service(tmp_path, monkeypatch)
+    monkeypatch.setattr(module, "require_interactive_session", lambda: None)
+    monkeypatch.setattr(service, "_stop_locked", lambda: events.append("stop"))
+    monkeypatch.setattr(service, "_start_locked", lambda: events.append("start") or 1)
+    assert service.restart() == 1
+    assert events == ["lock", "stop", "start", "unlock"]
+
+
+def test_process_exit_invalidates_a_ready_snapshot(tmp_path, monkeypatch):
+    module = service_module()
+    service = module.ManagerService(tmp_path)
+    monkeypatch.setattr(module, "is_process_alive", lambda *_: False)
+    old = {"running": 1, "startup_status": "ready", "process_identities": [(123, "fixture-time")]}
+    result = service.watch_status(old)
+    assert result["running"] == 0
+    assert result["startup_status"] == "failed"
+    assert old["running"] == 1
+
+
+def test_import_refuses_bad_digest_before_apply(tmp_path, monkeypatch):
+    _, service, events = fixture_service(tmp_path, monkeypatch)
+    package = tmp_path / "windows-client.zip"
+    package.write_bytes(b"corrupted")
+    (tmp_path / "windows-client.sha256").write_text("a" * 64, encoding="ascii")
+    with pytest.raises(updater.UpdateError, match="checksum"):
+        service.import_package(package)
+    assert "apply" not in events
+
+
+def test_pending_main_offers_last_complete_release_without_automatically_installing_it(monkeypatch):
+    import urllib.error
+
+    candidate = "b" * 40
+    url = f"https://github.com/{updater.REPOSITORY}/releases/download/win-client-{candidate}/"
+    assets = [{"name": name, "browser_download_url": url + name}
+              for name in ("windows-client.zip", "windows-client.sha256")]
+    stable = {"tag_name": f"win-client-{candidate}", "published_at": "2026-11-21T00:00:00Z", "assets": assets}
+
+    def request(url, container=dict):
+        if url.endswith("commits/main"):
+            return {"sha": COMMIT}
+        if "/releases/tags/" in url:
+            raise updater.UpdateError("missing") from urllib.error.HTTPError(url, 404, "missing", {}, None)
+        return [{**stable, "published_at": "2026-11-22T00:00:00Z", "draft": True}, stable]
+
+    monkeypatch.setattr(updater, "_request_json", request)
+    assert updater.check_release()["commit"] == candidate
+    monkeypatch.setattr(updater, "_download", lambda *_: pytest.fail("must not download on startup fallback"))
+    with pytest.raises(updater.UpdateError, match="尚未发布"):
+        updater.fetch_release_package()

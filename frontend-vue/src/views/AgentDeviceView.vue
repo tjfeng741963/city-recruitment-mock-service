@@ -6,7 +6,7 @@
         <p class="page-desc">连接企业微信，选择接待岗位和 AI 工作流，设置报名通知群</p>
       </div>
       <div class="header-actions">
-        <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
+        <el-button :icon="Refresh" :loading="loading" @click="load()">刷新</el-button>
         <el-button type="primary" :icon="Plus" @click="openCreate">连接新账号</el-button>
       </div>
     </div>
@@ -108,7 +108,7 @@
         <el-table-column label="客户端连接" width="110">
           <template #default="{ row }">
             <el-tag :type="isWebTestDevice(row) ? 'info' : isOnline(row) ? 'success' : 'danger'" effect="light">
-              {{ isWebTestDevice(row) ? '无需连接' : isOnline(row) ? '在线' : '离线' }}
+              {{ isWebTestDevice(row) ? '无需连接' : isOnline(row) ? '回复在线' : row.bridge_state === 'scanning' ? '等待扫码' : '离线' }}
             </el-tag>
             <div v-if="row.queue_depth" class="queue-note">队列 {{ row.queue_depth }}</div>
           </template>
@@ -116,7 +116,7 @@
 
         <el-table-column label="最近心跳" width="180">
           <template #default="{ row }">
-            <span class="muted">{{ row.last_online ? formatDateTime(row.last_online) : '-' }}</span>
+            <span class="muted">{{ row.last_heartbeat_at ? formatDateTime(row.last_heartbeat_at) : row.last_online ? formatDateTime(row.last_online) : '-' }}</span>
           </template>
         </el-table-column>
 
@@ -356,15 +356,22 @@ function isOnline(device: AgentDeviceItem): boolean {
   return deviceOnline(device)
 }
 
-async function load(): Promise<void> {
-  loading.value = true
-  error.value = ''
+let devicePoll: ReturnType<typeof setInterval> | undefined
+let latestDeviceRequest = 0
+
+async function load(silent = false): Promise<void> {
+  const request = ++latestDeviceRequest
+  if (!silent) {
+    loading.value = true
+    error.value = ''
+  }
   try {
     const { data } = await devicesApi.list({ page: 1, page_size: 1000 })
+    if (request !== latestDeviceRequest) return
     devices.value = data.items || []
     if ((page.value - 1) * pageSize.value >= devices.value.length) page.value = 1
   } catch (err: any) {
-    error.value = err?.response?.data?.detail || '设备列表加载失败'
+    if (!silent) error.value = err?.response?.data?.detail || '设备列表加载失败'
   } finally {
     loading.value = false
   }
@@ -634,7 +641,9 @@ onMounted(() => {
   void load()
   void loadFactories()
   void loadPositions()
+  devicePoll = setInterval(() => { if (!loading.value) void load(true) }, 15000)
 })
+onUnmounted(() => { clearInterval(devicePoll); latestDeviceRequest += 1 })
 </script>
 
 <style scoped>

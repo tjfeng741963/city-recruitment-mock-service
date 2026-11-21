@@ -8,7 +8,7 @@ import queue
 import threading
 import time
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 import client_updater as updater
 from client_manager_service import ManagerService
@@ -23,7 +23,7 @@ BLUE = "#235bd8"
 def friendly_error(exc: Exception) -> str:
     text = str(exc)
     if any(word in text for word in ("HTTPS", "GitHub", "HTTP", "urlopen", "timed out")):
-        return "无法取得更新。请检查网络；当前 main 的客户端包也可能尚未发布。已安装的代码未因此改变，请稍后重试。"
+        return f"{text}。可以重试，或导入已下载的官方更新包。"
     if "another client updater" in text:
         return "另一个更新或启动操作正在进行，请稍后刷新状态。"
     if "manager protocol" in text:
@@ -49,6 +49,9 @@ class ManagerWindow:
         self.release = None
         self.state = None
         self.events = queue.SimpleQueue()
+        self.watch_pending = False
+        self.status_generation = 0
+        self.next_inventory = time.monotonic() + 20
         self.current_text = tk.StringVar(value="读取中…")
         self.latest_text = tk.StringVar(value="点击「检查更新」获取")
         self.runtime_text = tk.StringVar(value="正在读取本机状态…")
@@ -59,6 +62,7 @@ class ManagerWindow:
         self.window.protocol("WM_DELETE_WINDOW", self.close)
         self._poll_id = self.window.after(50, self._poll)
         self.refresh()
+        self._watch_id = self.window.after(2000, self._watch)
 
     def _build(self):
         self.window.title("城市招聘 · 客户端管理")
@@ -102,7 +106,8 @@ class ManagerWindow:
         self.check_button.pack(side="left")
         self.install_button = ttk.Button(actions, text="下载并更新", style="Primary.TButton", command=self.install)
         self.install_button.pack(side="left", padx=10)
-        tk.Label(actions, text="安装完成后保持停止", bg=BACKGROUND, fg=MUTED).pack(side="left", padx=4)
+        self.import_button = ttk.Button(actions, text="导入本地更新包", command=self.import_package)
+        self.import_button.pack(side="left", padx=4)
 
         control = tk.Frame(outer, bg="white", padx=18, pady=14)
         control.pack(fill="x")
@@ -114,6 +119,8 @@ class ManagerWindow:
         self.stop_button.pack(side="right")
         self.start_button = ttk.Button(control, text="启动回复", command=self.start)
         self.start_button.pack(side="right", padx=8)
+        self.restart_button = ttk.Button(control, text="重启回复", command=self.restart)
+        self.restart_button.pack(side="right")
 
         tk.Label(outer, textvariable=self.message_text, bg=BACKGROUND, fg=INK, anchor="w", justify="left", wraplength=825).pack(fill="x", pady=(16, 6))
         progress = tk.Frame(outer, bg=BACKGROUND)
@@ -141,6 +148,8 @@ class ManagerWindow:
         self.install_button.configure(text="已是最新版本" if up_to_date else "下载并更新")
         can_install = not self.busy and stopped and self.release and not up_to_date
         self.install_button.state(["!disabled"] if can_install else ["disabled"])
+        self.import_button.state(["!disabled"] if not self.busy and stopped else ["disabled"])
+        self.restart_button.state(["!disabled"] if not self.busy and self.state and self.state["running"] and not self.state.get("other_running") else ["disabled"])
         self.start_button.state(["!disabled"] if not self.busy and stopped else ["disabled"])
         self.stop_button.state(["!disabled"] if not self.busy and self.state and self.state["running"] else ["disabled"])
 
@@ -153,9 +162,10 @@ class ManagerWindow:
     def _run(self, operation, function):
         if self.busy or self.closed:
             return
+        self.status_generation += 1
         self.busy = True
         self.operation = operation
-        self.stage_text.set({"status": "读取本机状态…", "check": "查询已发布版本…", "update": "准备更新…", "start": "正在启动回复…", "stop": "正在停止回复…"}[operation])
+        self.stage_text.set({"status": "读取本机状态…", "check": "查询已发布版本…", "update": "准备更新…", "start": "正在启动回复…", "stop": "正在停止回复…", "restart": "正在重启回复…", "import": "正在校验本地更新包…"}[operation])
         self.progress.start(12)
         self._buttons()
         def worker():
@@ -170,7 +180,7 @@ class ManagerWindow:
                 self.events.put(("error", operation, exc))
         threading.Thread(target=worker, daemon=True).start()
 
-    def _apply_state(self, state):
+    def _apply_state(self, state, *, watched=False):
         self.state = state
         if state is None:
             self.current_text.set("状态不可用，请刷新")
@@ -185,27 +195,59 @@ class ManagerWindow:
             "waiting_wecom": "等待打开企业微信",
             "waiting_login": "等待扫码登录企业微信",
             "initializing": "企业微信已登录，正在初始化数据库…",
-            "ready": f"自动回复可用 · {count} 个进程",
+            "ready": "本机回复已就绪" if count == 1 else "回复进程数量异常",
             "failed": "自动回复启动失败",
             "stopped": "自动回复已停止",
         }
         if not startup_status:
-            startup_status = "ready" if count else "stopped"
+            startup_status = "starting" if count else "stopped"
         self.runtime_text.set(status_text.get(startup_status, "自动回复状态未知"))
-        if state.get("startup_detail"):
+        if state.get("startup_detail") and (not watched or startup_status == "failed"):
             self.message_text.set(state["startup_detail"])
-        self.runtime_label.configure(fg="#15724a" if startup_status == "ready" and count else INK)
+        self.runtime_label.configure(fg="#15724a" if startup_status == "ready" and count == 1 else INK)
         enabled = state["task_enabled"]
         schedule = "登录自动启动已启用" if enabled is True else "登录自动启动已暂停" if enabled is False else "未能读取登录自动启动任务"
         if state.get("other_running"):
             schedule += " · 检测到其他路径的回复进程，暂不允许安装或启动"
         self.schedule_text.set(schedule)
 
+    def _watch(self):
+        if self.closed:
+            return
+        self._watch_id = self.window.after(2000, self._watch)
+        if (self.busy and self.operation != "check") or self.watch_pending:
+            return
+        previous = self.state
+        now = time.monotonic()
+        full = previous is None or (not previous["running"] and now >= self.next_inventory)
+        if not full and not previous["running"]:
+            return
+        if full:
+            self.next_inventory = now + 20
+        self.watch_pending = True
+        generation = self.status_generation
+
+        def worker():
+            try:
+                state = self.service.status() if full else self.service.watch_status(previous)
+            except Exception:
+                state = None
+            self.events.put(("watch", generation, state))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _poll(self):
         if self.closed:
             return
         while not self.events.empty():
             event = self.events.get()
+            if event[0] == "watch":
+                self.watch_pending = False
+                _, generation, state = event
+                if generation == self.status_generation and (not self.busy or self.operation == "check"):
+                    self._apply_state(state, watched=True)
+                    self._buttons()
+                continue
             if event[0] == "stage":
                 self.stage_text.set(event[1])
                 continue
@@ -218,10 +260,14 @@ class ManagerWindow:
             if event[0] == "error":
                 if operation == "check":
                     self.release = None
-                    self.latest_text.set("检查失败 / 尚无可用包")
+                    self.latest_text.set("检查失败")
                 if operation == "status":
                     self._apply_state(None)
-                self.message_text.set("操作失败：" + friendly_error(result))
+                if operation in {"start", "stop", "restart"}:
+                    self.next_inventory = 0
+                    self._apply_state(None)
+                stage = {"check": "查询发布版本失败", "update": "更新失败", "import": "导入失败"}.get(operation, "操作失败")
+                self.message_text.set(stage + "：" + friendly_error(result))
                 self._record(str(result))
                 if operation != "status":
                     updater._log_event(self.service.root, f"manager {operation} failed: {result}")
@@ -231,11 +277,14 @@ class ManagerWindow:
                     self.release = result
                     self.latest_text.set(result["commit"])
                     current = self.state.get("commit") if self.state else None
-                    self.message_text.set("当前已是该发布版本，无需重复安装。" if current == result["commit"] else "发现已发布版本。停止回复后点击「下载并更新」。")
-                elif operation == "update":
+                    if result.get("pending_main"):
+                        self.message_text.set("最新提交的安装包还在发布。上方为当前可用的完整版本。")
+                    else:
+                        self.message_text.set("当前已是该发布版本，无需重复安装。" if current == result["commit"] else "发现已发布版本。停止回复后点击「下载并更新」。")
+                elif operation in {"update", "import"}:
                     self.message_text.set(f"更新完成，校验安装了 {len(result['changed'])} 个变更文件。自动回复未启动。")
                     self._record(f"已安装 {result['commit']}；再次打开窗口可加载新版管理界面。")
-                elif operation == "start":
+                elif operation in {"start", "restart"}:
                     start_status = (self.state or {}).get("startup_status")
                     if start_status == "waiting_login":
                         self.message_text.set("企业微信尚未登录，请扫码；二维码会继续按节流周期上传。")
@@ -243,8 +292,10 @@ class ManagerWindow:
                         self.message_text.set("请先打开企业微信，客户端会继续等待，不会初始化数据库。")
                     elif start_status == "initializing":
                         self.message_text.set("已启动，正在初始化数据库；初始化完成后才会处理消息。")
+                    elif start_status == "ready" and self.state["running"]:
+                        self.message_text.set("本机已就绪，网页在线状态以实际心跳为准。")
                     else:
-                        self.message_text.set("自动回复已进入可用状态。请在业务后台核对在线状态与回复结果。")
+                        self.message_text.set("正在等待确认启动结果，请查看当前状态。")
                 elif operation == "stop":
                     self.message_text.set("自动回复进程已停止。请核对停止时正在处理的消息，避免重复发送。")
             self._buttons()
@@ -265,6 +316,26 @@ class ManagerWindow:
         commit = self.release["commit"]
         self._run("update", lambda: self.service.update(commit, progress=lambda text: self.events.put(("stage", text))))
 
+    def import_package(self):
+        if self.busy:
+            return
+        filename = filedialog.askopenfilename(
+            parent=self.window, title="选择官方更新包（同目录需有 windows-client.sha256）",
+            filetypes=[("Windows 客户端安装包", "*.zip")],
+        )
+        if filename and messagebox.askyesno(
+            "确认安装包来源",
+            "请确认 ZIP 和 windows-client.sha256 均来自同一次官方 GitHub 发布。\n是否校验并安装？",
+            parent=self.window,
+        ):
+            self._run("import", lambda: self.service.import_package(Path(filename)))
+
+    def restart(self):
+        if self.busy:
+            return
+        if messagebox.askyesno("重启自动回复", "将停止当前进程并重新启动自动回复。\n是否继续？", parent=self.window):
+            self._run("restart", self.service.restart)
+
     def start(self):
         if self.busy:
             return
@@ -283,11 +354,12 @@ class ManagerWindow:
         os.startfile(str(folder))
 
     def close(self):
-        if self.busy and self.operation in {"update", "start", "stop"}:
+        if self.busy and self.operation in {"update", "import", "start", "stop", "restart"}:
             messagebox.showinfo("操作尚未结束", "请等待本次操作完成再关闭窗口。", parent=self.window)
             return
         self.closed = True
         self.window.after_cancel(self._poll_id)
+        self.window.after_cancel(self._watch_id)
         self.window.destroy()
 
 
