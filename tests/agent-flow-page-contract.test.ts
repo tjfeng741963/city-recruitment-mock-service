@@ -1,0 +1,45 @@
+import { readFileSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+
+const root = process.cwd();
+const read = (path: string) => readFileSync(`${root}/${path}`, "utf8");
+
+describe("招聘流程图入口接线", () => {
+  it("registers the flow page under the existing knowledge-management route group", () => {
+    const router = read("frontend-vue/src/router/index.ts");
+    const menu = read("frontend-vue/src/layouts/MainLayout.vue");
+
+    expect(router).toContain("path: 'recruitment-flow'");
+    expect(router).toContain("component: () => import('../views/AgentFlowView.vue')");
+    expect(router).toContain("title: '招聘流程图', group: '知识管理'");
+    expect(menu).toContain('index="/recruitment-flow"');
+    expect(menu).toContain("<template #title>流程图</template>");
+  });
+
+  it("sends the current drawer position to the unified flow page instead of editing a second graph", () => {
+    const drawer = read("frontend-vue/src/components/basic/PositionAgentDrawer.vue");
+
+    expect(drawer).toContain("router.push({ name: 'recruitment-flow', query: { position_id: String(props.position.id) } })");
+    expect(drawer).toContain("打开流程图");
+    expect(drawer).not.toContain("function saveFlow()");
+    expect(drawer).not.toContain("function addFlowNode(");
+  });
+
+  it("keeps the selected position in the flow page route and reads its real graph", () => {
+    const page = read("frontend-vue/src/views/AgentFlowView.vue");
+
+    expect(page).toContain("route.query.position_id");
+    expect(page).toContain("agentApi.flowGet(id)");
+    expect(page).toContain("agentApi.flowSave(flow.value)");
+    expect(page).toContain("flowRequiresEnableConfirmation");
+    expect(page).toContain("Number(error?.response?.status) === 409");
+  });
+
+  it("confirms before leaving the route with unsaved edits", () => {
+    const page = read("frontend-vue/src/views/AgentFlowView.vue");
+
+    expect(page).toContain("onBeforeRouteLeave");
+    expect(page).toContain("if (!isDirty.value) return true");
+    expect(page).toContain("离开页面会丢弃尚未保存的流程修改");
+  });
+});

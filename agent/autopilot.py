@@ -1311,6 +1311,19 @@ def _run_flow(store: Store, cfg: dict, cid: str, name: str, flow: dict, *, node_
             state.set_phase(cid, "held", error="流程快照存在循环")
             return "held"
         visited.add(key)
+        if current.get("status", "enabled") == "disabled":
+            state.set_step(cid, key, 0)
+            # Disabled nodes keep their connections for editing, but their
+            # content and timeout/keyword conditions are not executed. Follow
+            # the normal continuation, or the any-reply fallback of a wait
+            # node, using this conversation's immutable flow snapshot.
+            nxt = _flow_next(flow, key, "default") or _flow_next(flow, key, "reply", "")
+            log(f"[流程] 跳过停用节点 {key}", scope="flow")
+            if nxt is None:
+                state.set_phase(cid, "expired")
+                return "expired"
+            current, step_index = nxt, 0
+            continue
         state.set_step(cid, key, int(step_index))
         state.update(cid, wait_minutes=max(1, int(current.get("wait_minutes") or 15)))
         parts = current.get("parts") or []

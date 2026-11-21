@@ -145,12 +145,13 @@ function normalizeEdges(raw: unknown, nodes: FlowNode[]): FlowEdge[] {
 
 function validateGraph(nodes: FlowNode[], edges: FlowEdge[], entryKey: string): void {
   const enabled = nodes.filter(n => n.status === "enabled");
-  const byKey = new Map(enabled.map(n => [n.node_key,n]));
-  if (!byKey.has(entryKey)) throw new Error("入口不存在或已停用");
+  const allByKey = new Map(nodes.map(n => [n.node_key,n]));
+  const enabledByKey = new Map(enabled.map(n => [n.node_key,n]));
+  if (!enabledByKey.has(entryKey)) throw new Error("入口不存在或已停用");
   for (const edge of edges) {
-    if (!byKey.has(edge.from_key) || (edge.to_key && !byKey.has(edge.to_key))) throw new Error("边不能连接停用节点");
-    const from = byKey.get(edge.from_key)!;
-    const to = byKey.get(edge.to_key);
+    const from = allByKey.get(edge.from_key);
+    const to = allByKey.get(edge.to_key);
+    if (!from || (edge.to_key && !to)) throw new Error("边连接的节点不存在");
     if (from.node_type === "end") throw new Error("end 节点不能有出边");
     if (edge.trigger === "timeout" && (!from.await_reply || to?.node_type !== "followup")) throw new Error("timeout 必须从等待节点指向 followup");
     if (to?.node_type === "followup" && edge.trigger !== "timeout") throw new Error("followup 只能通过 timeout 进入");
@@ -162,11 +163,16 @@ function validateGraph(nodes: FlowNode[], edges: FlowEdge[], entryKey: string): 
     for (const trigger of ["default","any_reply","timeout","giveup"]) {
       if (out.filter(e => e.trigger === trigger).length > 1) throw new Error(`触发器重复：${node.node_key}/${trigger}`);
     }
-    if (node.node_type === "followup" && (node.node_key === entryKey || edges.filter(e => e.to_key === node.node_key && e.trigger === "timeout").length !== 1)) throw new Error("followup 必须且只能挂一条 timeout 边");
+    if (node.node_type === "followup") {
+      const timeoutInputs = edges.filter(e => e.to_key === node.node_key && e.trigger === "timeout");
+      if (node.node_key === entryKey || timeoutInputs.length !== 1 || enabledByKey.get(timeoutInputs[0]?.from_key)?.await_reply !== true) {
+        throw new Error("followup 必须且只能挂一条来自启用等待节点的 timeout 边");
+      }
+    }
     if (node.node_type !== "end" && !out.length) throw new Error(`节点没有终态出口：${node.node_key}`);
     if (node.await_reply && !out.some(e => e.trigger === "any_reply")) throw new Error("等待节点必须有 any_reply 兜底");
     if (node.node_type === "branch" && !out.some(e => e.trigger === "default")) throw new Error("分支必须有 default 兜底");
-    if (node.node_type === "followup" && out.some(e => e.to_key && byKey.get(e.to_key)?.node_type !== "end")) throw new Error("复聊发送后必须结束，不能继续发送介绍");
+    if (node.node_type === "followup" && out.some(e => e.to_key && enabledByKey.get(e.to_key)?.node_type !== "end")) throw new Error("复聊发送后必须结束，不能继续发送介绍");
     if (!node.await_reply && !["branch", "end"].includes(node.node_type) && !out.some(e => e.trigger === "default")) throw new Error("连续发送节点必须有 default 出口");
   }
   const reached = new Set<string>();
@@ -176,7 +182,14 @@ function validateGraph(nodes: FlowNode[], edges: FlowEdge[], entryKey: string): 
     if (visiting.has(key)) throw new Error("流程不能形成循环（防止重复发送）");
     if (reached.has(key)) return;
     visiting.add(key);reached.add(key);
-    for (const edge of edges.filter(e => e.from_key === key)) visit(edge.to_key);
+    const node = allByKey.get(key)!;
+    const outgoing = edges.filter(e => e.from_key === key);
+    // Disabled nodes remain editable in the graph, but the client runner only
+    // bypasses them through their continuous or any-reply primary exit.
+    const traversed = node.status === "disabled"
+      ? [outgoing.find(e => e.trigger === "default") ?? outgoing.find(e => e.trigger === "any_reply")].filter(Boolean)
+      : outgoing;
+    for (const edge of traversed) visit(edge!.to_key);
     visiting.delete(key);
   }
   visit(entryKey);

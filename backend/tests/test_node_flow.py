@@ -144,6 +144,93 @@ def test_old_snapshot_wins_and_disabled_latest_flow_does_not_break_active_chat(a
     assert agent._flow_state.get("S:customer")["flow_version"] == 1
 
 
+def test_disabled_flow_node_is_bypassed_without_sending_its_content(agent):
+    state = MagicMock()
+    state.claim_step.return_value = True
+    agent._flow_store = lambda: state
+    agent.core_send.send.return_value = {"ok": True, "conversation_id": "S:customer", "detail": "sent"}
+    flow = {
+        "nodes": [
+            {"node_key": "skip", "node_type": "text", "status": "disabled", "await_reply": False,
+             "parts": [{"kind": "text", "body": "停用节点内容", "delay_ms": 0}]},
+            {"node_key": "active", "node_type": "text", "status": "enabled", "await_reply": True,
+             "wait_minutes": 10, "parts": [{"kind": "text", "body": "启用节点内容", "delay_ms": 0}]},
+            {"node_key": "end", "node_type": "end", "status": "enabled", "parts": []},
+        ],
+        "edges": [
+            {"from_key": "skip", "to_key": "active", "trigger": "default"},
+            {"from_key": "active", "to_key": "end", "trigger": "any_reply"},
+        ],
+    }
+
+    result = agent._run_flow(MagicMock(), CFG, "S:customer", "Customer", flow, node_key="skip")
+
+    assert result == "awaiting"
+    state.claim_step.assert_called_once_with("S:customer", "active", 0, body="启用节点内容", media_name="")
+    assert agent.core_send.send.call_count == 1
+    assert agent.core_send.send.call_args.args[2] == "启用节点内容"
+
+
+def test_disabled_wait_node_bypasses_reply_and_never_fires_its_timeout(agent):
+    state = MagicMock()
+    state.claim_step.return_value = True
+    agent._flow_store = lambda: state
+    flow = {
+        "nodes": [
+            {"node_key": "skip_wait", "node_type": "text", "status": "disabled", "await_reply": True,
+             "parts": [{"kind": "text", "body": "停用等待内容", "delay_ms": 0}]},
+            {"node_key": "active", "node_type": "text", "status": "enabled", "await_reply": True,
+             "parts": [{"kind": "text", "body": "回复后的内容", "delay_ms": 0}]},
+            {"node_key": "followup", "node_type": "followup", "status": "disabled",
+             "parts": [{"kind": "text", "body": "不应发送超时复聊", "delay_ms": 0}]},
+            {"node_key": "end", "node_type": "end", "status": "enabled", "parts": []},
+        ],
+        "edges": [
+            {"from_key": "skip_wait", "to_key": "active", "trigger": "any_reply"},
+            {"from_key": "skip_wait", "to_key": "followup", "trigger": "timeout"},
+            {"from_key": "active", "to_key": "end", "trigger": "any_reply"},
+            {"from_key": "followup", "to_key": "end", "trigger": "default"},
+        ],
+    }
+
+    result = agent._run_flow(MagicMock(), CFG, "S:customer", "Customer", flow, node_key="skip_wait")
+
+    assert result == "awaiting"
+    state.claim_step.assert_called_once_with("S:customer", "active", 0, body="回复后的内容", media_name="")
+    assert agent.core_send.send.call_args.args[2] == "回复后的内容"
+
+
+def test_branch_uses_keyword_match_and_default_fallback(agent):
+    state = MagicMock()
+    state.claim_step.return_value = True
+    agent._flow_store = lambda: state
+    flow = {
+        "nodes": [
+            {"node_key": "branch", "node_type": "branch", "status": "enabled", "parts": []},
+            {"node_key": "matched", "node_type": "text", "status": "enabled", "await_reply": True,
+             "parts": [{"kind": "text", "body": "命中工资分支", "delay_ms": 0}]},
+            {"node_key": "fallback", "node_type": "text", "status": "enabled", "await_reply": True,
+             "parts": [{"kind": "text", "body": "默认分支", "delay_ms": 0}]},
+            {"node_key": "end", "node_type": "end", "status": "enabled", "parts": []},
+        ],
+        "edges": [
+            {"from_key": "branch", "to_key": "matched", "trigger": "keyword", "condition_value": "工资", "priority": 2},
+            {"from_key": "branch", "to_key": "fallback", "trigger": "default", "condition_value": "", "priority": 0},
+            {"from_key": "matched", "to_key": "end", "trigger": "any_reply"},
+            {"from_key": "fallback", "to_key": "end", "trigger": "any_reply"},
+        ],
+    }
+
+    matched = agent._run_flow(MagicMock(), CFG, "S:customer", "Customer", flow, node_key="branch", hint="问下工资多少")
+    assert matched == "awaiting"
+    assert agent.core_send.send.call_args.args[2] == "命中工资分支"
+
+    agent.core_send.send.reset_mock()
+    fallback = agent._run_flow(MagicMock(), CFG, "S:customer", "Customer", flow, node_key="branch", hint="想了解面试地址")
+    assert fallback == "awaiting"
+    assert agent.core_send.send.call_args.args[2] == "默认分支"
+
+
 def test_followup_once_has_durable_rate_limit_and_failure_stays_held(agent, monkeypatch):
     now = datetime(2026, 11, 19, 4, tzinfo=timezone.utc).timestamp()
     monkeypatch.setattr(agent.time, "time", lambda: now)
