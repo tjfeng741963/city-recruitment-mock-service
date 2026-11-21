@@ -154,6 +154,12 @@ const router = createRouter({
           meta: { title: '知识库配置', group: '知识管理' },
         },
         {
+          path: 'recruitment-flow',
+          name: 'recruitment-flow',
+          component: () => import('../views/AgentFlowView.vue'),
+          meta: { title: '招聘流程图', group: '知识管理' },
+        },
+        {
           path: 'unknown-questions',
           name: 'unknown-questions',
           component: () => import('../views/UnknownQuestionView.vue'),

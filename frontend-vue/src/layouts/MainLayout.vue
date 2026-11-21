@@ -83,6 +83,10 @@
             <el-icon><Reading /></el-icon>
             <template #title>知识库配置</template>
           </el-menu-item>
+          <el-menu-item index="/recruitment-flow">
+            <el-icon><Share /></el-icon>
+            <template #title>流程图</template>
+          </el-menu-item>
 <!-- /unknown-questions 入口按旧版注入补丁隐藏（nav-adjust/city-factories），路由保留 -->
         </el-sub-menu>
 

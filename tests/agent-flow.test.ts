@@ -179,4 +179,62 @@ describe("node workflow and conversation state API", () => {
     const disabled = await app.inject({method:"GET",url:"/api/v1/agent/flow?device_code=local-device-001",headers:device});
     expect(disabled.json().nodes).toEqual([]);
   });
+
+  it("accepts a connected disabled node as a bypass and serves its status to devices", async () => {
+    const bypassFlow = {
+      position_id: 1,
+      version: (await app.inject({ method: "GET", url: "/api/v1/agent-flow?position_id=1", headers: admin })).json().version,
+      status: "enabled",
+      entry_key: "start",
+      canvas: { viewport: {} },
+      nodes: [
+        { node_key: "start", node_type: "text", title: "入口", status: "enabled", await_reply: false,
+          parts: [{ kind: "text", body: "入口内容", delay_ms: 2000 }] },
+        { node_key: "skip", node_type: "text", title: "停用节点", status: "disabled", await_reply: false,
+          parts: [{ kind: "text", body: "不应发送", delay_ms: 2000 }] },
+        { node_key: "end", node_type: "end", title: "结束", status: "enabled", parts: [] },
+      ],
+      edges: [
+        { from_key: "start", to_key: "skip", trigger: "default", condition_value: "", priority: 0 },
+        { from_key: "skip", to_key: "end", trigger: "default", condition_value: "", priority: 0 },
+      ],
+    };
+    const saved = await app.inject({ method: "PUT", url: "/api/v1/agent-flow", headers: admin, payload: bypassFlow });
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json().nodes.find((node: { node_key: string }) => node.node_key === "skip").status).toBe("disabled");
+    const deviceFlow = await app.inject({ method: "GET", url: "/api/v1/agent/flow?device_code=local-device-001", headers: device });
+    expect(deviceFlow.statusCode).toBe(200);
+    expect(deviceFlow.json().nodes.find((node: { node_key: string }) => node.node_key === "skip").status).toBe("disabled");
+  });
+
+  it("rejects an enabled timeout followup reachable only from a disabled waiting node", async () => {
+    const currentVersion = (await app.inject({ method: "GET", url: "/api/v1/agent-flow?position_id=1", headers: admin })).json().version;
+    const invalidFlow = {
+      position_id: 1,
+      version: currentVersion,
+      status: "enabled",
+      entry_key: "start",
+      canvas: { viewport: {} },
+      nodes: [
+        { node_key: "start", node_type: "text", status: "enabled", await_reply: false,
+          parts: [{ kind: "text", body: "入口", delay_ms: 2000 }] },
+        { node_key: "skip_wait", node_type: "text", status: "disabled", await_reply: true,
+          parts: [{ kind: "text", body: "不发送", delay_ms: 2000 }] },
+        { node_key: "active", node_type: "text", status: "enabled", await_reply: true,
+          parts: [{ kind: "text", body: "可达节点", delay_ms: 2000 }] },
+        { node_key: "followup", node_type: "followup", status: "enabled", parts: [{ kind: "text", body: "复聊", delay_ms: 2000 }] },
+        { node_key: "end", node_type: "end", status: "enabled", parts: [] },
+      ],
+      edges: [
+        { from_key: "start", to_key: "skip_wait", trigger: "default", condition_value: "", priority: 0 },
+        { from_key: "skip_wait", to_key: "active", trigger: "any_reply", condition_value: "", priority: 0 },
+        { from_key: "skip_wait", to_key: "followup", trigger: "timeout", condition_value: "", priority: 1 },
+        { from_key: "active", to_key: "end", trigger: "any_reply", condition_value: "", priority: 0 },
+        { from_key: "followup", to_key: "end", trigger: "default", condition_value: "", priority: 0 },
+      ],
+    };
+    const response = await app.inject({ method: "PUT", url: "/api/v1/agent-flow", headers: admin, payload: invalidFlow });
+    expect(response.statusCode).toBe(422);
+    expect(response.json().detail).toContain("启用等待节点");
+  });
 });

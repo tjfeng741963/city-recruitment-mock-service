@@ -4,16 +4,16 @@
 
 **Goal:** 在知识管理菜单下展示并编辑每个岗位真实保存的招聘流程图。
 
-**Architecture:** 复用 4222 的 `agent-flow` API；纯图状态变更放在 `flow-graph.ts`，单独的 `AgentFlowCanvas.vue` 渲染节点/边并负责拖拽，`AgentFlowView.vue` 负责岗位选择、节点/边属性、状态与保存。岗位抽屉只跳转到新页面。
+**Architecture:** 复用 4222 的 `agent-flow` API；纯图状态变更放在 `flow-graph.ts`，独立的 `AgentFlowCanvas.vue` 渲染节点/边并负责拖拽，`AgentFlowView.vue` 负责岗位选择、节点/边属性、状态与保存。同步调整 4222 图校验和 Windows `_run_flow`，让停用节点被绕过；岗位抽屉只跳转到新页面。
 
 **Tech Stack:** Vue 3、TypeScript、Element Plus、SVG、Pointer Events、Vitest、Fastify `app.inject`。
 
 ## Global Constraints
 
 - 页面沿用当前 Vue 3 + Element Plus 后台的布局、组件、色彩、间距和文案风格。
-- 不新增后端接口、数据库字段或节点类型。
+- 不新增接口、数据库字段或节点类型；仅调整现有图校验与节点运行语义。
 - 不启动自动回复、不打开企业微信、不扫码、不发送消息。
-- 流程保存保留服务端 `version`；409 不覆盖旧版本；启用前要确认。
+- 流程保存保留服务端 `version`；409 不覆盖旧版本；启用前要确认；离开脏页面需确认；启用前拒绝占位话术/空文本/未选媒体；改入口时确认并停用不可达的启用节点。
 - 只 stage 本计划列出的具体文件；不得提交 `.env*`、密钥、数据库、过程截图/日志、`dist/` 或 `node_modules/`。
 
 ---
@@ -30,7 +30,7 @@
 - `addBranchNode<T extends FlowLike>(source: T, fromKey: string): T`
 - `addFollowupNode<T extends FlowLike>(source: T, awaitNodeKey: string): T`
 - `addFlowEdge<T extends FlowLike>(source: T, fromKey: string): T`
-- `removeFlowEdge<T extends FlowLike>(source: T, index: number): { flow: T; blocked?: "missing" | "required-fallback" }`
+- `removeFlowEdge<T extends FlowLike>(source: T, index: number): { flow: T; blocked?: "missing" | "primary-fallback" | "active-followup" }`
 - `addFlowNode<T extends FlowLike>(source: T, kind: "text" | "image" | "video" | "end"): T`
 - `dragFlowPoint(nodeOrigin, pointerOrigin, pointerCurrent, zoom): { x: number; y: number }`
 - `flowRequiresEnableConfirmation(previousStatus, nextStatus): boolean`
@@ -95,14 +95,30 @@ it("adds an optional keyword edge without removing the waiting fallback", () => 
   expect(edited.edges).toContainEqual(expect.objectContaining({ from_key: "opening_3", trigger: "any_reply" }));
 });
 
-it("refuses to remove required fallback edges and removes an optional keyword edge", () => {
+it("protects primary fallbacks and removes optional keyword edges", () => {
   const withKeyword = addFlowEdge(migratedFlow(), "opening_3");
   const requiredIndex = withKeyword.edges.findIndex((edge) => edge.from_key === "opening_3" && edge.trigger === "any_reply");
-  expect(removeFlowEdge(withKeyword, requiredIndex).blocked).toBe("required-fallback");
+  expect(removeFlowEdge(withKeyword, requiredIndex).blocked).toBe("primary-fallback");
   const keywordIndex = withKeyword.edges.findIndex((edge) => edge.from_key === "opening_3" && edge.trigger === "keyword");
   const removed = removeFlowEdge(withKeyword, keywordIndex);
   expect(removed.blocked).toBeUndefined();
   expect(removed.flow.edges).toHaveLength(withKeyword.edges.length - 1);
+});
+
+it("protects timeout only while it feeds an enabled followup", () => {
+  const flow = addFollowupNode(migratedFlow(), "opening_3");
+  const timeoutIndex = flow.edges.findIndex((edge) => edge.trigger === "timeout");
+  expect(removeFlowEdge(flow, timeoutIndex).blocked).toBe("active-followup");
+  const disabledFollowup = {
+    ...flow,
+    nodes: flow.nodes.map((node) => node.node_type === "followup" ? { ...node, status: "disabled" } : node),
+  };
+  expect(removeFlowEdge(disabledFollowup, timeoutIndex).blocked).toBeUndefined();
+  const unusedTimeout = {
+    ...migratedFlow(),
+    edges: [...migratedFlow().edges, { from_key: "opening_3", to_key: "", trigger: "timeout", condition_value: "", priority: 0 }],
+  };
+  expect(removeFlowEdge(unusedTimeout, unusedTimeout.edges.length - 1).blocked).toBeUndefined();
 });
 
 it("converts pointer movement into graph coordinates at the current zoom", () => {
@@ -123,13 +139,110 @@ Run `npx vitest run tests/agent-flow-editor.test.ts` from the repository root. E
 
 - [ ] **Step 3: Implement the tested helpers**
 
-`moveFlowNode` clones the graph and only changes the matching node's `x/y`. `updateFlowEdge` clones the graph and only merges fields into the indexed edge. `addBranchNode` requires a selected node with an open `default` or `any_reply` edge, redirects that edge to a new branch, and gives the branch a terminal `default` edge. `addFollowupNode` requires `await_reply=true`, appends a one-text-part followup, adds one `timeout` edge from the waiting node and one terminal `default` edge from the followup. Missing nodes or invalid source nodes throw a user-readable error; no existing edge is silently deleted. `dragFlowPoint` adds pointer delta divided by finite positive zoom to the persisted origin. `flowRequiresEnableConfirmation` returns true only for `disabled -> enabled`.
+`moveFlowNode` clones the graph and only changes the matching node's `x/y`. `updateFlowEdge` clones the graph and only merges fields into the indexed edge. `addBranchNode` requires a selected node with an open `default` or `any_reply` edge, redirects that edge to a new branch, and gives the branch a terminal `default` edge. `addFollowupNode` requires `await_reply=true`, appends a one-text-part followup, adds one `timeout` edge from the waiting node and one terminal `default` edge from the followup. `addFlowEdge` adds an optional keyword edge. `removeFlowEdge` protects `default` and `any_reply` primary exits, and protects a timeout only while it targets an enabled followup. Missing nodes or invalid source nodes throw a user-readable error. `dragFlowPoint` adds pointer delta divided by finite positive zoom to the persisted origin. `flowRequiresEnableConfirmation` returns true only for `disabled -> enabled`.
 
 - [ ] **Step 4: Verify GREEN against both helper and server graph validation**
 
 Run `npx vitest run tests/agent-flow-editor.test.ts tests/agent-flow.test.ts`. Expected: all appended/modified graphs accepted by `PUT /api/v1/agent-flow`; the invalid followup source is rejected before saving.
 
-### Task 2: Flow canvas component
+### Task 2: Disabled node execution semantics
+
+**Files:**
+- Modify: `src/modules/agent/agent-flow.routes.ts`
+- Modify: `agent/autopilot.py`
+- Test: `tests/agent-flow.test.ts`
+- Test: `backend/tests/test_node_flow.py`
+- Update: `docs/API-接口清单.md`
+
+**Interfaces:**
+- `PUT /api/v1/agent-flow` continues using its current request/response schema. Graph validation accepts connections to and from disabled nodes while requiring the enabled execution path from the enabled entry to remain connected.
+- `_run_flow(...)` skips parts from disabled nodes. It follows that node's `default` edge first, then `any_reply`; it never fires a disabled node's `timeout` or `keyword` edge. With no bypass exit it ends the flow without sending.
+- Existing conversation snapshots remain immutable and continue their snapshot version.
+
+- [ ] **Step 1: Add the failing TypeScript API test**
+
+Add to the `node workflow and conversation state API` suite in `tests/agent-flow.test.ts`:
+
+```ts
+it("accepts a connected disabled node as a bypass and serves its status to devices", async () => {
+  const bypassFlow = {
+    ...flow,
+    entry_key: "start",
+    nodes: [
+      { node_key: "start", node_type: "text", title: "入口", status: "enabled", await_reply: false,
+        parts: [{ kind: "text", body: "入口内容", delay_ms: 2000 }] },
+      { node_key: "skip", node_type: "text", title: "停用节点", status: "disabled", await_reply: false,
+        parts: [{ kind: "text", body: "不应发送", delay_ms: 2000 }] },
+      { node_key: "end", node_type: "end", title: "结束", status: "enabled", parts: [] },
+    ],
+    edges: [
+      { from_key: "start", to_key: "skip", trigger: "default", condition_value: "", priority: 0 },
+      { from_key: "skip", to_key: "end", trigger: "default", condition_value: "", priority: 0 },
+    ],
+  };
+  const saved = await app.inject({ method: "PUT", url: "/api/v1/agent-flow", headers: admin, payload: bypassFlow });
+  expect(saved.statusCode).toBe(200);
+  expect(saved.json().nodes.find((node: { node_key: string }) => node.node_key === "skip").status).toBe("disabled");
+  const deviceFlow = await app.inject({ method: "GET", url: "/api/v1/agent/flow?device_code=local-device-001", headers: device });
+  expect(deviceFlow.statusCode).toBe(200);
+  expect(deviceFlow.json().nodes.find((node: { node_key: string }) => node.node_key === "skip").status).toBe("disabled");
+});
+```
+
+- [ ] **Step 2: Run RED**
+
+Run `npx vitest run tests/agent-flow.test.ts`; expected: current validator returns 422 because it rejects an edge connected to a disabled node.
+
+- [ ] **Step 3: Add the failing Windows runtime test**
+
+Append to `backend/tests/test_node_flow.py`:
+
+```python
+def test_disabled_flow_node_is_bypassed_without_sending_its_content(agent):
+    state = MagicMock()
+    state.claim_step.return_value = True
+    agent._flow_store = lambda: state
+    flow = {
+        "nodes": [
+            {"node_key": "skip", "node_type": "text", "status": "disabled", "await_reply": False,
+             "parts": [{"kind": "text", "body": "停用节点内容", "delay_ms": 0}]},
+            {"node_key": "active", "node_type": "text", "status": "enabled", "await_reply": True,
+             "wait_minutes": 10, "parts": [{"kind": "text", "body": "启用节点内容", "delay_ms": 0}]},
+            {"node_key": "end", "node_type": "end", "status": "enabled", "parts": []},
+        ],
+        "edges": [
+            {"from_key": "skip", "to_key": "active", "trigger": "default"},
+            {"from_key": "active", "to_key": "end", "trigger": "any_reply"},
+        ],
+    }
+    result = agent._run_flow(MagicMock(), CFG, "S:customer", "Customer", flow, node_key="skip")
+    assert result == "awaiting"
+    state.claim_step.assert_called_once_with("S:customer", "active", 0, body="启用节点内容", media_name="")
+    assert agent.core_send.send.call_count == 1
+    assert agent.core_send.send.call_args.args[2] == "启用节点内容"
+```
+
+- [ ] **Step 4: Run RED**
+
+Run `python -m pytest -q backend/tests/test_node_flow.py::test_disabled_flow_node_is_bypassed_without_sending_its_content`; expected: sender is called with `停用节点内容` and the result differs from `awaiting`.
+
+- [ ] **Step 5: Implement runtime bypass**
+
+At the start of each `_run_flow` node iteration, before reading `parts`, check `current.status == "disabled"`. Mark the phase `running`, choose `_flow_next(flow, key, "default")` or `_flow_next(flow, key, "reply", "")`, then continue at that node with `step_index=0`. If neither exists, set phase `expired` and return without claiming an outbox step or calling `core_send`.
+
+- [ ] **Step 6: Implement graph validation and device-flow contract**
+
+In `validateGraph`, allow edges whose endpoints include disabled nodes. Keep node/edge type checks, cycle checks, entry checks, and structural requirements for enabled nodes. Compute runtime reachability through disabled nodes by following only their `default` edge, or their `any_reply` edge when no default exists; ignore disabled-node keyword/timeout edges for reachability. Every enabled node must be reached from the enabled entry. An enabled followup must retain exactly one timeout input from an enabled waiting node. Device `/agent/flow` continues returning the full graph including disabled nodes so the client runner can bypass them. Update `setNodeEnabled` so an operator can disable a connected node; the server validator handles invalid dependent enabled followups. Keep the entry node protected. Update `setAwaitReply(false)` to reject nodes that still have timeout or keyword edges, because a continuous message node will not evaluate reply conditions.
+
+- [ ] **Step 7: Verify branch runtime and document both runtime rules**
+
+The existing `_run_flow` branch path calls `_flow_next` for keyword matching and falls back to the branch `default` edge when no keyword or any-reply edge matches. Keep this behavior and cover both matched and default paths with `backend/tests/test_node_flow.py`; do not change the WeCom send core. Update `docs/API-接口清单.md` to document: disabled nodes stay in the graph for editing; the Windows runner skips disabled-node parts, ignores its keyword/timeout conditions, and takes its default edge or any-reply edge; branch nodes check case-insensitive keyword containment in descending priority, then take `default`; enabled followups require an enabled waiting-node timeout source; active session snapshots keep their original version.
+
+- [ ] **Step 8: Run GREEN and related suites**
+
+Run `npx vitest run tests/agent-flow.test.ts tests/agent-flow-editor.test.ts` and `backend/.venv/Scripts/python.exe -m pytest -q backend/tests/test_node_flow.py` from the repository root; expected: all flow API and runner regressions pass without any send-core modification.
+
+### Task 3: Flow canvas component
 
 **Files:**
 - Create: `frontend-vue/src/components/agent/AgentFlowCanvas.vue`
@@ -146,7 +259,7 @@ Run `npx vitest run tests/agent-flow-editor.test.ts tests/agent-flow.test.ts`. E
 - [ ] **Step 3: Implement the component with SVG paths and arrow markers for each `from_key/to_key`, trigger labels on edges, fixed-size Element Plus-style node surfaces, selection state, and pointer capture. On pointer move, call `dragFlowPoint` with pointer start/current coordinates and current canvas zoom, then emit `move-node`; release pointer capture on pointer-up/cancel.
 - [ ] **Step 4: Run `npm run build --prefix frontend-vue` and `npx vitest run tests/agent-flow-editor.test.ts`.**
 
-### Task 3: Standalone page, property inspector, and save protocol
+### Task 4: Standalone page, property inspector, and save protocol
 
 **Files:**
 - Create: `frontend-vue/src/views/AgentFlowView.vue`
@@ -163,10 +276,10 @@ Run `npx vitest run tests/agent-flow-editor.test.ts tests/agent-flow.test.ts`. E
 - [ ] **Step 3: Implement the page with a top position/status/version toolbar, graph canvas, and right-side inspector. The inspector edits node title/status, 1–6 parts, part kind/body/media/delay, `await_reply`, `wait_minutes`, `max_times`, and selected-edge `trigger/to_key/condition_value/priority`. Add/remove optional keyword edges with `addFlowEdge`/`removeFlowEdge`; keep required fallback edges visible and non-removable. Enforce backend enums and only offer enabled media for the selected position or common pool.**
 - [ ] **Step 4: Add toolbar actions for text/image/video, branch, followup, and end nodes. Message nodes append through `addFlowNode`; branch and followup use the selected source node through `addBranchNode`/`addFollowupNode`. Show helper validation errors beside the toolbar and do not mutate the graph on an invalid operation.**
 - [ ] **Step 5: Add an empty state with “create disabled draft” and “migrate opening to disabled draft” actions. Initialize a new flow with one text node and a terminal `any_reply` edge; never auto-enable a new or migrated flow.**
-- [ ] **Step 6: Save with the loaded `version`; preserve dirty edits on HTTP 409, show an explicit reload action, and call `flowRequiresEnableConfirmation` before changing `disabled` to `enabled`.**
+- [ ] **Step 6: Save with the loaded `version`; preserve dirty edits on HTTP 409, show an explicit reload action, confirm before enabling or discarding edits, reject placeholder/empty text and missing media on enabled nodes, and disable newly unreachable nodes when changing the entry.**
 - [ ] **Step 7: Run `npx vitest run tests/agent-flow-editor.test.ts tests/agent-flow.test.ts` and `npm run build --prefix frontend-vue`.**
 
-### Task 4: Navigation unification and visual verification
+### Task 5: Navigation unification and visual verification
 
 **Files:**
 - Modify: `frontend-vue/src/router/index.ts`
@@ -184,6 +297,7 @@ Run `npx vitest run tests/agent-flow-editor.test.ts tests/agent-flow.test.ts`. E
 
 - Page route/menu and drawer unification are covered by Task 4.
 - Real per-position flow loading, graph display, editing, and persistence are covered by Tasks 2–3.
-- Existing API enums, optimistic versioning, disabled draft, and activation confirmation are covered by Task 3.
+- Existing API enums, optimistic versioning, disabled draft, and activation confirmation are covered by Task 4.
 - UI consistency is enforced by reusing the existing Vue/Element Plus shell and controls; no component library is added.
-- No backend or frozen WeCom input/send core is modified.
+- Backend changes are limited to existing flow validation and runner orchestration; no frozen WeCom input/send core is modified.
+- Node enable/disable is truthful: API tests prove connected disabled nodes remain editable, runtime tests prove they are bypassed without sending.
