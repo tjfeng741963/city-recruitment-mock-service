@@ -113,6 +113,61 @@ describe("node workflow and conversation state API", () => {
     expect(invalid.statusCode).toBe(422);
   });
 
+  it("serves an admin flow state summary without exposing conversation details", async () => {
+    const posted = await app.inject({
+      method: "POST", url: "/api/v1/agent/state", headers: device,
+      payload: {
+        device_code: "local-device-001",
+        items: [
+          { session_key: "S:summary_1", position_id: 1, flow_version: 2, node_key: "qualify", step_index: 0,
+            phase: "awaiting", followup_round: 0, conv_name: "客户甲", last_error: "不得返回", snapshot: { nodes: [{ body: "不得返回正文" }] } },
+          { session_key: "S:summary_2", position_id: 1, flow_version: 2, node_key: "qualify", step_index: 0,
+            phase: "awaiting", followup_round: 0, conv_name: "客户乙", snapshot: { nodes: [{ body: "不得返回正文" }] } },
+        ],
+      },
+    });
+    expect(posted.statusCode).toBe(200);
+    app.db.prepare("UPDATE agent_conversation_state SET updated_at=? WHERE device_code=? AND node_key=?")
+      .run("2026-11-21 05:30:00", "local-device-001", "qualify");
+    const anotherDeviceId = Number(app.db.prepare("INSERT INTO agent_devices(device_name,status,data_json) VALUES ('汇总隔离测试设备','enabled',?)")
+      .run(JSON.stringify({ device_code: "summary-other-device" })).lastInsertRowid);
+    expect(anotherDeviceId).toBeGreaterThan(0);
+    app.db.prepare(`INSERT INTO agent_conversation_state
+      (session_key,device_code,position_id,flow_version,node_key,phase,updated_at)
+      VALUES ('S:other-device-summary','summary-other-device',99,9,'foreign-node','held',CURRENT_TIMESTAMP)`).run();
+
+    const summary = await app.inject({
+      method: "GET", url: "/api/v1/agent/state?device_code=local-device-001&summary=1", headers: admin,
+    });
+    expect(summary.statusCode).toBe(200);
+    expect(summary.json()).toMatchObject({
+      device_code: "local-device-001",
+      items: expect.arrayContaining([expect.objectContaining({ position_id: 1, flow_version: 2, node_key: "qualify", phase: "awaiting", count: 2, updated_at: "2026-11-21T05:30:00.000Z" })]),
+    });
+    for (const item of summary.json().items) {
+      expect(Object.keys(item).sort()).toEqual(["count", "flow_version", "node_key", "phase", "position_id", "updated_at"]);
+      expect(typeof item.updated_at).toBe("string");
+    }
+    expect(summary.json().items.some((item: { node_key: string }) => item.node_key === "foreign-node")).toBe(false);
+    expect(JSON.stringify(summary.json())).not.toMatch(/session_key|conv_name|snapshot|last_error|summary_1|summary_2|客户甲|客户乙|不得返回/);
+
+    const missingDevice = await app.inject({
+      method: "GET", url: "/api/v1/agent/state?summary=1", headers: admin,
+    });
+    expect(missingDevice.statusCode).toBe(422);
+    expect((await app.inject({
+      method: "GET", url: "/api/v1/agent/state?device_code=local-device-001", headers: admin,
+    })).statusCode).toBe(403);
+    expect((await app.inject({
+      method: "GET", url: "/api/v1/agent/state?device_code=local-device-001&summary=1", headers: device,
+    })).statusCode).toBe(403);
+    const unknownDevice = await app.inject({
+      method: "GET", url: "/api/v1/agent/state?device_code=summary-no-device&summary=1", headers: admin,
+    });
+    expect(unknownDevice.statusCode).toBe(200);
+    expect(unknownDevice.json()).toEqual({ device_code: "summary-no-device", items: [] });
+  });
+
   it("rejects invalid graph updates without replacing the saved graph or version", async () => {
     const original = (await app.inject({method:"GET",url:"/api/v1/agent-flow?position_id=1",headers:admin})).json();
     for (const invalid of [

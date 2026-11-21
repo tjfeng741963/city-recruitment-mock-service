@@ -42,4 +42,22 @@ describe("招聘流程图入口接线", () => {
     expect(page).toContain("if (!isDirty.value) return true");
     expect(page).toContain("离开页面会丢弃尚未保存的流程修改");
   });
+
+  it('provides a full-screen workspace with a keyboard-accessible resizable inspector', () => {
+    const page = read('frontend-vue/src/views/AgentFlowView.vue');
+    expect(page).toContain('退出全屏');
+    expect(page).toContain('role="separator"');
+    expect(page).toContain('inspectorWidth');
+    expect(page).toContain("event.key === 'Escape'");
+  });
+
+  it('separates saved editing from the actual device path and labels evidence limits', () => {
+    const page = read('frontend-vue/src/views/AgentFlowView.vue');
+    expect(page).toContain('实际执行路径');
+    expect(page).toContain('编辑流程');
+    expect(page).toContain('未绑定设备');
+    expect(page).toContain('不是送达回执');
+    expect(page).toContain('agentApi.flowStateSummary');
+    expect(page).toContain('FlowRuntimeInspector');
+  });
 });

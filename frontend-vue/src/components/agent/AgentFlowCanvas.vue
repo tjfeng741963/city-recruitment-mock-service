@@ -1,11 +1,29 @@
 <template>
-  <section class="flow-canvas-shell" aria-label="招聘流程画布">
+  <section class="flow-canvas-shell" :class="{ 'is-readonly': readonly }" aria-label="招聘流程画布">
     <div class="canvas-toolbar">
       <span class="canvas-caption">{{ flow.nodes.length }} 个节点 · {{ flow.edges.length }} 条连接</span>
-      <el-button size="small" :icon="FullScreen" @click="fitToCanvas">适配画布</el-button>
+      <div class="zoom-controls" aria-label="画布缩放">
+        <el-button size="small" :icon="Minus" aria-label="缩小画布" title="缩小" :disabled="zoom <= 0.25" @click="zoomBy(-0.1)" />
+        <el-slider :model-value="zoomPercent" :min="25" :max="150" :step="5" :format-tooltip="(value: number) => `${value}%`" aria-label="画布缩放比例" @update:model-value="setZoomPercent" />
+        <span class="zoom-value" aria-live="polite">{{ zoomPercent }}%</span>
+        <el-button size="small" :icon="Plus" aria-label="放大画布" title="放大" :disabled="zoom >= 1.5" @click="zoomBy(0.1)" />
+        <el-button size="small" @click="setZoom(1)">100%</el-button>
+        <el-button size="small" :icon="FullScreen" @click="fitToCanvas">适配画布</el-button>
+      </div>
     </div>
 
-    <div ref="viewport" class="flow-viewport">
+    <div
+      ref="viewport"
+      class="flow-viewport"
+      :class="{ 'is-panning': Boolean(pan) }"
+      tabindex="0"
+      aria-label="流程画布，拖动空白平移，Ctrl 或 Command 加滚轮缩放"
+      @pointerdown="beginPan"
+      @pointermove="movePan"
+      @pointerup="endPan"
+      @pointercancel="endPan"
+      @wheel="onWheel"
+    >
       <div class="flow-spacer" :style="spacerStyle">
         <div class="flow-scene" :style="sceneStyle">
           <svg class="flow-edges" :width="scene.width" :height="scene.height" :viewBox="`0 0 ${scene.width} ${scene.height}`" aria-label="流程连接">
@@ -35,7 +53,7 @@
                 class="edge-label"
                 :class="{ selected: selectedEdgeIndex === index }"
                 @click.stop="emit('select-edge', index)"
-              >{{ triggerLabel(edge.trigger) }}{{ edge.condition_value ? ` · ${edge.condition_value}` : '' }}</text>
+              >{{ edge.runtime_label || `${triggerLabel(edge.trigger)}${edge.condition_value ? ` · ${edge.condition_value}` : ''}` }}</text>
             </g>
           </svg>
 
@@ -61,28 +79,29 @@
             <div class="node-heading">
               <span class="node-title">{{ node.title || node.node_key }}</span>
               <el-tag size="small" effect="plain" :type="node.status === 'disabled' ? 'info' : 'primary'">
-                {{ nodeTypeLabel(node.node_type) }}
+                {{ nodeContentLabel(node) }}
               </el-tag>
             </div>
             <div class="node-summary">{{ nodeSummary(node) }}</div>
             <div class="node-footer">
-              <span>{{ node.await_reply ? `等待回复 · ${node.wait_minutes || 15} 分钟` : '连续执行' }}</span>
-              <span v-if="node.node_type === 'followup'">最多 1 次</span>
-              <span v-else-if="node.status === 'disabled'">停用</span>
-              <span v-else>第 {{ index + 1 }} 步</span>
+              <span>{{ nodeExecutionLabel(node) }}</span>
+              <span v-if="node.node_key === flow.entry_key" class="entry-label">流程入口</span>
+              <span v-else-if="node.status === 'disabled'">已停用</span>
             </div>
           </div>
         </div>
       </div>
     </div>
+    <div class="canvas-hint">拖动空白平移 · Ctrl / ⌘ + 滚轮缩放 · {{ readonly ? '点击节点查看执行说明' : '拖动节点调整位置，点击节点或连线编辑' }}</div>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { FullScreen } from '@element-plus/icons-vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { FullScreen, Minus, Plus } from '@element-plus/icons-vue'
 import type { AgentFlow, AgentFlowEdge, AgentFlowNode } from '../../api/agent'
 import { dragFlowPoint } from '../basic/flow-graph'
+import { fitCanvasZoom, panCanvasScroll, zoomCanvasAt } from './canvas-navigation'
 
 const NODE_WIDTH = 272
 const NODE_HEIGHT = 148
@@ -92,6 +111,7 @@ const props = defineProps<{
   flow: AgentFlow
   selectedNodeKey: string
   selectedEdgeIndex: number | null
+  readonly?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -102,6 +122,10 @@ const emit = defineEmits<{
 
 const viewport = ref<HTMLElement | null>(null)
 const zoom = ref(1)
+const zoomPercent = computed(() => Math.round(zoom.value * 100))
+const viewportSize = ref({ width: 0, height: 0 })
+const pan = ref<{ pointerId: number; x: number; y: number; left: number; top: number } | null>(null)
+let observer: ResizeObserver | undefined
 const drag = ref<{
   pointerId: number
   nodeKey: string
@@ -134,14 +158,16 @@ const scene = computed(() => {
 })
 
 const spacerStyle = computed(() => ({
-  width: `${scene.value.width * zoom.value}px`,
-  height: `${scene.value.height * zoom.value}px`,
+  width: `${Math.max(viewportSize.value.width, scene.value.width * zoom.value)}px`,
+  height: `${Math.max(viewportSize.value.height, scene.value.height * zoom.value)}px`,
 }))
 
 const sceneStyle = computed(() => ({
   width: `${scene.value.width}px`,
   height: `${scene.value.height}px`,
   transform: `scale(${zoom.value})`,
+  left: `${Math.max(0, (viewportSize.value.width - scene.value.width * zoom.value) / 2)}px`,
+  top: `${Math.max(0, (viewportSize.value.height - scene.value.height * zoom.value) / 2)}px`,
 }))
 
 const labels: Record<string, string> = {
@@ -151,6 +177,8 @@ const labels: Record<string, string> = {
   followup: '复聊',
   branch: '分支',
   end: '结束',
+  system_start: '客户进入',
+  system_ai: 'AI 答疑',
 }
 
 const triggerLabels: Record<string, string> = {
@@ -229,15 +257,32 @@ function nodeTypeLabel(nodeType: string): string {
   return labels[nodeType] || nodeType
 }
 
+function nodeContentLabel(node: AgentFlowNode): string {
+  if (['branch', 'end', 'followup', 'system_start', 'system_ai'].includes(node.node_type)) return nodeTypeLabel(node.node_type)
+  const kinds = [...new Set((node.parts || []).map((part) => part.kind))]
+  return kinds.length ? kinds.map(nodeTypeLabel).join(' + ') : nodeTypeLabel(node.node_type)
+}
+
 function nodeSummary(node: AgentFlowNode): string {
+  if (node.node_type.startsWith('system_')) return String(node.body || '')
   if (node.node_type === 'branch') return '按关键词或默认条件分流'
   if (node.node_type === 'end') return '流程到此结束'
   const parts = Array.isArray(node.parts) ? node.parts : []
-  const preview = parts.map((part) => part.kind === 'text' ? part.body : part.media_name ? `素材：${part.media_name}` : '未选素材')
+  const preview = parts.map((part) => part.kind === 'text' ? part.body : part.media_name ? `${nodeTypeLabel(part.kind)}：${part.media_name}` : '未选素材')
     .filter(Boolean)
     .slice(0, 2)
     .join(' / ')
   return preview || '尚未配置内容'
+}
+
+function nodeExecutionLabel(node: AgentFlowNode): string {
+  if (node.status === 'disabled') return '跳过内容与等待'
+  if (node.node_type === 'system_start') return '满足首次触发条件'
+  if (node.node_type === 'system_ai') return '按客户问题生成回复'
+  if (node.node_type === 'end') return '固定流程结束'
+  if (node.node_type === 'branch') return '关键词优先，否则走默认'
+  if (node.node_type === 'followup') return '超时后发送 · 最多 1 次'
+  return node.await_reply ? `发完等待客户回复 · ${node.wait_minutes || 15} 分钟` : '发送后沿连接继续'
 }
 
 function selectNode(nodeKey: string): void {
@@ -247,6 +292,11 @@ function selectNode(nodeKey: string): void {
 
 function beginDrag(event: PointerEvent, node: AgentFlowNode, index: number): void {
   if (event.button !== 0) return
+  event.stopPropagation()
+  if (props.readonly) {
+    emit('select-node', node.node_key)
+    return
+  }
   const point = graphPosition(node, index)
   drag.value = {
     pointerId: event.pointerId,
@@ -262,6 +312,7 @@ function beginDrag(event: PointerEvent, node: AgentFlowNode, index: number): voi
 }
 
 function moveDrag(event: PointerEvent): void {
+  if (props.readonly) return
   const current = drag.value
   if (!current || current.pointerId !== event.pointerId) return
   if (!current.moved && Math.hypot(event.clientX - current.pointerX, event.clientY - current.pointerY) < 3) return
@@ -284,18 +335,87 @@ function endDrag(event: PointerEvent): void {
 function fitToCanvas(): void {
   const host = viewport.value
   if (!host) return
-  const scaleX = (host.clientWidth - 32) / scene.value.width
-  const scaleY = (host.clientHeight - 32) / scene.value.height
-  zoom.value = Math.max(0.45, Math.min(1, scaleX, scaleY))
-  host.scrollTo({ left: 0, top: 0, behavior: 'smooth' })
+  zoom.value = fitCanvasZoom(scene.value, { width: host.clientWidth, height: host.clientHeight })
+  nextTick(() => host.scrollTo({ left: 0, top: 0, behavior: 'smooth' }))
 }
 
-defineExpose({ fitToCanvas })
+function setZoom(value: number, anchor?: { x: number; y: number }): void {
+  const host = viewport.value
+  if (!host) return
+  const nextZoom = Math.max(0.25, Math.min(1.5, value))
+  const result = zoomCanvasAt({
+    zoom: zoom.value, nextZoom,
+    scrollLeft: host.scrollLeft, scrollTop: host.scrollTop,
+    anchorX: anchor?.x ?? host.clientWidth / 2,
+    anchorY: anchor?.y ?? host.clientHeight / 2,
+    originX: Math.max(0, (host.clientWidth - scene.value.width * zoom.value) / 2),
+    originY: Math.max(0, (host.clientHeight - scene.value.height * zoom.value) / 2),
+    nextOriginX: Math.max(0, (host.clientWidth - scene.value.width * nextZoom) / 2),
+    nextOriginY: Math.max(0, (host.clientHeight - scene.value.height * nextZoom) / 2),
+  })
+  zoom.value = result.zoom
+  nextTick(() => host.scrollTo({ left: result.scrollLeft, top: result.scrollTop }))
+}
+
+function setZoomPercent(value: number | number[]): void {
+  if (typeof value === 'number') setZoom(value / 100)
+}
+
+function zoomBy(delta: number): void {
+  setZoom(Math.round((zoom.value + delta) * 100) / 100)
+}
+
+function onWheel(event: WheelEvent): void {
+  if (!event.ctrlKey && !event.metaKey) return
+  event.preventDefault()
+  const host = viewport.value
+  if (!host) return
+  const rect = host.getBoundingClientRect()
+  setZoom(zoom.value * Math.exp(-event.deltaY * 0.002), { x: event.clientX - rect.left, y: event.clientY - rect.top })
+}
+
+function beginPan(event: PointerEvent): void {
+  if (event.button !== 0 || (event.target as Element).closest('.flow-node, .edge-hit, .edge-label')) return
+  const host = viewport.value
+  if (!host) return
+  pan.value = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, left: host.scrollLeft, top: host.scrollTop }
+  host.setPointerCapture(event.pointerId)
+}
+
+function movePan(event: PointerEvent): void {
+  const current = pan.value
+  if (!current || current.pointerId !== event.pointerId || !viewport.value) return
+  const point = panCanvasScroll({ left: current.left, top: current.top }, current, { x: event.clientX, y: event.clientY })
+  viewport.value.scrollTo(point.left, point.top)
+}
+
+function endPan(event: PointerEvent): void {
+  const host = viewport.value
+  if (pan.value?.pointerId === event.pointerId) pan.value = null
+  if (host?.hasPointerCapture(event.pointerId)) host.releasePointerCapture(event.pointerId)
+}
+
+onMounted(() => {
+  if (!viewport.value) return
+  observer = new ResizeObserver(([entry]) => {
+    if (entry) viewportSize.value = { width: entry.contentRect.width, height: entry.contentRect.height }
+  })
+  observer.observe(viewport.value)
+})
+
+onBeforeUnmount(() => observer?.disconnect())
+
+defineExpose({ fitToCanvas, setZoom, zoomBy, zoomPercent })
 </script>
 
 <style scoped>
 .flow-canvas-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   border: 1px solid var(--el-border-color-light);
   border-radius: 6px;
   background: var(--el-bg-color-page, #f5f7fb);
@@ -310,7 +430,14 @@ defineExpose({ fitToCanvas })
   padding: 6px 10px;
   border-bottom: 1px solid var(--el-border-color-light);
   background: var(--el-bg-color);
+  flex-wrap: wrap;
+  flex-shrink: 0;
 }
+
+.zoom-controls { display: flex; align-items: center; gap: 6px; }
+.zoom-controls :deep(.el-button + .el-button) { margin-left: 0; }
+.zoom-controls :deep(.el-slider) { width: 104px; margin: 0 6px; }
+.zoom-value { min-width: 39px; color: var(--el-text-color-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
 
 .canvas-caption {
   min-width: 0;
@@ -319,12 +446,18 @@ defineExpose({ fitToCanvas })
 }
 
 .flow-viewport {
+  flex: 1;
   width: 100%;
   height: min(68vh, 760px);
-  min-height: 440px;
+  min-height: 200px;
   overflow: auto;
   overscroll-behavior: contain;
+  cursor: grab;
+  touch-action: none;
 }
+
+.flow-viewport.is-panning { cursor: grabbing; user-select: none; }
+.canvas-hint { padding: 6px 10px; border-top: 1px solid var(--el-border-color-light); color: var(--el-text-color-secondary); background: var(--el-bg-color); font-size: 11px; flex-shrink: 0; }
 
 .flow-spacer {
   position: relative;
@@ -423,6 +556,12 @@ defineExpose({ fitToCanvas })
   opacity: 0.62;
 }
 
+.is-readonly .flow-node,
+.is-readonly .flow-node:active { cursor: pointer; }
+.node-system_start,
+.node-system_ai { border-style: dashed; background: var(--el-color-primary-light-9); }
+.entry-label { color: var(--el-color-primary); }
+
 .node-heading,
 .node-footer {
   display: flex;
@@ -459,9 +598,10 @@ defineExpose({ fitToCanvas })
 }
 
 @media (max-width: 700px) {
+  .zoom-controls { flex-wrap: wrap; gap: 4px; }
+  .zoom-controls :deep(.el-slider) { width: 72px; }
   .flow-viewport {
-    height: 58vh;
-    min-height: 340px;
+    min-height: 200px;
   }
 }
 </style>

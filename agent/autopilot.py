@@ -1672,8 +1672,8 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             log(f"跳过 {cid}：会话没有可搜索的名字")
             continue
 
-        # 新节点流程拥有当前会话时，流程是这一轮的唯一出口：首次接触和
-        # await_reply 的客户消息都只推进节点，不再同时调用 chat。
+        # 新节点流程推进期间是这一轮的唯一出口；最后一个等待节点没有
+        # 后继时，本条客户回复直接交给 chat，不能消耗掉后再等客户重说。
         hint = _inbound_hint(it)
         flow_state = _flow_store() if not dry else None
         flow_row = flow_state.get(cid) if flow_state is not None else None
@@ -1720,21 +1720,22 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     rlog.mark_skipped(mid, cid, "空系统事件不推进等待节点")
                     stats["skipped"] += 1
                     continue
-                flow_state.update(cid, last_inbound_at=float(it["msg_time"] or 0), last_inbound_id=str(mid))
                 current = _flow_node(flow, str(flow_row.get("node_key")))
                 nxt = _flow_next(flow, str(flow_row.get("node_key")), "reply", hint)
-                result = "replied"
                 if current is not None and nxt is not None:
+                    flow_state.update(cid, last_inbound_at=float(it["msg_time"] or 0), last_inbound_id=str(mid))
                     flow_state.set_phase(cid, "replied")
                     flow_state.set_step(cid, str(nxt.get("node_key")), 0)
                     result = _run_flow(store, cfg, cid, name, flow, node_key=str(nxt.get("node_key")), step_index=0, hint=hint)
-                else:
-                    flow_state.set_phase(cid, "replied")
-                rlog.mark_skipped(mid, cid, "客户回复推进节点，跳过 chat")
-                stats["skipped"] += 1
-                if result == "held":
-                    break
-                continue
+                    rlog.mark_skipped(mid, cid, "客户回复推进节点，跳过 chat")
+                    stats["skipped"] += 1
+                    if result == "held":
+                        break
+                    continue
+                flow_state.set_phase(cid, "replied")
+                # No next node: keep this inbound available for the normal AI
+                # path below. Its ledger result, rather than flow advancement,
+                # records whether the reply was actually answered.
             else:  # held：只保留给人工，不自动推进
                 rlog.mark_held(mid, cid, "流程发送失败，待人工处理")
                 stats["skipped"] += 1
