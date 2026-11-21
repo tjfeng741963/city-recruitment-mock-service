@@ -145,7 +145,9 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 
 设备选 Dify 后，`GET /agent/opening` 返回空清单与 `provider:dify`，`POST /agent/chat` 使用绑定岗位资料调用 Dify，返回兼容的 `reply.messages`。设备令牌必须匹配 body.device_code；Dify 模式 session_key 必填。`dry:true` 返回中性岗位输入且不调用模型。Dify 会话以设备、当前登录账号、联系人、岗位和应用配置隔离。失败返回 `ok:false,provider:dify,code,error`，不退回 Agent；金额不在当前事实中则暂停。内置人设与开场不参与 Dify 生成。
 
-新增会话与调用表为 `dify_reply_sessions`、`dify_reply_calls`（迁移 047）；调用表只记录状态、错误码及耗时。岗位咨询不等于正式面试登记，未对接登记接口时不写 `agent_archive`。
+模式二支持「推荐岗位」「选择岗位 编号」「查看面试安排」「报名」「确认报名」。岗位从设备已绑厂区或默认岗位所属城市中取，选岗按设备、账号和会话保存，换岗后模型会话按岗位区分。后台校验日期、星期、休息日、时段和面试点，资料变化后重新要求确认。有可核对的面试计划、同设备已关联的企微单聊和明确确认时，事务式写入 `agent_archive`。用同一会话重复确认返回已保存结果。查询候选人和面试登记返回 `interview_point`、`interview_address`，可按档案 ID 查看该会话。管理员预览只模拟确认，不新增真实面试记录。
+
+Dify 会话与调用表为 `dify_reply_sessions`、`dify_reply_calls`（迁移 047）；调用表只记录状态、错误码及耗时。迁移 048 增加 `dify_recruitment_state` 和现有档案的面试点及会话关联字段。
 
 **`/api/v1/agent/chat` 的请求**
 

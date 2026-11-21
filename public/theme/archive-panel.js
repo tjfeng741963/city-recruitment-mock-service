@@ -294,10 +294,12 @@
         <div class="k">电话</div><div class="v">${escapeHtml(it.phone || "-")}</div>
         <div class="k">城市</div><div class="v">${escapeHtml(it.city || "-")}</div>
         <div class="k">面试时间</div><div class="v">${escapeHtml(it.interview_date || "")} ${escapeHtml(it.interview_time || "")}</div>
+        ${it.interview_point ? `<div class="k">面试点</div><div class="v">${escapeHtml(it.interview_point)}</div>` : ""}
+        ${it.interview_address && it.interview_address !== it.interview_point ? `<div class="k">面试地址</div><div class="v">${escapeHtml(it.interview_address)}</div>` : ""}
         <div class="k">客户</div><div class="v">${escapeHtml(it.customer_nickname || "-")}</div>
         <div class="k">设备</div><div class="v">${escapeHtml(it.device_code || "-")}${it.group_chat ? "（群聊：" + escapeHtml(it.group_chat) + "）" : ""}</div>
         <div class="k">确认</div><div class="v"><span class="${it.interview_confirmed ? "rk-arch-confirmed" : "rk-arch-unconfirmed"}">${it.interview_confirmed ? "已确认" : "待确认"}</span></div>
-        <div class="k">群聊通知</div><div class="v"><span class="rk-arch-pill ${PILL_CLASS(it.notify_status)}">${STATUS_TEXT[PILL_CLASS(it.notify_status)] || it.notify_status}</span></div>
+        ${it.notify_status==="archive-only" ? "" : `<div class="k">群聊通知</div><div class="v"><span class="rk-arch-pill ${PILL_CLASS(it.notify_status)}">${STATUS_TEXT[PILL_CLASS(it.notify_status)] || it.notify_status}</span></div>`}
         <div class="k">更新时间</div><div class="v">${escapeHtml(it.updated_at || "-")}</div>
       </div>
       <div style="margin-top:12px"><b style="font-size:12.5px">到达状态</b></div>`;

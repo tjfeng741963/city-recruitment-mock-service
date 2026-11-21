@@ -93,6 +93,12 @@ export function recruitmentCandidates(db: DatabaseSync): Row[] {
 }
 
 export function candidateConversation(db: DatabaseSync, id: string): {device_code:string;customer_id:string;nickname:string} | undefined {
+  if (/^dify:[a-f0-9]{64}$/.test(id)) {
+    return db.prepare(`SELECT c.device_code,CAST(c.customer_id AS TEXT) customer_id,c.nickname
+      FROM agent_archive a JOIN agent_conversations c ON c.id=a.dify_conversation_row_id AND c.device_code=a.dify_device_code
+        AND c.external_conversation_id=a.dify_external_session
+      WHERE a.session_key=?`).get(id) as ReturnType<typeof candidateConversation>;
+  }
   if (/^conversation:\d+$/.test(id)) {
     return db.prepare('SELECT device_code,CAST(customer_id AS TEXT) customer_id,nickname FROM agent_conversations WHERE id=?').get(Number(id.slice(13))) as ReturnType<typeof candidateConversation>;
   }

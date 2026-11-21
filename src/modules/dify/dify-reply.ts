@@ -6,6 +6,7 @@ import { difyContext, difyContextConflict, difyInput } from "./dify-context.js";
 import { DeviceBridgeStore } from "../messaging/device-bridge.js";
 import { devicePositionId } from "../../shared/device-factories.js";
 import { canAccessCity, getUserScope } from "../../auth/user-scopes.js";
+import { recruitmentPositionAvailable, recruitmentTurn, selectedRecruitmentPosition } from "./dify-recruitment.js";
 
 const object = (raw: string): Record<string, unknown> => {
   try { const data = JSON.parse(raw); return data && typeof data === "object" && !Array.isArray(data) ? data : {}; }
@@ -26,6 +27,9 @@ export function deviceReplyProvider(db: DatabaseSync, code: string): "agent" | "
 }
 export function ownsReplyDevice(db: DatabaseSync, request: FastifyRequest, code: string): boolean {
   if (request.auth?.role === "admin") return true;
+  return hasDifyDeviceToken(db,request,code);
+}
+export function hasDifyDeviceToken(db: DatabaseSync, request: FastifyRequest, code: string): boolean {
   const token = (request.headers.authorization || "").replace(/^Bearer /, "").trim();
   const row = db.prepare("SELECT b.device_code FROM bridge_devices b JOIN agent_devices a ON json_extract(a.data_json,'$.device_code')=b.device_code WHERE b.token_hash=? AND a.status='enabled'").get(digest(token)) as {device_code:string} | undefined;
   return Boolean(token && row?.device_code === code);
@@ -61,7 +65,7 @@ export function registerReplyProviderRoutes(app: FastifyInstance, db: DatabaseSy
     const positionId=Number(req.body?.position_id),input=typeof req.body?.text==='string'?req.body.text.trim():'';
     if(!Number.isSafeInteger(positionId)||positionId<=0||!input||input.length>2000)return reply.code(422).send({detail:"position_id and text (max 2000) required"});
     const session=typeof req.body.session_key==='string'?req.body.session_key.trim():'';
-    if(req.body.dry!==true&&!/^dify-preview:[A-Za-z0-9-]{1,80}$/.test(session))return reply.code(422).send({detail:"preview session_key must start with dify-preview:"});
+    if((req.body.dry!==true||session)&&!/^dify-preview:[A-Za-z0-9-]{1,80}$/.test(session))return reply.code(422).send({detail:"preview session_key must start with dify-preview:"});
     return generateDifyReply(db,{deviceCode:`preview-admin-${req.auth.id}`,positionId,sessionKey:session,text:input,dry:req.body.dry===true,preview:true});
   });
   for (const method of ["get", "put"] as const) {
@@ -97,13 +101,13 @@ function validBase(base: string): boolean {
   } catch {return false;}
 }
 const queues=new Map<string,Promise<unknown>>();
-export async function generateDifyReply(db: DatabaseSync, input:{deviceCode:string;positionId:number;sessionKey:string;text:string;dry?:boolean;preview?:boolean}) {
+export async function generateDifyReply(db: DatabaseSync, input:{deviceCode:string;positionId:number;sessionKey:string;text:string;dry?:boolean;preview?:boolean;canWriteRegistration?:boolean}) {
   const account=db.prepare("SELECT account_id FROM bridge_devices WHERE device_code=?").get(input.deviceCode) as {account_id:string} | undefined;
   const cfg=config();
-  const identity=digest(JSON.stringify([input.deviceCode,account?.account_id||"",input.sessionKey,input.positionId,cfg.base,digest(cfg.key)]));
-  const previous=queues.get(identity)||Promise.resolve();
-  const pending=previous.catch(()=>{}).then(()=>run());queues.set(identity,pending);
-  try {return await pending;} finally {if(queues.get(identity)===pending)queues.delete(identity);}
+  const scope=digest(JSON.stringify([input.deviceCode,account?.account_id||"",input.sessionKey]));
+  const previous=queues.get(scope)||Promise.resolve();
+  const pending=previous.catch(()=>{}).then(()=>run());queues.set(scope,pending);
+  try {return await pending;} finally {if(queues.get(scope)===pending)queues.delete(scope);}
   async function run() {
     const blocked=()=>{
       if(input.preview)return false;
@@ -114,14 +118,33 @@ export async function generateDifyReply(db: DatabaseSync, input:{deviceCode:stri
       return Boolean(conv?.takeover || nowAccount?.account_id!==account?.account_id);
     };
     if(blocked()) return failure("human_takeover","设备停用、已切换账号或会话已接管");
-    const facts=difyContext(db,input.positionId);
+    if(!input.dry&&!input.sessionKey)return failure("dify_session_required","Dify 模式需要 session_key");
+    let positionId=input.positionId;
+    if(input.dry&&input.sessionKey){
+      positionId=selectedRecruitmentPosition(db,scope,input.positionId);
+      if(!recruitmentPositionAvailable(db,input.deviceCode,input.positionId,positionId,input.preview===true))return failure("dify_position_unavailable","岗位不可用");
+    }
+    if(!input.dry){
+      try{
+        const action=recruitmentTurn(db,{identity:scope,device:input.deviceCode,account:account?.account_id||"",session:input.sessionKey,
+          initial:input.positionId,query:input.text,preview:input.preview===true,canWrite:input.canWriteRegistration===true});
+        positionId=action.positionId;
+        if(action.message)return {ok:true,provider:"dify",model:"Dify 招聘流程",session_key:input.sessionKey,
+          reply:{messages:[{type:"text",content:action.message.replace(/[【】]/g,c=>c==="【"?"〔":"〕").slice(0,4000)}]},latency_ms:0};
+      }catch{
+        return failure("dify_registration_error","招聘系统暂未保存本轮操作，请稍后重试或联系招聘员。");
+      }
+    }
+    const facts=difyContext(db,positionId);
     if(!facts)return failure("dify_position_unavailable","岗位不可用");
     const conflict=difyContextConflict(facts);
     if(conflict)return failure('dify_context_conflict',conflict);
     const selected=difyInput(facts,input.text);
     if(!selected)return failure('dify_context_too_large','城市关键字段过长，请精简薪资、时间或面试地点；完整话术请放入原文段落或知识库');
+    // Keep the published Dify conversation per application and selected position.
+    const identity=digest(JSON.stringify([input.deviceCode,account?.account_id||"",input.sessionKey,positionId,cfg.base,digest(cfg.key)]));
     const payload={inputs:{position_data:JSON.stringify(selected),current_time:new Date().toLocaleString("sv-SE",{timeZone:"Asia/Shanghai"})},query:input.text,response_mode:"blocking",user:`recruit-${identity}`};
-    if(input.dry)return {ok:true,provider:"dify",dry:true,position_id:input.positionId,inputs:payload.inputs};
+    if(input.dry)return {ok:true,provider:"dify",dry:true,position_id:positionId,inputs:payload.inputs};
     if(!input.sessionKey)return failure("dify_session_required","Dify 模式需要 session_key");
     if(!cfg.key||!validBase(cfg.base))return failure("dify_not_configured","Dify 服务端地址或应用密钥未配置");
     const started=Date.now();let errorCode="";
@@ -142,7 +165,8 @@ export async function generateDifyReply(db: DatabaseSync, input:{deviceCode:stri
       const knownAmounts=new Set(amounts(JSON.stringify(selected)));
       if(amounts(answer).some(amount=>!knownAmounts.has(amount)))throw new Error("dify_fact_mismatch");
       if(blocked())throw new Error("human_takeover");
-      if (JSON.stringify(difyContext(db,input.positionId)) !== JSON.stringify(facts)) throw new Error("dify_position_changed");
+      if(!recruitmentPositionAvailable(db,input.deviceCode,input.positionId,positionId,input.preview===true))throw new Error("dify_position_changed");
+      if (JSON.stringify(difyContext(db,positionId)) !== JSON.stringify(facts)) throw new Error("dify_position_changed");
       const messages=answer.split("###").map(s=>s.trim()).filter(Boolean).map(content=>({type:"text",content}));
       if(!messages.length)throw new Error("dify_invalid_reply");
       return {ok:true,provider:"dify",model:"Dify Chatflow",session_key:input.sessionKey,reply:{messages},latency_ms:Date.now()-started};
@@ -151,7 +175,7 @@ export async function generateDifyReply(db: DatabaseSync, input:{deviceCode:stri
       errorCode=["dify_http_error","dify_invalid_response","dify_invalid_reply","dify_fact_mismatch","dify_position_changed","human_takeover"].includes(code)?code:"dify_unavailable";
       return failure(errorCode,"Dify 回复暂停，请在调试台或会话日志中检查");
     } finally {
-      db.prepare("INSERT INTO dify_reply_calls(id,device_code,position_id,status,error_code,latency_ms) VALUES (?,?,?,?,?,?)").run(randomUUID(),input.deviceCode,input.positionId,errorCode?"failed":"generated",errorCode,Date.now()-started);
+      db.prepare("INSERT INTO dify_reply_calls(id,device_code,position_id,status,error_code,latency_ms) VALUES (?,?,?,?,?,?)").run(randomUUID(),input.deviceCode,positionId,errorCode?"failed":"generated",errorCode,Date.now()-started);
     }
   }
 }
