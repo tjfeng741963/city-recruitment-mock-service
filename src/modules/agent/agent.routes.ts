@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
+import { difyDashboard } from "../dify/dify-context.js";
 import { serializeAgentDevice, serializeStatusDashboard } from "../../shared/response-serializers.js";
 import { canAccessDevice, deviceConstraint, getUserScope } from "../../auth/user-scopes.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -434,11 +435,10 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     const messagesScope = deviceFilter("device_code");
     const messages = (db.prepare(`SELECT COUNT(*) AS total FROM agent_messages WHERE 1=1${messagesScope.sql}`).get(...messagesScope.values) as { total: number }).total;
     const pendingScope = deviceFilter("device_code");
-    const pending = (db.prepare(`SELECT COUNT(*) AS total FROM agent_conversations WHERE state='pending_invite'${pendingScope.sql}`).get(...pendingScope.values) as { total: number }).total;
-    const failedScope = deviceFilter("device_code");
-    const failed = (db.prepare(`SELECT COUNT(*) AS total FROM agent_messages WHERE status='failed'${failedScope.sql}`).get(...failedScope.values) as { total: number }).total;
+    const pending = (db.prepare(`SELECT COUNT(*) AS total FROM bridge_commands WHERE status IN ('queued','claimed')${pendingScope.sql}`).get(...pendingScope.values) as { total: number }).total;
+    const dify=difyDashboard(db,scope.isAdmin?null:scope.deviceCodes);
     const hourly = Array.from({ length: 24 }, (_, hour) => ({ hour, count: 0 }));
-    return serializeStatusDashboard({ devices: { total: devices, active_today: 0 }, messages: { total: messages, hourly }, queue: { pending }, errors: { failed_today: failed, ai_abnormal: 0 }, state_distribution: {}, device_ranking: [], dify_health: [], degraded: [], daily_trend: [] });
+    return serializeStatusDashboard({ devices: { total: devices, active_today: 0 }, messages: { total: messages, hourly }, queue: { pending }, errors: { failed_today: dify.failed, ai_abnormal: dify.abnormal }, state_distribution: {}, device_ranking: [], dify_health: dify.health, degraded: dify.degraded, daily_trend: [] });
   });
   // device_code is a required query parameter on the target (422 when absent),
   // but its value is not authenticated: any string reaches the DB lookup.

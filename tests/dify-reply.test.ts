@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildServer } from "../src/server.js";
 import type { FastifyInstance } from "fastify";
 import { DeviceBridgeStore } from "../src/modules/messaging/device-bridge.js";
+import { difyContext, difyInput } from '../src/modules/dify/dify-context.js';
 
 describe("Dify second reply route", () => {
   let app: FastifyInstance;
@@ -126,5 +127,64 @@ describe("Dify second reply route", () => {
     new DeviceBridgeStore(app.db).heartbeat(code,"offline");
     const result=await app.inject({method:"PUT",url:`/api/v1/agent/devices/${code}/reply-provider`,headers:admin,payload:{provider:"dify"}});
     expect(result.statusCode).toBe(409);
+  });
+  it("reads live city materials and existing scoped knowledge for Dify only",async()=>{
+    const city=app.db.prepare("INSERT INTO cities(city_name,province,data_json) VALUES ('测试城市','测试省',?) RETURNING id").get(JSON.stringify({salary:{raw:'综合月薪5000-8000元'},work_hours:{raw:'每天8小时'},interview:{time:'周一下午14:00',location:'城市面试点',interview_notice:'携带身份证原件'},prompt_sections:{meal_dorm:'包住不包吃',custom_intro:'入职前可先参观'}})) as {id:number};
+    app.db.prepare('UPDATE service_positions SET city_id=? WHERE id=?').run(city.id,position);
+    const insert=app.db.prepare("INSERT INTO kb_faq(tenant_id,scope_level,scope_position_id,question,answer,status) VALUES (1,?,?,?,?,?)");
+    insert.run('global',null,'怎么联系人工','请留言，招聘员接手后答复','enabled');
+    insert.run('position',position,'发薪日','每月15号发薪','enabled');
+    const other=app.db.prepare("INSERT INTO service_positions(position_name,status) VALUES ('其他岗位','enabled') RETURNING id").get() as {id:number};
+    insert.run('position',other.id,'别家资料','这是其他岗位资料','enabled');
+    insert.run('position',position,'停用问题','停用答案','disabled');
+    await select();const network=vi.fn().mockResolvedValue(new Response(JSON.stringify({answer:'综合月薪5000-8000元',conversation_id:'city-context'}),{status:200}));vi.stubGlobal('fetch',network);
+    expect((await chat()).json()).toMatchObject({ok:true});
+    const data=JSON.parse(JSON.parse(network.mock.calls[0][1].body).inputs.position_data);
+    expect(data).toMatchObject({city:'测试城市',wage_text:'综合月薪5000-8000元',hours_text:'每天8小时',interview_address:'城市面试点',welfare_text:'包住不包吃'});
+    expect(data.city_materials.custom_intro).toBe('入职前可先参观');
+    expect(JSON.stringify(data.knowledge)).toContain('每月15号发薪');expect(JSON.stringify(data.knowledge)).toContain('招聘员接手');
+    expect(JSON.stringify(data)).not.toMatch(/其他岗位资料|停用答案/);
+    app.db.prepare('UPDATE cities SET data_json=? WHERE id=?').run(JSON.stringify({salary:{raw:'综合月薪6000-9000元'}}),city.id);
+    network.mockResolvedValue(new Response(JSON.stringify({answer:'综合月薪6000-9000元',conversation_id:'city-context'}),{status:200}));
+    await chat('S:test','现在工资呢？');
+    expect(JSON.parse(JSON.parse(network.mock.calls[1][1].body).inputs.position_data).wage_text).toBe('综合月薪6000-9000元');
+  });
+  it("exposes administrator city and knowledge preview without switching device or sending",async()=>{
+    const dry=await app.inject({method:'POST',url:'/api/v1/dify/preview',headers:admin,payload:{position_id:position,text:'工资？',dry:true}});
+    expect(dry.statusCode).toBe(200);expect(dry.json()).toMatchObject({ok:true,provider:'dify',dry:true});
+    expect(app.db.prepare('SELECT COUNT(*) n FROM bridge_commands').get()).toMatchObject({n:0});
+    const anonymous=await app.inject({method:'POST',url:'/api/v1/dify/preview',payload:{position_id:position,text:'工资？',dry:true}});expect(anonymous.statusCode).toBe(403);
+  });
+  it("pauses when city or knowledge changes during generation",async()=>{
+    await select();vi.stubGlobal('fetch',vi.fn().mockImplementation(async()=>{
+      app.db.prepare("INSERT INTO kb_faq(tenant_id,scope_level,question,answer,status) VALUES (1,'global','咨询人工','请稍候','enabled')").run();
+      return new Response(JSON.stringify({answer:'22元/小时',conversation_id:'changed-knowledge'}),{status:200});
+    }));
+    expect((await chat()).json()).toMatchObject({ok:false,code:'dify_position_changed'});
+  });
+  it("connects original dashboard to today's Dify calls instead of ordinary send failures",async()=>{
+    app.db.prepare("INSERT INTO agent_messages(device_code,customer_id,direction,content,status) VALUES (?,1,'outbound','old','failed')").run(code);
+    const call=app.db.prepare("INSERT INTO dify_reply_calls(id,device_code,position_id,status,error_code,latency_ms,created_at) VALUES (?,?,?,?,?,?,?)");
+    const now=new Date().toISOString();call.run('today',code,position,'failed','dify_http_error',5,now);call.run('ok',code,position,'generated','',5,now);call.run('old',code,position,'failed','dify_http_error',5,'2020-01-01 00:00:00');
+    const result=await app.inject({url:'/api/v1/agent/status/dashboard',headers:admin});
+    expect(result.json()).toMatchObject({errors:{failed_today:1},dify_health:[{device_code:code,fail_count:1}],degraded:[{device_code:code,fail_rate:50}]});
+  });
+  it("restores complete city material editing without losing existing nested or unknown data",async()=>{
+    const city=app.db.prepare("INSERT INTO cities(city_name,province,data_json) VALUES ('编辑测试城','测试省',?) RETURNING id").get(JSON.stringify({salary:{raw:'旧工资',formal:{monthly:6000}},interview:{room:'A室'},untouched:'keep',prompt_sections:{legacy:'旧字段'},prompt_section_labels:{legacy:'历史原文'}})) as {id:number};
+    const r=await app.inject({method:'PUT',url:`/api/v1/dify/cities/${city.id}/materials`,headers:admin,payload:{salary:{raw:'5000-8000元/月'},interview:{location:'新面试点'},prompt_sections:{legacy:'已编辑',meal_dorm:'包住'},prompt_section_labels:{legacy:'历史原文',meal_dorm:'吃住情况'}}});
+    expect(r.statusCode).toBe(200);
+    const raw=JSON.parse((app.db.prepare('SELECT data_json FROM cities WHERE id=?').get(city.id) as {data_json:string}).data_json);
+    expect(raw).toMatchObject({untouched:'keep',salary:{raw:'5000-8000元/月',formal:{monthly:6000}},interview:{room:'A室',location:'新面试点'},prompt_sections:{legacy:'已编辑',meal_dorm:'包住'}});
+    expect(app.db.prepare('SELECT COUNT(*) n FROM city_history WHERE city_id=?').get(city.id)).toMatchObject({n:1});
+  });
+  it('retrieves complete relevant knowledge within the real Dify input limit',()=>{
+    const insert=app.db.prepare("INSERT INTO kb_faq(tenant_id,scope_level,question,answer,status) VALUES (1,'global',?,?,'enabled')");
+    for(let i=0;i<50;i++)insert.run('其他问答'+i,'一般说明'.repeat(300));
+    insert.run('行李到达后放在哪里','行李暂存于蓝色接待区');
+    const full=difyContext(app.db,position)!;expect(JSON.stringify(full).length).toBeGreaterThan(20000);
+    const selected=difyInput(full,'行李到达后放在哪里')!;
+    expect(JSON.stringify(selected).length).toBeLessThan(20000);
+    expect(selected.knowledge.some(k=>k.answer==='行李暂存于蓝色接待区')).toBe(true);
+    expect(selected.retrieval.omitted).toBeGreaterThan(0);
   });
 });
