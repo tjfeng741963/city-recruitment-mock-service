@@ -23,4 +23,8 @@ const legacy = [...html.matchAll(/    <link rel="stylesheet" href="\/legacy\/[^\
 shell = shell.replace(/^    <link rel="stylesheet" href="\/legacy\/[^\n]+\n/gm, '');
 shell = shell.replace('    <link rel="preload"', `${legacy.join('\n')}\n    <link rel="preload"`);
 fs.writeFileSync(shellPath, shell);
+if (process.argv.includes('--runtime')) {
+  // Compose serves frontend-vue/dist; include the same shell and support files tested locally.
+  fs.cpSync(path.join(root, 'public'), build, { recursive: true });
+}
 console.log('Published Vue assets and complete style dependencies; retained historical assets for existing clients.');
