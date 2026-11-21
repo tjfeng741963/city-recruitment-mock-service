@@ -3,7 +3,13 @@
     <div class="inspector-label">{{ node?.node_type === 'system_media' ? 'AI 可选媒体分支 · 只读' : legacy ? '当前旧开场路径 · 只读' : '已保存的运行路径 · 只读' }}</div>
     <template v-if="node">
       <h3>{{ node.title || node.node_key }}</h3>
-      <el-button v-if="editable" link type="primary" @click="$emit('edit-node', node.node_key)">编辑此节点</el-button>
+      <div v-if="editEntries.length" class="edit-entries">
+        <el-button v-if="editEntries.includes('edit-node')" link type="primary" @click="$emit('edit-node', node.node_key)">编辑此节点</el-button>
+        <el-button v-if="editEntries.includes('edit-opening')" link type="primary" @click="$emit('edit-opening', node.node_key)">编辑当前开场</el-button>
+        <el-button v-if="editEntries.includes('manage-media')" link type="primary" @click="$emit('manage-media')">管理这项图片视频</el-button>
+        <el-button v-if="editEntries.includes('edit-persona')" link type="primary" @click="$emit('edit-persona')">编辑人设与话术</el-button>
+        <el-button v-if="editEntries.includes('manage-knowledge')" link type="primary" @click="$emit('manage-knowledge')">管理岗位知识库</el-button>
+      </div>
       <h4>这个节点实际做什么</h4>
       <p v-for="line in explanations" :key="line">{{ line }}</p>
       <template v-if="node.parts?.length">
@@ -42,8 +48,17 @@ import { computed } from 'vue'
 import type { AgentFlow, AgentFlowEdge, AgentFlowNode } from '../../api/agent'
 import { describeRuntimeNode } from './flow-runtime'
 import FlowMediaPreview from './FlowMediaPreview.vue'
+import { runtimeEditEntries } from './flow-edit-entry'
 const props = defineProps<{ graph: AgentFlow; node: AgentFlowNode | null; edge: AgentFlowEdge | null; legacy: boolean; editable: boolean }>()
-defineEmits<{ (event: 'edit-node', key: string): void; (event: 'select-node', key: string): void }>()
+defineEmits<{
+  (event: 'edit-node', key: string): void
+  (event: 'select-node', key: string): void
+  (event: 'edit-opening', key: string): void
+  (event: 'manage-media'): void
+  (event: 'edit-persona'): void
+  (event: 'manage-knowledge'): void
+}>()
+const editEntries = computed(() => runtimeEditEntries(props.node, props.legacy, props.editable))
 const explanations = computed(() => props.node ? describeRuntimeNode(props.node, props.graph, props.legacy) : [])
 const outgoing = computed(() => props.graph.edges.filter(edge => edge.from_key === props.node?.node_key))
 function title(key: string): string { return props.graph.nodes.find(node => node.node_key === key)?.title || key || '结束' }
@@ -55,6 +70,8 @@ function edgeLabel(edge: AgentFlowEdge): string {
 <style scoped>
 .runtime-inspector { color: var(--el-text-color-regular); font-size: 13px; line-height: 1.7; }
 .inspector-label,.message-kind { color: var(--el-text-color-secondary); font-size: 12px; }
+.edit-entries { display: flex; flex-wrap: wrap; gap: 8px 12px; margin: 8px 0; }
+.edit-entries :deep(.el-button + .el-button) { margin-left: 0; }
 h3 { margin: 6px 0 8px; color: var(--el-text-color-primary); font-size: 16px; }
 h4 { margin: 20px 0 8px; font-size: 13px; }
 p { margin: 8px 0; overflow-wrap: anywhere; }

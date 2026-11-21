@@ -58,6 +58,7 @@ const DEVICE_TOKEN_ROUTES = new Set(["heartbeat", "claim", "receipts", "inbound"
     "GET /api/v1/agent/flow",
     "GET /api/v1/agent/state",
     "POST /api/v1/agent/state",
+    "POST /api/v1/agent/config-sync",
     // 开场清单与回执也是设备调的：设备令牌在路由内校验（与媒体下载同一套）。
     "GET /api/v1/agent/opening",
     "POST /api/v1/agent/opening/log",

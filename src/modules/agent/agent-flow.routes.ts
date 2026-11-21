@@ -265,10 +265,81 @@ function isoOrNull(value: unknown): string | null {
   return new Date(value).toISOString();
 }
 
+const CONFIG_SYNC_STATES = new Set(["synced", "stale", "blocked", "error"]);
+const CONFIG_SYNC_ERRORS = new Set(["", "auth", "network", "http", "invalid_response", "cache", "read", "write", "unknown", "timeout"]);
+
+function configSyncBranch(value: unknown, flow: boolean): Json {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("配置摘要必须为对象");
+  const item = value as Json;
+  const nullableInt = (raw: unknown, field: string): number | null => {
+    if (raw === null || raw === undefined) return null;
+    if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 0) throw new Error(`${field} 无效`);
+    return raw;
+  };
+  const state = str(item.state);
+  const error = item.error === null || item.error === undefined ? "" : str(item.error, "invalid");
+  if (!CONFIG_SYNC_STATES.has(state)) throw new Error("state 无效");
+  if (!CONFIG_SYNC_ERRORS.has(error)) throw new Error("error 必须为允许的短错误码");
+  const version = flow ? nullableInt(item.version, "version") : item.version == null ? null : str(item.version).toLowerCase();
+  if (!flow && version !== null && !/^[a-f0-9]{64}$/.test(String(version))) throw new Error("opening.version 无效");
+  const result: Json = {
+    position_id: nullableInt(item.position_id, "position_id"), version,
+    synced_at: isoOrNull(item.synced_at), checked_at: isoOrNull(item.checked_at), state, error,
+  };
+  if (flow) {
+    const status = item.status == null ? null : str(item.status);
+    if (status !== null && !["enabled", "disabled"].includes(status)) throw new Error("flow.status 无效");
+    result.status = status;
+  }
+  return result;
+}
+
+function normalizeConfigSync(value: unknown): Json {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("配置摘要必须为对象");
+  const body = value as Json;
+  const commit = str(body.client_commit).toLowerCase();
+  return {
+    client_commit: /^[a-f0-9]{40}$/.test(commit) ? commit : null,
+    flow: configSyncBranch(body.flow, true), opening: configSyncBranch(body.opening, false),
+  };
+}
+
 export async function registerAgentFlowRoutes(app: FastifyInstance, db: DatabaseSync): Promise<void> {
   const deviceStore = new DeviceBridgeStore(db);
   const deviceAllowed = (request: import("fastify").FastifyRequest, code: string) =>
     Boolean(code && deviceStore.authenticate(code, (request.headers.authorization ?? "").replace(/^Bearer /, "")) && deviceStore.enabled(code));
+
+  app.get<{ Querystring: { device_code?: string } }>("/api/v1/agent/config-sync", async (request, reply) => {
+    if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin access required" });
+    const deviceCode = str(request.query.device_code).trim();
+    if (!deviceCode) return reply.code(422).send({ detail: "device_code is required" });
+    const row = db.prepare("SELECT data_json FROM agent_devices WHERE json_extract(data_json,'$.device_code')=?")
+      .get(deviceCode) as { data_json: string } | undefined;
+    const stored = parseObject(parseObject(row?.data_json).config_sync);
+    if (!Object.keys(stored).length) return { available: false, device_code: deviceCode };
+    try {
+      const safe = normalizeConfigSync(stored);
+      const serverReceivedAt = isoOrNull(stored.server_received_at);
+      if (!serverReceivedAt) return { available: false, device_code: deviceCode };
+      return { available: true, device_code: deviceCode, ...safe, server_received_at: serverReceivedAt };
+    } catch {
+      return { available: false, device_code: deviceCode };
+    }
+  });
+
+  app.post<{ Body: Json }>("/api/v1/agent/config-sync", async (request, reply) => {
+    const deviceCode = str(request.body?.device_code).trim();
+    if (!deviceAllowed(request, deviceCode)) return reply.code(403).send({ detail: "Device token or scope invalid" });
+    try {
+      const safe = normalizeConfigSync(request.body);
+      const serverReceivedAt = new Date().toISOString();
+      db.prepare("UPDATE agent_devices SET data_json=json_set(data_json,'$.config_sync',json(?)) WHERE json_extract(data_json,'$.device_code')=?")
+        .run(JSON.stringify({ ...safe, server_received_at: serverReceivedAt }), deviceCode);
+      return { ok: true, server_received_at: serverReceivedAt };
+    } catch (error) {
+      return reply.code(422).send({ detail: error instanceof Error ? error.message : "配置摘要无效" });
+    }
+  });
 
   app.get<{ Querystring: { position_id?: string } }>("/api/v1/agent-flow", async (request, reply) => {
     if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin access required" });

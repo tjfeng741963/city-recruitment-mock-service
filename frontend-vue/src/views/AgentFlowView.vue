@@ -61,8 +61,18 @@
     <div v-if="savedFlow && !loading" class="runtime-status-bar">
       <span><strong>绑定设备</strong>：{{ boundDevices.length ? boundDevices.map(device => device.device_code).join('、') : devicesAvailable ? '未绑定设备，当前无人执行该岗位' : '设备列表读取失败，绑定状态未知' }}</span>
       <span>{{ savedFlow.status === 'enabled' ? '新客户使用已保存节点；在途会话保留原快照' : '节点图停用；绑定设备的新客户走旧开场' }}</span>
-      <span class="field-note">按已保存版本推导；客户端安装版本与送达尚未核验</span>
+      <span class="field-note">当前使用：{{ savedFlow.status === 'enabled' ? '节点流程' : '旧开场' }}；保存版本 {{ savedFlow.status === 'enabled' ? `v${savedFlow.version}` : openingVersion ? openingVersion.slice(0, 10) : '未知' }}</span>
+      <el-button v-if="savedFlow.status !== 'enabled'" link type="primary" @click="openOpeningEditor">编辑当前开场</el-button>
       <el-button link type="primary" @click="runtimeDetails = !runtimeDetails">{{ runtimeDetails ? '收起运行说明' : '查看运行说明与状态' }}</el-button>
+    </div>
+
+    <div v-if="boundDevices.length && savedFlow && !loading" class="config-sync-status">
+      <div v-for="device in boundDevices" :key="device.device_code" class="config-sync-row">
+        <strong>{{ device.device_code }}</strong>
+        <el-tag size="small" :type="syncView(device.device_code).state === 'synced' ? 'success' : syncView(device.device_code).state === 'blocked' ? 'danger' : 'info'">{{ syncView(device.device_code).label }}</el-tag>
+        <span>安装版本 {{ clientSync[device.device_code]?.client_commit?.slice(0, 8) || '未上报' }} · 拉取时间 {{ formatTime(syncView(device.device_code).time) }}</span>
+        <el-tooltip :content="syncView(device.device_code).detail"><span class="field-note">配置拉取不等于发送或送达</span></el-tooltip>
+      </div>
     </div>
 
     <div v-if="viewMode === 'runtime' && savedFlow && !loading" class="runtime-media-summary">
@@ -164,7 +174,8 @@
           <aside class="inspector" aria-label="流程属性">
             <FlowRuntimeInspector v-if="viewMode === 'runtime'" :graph="displayFlow" :node="runtimeNode" :edge="runtimeEdge"
               :legacy="savedFlow?.status !== 'enabled'" :editable="Boolean(runtimeNode && flow.nodes.some(node => node.node_key === runtimeNode!.node_key)) && savedFlow?.status === 'enabled'"
-              @select-node="selectDisplayNode" @edit-node="editRuntimeNode" />
+              @select-node="selectDisplayNode" @edit-node="editRuntimeNode" @edit-opening="openOpeningEditor"
+              @manage-media="manageMedia" @edit-persona="openPersonaEditor" @manage-knowledge="manageKnowledge" />
             <template v-else-if="selectedNode">
               <div class="inspector-heading">
                 <div>
@@ -261,6 +272,7 @@
                         controls-position="right"
                         @update:model-value="(value: number | undefined) => setPartDelay(part, value)"
                       />
+                      <div class="field-note">本条完成后的实际等待；最后一条也用于进入下一节点前等待。</div>
                     </el-form-item>
                   </div>
                 </template>
@@ -278,15 +290,6 @@
                 </el-form-item>
                 <el-form-item v-if="isFollowup(selectedNode)" label="复聊次数">
                   <el-input-number :model-value="1" disabled controls-position="right" />
-                </el-form-item>
-                <el-form-item v-if="selectedNode.node_type !== 'end'" label="节点间隔（秒）">
-                  <el-input-number
-                    :model-value="millisecondsToSeconds(selectedNode.delay_ms)"
-                    :min="0"
-                    :max="60"
-                    controls-position="right"
-                    @update:model-value="(value: number | undefined) => setNodeDelay(selectedNode!, value)"
-                  />
                 </el-form-item>
               </el-form>
             </template>
@@ -352,11 +355,13 @@
         </div>
       </template>
     </template>
+    <PositionAgentDrawer v-model="agentDrawerVisible" :position="currentPosition" :initial-tab="agentDrawerTab" @changed="refreshOpeningContext" />
   </section>
 </template>
 
 <script setup lang="ts">
 import PositionQa from '../components/agent/PositionQa.vue'
+import PositionAgentDrawer from '../components/basic/PositionAgentDrawer.vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -370,6 +375,7 @@ import { agentApi, devicesApi, type AgentDeviceItem, type AgentFlow, type AgentF
 import { mediaApi, positionsApi } from '../api/core'
 import type { ServicePosition } from '../api/types'
 import { toArray } from '../utils/format'
+import { configurationSyncView, type ConfigSyncEvidence } from '../components/agent/config-sync-view'
 import {
   addBranchNode,
   addFlowEdge,
@@ -413,6 +419,13 @@ const viewMode = ref<'runtime' | 'edit'>('runtime')
 const runtimeDetails = ref(false)
 const savedFlow = ref<AgentFlow | null>(null)
 const legacyOpenings = ref<LegacyOpening[]>([])
+const openingVersion = ref<string | null>(null)
+const clientSync = ref<Record<string, ConfigSyncEvidence | null>>({})
+const evidenceNow = ref(Date.now())
+const agentDrawerVisible = ref(false)
+const agentDrawerTab = ref<'persona' | 'opening' | 'flow'>('opening')
+const currentPosition = computed(() => positions.value.find(item => item.id === positionId.value) || null)
+let evidenceTimer: ReturnType<typeof setInterval> | undefined
 const aiFacts = ref<Record<string, string>>({})
 const aiContextAvailable = ref(false)
 const devices = ref<AgentDeviceItem[]>([])
@@ -511,11 +524,13 @@ async function loadFlow(id: number): Promise<void> {
     flow.value = normalizeFlow(flowResult.data)
     savedFlow.value = JSON.parse(JSON.stringify(flow.value))
     legacyOpenings.value = activeOpenings((personaResult.data.openings || []) as unknown as LegacyOpening[])
+    openingVersion.value = personaResult.data.opening_version || null
     aiFacts.value = (contextResult?.data.facts || {}) as Record<string, string>
     aiContextAvailable.value = contextResult !== null
     devicesAvailable.value = devicesResult !== null
     devices.value = toArray<AgentDeviceItem>(devicesResult?.data)
     mirrors.value = []
+    clientSync.value = {}
     mirrorErrors.value = []
     runtimeNodeKey.value = '__runtime_start'
     runtimeEdgeIndex.value = null
@@ -524,11 +539,13 @@ async function loadFlow(id: number): Promise<void> {
     chooseSelection(flow.value)
     baseline.value = snapshot(flow.value)
     void loadRuntimeMirrors(id, sequence)
+    void loadClientSync(id, sequence)
   } catch (error) {
     if (sequence !== loadSequence) return
     pageError.value = errorText(error, '流程加载失败')
     flow.value = null
     savedFlow.value = null
+    openingVersion.value = null
     aiFacts.value = {}
     aiContextAvailable.value = false
     openingsAvailable.value = false
@@ -540,6 +557,43 @@ async function loadFlow(id: number): Promise<void> {
       await nextTick()
       canvas.value?.fitToCanvas()
     }
+  }
+}
+
+async function loadClientSync(id: number, sequence: number): Promise<void> {
+  const scoped = devices.value.filter(device => Number(device.position_id) === id)
+  const results = await Promise.all(scoped.map(async device => {
+    try { const { data } = await agentApi.configSync(device.device_code); return [device.device_code, data] as const }
+    catch { return [device.device_code, null] as const }
+  }))
+  if(sequence === loadSequence) clientSync.value = Object.fromEntries(results)
+}
+
+function syncView(code: string) {
+  return configurationSyncView(clientSync.value[code], {
+    mode: savedFlow.value?.status === 'enabled' ? 'flow' : 'opening',
+    positionId: positionId.value,
+    version: savedFlow.value?.status === 'enabled' ? savedFlow.value.version : openingVersion.value,
+    flowVersion: savedFlow.value?.version,
+    flowStatus: savedFlow.value?.status === 'enabled' ? 'enabled' : 'disabled',
+  }, evidenceNow.value)
+}
+
+function openOpeningEditor(): void { agentDrawerTab.value = 'opening'; agentDrawerVisible.value = true }
+function openPersonaEditor(): void { agentDrawerTab.value = 'persona'; agentDrawerVisible.value = true }
+function manageMedia(): void { void router.push({path:'/media',query:{position_id:String(positionId.value)}}) }
+function manageKnowledge(): void { void router.push({path:'/knowledge',query:{position_id:String(positionId.value)}}) }
+async function refreshOpeningContext(): Promise<void> {
+  const id=positionId.value,sequence=loadSequence
+  try {
+    const [persona, context]=await Promise.all([agentApi.personaGet(id),agentApi.context({position_id:id})])
+    if(sequence!==loadSequence || id!==positionId.value)return
+    legacyOpenings.value = activeOpenings((persona.data.openings||[]) as unknown as LegacyOpening[])
+    openingVersion.value = persona.data.opening_version || null
+    aiFacts.value = (context.data.facts||{}) as Record<string,string>
+    void loadClientSync(id,sequence)
+  } catch {
+    if(sequence===loadSequence)pageError.value='开场已提交，但运行图刷新失败，请点击刷新重新核对。'
   }
 }
 
@@ -954,10 +1008,6 @@ function setPartDelay(part: AgentFlowPart, seconds: number | undefined): void {
   part.delay_ms = Math.max(0, Math.min(60, Number(seconds) || 0)) * 1000
 }
 
-function setNodeDelay(node: AgentFlowNode, seconds: number | undefined): void {
-  node.delay_ms = Math.max(0, Math.min(60, Number(seconds) || 0)) * 1000
-}
-
 function millisecondsToSeconds(value: unknown): number {
   const milliseconds = Number(value)
   return Number.isFinite(milliseconds) ? Math.round(milliseconds / 1000) : 2
@@ -1003,8 +1053,12 @@ onBeforeRouteLeave(async () => {
   }
 })
 
-onMounted(() => { window.addEventListener('keydown', onWorkspaceKey); void loadPositions() })
-onBeforeUnmount(() => { loadSequence += 1; window.removeEventListener('keydown', onWorkspaceKey) })
+onMounted(() => {
+  window.addEventListener('keydown', onWorkspaceKey)
+  void loadPositions()
+  evidenceTimer = setInterval(() => { evidenceNow.value=Date.now(); if(!loading.value && positionId.value)void loadClientSync(positionId.value,loadSequence) },30000)
+})
+onBeforeUnmount(() => { loadSequence += 1; if(evidenceTimer)clearInterval(evidenceTimer); window.removeEventListener('keydown', onWorkspaceKey) })
 </script>
 
 <style scoped>
@@ -1016,6 +1070,8 @@ onBeforeUnmount(() => { loadSequence += 1; window.removeEventListener('keydown',
 .is-fullscreen .flow-toolbar { flex-shrink: 0; margin-bottom: 8px; }
 .runtime-status-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; flex-shrink: 0; padding: 6px 4px 10px; font-size: 12px; color: var(--el-text-color-regular); }
 .runtime-status-bar .el-button { margin-left: auto; }
+.config-sync-status { flex-shrink: 0; padding: 0 4px 8px; font-size: 12px; color: var(--el-text-color-regular); }
+.config-sync-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:3px 0; }
 .runtime-media-summary { display: flex; flex-wrap: wrap; flex-shrink: 0; gap: 5px 18px; margin-bottom: 8px; color: var(--el-text-color-regular); font-size: 12px; }
 .flow-page :deep(.el-button.is-link) { background: transparent !important; border-color: transparent !important; }
 .flow-page :deep(.el-button.is-link:hover) { background: var(--el-fill-color-light) !important; }

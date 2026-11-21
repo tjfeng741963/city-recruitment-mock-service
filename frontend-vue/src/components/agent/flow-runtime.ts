@@ -188,7 +188,7 @@ export function describeRuntimeNode(node: AgentFlowNode, graph: AgentFlow, legac
   else {
     for (const [index, part] of (node.parts || []).entries()) {
       const seconds = Number(part.delay_ms ?? node.delay_ms ?? 2000) / 1000
-      const timing = legacy ? '发送节奏使用 Windows 客户端冷却配置，失败会增加退避；旧开场暂不读取每条的发送间隔设置。' : `完成后间隔 ${seconds} 秒。`
+      const timing = legacy ? `发送后至少间隔 ${seconds} 秒；Windows 客户端安全冷却配置可能增加额外等待，失败会增加退避。` : `完成后间隔 ${seconds} 秒。`
       if (part.kind === 'text') result.push(`第 ${index + 1} 条：发送下面的原文，确认目标会话与文本发送结果。${timing}`)
       else {
         result.push(`第 ${index + 1} 条${part.kind === 'video' ? '视频' : '图片'}：先查 Windows 本地素材，缺失时从服务器预取「${part.media_name || '未选择素材'}」，再通过现有企微媒体发送动作处理。${timing}`)
