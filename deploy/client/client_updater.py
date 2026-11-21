@@ -1,4 +1,4 @@
-"""Install the immutable Windows client package matching the current main SHA."""
+"""Discover and install immutable Windows client release packages."""
 
 from __future__ import annotations
 
@@ -281,11 +281,11 @@ def apply_package(
     return {"commit": expected_commit, "changed": changed, "backup": str(backup)}
 
 
-def _request_json(url: str) -> dict[str, Any]:
+def _request_json(url: str, container: type = dict) -> Any:
     try:
         result = json.loads(_download(url, 2 * 1024 * 1024, 20))
-        if not isinstance(result, dict):
-            raise ValueError("API response is not an object")
+        if not isinstance(result, container):
+            raise ValueError("unexpected GitHub API response type")
         return result
     except (OSError, ValueError, urllib.error.URLError) as exc:
         raise UpdateError(f"GitHub API request failed: {exc}") from exc
@@ -333,7 +333,15 @@ def _download(url: str, limit: int, timeout: int) -> bytes:
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
             except (OSError, subprocess.SubprocessError) as exc:
-                raise UpdateError("HTTPS download failed") from exc
+                stderr = getattr(exc, "stderr", None) or b""
+                http = re.search(rb"returned error: (\d{3})", stderr)
+                if http:
+                    detail = f"HTTP {http[1].decode('ascii')}"
+                elif isinstance(exc, subprocess.TimeoutExpired):
+                    detail = "timeout"
+                else:
+                    detail = f"curl exit {getattr(exc, 'returncode', 'unavailable')}"
+                raise UpdateError(f"HTTPS download failed ({detail})") from exc
             data = target.read_bytes()
     else:
         request = urllib.request.Request(url, headers={"User-Agent": "city-recruitment-client-updater"})
@@ -347,29 +355,75 @@ def _download(url: str, limit: int, timeout: int) -> bytes:
     return data
 
 
+def _http_status(exc: BaseException) -> int | None:
+    current: BaseException | None = exc
+    while current is not None:
+        if isinstance(current, urllib.error.HTTPError):
+            return current.code
+        stderr = getattr(current, "stderr", None)
+        if isinstance(stderr, bytes):
+            match = re.search(rb"returned error: (\d{3})", stderr)
+            if match:
+                return int(match.group(1))
+        current = current.__cause__
+    return None
+
+
+def _release_info(commit: str, release: dict[str, Any]) -> dict[str, str]:
+    package_url, checksum_url = release_asset_urls(commit, release)
+    return {"commit": commit, "package_url": package_url, "checksum_url": checksum_url}
+
+
 def check_release() -> dict[str, str]:
     main = _request_json(f"{API_BASE}/commits/main")
     commit = str(main.get("sha", ""))
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise UpdateError("GitHub main returned an invalid commit SHA")
-    release = _request_json(f"{API_BASE}/releases/tags/{TAG_PREFIX}{commit}")
-    package_url, checksum_url = release_asset_urls(commit, release)
-    return {"commit": commit, "package_url": package_url, "checksum_url": checksum_url}
+    try:
+        release = _request_json(f"{API_BASE}/releases/tags/{TAG_PREFIX}{commit}")
+    except UpdateError as exc:
+        if _http_status(exc) != 404:
+            raise
+    else:
+        assets = {asset.get("name") for asset in release.get("assets", []) if isinstance(asset, dict)}
+        if not release.get("draft") and not release.get("prerelease"):
+            if {"windows-client.zip", "windows-client.sha256"} <= assets:
+                return _release_info(commit, release)
+    releases = _request_json(f"{API_BASE}/releases?per_page=30", list)
+    for candidate in sorted((item for item in releases if isinstance(item, dict)),
+                            key=lambda item: str(item.get("published_at") or ""), reverse=True):
+        tag = re.fullmatch(rf"{TAG_PREFIX}([0-9a-f]{{40}})", str(candidate.get("tag_name", "")))
+        if tag is None or not candidate.get("published_at") or candidate.get("draft") or candidate.get("prerelease"):
+            continue
+        try:
+            info = _release_info(tag[1], candidate)
+            return {**info, "pending_main": commit}
+        except UpdateError:
+            continue
+    raise UpdateError("没有已发布且含完整安装包的 Windows 客户端版本。")
+
+
+def parse_checksum(data: bytes) -> str:
+    try:
+        parts = data.decode("ascii").split()
+    except UnicodeError as exc:
+        raise UpdateError("Windows client release checksum file is invalid") from exc
+    if len(data) > 1024 or not parts or not re.fullmatch(r"[0-9a-fA-F]{64}", parts[0]):
+        raise UpdateError("Windows client release checksum file is invalid")
+    return parts[0].lower()
 
 
 def fetch_release_package(release: dict[str, str] | None = None) -> tuple[str, bytes, str]:
-    release = release if release is not None else check_release()
-    commit = release["commit"]
-    package_url, checksum_url = release["package_url"], release["checksum_url"]
+    if release is None:
+        release = check_release()
+        if "pending_main" in release:
+            raise UpdateError("最新主分支的安装包尚未发布，请在管理器中检查可用版本。")
     try:
-        package = _download(package_url, MAX_ARCHIVE_BYTES, 60)
-        checksum_text = _download(checksum_url, 1024, 15).decode("ascii").strip()
-    except (OSError, UnicodeError, urllib.error.URLError) as exc:
+        package = _download(release["package_url"], MAX_ARCHIVE_BYTES, 60)
+        checksum_data = _download(release["checksum_url"], 1024, 15)
+    except (OSError, UpdateError) as exc:
         raise UpdateError(f"Windows client release download failed: {exc}") from exc
-    checksum = checksum_text.split()[0] if checksum_text else ""
-    if not re.fullmatch(r"[0-9a-fA-F]{64}", checksum):
-        raise UpdateError("Windows client release checksum file is invalid")
-    return commit, package, checksum.lower()
+    return release["commit"], package, parse_checksum(checksum_data)
 
 
 def _running_autopilot() -> bool:

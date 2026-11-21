@@ -133,6 +133,16 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
           // 后台设备列表直接回显多选结果，不用前端再逐台去拉 /factories。
           const factoryIds = readDeviceFactoryIds(db, parseDeviceData(row.data_json).factory_ids);
           const serialized = serializeAgentDevice(row) as Record<string, unknown>;
+          const bridge = bridgeStore.status(String(serialized.device_code ?? ""));
+          if (bridge) {
+            const fresh = bridge.heartbeat_at > 0 && Date.now() - bridge.heartbeat_at <= 60_000;
+            const online = row.status === "enabled" && fresh && bridge.state === "online";
+            Object.assign(serialized, {
+              status: online, online,
+              bridge_state: fresh && row.status === "enabled" ? bridge.state : "offline",
+              last_heartbeat_at: bridge.heartbeat_at > 0 ? new Date(bridge.heartbeat_at).toISOString() : null,
+            });
+          }
           return { ...serialized, factory_ids: factoryIds, factories: loadFactories(db, factoryIds) };
         })
         // 过滤参数用显式断言：展开后的对象类型不带索引签名，
