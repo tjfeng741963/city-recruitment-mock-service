@@ -128,9 +128,9 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 
 **`/api/v1/agent/chat` 的请求**
 
-候选人名单与面试登记直接读取同一份 `agent_archive`，不复制名单。档案姓名/电话/面试安排优先，缺失姓名、地区或招聘项目可从精确关联的会话补充；返回 `device_code/customer_id/has_conversation/province/city/district/remind_status`。手动登记保留原始录入资料和设备，返回实际保存的 session_key；没有真实会话时不按昵称或电话猜测关联。候选人页每 15 秒刷新可见页面，面试登记修改或标记到达后同步反映。
+候选人完整名单只读汇总 `agent_conversations`、历史 `candidate_events` 和 `agent_archive`，按精确设备/客户关联去重，不按昵称或手机合并。`status=all` 返回全部，另支持 `communicating/pending_information/invited/disqualified/checked_in`；普通对话默认沟通中，报名成功按明确记录判定。最新事件决定状态，旧事件可补齐已知资料；会话重启后不被旧事件恢复旧状态。档案姓名/电话/面试安排优先，缺失姓名、地区或招聘项目可从精确关联的会话补充；返回 `device_code/customer_id/has_conversation/province/city/district/remind_status`。手动登记保留原始录入资料和设备，返回实际保存的 session_key；没有真实会话时不按昵称或电话猜测关联。候选人页每 15 秒刷新可见页面，面试登记修改或标记到达后同步反映。
 
-对话记录 GET 返回 `{conversation,items,has_more}`，`items` 按消息 ID 升序；`before_id` 向前翻页。提醒状态来自实际提醒任务状态或既有提醒计数，不把群聊转发成功当作已经提醒本人。
+对话记录支持档案 session_key、`conversation:主键` 和 `event:主键` 的精确关联，不要求先有面试档案。GET 返回 `{conversation,items,has_more}`，`items` 按消息 ID 升序；`before_id` 向前翻页。提醒状态来自实际提醒任务状态或既有提醒计数，不把群聊转发成功当作已经提醒本人。
 
 `dry:true` 返回岗位事实和适用问答 `knowledge:[{id,question,answer,scope}]` 及 prompt，不调用模型、不写业务状态。`preview:true` 仅管理员可用，禁止同时传 `session_key` 或 `device_code`；调用现有非思考模型生成模拟回答，在任何会话/档案/群通知写入前返回。
 
