@@ -38,6 +38,12 @@ curl -X POST http://127.0.0.1:8080/api/v1/auth/login \
 
 ---
 
+## 微信账号列表的回复来源
+
+`GET /api/v1/agent/devices` 沿用登录鉴权及用户设备范围过滤，`items[]` 新增安全字段 `reply_provider: "agent" | "dify"`。只有配置值为 dify 时返回 dify，其余与实际运行默认一致返回 agent；不返回 Dify 密钥或连接凭据。页面用该字段展示回复来源并选择入口，不通过 GET 改变来源。
+
+账号页“工作流配置”：系统 Agent 按绑定的 `position_id` 进入 `/recruitment-flow?position_id=...`；Dify 进入 `/dify-connection?device_code=...`。Dify 页只接受列表内可访问账号，自动选中并读取专用来源接口，不自动保存或切换来源。该页提供配置核对与测试，流程内容仍在 Dify 后台维护。
+
 ## 设备人工发送队列的只读检查
 
 `GET /api/v1/bridge/devices/:code/config` 使用对应设备的 Bearer token（服务间调用沿用 `X-Profile-Token`）。响应新增 `command_queue: {queued: number, claimed: number, unknown: number}`，默认均为 0。统计仅覆盖该设备、包含全部历史记录，不受最近 50 条列表限制，不返回客户或消息正文。

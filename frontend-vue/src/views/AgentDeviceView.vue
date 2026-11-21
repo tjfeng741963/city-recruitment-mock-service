@@ -1,32 +1,32 @@
 <template>
-  <section>
+  <section data-device-settings-native>
     <div class="page-header">
       <div>
         <h2 class="page-title">微信账号</h2>
-        <p class="page-desc">管理 AI 坐席设备，每个设备对应一个微信账号</p>
+        <p class="page-desc">连接企业微信，选择接待岗位和 AI 工作流，设置报名通知群</p>
       </div>
       <div class="header-actions">
         <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
-        <el-button type="primary" :icon="Plus" @click="openCreate">新增设备</el-button>
+        <el-button type="primary" :icon="Plus" @click="openCreate">连接新账号</el-button>
       </div>
     </div>
 
     <div class="stats-row">
       <div class="stat-card">
-        <div class="stat-value">{{ devices.length }}</div>
-        <div class="stat-label">总设备</div>
+        <div class="stat-value">{{ receptionDevices.length }}</div>
+        <div class="stat-label">接待账号</div>
       </div>
       <div class="stat-card">
         <div class="stat-value">{{ onlineCount }}</div>
-        <div class="stat-label">启用中</div>
+        <div class="stat-label">客户端在线</div>
       </div>
       <div class="stat-card">
-        <div class="stat-value">{{ inviteCount }}</div>
-        <div class="stat-label">邀约版</div>
+        <div class="stat-value">{{ receptionDevices.length - onlineCount }}</div>
+        <div class="stat-label">客户端离线</div>
       </div>
       <div class="stat-card">
-        <div class="stat-value">{{ followupCount }}</div>
-        <div class="stat-label">跟进版</div>
+        <div class="stat-value">{{ testCount }}</div>
+        <div class="stat-label">网页测试</div>
       </div>
     </div>
 
@@ -34,14 +34,17 @@
       <el-input
         v-model="keyword"
         class="search-input"
-        placeholder="搜索设备名称 / 设备码 / 账号..."
+        placeholder="搜索账号备注 / 客户端标识 / 负责人"
         clearable
         :prefix-icon="Search"
       />
-      <el-select v-model="modeFilter" class="status-select" placeholder="模式筛选" clearable>
-        <el-option label="全部模式" value="" />
-        <el-option label="邀约版" value="invite" />
-        <el-option label="跟进版" value="followup" />
+      <el-select v-model="providerFilter" class="status-select" placeholder="回复来源" clearable>
+        <el-option label="系统 Agent" value="agent" />
+        <el-option label="Dify 工作流" value="dify" />
+      </el-select>
+      <el-select v-model="kindFilter" class="status-select" placeholder="账号类型" clearable>
+        <el-option label="接待账号" value="reception" />
+        <el-option label="网页测试" value="test" />
       </el-select>
       <el-select v-model="onlineFilter" class="status-select" placeholder="状态筛选" clearable>
         <el-option label="全部状态" value="" />
@@ -61,80 +64,82 @@
 
     <div class="table-wrapper">
       <el-table v-loading="loading" :data="pagedDevices" row-key="id">
-        <el-table-column label="设备名称" min-width="210">
+        <el-table-column label="账号与接待岗位" min-width="210">
           <template #default="{ row }">
             <div class="device-name">{{ row.name || row.device_name || row.device_code }}</div>
+            <el-tag v-if="isWebTestDevice(row)" size="small" type="info">网页测试 · 未连接企微</el-tag>
             <div v-if="row.factories && row.factories.length" class="factory-tags">
               <el-tag v-for="factory in row.factories" :key="factory.id" size="small" effect="plain">
                 {{ factory.name }}
               </el-tag>
             </div>
-            <span v-else class="muted factory-empty">未绑定工厂</span>
+            <span v-else class="muted factory-empty">{{ row.position_id ? '按绑定岗位使用资料' : '尚未选择接待岗位' }}</span>
             <div v-if="row.position_id" class="position-label">
               岗位：{{ positionName(row.position_id) }}
             </div>
           </template>
         </el-table-column>
 
-        <el-table-column label="设备码" min-width="150">
+        <el-table-column label="客户端标识" min-width="150">
           <template #default="{ row }">
             <div class="device-code">{{ row.device_code || '-' }}</div>
-            <el-button v-if="!isOnline(row)" link type="primary" size="small" @click="openQr(row)">
+            <span v-if="isWebTestDevice(row)" class="muted">仅网页测试</span>
+            <el-button v-else-if="!isOnline(row)" link type="primary" size="small" @click="openQr(row)">
               扫码登录
             </el-button>
-            <span v-else class="online-mark">已登录</span>
+            <span v-else class="online-mark">客户端已连接</span>
           </template>
         </el-table-column>
 
-        <el-table-column label="模式" width="100">
+        <el-table-column label="回复来源" width="125">
           <template #default="{ row }">
-            <el-tag :type="row.mode === 'invite' ? 'warning' : 'success'" effect="light">
-              {{ row.mode === 'invite' ? '邀约版' : '跟进版' }}
+            <el-tag :type="row.reply_provider === 'dify' ? 'warning' : 'info'" effect="light">
+              {{ row.reply_provider === 'dify' ? 'Dify 工作流' : row.reply_provider === 'agent' ? '系统 Agent' : '待确认' }}
             </el-tag>
           </template>
         </el-table-column>
 
-        <el-table-column label="分配账号" min-width="130">
+        <el-table-column label="负责人" min-width="130">
           <template #default="{ row }">
             <span>{{ row.recruiter_id || '未分配' }}</span>
           </template>
         </el-table-column>
 
-        <el-table-column label="状态" width="110">
+        <el-table-column label="客户端连接" width="110">
           <template #default="{ row }">
-            <el-tag :type="isOnline(row) ? 'success' : 'danger'" effect="light">
-              {{ isOnline(row) ? '在线' : '离线' }}
+            <el-tag :type="isWebTestDevice(row) ? 'info' : isOnline(row) ? 'success' : 'danger'" effect="light">
+              {{ isWebTestDevice(row) ? '无需连接' : isOnline(row) ? '在线' : '离线' }}
             </el-tag>
             <div v-if="row.queue_depth" class="queue-note">队列 {{ row.queue_depth }}</div>
           </template>
         </el-table-column>
 
-        <el-table-column label="最后在线" width="180">
+        <el-table-column label="最近心跳" width="180">
           <template #default="{ row }">
             <span class="muted">{{ row.last_online ? formatDateTime(row.last_online) : '-' }}</span>
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="230" fixed="right">
+        <el-table-column label="操作" width="260" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
-            <el-button link type="primary" @click="openCopy(row)">复制</el-button>
+            <el-button link type="primary" @click="openEdit(row)">接待设置</el-button>
+            <el-tooltip :content="deviceWorkflowEntry(row).reason || (row.reply_provider === 'dify' ? '进入该账号的 Dify 配置与测试' : '编辑该岗位的话术流程')">
+              <span><el-button link type="primary" :disabled="!deviceWorkflowEntry(row).href" @click="openWorkflow(row)">工作流配置</el-button></span>
+            </el-tooltip>
             <el-dropdown trigger="click" @command="(cmd: string) => handleCommand(cmd, row)">
               <el-button link type="primary">更多</el-button>
               <template #dropdown>
                 <el-dropdown-menu>
                   <el-dropdown-item command="groups">查看群组</el-dropdown-item>
-                  <el-dropdown-item command="workflow">工作流配置</el-dropdown-item>
-                  <el-dropdown-item command="clear-unread">清空未读</el-dropdown-item>
+                  <el-dropdown-item command="delete" divided>删除账号配置</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
-            <el-button link type="danger" @click="removeDevice(row)">删除</el-button>
           </template>
         </el-table-column>
 
         <template #empty>
-          <el-empty description="暂无设备" />
+          <el-empty description="暂无符合条件的账号" />
         </template>
       </el-table>
 
@@ -152,13 +157,14 @@
     <!-- 新增 / 编辑 -->
     <el-dialog
       v-model="formVisible"
-      :title="editingId ? '编辑设备' : '新增设备'"
+      :title="editingId ? '接待设置' : '连接新账号'"
       width="640px"
       :close-on-click-modal="false"
       @closed="resetForm"
     >
+      <el-alert title="先选择接待岗位，再配置对应工作流。保存配置不等于客户端已连接或消息已送达。" type="info" :closable="false" class="load-error" />
       <el-form label-width="110px">
-        <el-form-item label="设备码" required>
+        <el-form-item label="客户端标识" required>
           <div class="code-row">
             <el-input
               v-model="form.device_code"
@@ -174,20 +180,11 @@
             </el-button>
           </div>
         </el-form-item>
-        <el-form-item label="设备名称">
-          <el-input v-model="form.name" placeholder="如：坐席设备-01" />
+        <el-form-item label="账号备注">
+          <el-input v-model="form.name" placeholder="如：广州安检招聘号" />
         </el-form-item>
-        <el-form-item label="设备模式">
-          <el-radio-group v-model="form.mode">
-            <el-radio value="followup">跟进版</el-radio>
-            <el-radio value="invite">邀约版</el-radio>
-          </el-radio-group>
-          <div class="form-hint">
-            邀约版：邀约成功后完全沉默；跟进版：邀约后仍正常回复
-          </div>
-        </el-form-item>
-        <el-form-item label="分配账号">
-          <el-input v-model="form.recruiter_id" placeholder="如：hualin，留空=未分配" />
+        <el-form-item label="负责人">
+          <el-input v-model="form.recruiter_id" placeholder="填写已有招聘人员的账号，留空为未分配" />
         </el-form-item>
         <el-form-item label="绑定工厂">
           <el-select
@@ -224,7 +221,7 @@
           </el-select>
           <div class="form-hint">工厂改变后必须同步选择岗位；留空时系统会自动选该工厂的第一个启用岗位。</div>
         </el-form-item>
-        <el-form-item label="登记群聊">
+        <el-form-item label="报名通知群">
           <el-input
             v-model="form.group_chat"
             placeholder="面试登记通知群（可选，设备上报群名）"
@@ -234,23 +231,6 @@
       <template #footer>
         <el-button @click="formVisible = false">取消</el-button>
         <el-button type="primary" :loading="saving" @click="saveDevice">保存</el-button>
-      </template>
-    </el-dialog>
-
-    <!-- 复制 -->
-    <el-dialog v-model="copyVisible" title="复制设备" width="480px" @closed="copySource = null">
-      <el-form label-width="100px">
-        <el-form-item label="源设备码">
-          <el-input :model-value="copySource?.device_code || ''" disabled />
-        </el-form-item>
-        <el-form-item label="新设备码" required>
-          <el-input v-model="copyCode" placeholder="如：AG-002（不可重复）" />
-        </el-form-item>
-      </el-form>
-      <p class="dialog-hint">复制会带过来设备名称（追加“-副本”）、模式、分配账号、工厂与工作流配置。</p>
-      <template #footer>
-        <el-button @click="copyVisible = false">取消</el-button>
-        <el-button type="primary" :loading="copying" @click="confirmCopy">复制</el-button>
       </template>
     </el-dialog>
 
@@ -314,46 +294,12 @@
       </div>
     </el-drawer>
 
-    <!-- 工作流 -->
-    <el-dialog
-      v-model="workflowVisible"
-      :title="`工作流配置 · ${workflowDevice?.device_code || ''}`"
-      width="720px"
-      :close-on-click-modal="false"
-      @closed="workflowDevice = null"
-    >
-      <div v-loading="workflowLoading">
-        <p class="dialog-hint">
-          工作流接口返回空时以设备 config 为准；可编辑 merge_delay_seconds / timeout / event_rules /
-          reminder / quiet_hours 等字段。保存会同时写入 workflow 与设备 config。
-        </p>
-        <el-alert
-          v-if="workflowError"
-          type="error"
-          :title="workflowError"
-          show-icon
-          :closable="false"
-          class="load-error"
-        />
-        <el-input
-          v-model="workflowText"
-          type="textarea"
-          :rows="18"
-          spellcheck="false"
-          class="workflow-editor"
-        />
-      </div>
-      <template #footer>
-        <el-button type="danger" plain :disabled="workflowLoading" @click="removeWorkflow">删除工作流</el-button>
-        <el-button :disabled="workflowLoading" @click="formatWorkflow">格式化</el-button>
-        <el-button @click="workflowVisible = false">取消</el-button>
-        <el-button type="primary" :loading="workflowSaving" @click="saveWorkflow">保存</el-button>
-      </template>
-    </el-dialog>
   </section>
 </template>
 
 <script setup lang="ts">
+import { useRouter } from 'vue-router'
+import { deviceWorkflowEntry, isWebTestDevice, deviceOnline } from '../components/agent/device-workflow-entry'
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh, Search } from '@element-plus/icons-vue'
@@ -366,22 +312,26 @@ const devices = ref<AgentDeviceItem[]>([])
 const loading = ref(false)
 const error = ref('')
 const keyword = ref('')
-const modeFilter = ref('')
+const router = useRouter()
+const providerFilter = ref('')
+const kindFilter = ref('')
 const onlineFilter = ref('')
 const page = ref(1)
 const pageSize = ref(20)
 const factoryOptions = ref<Factory[]>([])
 const positionOptions = ref<ServicePosition[]>([])
 
-const onlineCount = computed(() => devices.value.filter((device) => isOnline(device)).length)
-const inviteCount = computed(() => devices.value.filter((device) => device.mode === 'invite').length)
-const followupCount = computed(() => devices.value.filter((device) => device.mode !== 'invite').length)
+const receptionDevices = computed(() => devices.value.filter(device => !isWebTestDevice(device)))
+const testCount = computed(() => devices.value.filter(isWebTestDevice).length)
+const onlineCount = computed(() => receptionDevices.value.filter(isOnline).length)
 
 const filteredDevices = computed(() => {
   const key = keyword.value.trim().toLowerCase()
   return devices.value.filter((device) => {
-    if (modeFilter.value === 'invite' && device.mode !== 'invite') return false
-    if (modeFilter.value === 'followup' && device.mode === 'invite') return false
+    if (providerFilter.value && device.reply_provider !== providerFilter.value) return false
+    if (kindFilter.value === 'test' && !isWebTestDevice(device)) return false
+    if (kindFilter.value === 'reception' && isWebTestDevice(device)) return false
+    if (onlineFilter.value && isWebTestDevice(device)) return false
     if (onlineFilter.value === 'online' && !isOnline(device)) return false
     if (onlineFilter.value === 'offline' && isOnline(device)) return false
     if (!key) return true
@@ -398,12 +348,12 @@ const pagedDevices = computed(() => {
 
 
 // 筛选变化时回到第 1 页，避免停在空页
-watch([[keyword]], () => {
+watch([keyword, providerFilter, kindFilter, onlineFilter], () => {
   page.value = 1
 })
 
 function isOnline(device: AgentDeviceItem): boolean {
-  return Boolean(device.online || device.status)
+  return deviceOnline(device)
 }
 
 async function load(): Promise<void> {
@@ -459,7 +409,6 @@ function positionName(positionId: number | null | undefined): string {
 interface DeviceForm {
   device_code: string
   name: string
-  mode: string
   recruiter_id: string
   factory_ids: number[]
   position_id: number | null
@@ -486,7 +435,6 @@ function emptyForm(): DeviceForm {
   return {
     device_code: '',
     name: '',
-    mode: 'followup',
     recruiter_id: '',
     factory_ids: [],
     position_id: null,
@@ -509,7 +457,6 @@ function openEdit(row: AgentDeviceItem): void {
   Object.assign(form, {
     device_code: row.device_code || '',
     name: row.name || row.device_name || '',
-    mode: row.mode || 'followup',
     recruiter_id: row.recruiter_id || '',
     factory_ids: [...(row.factory_ids || [])],
     position_id: row.position_id ? Number(row.position_id) : null,
@@ -520,7 +467,7 @@ function openEdit(row: AgentDeviceItem): void {
 
 async function saveDevice(): Promise<void> {
   if (!form.device_code.trim()) {
-    ElMessage.warning('请输入设备码')
+    ElMessage.warning('请输入客户端标识')
     return
   }
   saving.value = true
@@ -528,7 +475,6 @@ async function saveDevice(): Promise<void> {
     device_code: form.device_code.trim(),
     device_name: form.name.trim() || form.device_code.trim(),
     name: form.name.trim() || form.device_code.trim(),
-    mode: form.mode,
     recruiter_id: form.recruiter_id.trim(),
     factory_ids: form.factory_ids,
     position_id: form.position_id,
@@ -537,10 +483,10 @@ async function saveDevice(): Promise<void> {
   try {
     if (editingId.value) {
       await devicesApi.update(editingId.value, payload)
-      ElMessage.success('设备已更新')
+      ElMessage.success('接待设置已保存；客户端连接后读取，发送结果请在对话管理核对')
     } else {
       await devicesApi.create(payload)
-      ElMessage.success('设备已创建')
+      ElMessage.success('账号配置已创建，还需连接云电脑客户端并登录企业微信')
     }
     formVisible.value = false
     await load()
@@ -551,55 +497,12 @@ async function saveDevice(): Promise<void> {
   }
 }
 
-/* ---------- 复制 ---------- */
-const copyVisible = ref(false)
-const copying = ref(false)
-const copySource = ref<AgentDeviceItem | null>(null)
-const copyCode = ref('')
-
-function openCopy(row: AgentDeviceItem): void {
-  copySource.value = row
-  copyCode.value = ''
-  copyVisible.value = true
-}
-
-async function confirmCopy(): Promise<void> {
-  const source = copySource.value
-  if (!source) return
-  const code = copyCode.value.trim()
-  if (!code) {
-    ElMessage.warning('请输入新设备码')
-    return
-  }
-  copying.value = true
-  try {
-    await devicesApi.create({
-      device_code: code,
-      device_name: `${source.name || source.device_code}-副本`,
-      name: `${source.name || source.device_code}-副本`,
-      mode: source.mode || 'followup',
-      recruiter_id: source.recruiter_id || '',
-      factory_ids: source.factory_ids || [],
-      position_id: source.position_id || null,
-      group_chat: source.group_chat || '',
-      config: source.config || {},
-    })
-    ElMessage.success('设备已复制')
-    copyVisible.value = false
-    await load()
-  } catch (err: any) {
-    ElMessage.error(err?.response?.data?.detail || '复制失败')
-  } finally {
-    copying.value = false
-  }
-}
-
 /* ---------- 删除 ---------- */
 async function removeDevice(row: AgentDeviceItem): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      `确定删除设备「${row.name || row.device_code}」？删除后不可恢复。`,
-      '删除设备',
+      `确定删除账号配置「${row.name || row.device_code}」？这会删除后台接待配置，不会退出企业微信，也不会关闭云电脑。`,
+      '删除账号配置',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
     )
   } catch {
@@ -614,30 +517,17 @@ async function removeDevice(row: AgentDeviceItem): Promise<void> {
   }
 }
 
-/* ---------- 更多操作 ---------- */
+/* ---------- 账号操作 ---------- */
 function handleCommand(command: string, row: AgentDeviceItem): void {
-  if (command === 'groups') openGroups(row)
-  if (command === 'workflow') openWorkflow(row)
-  if (command === 'clear-unread') clearUnread(row)
+  if (command === 'groups') void openGroups(row)
+  if (command === 'delete') void removeDevice(row)
 }
 
-async function clearUnread(row: AgentDeviceItem): Promise<void> {
-  try {
-    await ElMessageBox.confirm(
-      `确认清除「${row.name || row.device_code}」下所有会话的未读状态？`,
-      '清除未读',
-      { type: 'warning', confirmButtonText: '清除', cancelButtonText: '取消' },
-    )
-  } catch {
-    return
-  }
-  try {
-    await devicesApi.clearUnread(row.id)
-    ElMessage.success('未读已清除')
-    await load()
-  } catch (err: any) {
-    ElMessage.error(err?.response?.data?.detail || '清除失败')
-  }
+function openWorkflow(row: AgentDeviceItem): void {
+  const entry = deviceWorkflowEntry(row)
+  if (!entry.href) { ElMessage.warning(entry.reason); return }
+  if (row.reply_provider === 'dify') window.location.assign(entry.href)
+  else void router.push(entry.href)
 }
 
 /* ---------- 扫码登录 ---------- */
@@ -738,100 +628,6 @@ async function openGroups(row: AgentDeviceItem): Promise<void> {
     groupError.value = err?.response?.data?.detail || '群组加载失败'
   } finally {
     groupLoading.value = false
-  }
-}
-
-/* ---------- 工作流 ---------- */
-const workflowVisible = ref(false)
-const workflowLoading = ref(false)
-const workflowSaving = ref(false)
-const workflowError = ref('')
-const workflowText = ref('')
-const workflowDevice = ref<AgentDeviceItem | null>(null)
-
-async function openWorkflow(row: AgentDeviceItem): Promise<void> {
-  workflowDevice.value = row
-  workflowVisible.value = true
-  workflowLoading.value = true
-  workflowError.value = ''
-  workflowText.value = ''
-  try {
-    const { data } = await devicesApi.workflowGet(row.id)
-    const items = Array.isArray(data.items) ? data.items : []
-    const source = items.length ? items[0] : row.config || {}
-    workflowText.value = JSON.stringify(source, null, 2)
-  } catch (err: any) {
-    workflowError.value = err?.response?.data?.detail || '工作流加载失败'
-    workflowText.value = JSON.stringify(row.config || {}, null, 2)
-  } finally {
-    workflowLoading.value = false
-  }
-}
-
-function formatWorkflow(): void {
-  try {
-    workflowText.value = JSON.stringify(JSON.parse(workflowText.value || '{}'), null, 2)
-  } catch {
-    ElMessage.error('JSON 格式不合法')
-  }
-}
-
-function parseWorkflow(): Record<string, unknown> | null {
-  try {
-    const parsed = JSON.parse(workflowText.value || '{}')
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      ElMessage.error('工作流必须是 JSON 对象')
-      return null
-    }
-    return parsed as Record<string, unknown>
-  } catch {
-    ElMessage.error('JSON 格式不合法')
-    return null
-  }
-}
-
-async function saveWorkflow(): Promise<void> {
-  const device = workflowDevice.value
-  if (!device) return
-  const parsed = parseWorkflow()
-  if (!parsed) return
-  workflowSaving.value = true
-  try {
-    await devicesApi.workflowPut(device.id, parsed)
-    await devicesApi.update(device.id, { config: parsed })
-    ElMessage.success('工作流已保存')
-    workflowVisible.value = false
-    await load()
-  } catch (err: any) {
-    ElMessage.error(err?.response?.data?.detail || '保存失败')
-  } finally {
-    workflowSaving.value = false
-  }
-}
-
-async function removeWorkflow(): Promise<void> {
-  const device = workflowDevice.value
-  if (!device) return
-  try {
-    await ElMessageBox.confirm('确定删除该设备的工作流配置？', '删除工作流', {
-      type: 'warning',
-      confirmButtonText: '删除',
-      cancelButtonText: '取消',
-    })
-  } catch {
-    return
-  }
-  workflowSaving.value = true
-  try {
-    await devicesApi.workflowDelete(device.id)
-    await devicesApi.update(device.id, { config: {} })
-    ElMessage.success('工作流已删除')
-    workflowVisible.value = false
-    await load()
-  } catch (err: any) {
-    ElMessage.error(err?.response?.data?.detail || '删除失败')
-  } finally {
-    workflowSaving.value = false
   }
 }
 

@@ -452,6 +452,7 @@
   let factoryPending = false;
   async function decorate() {
     if (!location.pathname.startsWith(PATH_PREFIX)) return;
+    if (document.querySelector('[data-device-settings-native]')) return;
     if (decorating) return;
     decorating = true;
     try {
