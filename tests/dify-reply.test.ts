@@ -191,6 +191,34 @@ describe("Dify second reply route", () => {
     await chat('S:test','现在工资呢？');
     expect(JSON.parse(JSON.parse(network.mock.calls[1][1].body).inputs.position_data).wage_text).toBe('综合月薪6000-9000元');
   });
+  it("shares saved job sections with Dify and retains city precedence", async () => {
+    const fields = {
+      positions: '岗位工种说明', requirements: '岗位要求说明', factory_env: '岗位工厂环境',
+      dorm_env: '岗位宿舍环境', work_env: '岗位工作环境', uniform: '岗位工衣说明',
+      medical_fee: '岗位体检费用说明', interview_notice: '岗位面试通知',
+      checkin_guide: '岗位面试指引', registration_form: '岗位报名说明',
+    };
+    const city = app.db.prepare("INSERT INTO cities(city_name,province,data_json) VALUES ('表单核对城','测试省',?) RETURNING id")
+      .get(JSON.stringify({prompt_sections:{uniform:'城市工衣说明',factory_env:'   '},interview:{interview_notice:'城市面试通知'}})) as {id:number};
+    const saved = await app.inject({method:"PUT",url:`/api/v1/service-positions/${position}`, headers:admin,
+      payload:{city_id:city.id,base_sections:fields}});
+    expect(saved.statusCode).toBe(200);
+    const preview = await app.inject({method:"POST",url:"/api/v1/dify/preview",headers:admin,
+      payload:{position_id:position,text:"请介绍岗位、工衣和面试",dry:true}});
+    const expected = {...fields,uniform:'城市工衣说明',interview_notice:'城市面试通知'};
+    const input = JSON.parse(preview.json().inputs.position_data);
+    expect(input.city_materials).toMatchObject(expected);
+    expect(input).toMatchObject({interview_notice:'城市面试通知',interview_guide:'岗位面试指引'});
+    expect(input.sources.sections).toEqual(Object.fromEntries(Object.keys(fields).map(key =>
+      [key,key==='uniform'||key==='interview_notice'?'city':'position_fallback'])));
+    await select();
+    const fetchDify = vi.fn().mockResolvedValue(new Response(JSON.stringify({answer:'岗位工衣由现场发放',conversation_id:'shared-materials'}),{status:200}));
+    vi.stubGlobal('fetch',fetchDify);
+    expect((await chat('S:materials','工衣和工作环境是什么样？')).json()).toMatchObject({ok:true});
+    const outgoing = JSON.parse(JSON.parse(fetchDify.mock.calls[0][1].body).inputs.position_data);
+    expect(outgoing.city_materials).toMatchObject(expected);
+    expect(JSON.stringify(outgoing)).not.toMatch(/岗位工衣说明|民族限制不得转交/);
+  });
   it("exposes administrator city and knowledge preview without switching device or sending",async()=>{
     const dry=await app.inject({method:'POST',url:'/api/v1/dify/preview',headers:admin,payload:{position_id:position,text:'工资？',dry:true}});
     expect(dry.statusCode).toBe(200);expect(dry.json()).toMatchObject({ok:true,provider:'dify',dry:true});

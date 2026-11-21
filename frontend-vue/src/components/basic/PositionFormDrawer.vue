@@ -95,7 +95,7 @@
               <el-tag effect="plain" type="primary">系统 Agent</el-tag>
               <span>读取本岗位资料。</span>
               <el-tag effect="plain" type="warning">Dify 工作流</el-tag>
-              <span>工资、班次等字段优先读取城市资料，城市对应字段为空时读取岗位。</span>
+              <span>同一字段优先读取城市资料，城市对应内容为空时读取本岗位。</span>
             </div>
             <div v-if="cityOverrides.length" class="line-legend">
               <el-tag effect="plain" type="warning">Dify 当前城市取值</el-tag>
@@ -113,14 +113,14 @@
                     <span class="field-label-with-line">
                       <span data-position-field-name>{{ sectionLabel(key) }}</span>
                       <el-tag size="small" effect="plain" type="primary">系统 Agent</el-tag>
-                      <el-tag v-if="difyFallbackFields.has(key)" size="small" effect="plain" type="warning">Dify · 城市优先</el-tag>
+                      <el-tag size="small" effect="plain" type="warning">Dify · 城市优先</el-tag>
                     </span>
                   </template>
                   <el-input
                     v-model="form.sections[key]"
                     type="textarea"
                     :rows="key === 'interview_notice' || key === 'checkin_guide' ? 4 : 2"
-                    :placeholder="`${sectionLabel(key)}，留空表示不启用该段`"
+                    :placeholder="`填写${sectionLabel(key)}的岗位资料`"
                   />
                 </el-form-item>
               </el-collapse-item>
@@ -288,7 +288,6 @@ const agentEditor = ref<InstanceType<typeof PositionAgentDrawer> | null>(null)
 const agentEditorOpened = ref(false)
 watch(activeTab, tab => { if (tab === 'agent') agentEditorOpened.value = true })
 const formBaseline = ref('')
-const difyFallbackFields = new Set(['salary_detail', 'salary_ask', 'work_hours', 'shift_info', 'work_content', 'meal_dorm', 'social_insurance'])
 const cities = ref<City[]>([])
 const factories = ref<Factory[]>([])
 const base = ref<Record<string, unknown>>({})
