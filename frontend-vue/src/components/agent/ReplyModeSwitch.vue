@@ -34,7 +34,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { devicesApi, type ReplyModeStatus, type ReplyProvider } from '../../api/agent'
 
 const props = defineProps<{ deviceCode: string; currentProvider?: ReplyProvider }>()
@@ -75,7 +75,12 @@ function apply(next: ReplyModeStatus) {
   status.value = next
   sampledAt.value = Date.now()
   if ((next.phase === 'completed' || next.phase === 'cancelled') &&
-      (previous?.id !== next.id || previous?.phase !== next.phase)) emit('confirmed')
+      (previous?.id !== next.id || previous?.phase !== next.phase)) {
+    if (previous) {
+      ElMessage.success(props.deviceCode + (next.phase === 'completed' ? ' 已切换至 ' : ' 已恢复至 ') + label(next.effective))
+    }
+    emit('confirmed')
+  }
 }
 
 async function refresh() {

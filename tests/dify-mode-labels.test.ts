@@ -10,5 +10,7 @@ describe('reply sources in the canvas',()=>{
   const drawer=readFileSync('frontend-vue/src/components/agent/ReceptionTestDrawer.vue','utf8');
   expect(drawer).toContain('系统 Agent');
   expect(drawer).toContain('Dify 工作流');
+  expect(drawer.includes('saveReplyProvider')).toBe(false);
+  expect(drawer).toContain('to="/agent-devices"');
  });
 });

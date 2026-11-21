@@ -92,11 +92,6 @@ export const devicesApi = {
     http.get<ReplyModeStatus>('/api/v1/agent/devices/' + encodeURIComponent(code) + '/reply-mode', { signal, timeout: 6000 }),
   requestReplyMode: (code: string, data: { provider: ReplyProvider; id: string } | { cancel: true; id: string }) =>
     http.post<ReplyModeStatus>('/api/v1/agent/devices/' + encodeURIComponent(code) + '/reply-mode', data, { timeout: 6000 }),
-  replyProvider: (code: string, signal?: AbortSignal) =>
-    http.get<{provider: 'agent' | 'dify'; configured: boolean}>(`/api/v1/agent/devices/${encodeURIComponent(code)}/reply-provider`, { signal }),
-  saveReplyProvider: (code: string, provider: 'agent' | 'dify', confirmed: boolean) =>
-    http.put<{provider: 'agent' | 'dify'; configured: boolean}>(`/api/v1/agent/devices/${encodeURIComponent(code)}/reply-provider`,
-      { provider, fresh_client_state_confirmed: confirmed }),
   clearUnread: (id: number | string) =>
     http.post<OkResult>(`/api/v1/agent/device/${id}/clear-unread`),
   workflowGet: (id: number | string) =>

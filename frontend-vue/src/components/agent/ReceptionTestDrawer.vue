@@ -42,25 +42,17 @@
 
       <details :open="!!initialDevice" class="account-settings">
         <summary>账号回复来源</summary>
-        <p class="hint">这里保存的是微信账号实际使用的引擎。切换前请停客户端并核对会话状态，保存后按现有流程重启客户端。</p>
+        <p class="hint">在微信账号列表的「回复来源」列切换正式接待模式。</p>
         <el-select v-model="deviceCode" aria-label="选择微信账号" placeholder="选择微信账号"
-          filterable clearable :loading="accountsLoading" :disabled="accountSaving">
+          filterable clearable :loading="accountsLoading">
           <el-option v-for="device in devices" :key="device.id" :value="device.device_code"
             :label="(device.name || device.device_code) + ' · ' + device.device_code" />
         </el-select>
         <el-alert v-if="accountError" :title="accountError" type="error" :closable="false" show-icon />
-        <p v-if="accountNotice" class="hint" role="status">{{ accountNotice }}</p>
-        <template v-if="source">
-          <p class="hint">当前使用 {{ source.provider === 'dify' ? 'Dify 工作流' : '系统 Agent' }}。{{ source.configured ? 'Dify 服务已配置。' : 'Dify 服务尚待配置。' }}</p>
-          <el-select v-model="selectedProvider" aria-label="新的回复来源" :disabled="accountSaving">
-            <el-option label="系统 Agent" value="agent" />
-            <el-option label="Dify 工作流" value="dify" />
-          </el-select>
-          <el-checkbox v-if="selectedProvider === 'dify' && source.provider !== 'dify'" v-model="freshState" :disabled="accountSaving">
-            已核对客户端使用独立且无旧流程快照的状态目录
-          </el-checkbox>
-          <el-button :disabled="!canSave" :loading="accountSaving" @click="saveSource">保存账号回复来源</el-button>
-        </template>
+        <p v-if="selectedDevice?.reply_provider" class="hint">
+          已确认来源 {{ selectedDevice.reply_provider === 'dify' ? 'Dify 工作流' : '系统 Agent' }}。
+        </p>
+        <router-link to="/agent-devices">前往微信账号列表</router-link>
       </details>
     </div>
   </el-drawer>
@@ -73,7 +65,6 @@ import { agentApi, devicesApi, type AgentDeviceItem } from '../../api/agent'
 import type { ServicePosition } from '../../api/types'
 
 type Engine = 'agent' | 'dify'
-type Source = { provider: Engine; configured: boolean }
 const visible = defineModel<boolean>({ required: true })
 const props = defineProps<{
   positionId: number
@@ -161,15 +152,9 @@ async function preview(generate: boolean): Promise<void> {
 
 const devices = ref<AgentDeviceItem[]>([])
 const deviceCode = ref<string | undefined>()
-const source = ref<Source>()
-const selectedProvider = ref<Engine>('agent')
-const freshState = ref(false)
 const accountError = ref('')
-const accountNotice = ref('')
 const accountsLoading = ref(false)
-const accountSaving = ref(false)
-const canSave = computed(() => !!deviceCode.value && !!source.value && !accountSaving.value &&
-  selectedProvider.value !== source.value.provider && (selectedProvider.value !== 'dify' || freshState.value))
+const selectedDevice = computed(() => devices.value.find(device => device.device_code === deviceCode.value))
 
 async function loadAccounts(): Promise<void> {
   accountsLoading.value = true
@@ -191,24 +176,6 @@ async function loadAccounts(): Promise<void> {
   }
 }
 
-watch(deviceCode, async (code, _previous, onCleanup) => {
-  source.value = undefined
-  freshState.value = false
-  accountError.value = ''
-  accountNotice.value = ''
-  if (!code) return
-  const controller = new AbortController()
-  onCleanup(() => controller.abort())
-  try {
-    const { data } = await devicesApi.replyProvider(code, controller.signal)
-    if (controller.signal.aborted) return
-    source.value = data
-    selectedProvider.value = data.provider
-  } catch (error) {
-    if (!controller.signal.aborted) accountError.value = errorText(error, '读取账号回复来源失败')
-  }
-})
-
 let initialPositionResolved = false
 watch([devices, () => props.positions, () => props.positionsLoading], ([accounts, positions, loading]) => {
   if (!props.initialDevice || initialPositionResolved || loading || !positions.length) return
@@ -218,25 +185,6 @@ watch([devices, () => props.positions, () => props.positionsLoading], ([accounts
   const boundPosition = positions.find(position => position.id === Number(device.position_id))
   if (boundPosition) testPosition.value = boundPosition.id
 }, { immediate: true })
-
-async function saveSource(): Promise<void> {
-  const code = deviceCode.value
-  if (!code || !canSave.value) return
-  accountSaving.value = true
-  accountError.value = ''
-  accountNotice.value = ''
-  try {
-    const { data } = await devicesApi.saveReplyProvider(code, selectedProvider.value, freshState.value)
-    source.value = data
-    selectedProvider.value = data.provider
-    freshState.value = false
-    accountNotice.value = '回复来源已保存。请重新启动客户端。'
-  } catch (error) {
-    accountError.value = errorText(error, '保存账号回复来源失败')
-  } finally {
-    accountSaving.value = false
-  }
-}
 
 watch(() => props.positionId, id => {
   if (!props.initialDevice) testPosition.value = id || undefined
