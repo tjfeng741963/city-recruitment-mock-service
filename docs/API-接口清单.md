@@ -107,7 +107,7 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 | PUT | `/api/v1/agent-flow` | admin | 事务保存整张流程图并递增 version |
 | POST | `/api/v1/agent-flow/migrate` | admin | 从旧 `position_opening` 生成停用的初始流程 |
 | GET | `/api/v1/agent/flow?device_code=:code` | 设备令牌 | 客户端读取设备岗位的启用流程 |
-| GET | `/api/v1/agent/state?device_code=:code` | 设备令牌 | 客户端读取会话状态用于重连对账 |
+| GET | `/api/v1/agent/state?device_code=:code` | 设备令牌；`summary=1` 仅管理员 | 客户端读取会话状态用于重连对账；管理员读取单设备去标识汇总 |
 | POST | `/api/v1/agent/state` | 设备令牌 | 客户端批量上报会话阶段和流程快照 |
 
 <!-- api-check:end -->
@@ -130,7 +130,8 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 - 节点 `node_type` 仅为 `text/image/video/followup/branch/end`；等待使用独立布尔 `await_reply`。`parts` 为数组，每节点 1–6 条，文本每条最多 2000 字；`followup` 仅允许一条文本且 `max_times` 固定为 1。`branch/end` 不带消息。媒体必须来自本岗位或通用池。
 - 边字段 `from_key,to_key,trigger,condition_value,priority`；`to_key=""` 表示结束。等待节点用 `any_reply/keyword` 进入后续节点；`timeout` 只指向一次性复聊；分支需要 `default` 兜底。孤儿节点、循环、非法出口均拒绝保存。
 - 节点 `status=disabled` 时保留其节点与连接供后台编辑；Windows 客户端跳过该节点内容，只沿 `default` 或 `any_reply` 主兜底继续，不执行其关键词/超时条件。等待节点和分支节点按优先级从高到低执行不区分大小写的关键词包含匹配；分支未命中时沿 `default` 出口继续。启用的复聊节点仍必须由启用的等待节点通过唯一 `timeout` 边进入。在途会话使用已存流程快照，不因新版本保存而重写。
-- `/agent/flow`、`/agent/state` 只接受对应 `device_code` 的设备令牌。流程停用时下发空节点阻止新会话，已开始会话保留本地快照。
+- `/agent/flow`、`/agent/state` 的逐会话状态只接受对应 `device_code` 的设备令牌。流程停用时下发空节点阻止新会话，已开始会话保留本地快照。
+- 管理员可只读调用 `GET /agent/state?device_code=:code&summary=1`，必须指定单个设备码。响应 `{device_code,items:[{position_id,flow_version,node_key,phase,count,updated_at}]}` 按岗位、流程版本、节点和阶段汇总，`updated_at` 为组内最新上报时间，统一返回带 `Z` 的 UTC ISO 8601 格式；不返回会话 ID、会话名、错误详情、正文或快照。该镜像汇总不能证明企微消息已经送达。管理员不能通过此接口读取逐会话明细，设备令牌不能使用管理员汇总模式。
 - `POST /agent/state`：`{device_code,items:[{session_key,position_id,flow_version,node_key,step_index,phase,revision,await_since,followup_sent_at,followup_round,snapshot,conv_name,wait_minutes,last_inbound_at,last_error}]}`，每批最多 200 条。两个等待/复聊时间字段使用 ISO 时间或 null，`last_inbound_at` 为 Unix 秒。游标按 `(device_code,session_key)` 隔离，仅接受更大的 `revision`；返回 `stale` 标识被拒绝的旧镜像。
 - `phase` 只接受 `idle/running/awaiting/followup_due/followup_sent/replied/expired/held`。发件箱投递结果在客户端 SQLite 中记录，不用 `phase` 代替。服务端 `agent_flow_outbox` 是预留表，本轮没有投递明细上报接口。
 

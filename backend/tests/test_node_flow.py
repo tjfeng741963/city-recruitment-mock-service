@@ -86,6 +86,25 @@ def test_system_event_does_not_open_gate_and_completed_flow_does_not_replay_open
     assert agent._brain.chat.call_args.kwargs["sent_summary"] == ["先看要求", "岗位薪资"]
 
 
+def test_terminal_wait_reply_is_handed_to_ai_on_the_same_message(agent):
+    terminal_flow = json.loads(json.dumps(FLOW))
+    terminal_flow["edges"][2]["to_key"] = ""
+    agent._brain.flow.return_value = terminal_flow
+    start(agent)
+    incoming(agent, 2, "符合")
+    agent.drain(MagicMock(), CFG)
+    assert agent._flow_state.get("S:customer")["node_key"] == "wage"
+
+    incoming(agent, 3, "工资多少")
+    agent.drain(MagicMock(), CFG)
+
+    agent._brain.chat.assert_called_once()
+    assert agent._brain.chat.call_args.args[0] == "工资多少"
+    assert agent._brain.chat.call_args.kwargs["sent_summary"] == ["先看要求", "岗位薪资"]
+    assert agent.core_send.send.call_count == 3
+    assert agent.core_send.send.call_args.args[2] == "这是答疑"
+
+
 def test_existing_contacts_stay_in_normal_chat(agent, monkeypatch):
     monkeypatch.setattr(agent, "_is_first_contact", lambda cid, seen: False)
     incoming(agent)

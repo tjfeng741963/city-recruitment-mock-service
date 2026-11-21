@@ -262,6 +262,15 @@ export interface AgentFlow {
   [key: string]: unknown
 }
 
+export interface FlowStateSummary {
+  position_id: number
+  flow_version: number
+  node_key: string
+  phase: string
+  count: number
+  updated_at: string
+}
+
 export const agentApi = {
   persona: () => http.get<Record<string, unknown>>('/api/v1/agent-persona'),
   personaGet: (positionId: number | string) =>
@@ -289,6 +298,10 @@ export const agentApi = {
     http.post<AgentFlow>('/api/v1/agent-flow/migrate', { position_id: positionId }),
   flowSave: (payload: AgentFlow) =>
     http.put<AgentFlow>('/api/v1/agent-flow', payload),
+  flowStateSummary: (deviceCode: string) =>
+    http.get<{ device_code: string; items: FlowStateSummary[] }>('/api/v1/agent/state', {
+      params: { device_code: deviceCode, summary: 1 },
+    }),
   logOpening: (payload: Record<string, unknown>) =>
     http.post<OkResult>('/api/v1/agent/opening/log', payload),
   chat: (payload: Record<string, unknown>) =>

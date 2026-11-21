@@ -354,8 +354,18 @@ export async function registerAgentFlowRoutes(app: FastifyInstance, db: Database
     }
   });
 
-  app.get<{ Querystring: { device_code?: string; session_key?: string } }>("/api/v1/agent/state", async (request, reply) => {
+  app.get<{ Querystring: { device_code?: string; session_key?: string; summary?: string } }>("/api/v1/agent/state", async (request, reply) => {
     const deviceCode = str(request.query.device_code).trim();
+    if (request.query.summary === "1") {
+      if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin access required" });
+      if (!deviceCode) return reply.code(422).send({ detail: "device_code is required" });
+      const items = db.prepare(`SELECT position_id,flow_version,node_key,phase,COUNT(*) AS count,
+        strftime('%Y-%m-%dT%H:%M:%fZ', MAX(updated_at)) AS updated_at
+        FROM agent_conversation_state WHERE device_code=?
+        GROUP BY position_id,flow_version,node_key,phase ORDER BY updated_at DESC,position_id,flow_version,node_key,phase`)
+        .all(deviceCode);
+      return { device_code: deviceCode, items };
+    }
     if (!deviceAllowed(request, deviceCode)) return reply.code(403).send({ detail: "Device token or scope invalid" });
     const rows = db.prepare("SELECT * FROM agent_conversation_state WHERE device_code=? ORDER BY updated_at DESC").all(deviceCode) as Array<Json>;
     return {device_code:deviceCode, items:rows.filter(row => !request.query.session_key || row.session_key === request.query.session_key)

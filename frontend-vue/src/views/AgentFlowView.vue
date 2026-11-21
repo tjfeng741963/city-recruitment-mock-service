@@ -1,12 +1,13 @@
 <template>
-  <section class="flow-page">
+  <section class="flow-page" :class="{ 'is-fullscreen': fullscreen }" :style="{ '--inspector-width': `${inspectorWidth}px` }">
     <div class="page-header">
       <div>
         <h2 class="page-title">招聘流程图</h2>
         <p class="page-desc">查看和配置各岗位当前保存的招聘对话流程</p>
       </div>
       <div class="header-actions">
-        <el-button :icon="Refresh" :disabled="!positionId" :loading="loading" @click="reloadFlow">刷新</el-button>
+        <el-button :icon="FullScreen" @click="fullscreen = !fullscreen">{{ fullscreen ? '退出全屏' : '全屏画布' }}</el-button>
+        <el-button :icon="Refresh" :disabled="!positionId || saving || migrating" :loading="loading" @click="reloadFlow">刷新</el-button>
         <el-button
           v-if="flow && flow.version === 0 && flow.nodes.length === 0"
           :icon="Upload"
@@ -14,7 +15,7 @@
           :loading="migrating"
           @click="migrateOpening"
         >从开场生成草稿</el-button>
-        <el-button type="primary" :icon="Check" :disabled="!isDirty || !flow" :loading="saving" @click="saveFlow">保存流程</el-button>
+        <el-button type="primary" :icon="Check" :disabled="!isDirty || !flow || loading || migrating" :loading="saving" @click="saveFlow">保存流程</el-button>
       </div>
     </div>
 
@@ -25,7 +26,7 @@
         filterable
         placeholder="选择招聘岗位"
         :loading="positionsLoading"
-        :disabled="positionsLoading || positions.length === 0"
+        :disabled="positionsLoading || loading || saving || migrating || positions.length === 0"
         @change="changePosition"
       >
         <el-option
@@ -35,19 +36,47 @@
           :value="position.id"
         />
       </el-select>
-      <el-tag v-if="flow" :type="flow.status === 'enabled' ? 'success' : 'info'" effect="light">
-        {{ flow.status === 'enabled' ? '新会话已启用' : '已停用' }}
+      <el-tag v-if="savedFlow" :type="savedFlow.status === 'enabled' ? 'success' : 'info'" effect="light">
+        {{ savedFlow.status === 'enabled' ? '已保存：节点流程启用' : '已保存：节点流程停用' }}
       </el-tag>
       <span v-if="flow" class="flow-version">版本 v{{ flow.version }} · {{ flow.nodes.length }} 节点 · {{ flow.edges.length }} 连接</span>
       <span v-if="isDirty" class="dirty-hint">未保存</span>
       <span class="toolbar-spacer" />
+      <el-radio-group v-model="viewMode" size="small" aria-label="流程视图" @change="changeViewMode">
+        <el-radio-button value="runtime">实际执行路径</el-radio-button>
+        <el-radio-button value="edit">编辑流程</el-radio-button>
+      </el-radio-group>
       <el-switch
-        v-if="flow && flow.nodes.length"
+        v-if="viewMode === 'edit' && flow && flow.nodes.length"
         :model-value="flow.status === 'enabled'"
         active-text="新会话启用"
         inactive-text="停用"
         @change="(enabled: boolean) => changeFlowStatus(enabled)"
       />
+    </div>
+
+    <div v-if="savedFlow && !loading" class="runtime-status-bar">
+      <span><strong>绑定设备</strong>：{{ boundDevices.length ? boundDevices.map(device => device.device_code).join('、') : devicesAvailable ? '未绑定设备，当前无人执行该岗位' : '设备列表读取失败，绑定状态未知' }}</span>
+      <span>{{ savedFlow.status === 'enabled' ? '新客户使用已保存节点；在途会话保留原快照' : '节点图停用；绑定设备的新客户走旧开场' }}</span>
+      <span class="field-note">按已保存版本推导；客户端安装版本与送达尚未核验</span>
+      <el-button link type="primary" @click="runtimeDetails = !runtimeDetails">{{ runtimeDetails ? '收起运行说明' : '查看运行说明与状态' }}</el-button>
+    </div>
+
+    <div v-if="runtimeDetails && savedFlow" class="runtime-details">
+      <p>这里显示按服务器配置推导的路径。没有运行客户端、企微未登录或没有客户触发时，不会自动发送。网页点击节点只查看配置。</p>
+      <p v-if="isDirty">编辑器有未保存修改；实际执行路径仍使用上次保存的 v{{ savedFlow.version }}。</p>
+      <p v-if="contentMatches">节点内容与旧开场逐条一致；等待方式仍以节点连接为准，内容一致不代表发送节奏一致。</p>
+      <p v-else>节点流程与旧开场内容不同。启用时走节点流程，停用时新客户走旧开场；已有会话保留自己的流程快照。</p>
+      <p>图片视频：先查本地文件，缺失再从服务器预取，由 Windows 发送。节点流程中，媒体必须在本轮已成功发送文本并确认目标之后执行。</p>
+      <div v-for="device in boundDevices" :key="device.device_code" class="device-evidence">
+        <strong>{{ device.device_code }}</strong> · 最后心跳 {{ formatTime(device.last_online) }}
+        <template v-if="mirrorErrors.includes(device.device_code)"> · 状态汇总读取失败</template>
+        <template v-else-if="!mirrors.some(row => row.device_code === device.device_code)"> · 没有流程状态上报；无法证明该设备已执行节点</template>
+        <div v-for="row in mirrors.filter(item => item.device_code === device.device_code)" :key="`${row.position_id}-${row.flow_version}-${row.node_key}-${row.phase}`">
+          v{{ row.flow_version }} · {{ row.node_key }} · {{ phaseLabel(row.phase) }} · {{ row.count }} 个会话 · {{ formatTime(row.updated_at) }}
+        </div>
+      </div>
+      <p class="field-note">状态上报不是送达回执；客户端已安装版本、企微实际在线和最终客户收信需分别核验。本页不会重置、重发或领取客户消息。</p>
     </div>
 
     <el-alert v-if="pageError && !conflict" class="page-alert" type="error" :title="pageError" show-icon :closable="false" />
@@ -69,7 +98,7 @@
     </div>
     <el-empty v-else-if="!positions.length" description="暂无可配置的招聘岗位" />
     <template v-else-if="flow">
-      <div v-if="!flow.nodes.length" class="empty-flow">
+      <div v-if="viewMode === 'edit' && !flow.nodes.length" class="empty-flow">
         <el-empty description="该岗位还没有流程图">
           <div class="empty-actions">
             <el-button type="primary" :icon="Plus" @click="createDraft">新建停用草稿</el-button>
@@ -81,7 +110,7 @@
       </div>
 
       <template v-else>
-        <div class="graph-actions">
+        <div v-if="viewMode === 'edit'" class="graph-actions">
           <el-dropdown @command="addMessageNode">
             <el-button :icon="Plus">添加消息节点<el-icon class="el-icon--right"><ArrowDown /></el-icon></el-button>
             <template #dropdown>
@@ -101,18 +130,32 @@
         </div>
 
         <div class="flow-workspace">
+          <div class="canvas-column">
           <AgentFlowCanvas
             ref="canvas"
-            :flow="flow"
-            :selected-node-key="selectedNodeKey"
-            :selected-edge-index="selectedEdgeIndex"
-            @select-node="selectNode"
-            @select-edge="selectEdge"
+            :flow="displayFlow"
+            :readonly="viewMode === 'runtime'"
+            :selected-node-key="displayNodeKey"
+            :selected-edge-index="displayEdgeIndex"
+            @select-node="selectDisplayNode"
+            @select-edge="selectDisplayEdge"
             @move-node="moveNode"
           />
 
+          <div class="canvas-footnote">{{ viewMode === 'runtime' ? '只读运行路径：开始与 AI 为说明阶段，不会存入节点配置。点节点在右侧查看完整消息和执行条件。' : '编辑中的节点图；拖动与参数修改保存后才影响新会话。' }}</div>
+          </div>
+
+          <div class="inspector-resizer" role="separator" aria-label="调整右侧编辑栏宽度" aria-orientation="vertical"
+            tabindex="0" :aria-valuenow="inspectorWidth" :aria-valuemin="300" :aria-valuemax="520"
+            @pointerdown="beginInspectorResize" @pointermove="moveInspectorResize" @pointerup="endInspectorResize" @pointercancel="endInspectorResize"
+            @keydown.left.prevent="inspectorWidth = Math.min(520, inspectorWidth + 20)"
+            @keydown.right.prevent="inspectorWidth = Math.max(300, inspectorWidth - 20)" />
+
           <aside class="inspector" aria-label="流程属性">
-            <template v-if="selectedNode">
+            <FlowRuntimeInspector v-if="viewMode === 'runtime'" :graph="displayFlow" :node="runtimeNode" :edge="runtimeEdge"
+              :legacy="savedFlow?.status !== 'enabled'" :editable="Boolean(runtimeNode && flow.nodes.some(node => node.node_key === runtimeNode!.node_key)) && savedFlow?.status === 'enabled'"
+              @select-node="selectDisplayNode" @edit-node="editRuntimeNode" />
+            <template v-else-if="selectedNode">
               <div class="inspector-heading">
                 <div>
                   <div class="inspector-eyebrow">节点属性</div>
@@ -120,6 +163,12 @@
                 </div>
                 <el-tag v-if="selectedNode.node_key === flow.entry_key" type="warning" effect="plain">入口</el-tag>
               </div>
+
+              <el-collapse class="node-execution-notes">
+                <el-collapse-item title="这个节点实际如何发送" name="execution">
+                  <p v-for="line in selectedNodeExplanation" :key="line" class="field-note">{{ line }}</p>
+                </el-collapse-item>
+              </el-collapse>
 
               <el-form label-position="top" size="small" class="inspector-form">
                 <el-form-item label="节点名称">
@@ -296,12 +345,14 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowDown, Check, CircleClose, Clock, Connection, Delete, Plus, Refresh, Share, Upload } from '@element-plus/icons-vue'
+import { ArrowDown, Check, CircleClose, Clock, Connection, Delete, FullScreen, Plus, Refresh, Share, Upload } from '@element-plus/icons-vue'
 import AgentFlowCanvas from '../components/agent/AgentFlowCanvas.vue'
-import { agentApi, type AgentFlow, type AgentFlowEdge, type AgentFlowNode, type AgentFlowPart } from '../api/agent'
+import FlowRuntimeInspector from '../components/agent/FlowRuntimeInspector.vue'
+import { activeOpenings, buildRuntimeFlow, compareOpeningContents, describeRuntimeNode, type LegacyOpening } from '../components/agent/flow-runtime'
+import { agentApi, devicesApi, type AgentDeviceItem, type AgentFlow, type AgentFlowEdge, type AgentFlowNode, type AgentFlowPart, type FlowStateSummary } from '../api/agent'
 import { mediaApi, positionsApi } from '../api/core'
 import type { ServicePosition } from '../api/types'
 import { toArray } from '../utils/format'
@@ -345,6 +396,30 @@ const selectedEdgeIndex = ref<number | null>(null)
 const canvas = ref<InstanceType<typeof AgentFlowCanvas> | null>(null)
 const baseline = ref('')
 const openingsAvailable = ref(false)
+const fullscreen = ref(true)
+const inspectorWidth = ref(360)
+const viewMode = ref<'runtime' | 'edit'>('runtime')
+const runtimeDetails = ref(false)
+const savedFlow = ref<AgentFlow | null>(null)
+const legacyOpenings = ref<LegacyOpening[]>([])
+const devices = ref<AgentDeviceItem[]>([])
+const devicesAvailable = ref(false)
+const mirrors = ref<Array<FlowStateSummary & { device_code: string }>>([])
+const mirrorErrors = ref<string[]>([])
+const runtimeNodeKey = ref('__runtime_start')
+const runtimeEdgeIndex = ref<number | null>(null)
+let loadSequence = 0
+let inspectorDrag: { pointerId: number; x: number; width: number } | null = null
+
+const boundDevices = computed(() => devices.value.filter(device => Number(device.position_id) === positionId.value))
+const runtimeFlow = computed(() => buildRuntimeFlow(savedFlow.value || { position_id: positionId.value, version: 0, status: 'disabled', entry_key: '', nodes: [], edges: [] }, legacyOpenings.value))
+const displayFlow = computed(() => viewMode.value === 'runtime' ? runtimeFlow.value : flow.value!)
+const displayNodeKey = computed(() => viewMode.value === 'runtime' ? runtimeNodeKey.value : selectedNodeKey.value)
+const displayEdgeIndex = computed(() => viewMode.value === 'runtime' ? runtimeEdgeIndex.value : selectedEdgeIndex.value)
+const runtimeNode = computed(() => runtimeFlow.value.nodes.find(node => node.node_key === runtimeNodeKey.value) || null)
+const runtimeEdge = computed(() => runtimeEdgeIndex.value === null ? null : runtimeFlow.value.edges[runtimeEdgeIndex.value] || null)
+const contentMatches = computed(() => Boolean(savedFlow.value?.nodes.length && compareOpeningContents(savedFlow.value, legacyOpenings.value)))
+const selectedNodeExplanation = computed(() => selectedNode.value && flow.value ? describeRuntimeNode(selectedNode.value, flow.value, false) : [])
 
 const isDirty = computed(() => Boolean(flow.value && JSON.stringify(flow.value) !== baseline.value))
 const selectedNode = computed(() => flow.value?.nodes.find((node) => node.node_key === selectedNodeKey.value) ?? null)
@@ -399,16 +474,27 @@ async function loadPositions(): Promise<void> {
 }
 
 async function loadFlow(id: number): Promise<void> {
+  const sequence = ++loadSequence
   loading.value = true
   pageError.value = ''
   conflict.value = false
   try {
-    const [flowResult, personaResult, mediaResult] = await Promise.all([
+    const [flowResult, personaResult, mediaResult, devicesResult] = await Promise.all([
       agentApi.flowGet(id),
       agentApi.personaGet(id),
       mediaApi.list({ page: 1, page_size: 1000 }).catch(() => null),
+      devicesApi.list({ page: 1, page_size: 1000 }).catch(() => null),
     ])
+    if (sequence !== loadSequence) return
     flow.value = normalizeFlow(flowResult.data)
+    savedFlow.value = JSON.parse(JSON.stringify(flow.value))
+    legacyOpenings.value = activeOpenings((personaResult.data.openings || []) as unknown as LegacyOpening[])
+    devicesAvailable.value = devicesResult !== null
+    devices.value = toArray<AgentDeviceItem>(devicesResult?.data)
+    mirrors.value = []
+    mirrorErrors.value = []
+    runtimeNodeKey.value = '__runtime_start'
+    runtimeEdgeIndex.value = null
     openingsAvailable.value = Array.isArray(personaResult.data.openings) && personaResult.data.openings.length > 0
     mediaItems.value = toArray<Record<string, unknown>>(mediaResult?.data).map((item) => ({
       name: String(item.name || ''),
@@ -418,18 +504,82 @@ async function loadFlow(id: number): Promise<void> {
     })).filter((item) => item.name)
     chooseSelection(flow.value)
     baseline.value = snapshot(flow.value)
+    void loadRuntimeMirrors(id, sequence)
   } catch (error) {
+    if (sequence !== loadSequence) return
     pageError.value = errorText(error, '流程加载失败')
     flow.value = null
+    savedFlow.value = null
     openingsAvailable.value = false
     mediaItems.value = []
     baseline.value = ''
   } finally {
-    loading.value = false
+    if (sequence === loadSequence) {
+      loading.value = false
+      await nextTick()
+      canvas.value?.fitToCanvas()
+    }
   }
 }
 
+async function loadRuntimeMirrors(id: number, sequence: number): Promise<void> {
+  const scoped = devices.value.filter(device => Number(device.position_id) === id)
+  const results = await Promise.all(scoped.map(async device => {
+    try {
+      const { data } = await agentApi.flowStateSummary(device.device_code)
+      return { code: device.device_code, rows: data.items, failed: false }
+    } catch { return { code: device.device_code, rows: [] as FlowStateSummary[], failed: true } }
+  }))
+  if (sequence !== loadSequence) return
+  mirrors.value = results.flatMap(result => result.rows.map(row => ({ ...row, device_code: result.code })))
+  mirrorErrors.value = results.filter(result => result.failed).map(result => result.code)
+}
+
+function phaseLabel(phase: string): string {
+  return ({ running: '执行中', awaiting: '等待回复', followup_due: '待复聊', followup_sent: '已复聊', replied: '已回复并交接', expired: '固定流程结束', held: '暂停待核对', idle: '尚未开始' } as Record<string, string>)[phase] || phase
+}
+
+function formatTime(value: unknown): string {
+  const timestamp = Date.parse(String(value || ''))
+  return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString('zh-CN') : '未上报'
+}
+
+function selectDisplayNode(key: string): void {
+  if (viewMode.value === 'runtime') { runtimeNodeKey.value = key; runtimeEdgeIndex.value = null }
+  else selectNode(key)
+}
+
+function selectDisplayEdge(index: number): void {
+  if (viewMode.value === 'runtime') { runtimeEdgeIndex.value = index; runtimeNodeKey.value = '' }
+  else selectEdge(index)
+}
+
+function changeViewMode(): void { nextTick(() => canvas.value?.fitToCanvas()) }
+function editRuntimeNode(key: string): void { viewMode.value = 'edit'; selectNode(key); changeViewMode() }
+
+function beginInspectorResize(event: PointerEvent): void {
+  if (event.button !== 0) return
+  event.preventDefault()
+  inspectorDrag = { pointerId: event.pointerId, x: event.clientX, width: inspectorWidth.value }
+  ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
+}
+function moveInspectorResize(event: PointerEvent): void {
+  if (inspectorDrag?.pointerId !== event.pointerId) return
+  inspectorWidth.value = Math.max(300, Math.min(520, inspectorDrag.width + inspectorDrag.x - event.clientX))
+}
+function endInspectorResize(event: PointerEvent): void {
+  if (inspectorDrag?.pointerId === event.pointerId) inspectorDrag = null
+  const target = event.currentTarget as HTMLElement
+  if (target.hasPointerCapture(event.pointerId)) target.releasePointerCapture(event.pointerId)
+}
+function onWorkspaceKey(event: KeyboardEvent): void {
+  if (event.key === 'Escape' && fullscreen.value) fullscreen.value = false
+}
+
+watch(canvas, value => { if (value) nextTick(() => value.fitToCanvas()) }, { flush: 'post' })
+
 async function changePosition(rawId: string | number): Promise<void> {
+  if (saving.value || migrating.value || loading.value) return
   const nextId = Number(rawId)
   if (!nextId || nextId === positionId.value) return
   if (isDirty.value) {
@@ -449,6 +599,10 @@ async function changePosition(rawId: string | number): Promise<void> {
 watch(() => route.query.position_id, async (rawId) => {
   const nextId = Number(rawId)
   if (!nextId || nextId === positionId.value || !positions.value.some((position) => position.id === nextId)) return
+  if (saving.value || migrating.value) {
+    await router.replace({ query: { ...route.query, position_id: String(positionId.value) } })
+    return
+  }
   if (isDirty.value) {
     try {
       await ElMessageBox.confirm('切换岗位会丢弃尚未保存的流程修改。', '切换岗位', {
@@ -464,6 +618,7 @@ watch(() => route.query.position_id, async (rawId) => {
 })
 
 async function reloadFlow(): Promise<void> {
+  if (saving.value || migrating.value) return
   if (!positionId.value) return
   if (isDirty.value) {
     try {
@@ -478,6 +633,7 @@ async function reloadFlow(): Promise<void> {
 }
 
 async function reloadAfterConflict(): Promise<void> {
+  if (saving.value || migrating.value) return
   if (isDirty.value) {
     try {
       await ElMessageBox.confirm('重新载入会丢弃当前未保存的修改。', '载入最新流程', {
@@ -496,6 +652,7 @@ function createDraft(): void {
   baseline.value = ''
   chooseSelection(flow.value)
   conflict.value = false
+  viewMode.value = 'edit'
 }
 
 function changeFlowStatus(enabled: boolean): void {
@@ -503,12 +660,16 @@ function changeFlowStatus(enabled: boolean): void {
 }
 
 async function migrateOpening(): Promise<void> {
-  if (!positionId.value || !flow.value || flow.value.version !== 0) return
+  if (!positionId.value || !flow.value || flow.value.version !== 0 || saving.value || migrating.value || loading.value) return
+  const requestPosition = positionId.value
+  const requestSequence = loadSequence
   migrating.value = true
   pageError.value = ''
   try {
-    const { data } = await agentApi.flowMigrate(positionId.value)
+    const { data } = await agentApi.flowMigrate(requestPosition)
+    if (requestPosition !== positionId.value || requestSequence !== loadSequence) return
     flow.value = normalizeFlow(data)
+    savedFlow.value = JSON.parse(JSON.stringify(flow.value))
     baseline.value = snapshot(flow.value)
     chooseSelection(flow.value)
     ElMessage.success('已生成停用草稿')
@@ -520,7 +681,7 @@ async function migrateOpening(): Promise<void> {
 }
 
 async function saveFlow(): Promise<void> {
-  if (!flow.value || !isDirty.value || saving.value) return
+  if (!flow.value || !isDirty.value || saving.value || loading.value || migrating.value) return
   if (flow.value.status === 'enabled') {
     const issues = flowActivationIssues(flow.value)
     if (issues.length) {
@@ -554,11 +715,15 @@ async function saveFlow(): Promise<void> {
     }
   }
   saving.value = true
+  const requestPosition = positionId.value
+  const requestSequence = loadSequence
   pageError.value = ''
   conflict.value = false
   try {
     const { data } = await agentApi.flowSave(flow.value)
+    if (requestPosition !== positionId.value || requestSequence !== loadSequence) return
     flow.value = normalizeFlow(data)
+    savedFlow.value = JSON.parse(JSON.stringify(flow.value))
     baseline.value = snapshot(flow.value)
     chooseSelection(flow.value)
     ElMessage.success(flow.value.status === 'enabled' ? '流程已启用' : '流程已保存并保持停用')
@@ -805,8 +970,8 @@ function triggerDescription(edge: AgentFlowEdge): string {
 }
 
 onBeforeRouteLeave(async () => {
-  if (!isDirty.value) return true
   if (saving.value || migrating.value) return false
+  if (!isDirty.value) return true
   try {
     await ElMessageBox.confirm('离开页面会丢弃尚未保存的流程修改。', '离开流程图', {
       type: 'warning', confirmButtonText: '离开', cancelButtonText: '留在页面',
@@ -817,11 +982,32 @@ onBeforeRouteLeave(async () => {
   }
 })
 
-onMounted(loadPositions)
+onMounted(() => { window.addEventListener('keydown', onWorkspaceKey); void loadPositions() })
+onBeforeUnmount(() => { loadSequence += 1; window.removeEventListener('keydown', onWorkspaceKey) })
 </script>
 
 <style scoped>
 .flow-page { min-width: 0; }
+.flow-page.is-fullscreen { position: fixed; z-index: 1800; inset: 0; display: flex; flex-direction: column; padding: 16px 20px 12px; overflow: hidden; background: var(--el-bg-color-page, #f5f7fb); }
+.is-fullscreen .page-header { flex-shrink: 0; margin-bottom: 10px; }
+.is-fullscreen .page-header .page-title { font-size: 20px; }
+.is-fullscreen .page-desc { margin: 3px 0 0; }
+.is-fullscreen .flow-toolbar { flex-shrink: 0; margin-bottom: 8px; }
+.runtime-status-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; flex-shrink: 0; padding: 6px 4px 10px; font-size: 12px; color: var(--el-text-color-regular); }
+.runtime-status-bar .el-button { margin-left: auto; }
+.flow-page :deep(.el-button.is-link) { background: transparent !important; border-color: transparent !important; }
+.flow-page :deep(.el-button.is-link:hover) { background: var(--el-fill-color-light) !important; }
+.runtime-details { flex-shrink: 0; max-height: 220px; overflow-y: auto; padding: 10px 14px; margin-bottom: 10px; border: 1px solid var(--el-border-color); border-radius: 6px; background: var(--el-bg-color); font-size: 12px; line-height: 1.65; }
+.runtime-details p { margin: 5px 0; }
+.device-evidence { padding: 5px 0; }
+.node-execution-notes { margin: 8px 0 16px; }
+.node-execution-notes p { margin: 8px 0; }
+.canvas-column { display: flex; flex-direction: column; min-width: 0; min-height: 0; height: min(68vh, 760px); }
+.is-fullscreen .canvas-column { height: 100%; }
+.canvas-footnote { flex-shrink: 0; padding: 8px 4px 0; font-size: 11px; line-height: 1.5; color: var(--el-text-color-secondary); }
+.inspector-resizer { width: 8px; cursor: col-resize; touch-action: none; display: flex; justify-content: center; }
+.inspector-resizer::after { content: ''; width: 2px; height: 48px; margin-top: 40px; border-radius: 2px; background: var(--el-border-color); }
+.inspector-resizer:hover::after,.inspector-resizer:focus-visible::after { background: var(--el-color-primary); }
 .flow-toolbar,
 .graph-actions,
 .empty-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
@@ -835,8 +1021,10 @@ onMounted(loadPositions)
 .empty-actions { justify-content: center; }
 .graph-actions { margin-bottom: 12px; }
 .graph-action-note { margin-left: auto; }
-.flow-workspace { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 330px); align-items: start; gap: 12px; min-width: 0; }
+.flow-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 8px var(--inspector-width, 360px); align-items: stretch; gap: 4px; min-width: 0; min-height: 0; }
+.is-fullscreen .flow-workspace { flex: 1; overflow: hidden; }
 .inspector { min-width: 0; max-height: min(68vh, 760px); padding: 14px; overflow: auto; border: 1px solid var(--bd-border, #e8ecf3); border-radius: 6px; background: var(--el-bg-color, #fff); }
+.is-fullscreen .inspector { max-height: none; height: 100%; box-sizing: border-box; }
 .inspector-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 14px; }
 .inspector-heading h3 { margin: 3px 0 0; font-size: 15px; font-weight: 600; }
 .inspector-eyebrow { color: var(--bd-text-tertiary, #7b8494); font-size: 11px; }
@@ -848,9 +1036,16 @@ onMounted(loadPositions)
 .compact-item { margin: 0; }
 .full-width { width: 100%; }
 .field-note { color: var(--bd-text-tertiary, #7b8494); font-size: 12px; line-height: 1.5; }
-@media (max-width: 1000px) {
+@media (max-width: 850px) {
   .flow-workspace { grid-template-columns: minmax(0, 1fr); }
+  .flow-page.is-fullscreen { padding: 10px; overflow-y: auto; }
+  .is-fullscreen .flow-workspace { flex: none; overflow: visible; }
+  .canvas-column,.is-fullscreen .canvas-column { height: 60vh; min-height: 350px; }
+  .inspector-resizer { display: none; }
   .inspector { max-height: none; }
+  .is-fullscreen .inspector { height: auto; max-height: 65vh; }
+  .header-actions { flex-wrap: wrap; gap: 6px; }
+  .header-actions .el-button { margin-left: 0; }
 }
 @media (max-width: 640px) {
   .flow-toolbar { align-items: stretch; }
