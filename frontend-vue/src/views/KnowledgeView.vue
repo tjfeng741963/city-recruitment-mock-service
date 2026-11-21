@@ -6,6 +6,7 @@
         <p class="page-desc">编辑通用和岗位问答；启用且通过校验的问答会进入当前岗位 AI 回复，无需重复发布。</p>
       </div>
       <div class="header-actions">
+        <el-button v-if="auth.user?.role === 'admin'" @click="router.push(receptionTestHref('dify', { positionId }))">到画布测试</el-button>
         <el-button :icon="Files" @click="templateVisible = true">模板包</el-button>
         <el-button v-if="false" :icon="Promotion" @click="publishVisible = true">发布</el-button>
         <el-button v-if="false" :icon="Clock" @click="historyVisible = true">发布历史</el-button>
@@ -16,7 +17,7 @@
     </div>
 
     <PositionContext @validated="id => contextReady = id >= 0" />
-    <PositionQa :position-id="positionId" />
+
     <el-alert v-if="activeTab !== 'library'" title="历史资料与治理工具；当前接待只读取通用和本岗位问答。这里的旧实体范围不代表已接入回复。" type="info" :closable="false" />
     <el-tabs v-model="activeTab" class="kb-tabs">
       <el-tab-pane label="知识库" name="library">
@@ -247,9 +248,10 @@
 </template>
 
 <script setup lang="ts">
-import PositionQa from '../components/agent/PositionQa.vue'
+import { receptionTestHref } from '../components/agent/device-workflow-entry'
 import { computed, onMounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
+import { useAuthStore } from '../stores/auth'
 import PositionContext from '../components/agent/PositionContext.vue'
 import { positionsApi } from '../api/core'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -285,6 +287,8 @@ import KbEntityPanel from '../components/kb/KbEntityPanel.vue'
 import KbDeviceBinding from '../components/kb/KbDeviceBinding.vue'
 
 const route = useRoute()
+const router = useRouter()
+const auth = useAuthStore()
 const contextReady=ref(false)
 const positionId = computed(() => Number(route.query.position_id) || 0)
 const positionName = ref('')

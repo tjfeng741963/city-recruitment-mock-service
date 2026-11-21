@@ -166,12 +166,14 @@ export function buildServer() {
     const file = path.join(config.frontendDir(), "dev.html");
     return reply.type("text/html; charset=utf-8").send(readFileSync(file));
   });
-  for (const [url, file, contentType] of [
-    ["/dify-connection", "dify-connection.html", "text/html; charset=utf-8"],
-    ["/dify-connection-script", "dify-connection.js", "text/javascript; charset=utf-8"],
-  ]) {
-    app.get(url, async (_request, reply) => reply.type(contentType).send(readFileSync(path.resolve("public", file))));
-  }
+  app.get<{ Querystring: { device_code?: string; position_id?: string } }>("/dify-connection", async (request, reply) => {
+    const query = new URLSearchParams({ test_engine: "dify" });
+    for (const field of ["device_code", "position_id"] as const) {
+      const value = request.query[field];
+      if (typeof value === "string" && value) query.set(field, value);
+    }
+    return reply.redirect("/recruitment-flow?" + query.toString());
+  });
 
   registerAuthRoutes(app, auth);  registerCoreRoutes(app, db);
   // knowledge 的旧契约先由兼容层接管（读写 kb_faq，AI 实际回复用的表），

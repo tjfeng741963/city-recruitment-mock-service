@@ -17,7 +17,9 @@ describe('account workflow navigation', () => {
   });
   it('opens Dify with the exact device even when there is no Agent position', () => {
     expect(deviceWorkflowEntry({device_code:'test /中文',reply_provider:'dify'}).href)
-      .toBe('/dify-connection?device_code=test%20%2F%E4%B8%AD%E6%96%87');
+      .toBe('/recruitment-flow?test_engine=dify&device_code=test+%2F%E4%B8%AD%E6%96%87');
+    expect(deviceWorkflowEntry({device_code:'dify-1',reply_provider:'dify',position_id:25}).href)
+      .toBe('/recruitment-flow?test_engine=dify&device_code=dify-1&position_id=25');
   });
   it('does not guess a provider when list data is missing or invalid', () => {
     expect(deviceWorkflowEntry({device_code:'pc',position_id:25}).href).toBeNull();

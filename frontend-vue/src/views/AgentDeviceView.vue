@@ -526,8 +526,7 @@ function handleCommand(command: string, row: AgentDeviceItem): void {
 function openWorkflow(row: AgentDeviceItem): void {
   const entry = deviceWorkflowEntry(row)
   if (!entry.href) { ElMessage.warning(entry.reason); return }
-  if (row.reply_provider === 'dify') window.location.assign(entry.href)
-  else void router.push(entry.href)
+  void router.push(entry.href)
 }
 
 /* ---------- 扫码登录 ---------- */

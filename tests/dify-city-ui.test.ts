@@ -13,11 +13,12 @@ describe('restored original city and knowledge entries',()=>{
   expect(script).toContain("'/api/v1/dify/cities/'");
   expect(readFileSync('public/index.html','utf8')).toContain('/theme/city-dify-sources.js');
  });
- it('uses an explicit non-sending Dify preview on the existing knowledge page',()=>{
-  const script=readFileSync('public/theme/city-dify-sources.js','utf8');
-  expect(script).toContain("location.pathname==='/knowledge'");
-  expect(script).toContain('/api/v1/dify/preview');
-  expect(script).toContain('不会发送企微');
-  expect(script).not.toContain('/send');
+ it('keeps city material editing and sends knowledge tests to the canvas',()=>{
+  const theme=readFileSync('public/theme/city-dify-sources.js','utf8');
+  const knowledge=readFileSync('frontend-vue/src/views/KnowledgeView.vue','utf8');
+  expect(theme).not.toContain('/api/v1/dify/preview');
+  expect(theme).not.toContain('/dify-connection');
+  expect(knowledge).toContain("receptionTestHref('dify', { positionId })");
+  expect(knowledge).not.toContain('<PositionQa');
  });
 });

@@ -41,27 +41,11 @@
    if(cancel)cancel.click();
   }catch(e){state.textContent='保存失败：'+e.message;}finally{save.disabled=false;select.disabled=false;}};
  }
- function previewBox(){
-  const header=document.querySelector('.page-header');if(!header||document.querySelector('[data-dify-source-preview]'))return;
-  const box=node('section');box.className='cds-box';box.dataset.difySourcePreview='1';box.setAttribute('aria-label','模式二 Dify 城市与知识库试答');
-  const title=node('strong','模式二 · Dify：城市资料 + 当前知识库'),desc=node('p','模式一和模式二使用不同编排。下面核对 Dify 实际取数：城市资料优先，城市空白项沿用岗位；知识仅含已启用且通过校验的通用和当前岗位问答。不会发送企微或推进真实会话。');desc.className='cds-muted';
-  const question=node('textarea');question.placeholder='例如：工资5000到8000吗？面试在哪里？';question.setAttribute('aria-label','模式二模拟问题');
-  const evidence=node('button','模式二 · 查看回答依据'),generate=node('button','模式二 · 生成模拟回答'),reset=node('button','新测试会话'),state=node('p'),result=node('div'),raw=node('pre');raw.hidden=true;result.className='cds-result';
-  let session='dify-preview:'+Array.from(crypto.getRandomValues(new Uint8Array(12)),v=>v.toString(16).padStart(2,'0')).join('');
-  reset.onclick=()=>{session='dify-preview:'+Date.now()+'-'+Math.floor(Math.random()*1e9);result.textContent='';raw.hidden=true;state.textContent='已新建测试会话';};
-  const run=async live=>{const id=Number(new URLSearchParams(location.search).get('position_id'));if(!id||!question.value.trim()){state.textContent='请先选择具体岗位并输入问题。';return;}evidence.disabled=generate.disabled=true;try{
-   const stillCurrent=()=>box.isConnected&&Number(new URLSearchParams(location.search).get('position_id'))===id;
-   const dry=await api('/api/v1/dify/preview','POST',{position_id:id,text:question.value,dry:true});if(!stillCurrent())return;if(!dry.ok)throw new Error(dry.error);const input=JSON.parse(dry.inputs.position_data);state.textContent='城市：'+input.city+'；工资来源：'+(input.sources.fields.wage_text==='city'?'城市资料':'岗位补充')+'；本轮知识：'+input.knowledge.length+'条。'+(input.retrieval?.omitted?'完整资料较长，已按问题选取完整段落，另有'+input.retrieval.omitted+'条未进入本轮。':'');raw.hidden=false;raw.textContent=JSON.stringify(input,null,2);
-   if(live){const response=await api('/api/v1/dify/preview','POST',{position_id:id,text:question.value,session_key:session});if(!stillCurrent())return;if(!response.ok)throw new Error(response.code+'：'+response.error);result.textContent=response.reply.messages.map(m=>m.content).join('\n\n');}
-  }catch(e){result.textContent='暂停：'+e.message;}finally{evidence.disabled=generate.disabled=false;}};
-  evidence.onclick=()=>run(false);generate.onclick=()=>run(true);box.append(title,desc,question,evidence,generate,reset,state,result,raw);header.after(box);
- }
  function render(){style();if(location.pathname==='/cities'){
   for(const drawer of document.querySelectorAll('.el-drawer')){const heading=drawer.querySelector('.el-drawer__header')?.textContent.trim()||'';if(heading==='编辑城市'&&!drawer.querySelector('[data-city-material-open]')){const button=node('button','编辑完整城市原文资料');button.type='button';button.dataset.cityMaterialOpen='1';button.className='el-button';button.onclick=()=>{const item=[...drawer.querySelectorAll('.el-form-item')].find(x=>x.querySelector('.el-form-item__label')?.textContent.trim()==='城市名称');cityEditor(item?.querySelector('input')?.value||'');};drawer.querySelector('.el-drawer__body')?.append(button);}}
   for(const item of document.querySelectorAll('.el-drawer .el-form-item,.el-drawer .el-collapse-item'))if(item.style.display==='none')item.style.display='';
   const header=document.querySelector('.page-header');if(header&&!document.querySelector('[data-city-dify-editor]')){const b=node('button','完整城市资料 · Dify 来源');b.dataset.cityDifyEditor='1';b.className='el-button';b.onclick=()=>cityEditor();(header.querySelector('.header-actions')||header).append(b);}
- }if(location.pathname==='/knowledge')previewBox();
- if(location.pathname==='/dashboard'){const header=document.querySelector('.page-header');if(header&&!document.querySelector('[data-dify-dashboard-link]')){const a=node('a','Dify 模式二配置与试答');a.href='/dify-connection';a.dataset.difyDashboardLink='1';a.style.cssText='display:inline-block;margin:8px;color:#174fcb';header.after(a);}}
+ }
  }
  let queued=false;const schedule=()=>{if(queued)return;queued=true;requestAnimationFrame(()=>{queued=false;render();});};new MutationObserver(schedule).observe(document.documentElement,{childList:true,subtree:true});window.addEventListener('popstate',schedule);document.readyState==='loading'?document.addEventListener('DOMContentLoaded',schedule,{once:true}):schedule();
 })();

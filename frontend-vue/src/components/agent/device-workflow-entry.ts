@@ -1,10 +1,23 @@
 type Device = { device_code?: string; reply_provider?: unknown; position_id?: number | null; online?: unknown; status?: unknown }
 
+export function receptionTestHref(engine: 'agent' | 'dify', context: {positionId?: number | null; deviceCode?: string} = {}) {
+  const search = new URLSearchParams({ test_engine: engine })
+  if (context.deviceCode) search.set('device_code', context.deviceCode)
+  if (context.positionId && Number.isSafeInteger(context.positionId) && context.positionId > 0) {
+    search.set('position_id', String(context.positionId))
+  }
+  return '/recruitment-flow?' + search.toString()
+}
+
 export function deviceWorkflowEntry(device: Device): { href: string | null; label: string; reason: string } {
   const unavailable = (reason: string) => ({ href: null, label: '工作流配置', reason })
   if (!device.device_code) return unavailable('缺少客户端标识，请先检查账号配置')
   if (device.reply_provider === 'dify') {
-    return { href: `/dify-connection?device_code=${encodeURIComponent(device.device_code)}`, label: '工作流配置', reason: '' }
+    return {
+      href: receptionTestHref('dify', { deviceCode: device.device_code, positionId: device.position_id }),
+      label: '工作流配置',
+      reason: '',
+    }
   }
   if (device.reply_provider !== 'agent') return unavailable('回复来源尚未确认，请刷新后重试')
   const id = Number(device.position_id)
