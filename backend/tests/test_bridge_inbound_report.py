@@ -319,3 +319,50 @@ def test_outbound_failure_is_durable_and_retried_after_restart(tmp_path):
     restarted._run(HEARTBEAT, {"messages": []})
     assert recovered.outbounds == failed.outbounds
     assert restarted._bridge_pending == {}
+
+
+def test_paged_bridge_catches_250_messages_after_lost_ack_and_restart(tmp_path):
+    import sqlite3
+    import time
+    autopilot = _load_autopilot()
+    db = tmp_path / "message.db"
+    now = int(time.time())
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE message_table(message_id INTEGER, conversation_id TEXT, sender_id TEXT, send_time INTEGER, content_type INTEGER, content BLOB)")
+        conn.executemany("INSERT INTO message_table VALUES (?,?,?,?,?,?)",
+                         [(i, "S:fixture", "other", now - 300 + i // 2, 2, b"body") for i in range(1, 251)])
+
+    def attach(reporter):
+        reporter.store._conn.side_effect = lambda _: sqlite3.connect(db)
+        autopilot._pb_text = lambda payload: payload.decode()
+        autopilot.direction_of = lambda *_: "inbound"
+        reporter.store.sessions.return_value = [{"id": "S:fixture", "name": "Fixture"}]
+        return reporter
+
+    bridge = FakeBridge(exc=TimeoutError("lost response"))
+    first = attach(make_reporter(autopilot, None, bridge, tmp_path))
+    batch = first._collect_bridge_page()
+    assert first._queue_bridge_messages(batch)
+    first._send_bridge_messages()
+    assert len(first._bridge_pending) == 50
+
+    received = FakeBridge()
+    resumed = attach(make_reporter(autopilot, None, received, tmp_path))
+    for _ in range(7):
+        assert resumed._queue_bridge_messages(resumed._collect_bridge_page())
+        resumed._send_bridge_messages()
+    assert [int(x["event_id"].rsplit(":", 1)[1]) for x in received.inbounds] == list(range(1, 251))
+    assert not resumed._bridge_pending
+
+
+def test_expired_inbound_is_held_before_generating_a_reply(tmp_path, monkeypatch):
+    from tests.agent_loader import load_reply_store
+    import time
+    autopilot = _load_autopilot()
+    ledger = load_reply_store(tmp_path / "reply.db")
+    monkeypatch.setattr(autopilot, "rlog", ledger)
+    age = int(time.time()) - 7200
+    ledger.record_incoming({"id": 1, "conv_id": "S:old", "conv_name": "Old contact", "time": age, "text": "waiting", "type": 2})
+    assert autopilot._hold_expired_replies() == 1
+    assert not ledger.pending()
+    assert ledger.recent()[0]["status"] == "held"

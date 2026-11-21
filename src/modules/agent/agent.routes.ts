@@ -138,6 +138,8 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
           if (mode) serialized.reply_provider = mode.effective;
           const bridge = bridgeStore.status(String(serialized.device_code ?? ""));
           if (bridge) {
+            const health = bridgeStore.runtimeHealth(String(serialized.device_code ?? ""));
+            if (health) serialized.windows_runtime = health;
             const fresh = bridge.heartbeat_at > 0 && Date.now() - bridge.heartbeat_at <= 60_000;
             const online = row.status === "enabled" && fresh && bridge.state === "online";
             Object.assign(serialized, {
@@ -228,7 +230,11 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     db.exec("BEGIN IMMEDIATE");
     try {
       const result = db.prepare("DELETE FROM agent_devices WHERE id=?").run(id);
-      if (result.changes) db.prepare("DELETE FROM reply_mode_transition WHERE device_code=?").run(String(data.device_code ?? ""));
+      if (result.changes) {
+        const code = String(data.device_code ?? "");
+        db.prepare("DELETE FROM reply_mode_transition WHERE device_code=?").run(code);
+        db.prepare("DELETE FROM windows_runtime_health WHERE device_code=?").run(code);
+      }
       db.exec("COMMIT");
       return result.changes ? { success: true } : reply.code(404).send({ detail: "Device not found" });
     } catch (error) {

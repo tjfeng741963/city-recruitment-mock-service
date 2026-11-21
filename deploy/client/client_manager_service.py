@@ -244,6 +244,8 @@ class ManagerService:
             "updated_at": runtime.get("updated_at"),
         }
 
+        if runtime:
+            result["last_process_stage"] = runtime.get("status")
         if owned:
             result["process_identities"] = owned
             try:
@@ -314,19 +316,59 @@ class ManagerService:
             return updater.apply_package(package, expected_commit=commit, expected_sha256=checksum,
                                          root=self.root, require_manager=True)
 
+    def start_on_logon(self) -> bool:
+        with management_lock():
+            if (self.root / "logs" / "manual-stop").exists():
+                updater._log_event(self.root, "logon start skipped after manual stop")
+                return False
+            self._start_locked()
+            return True
+
+    def supervise(self, *, wait=time.sleep, max_restarts=2) -> int:
+        """Watch only a verified, running client started by the logon task."""
+        for _ in range(max_restarts):
+            state = self.status()
+            identities = state.get("process_identities", [])
+            if len(identities) != 1 or state.get("other_running"):
+                return 0
+            pid, created = identities[0]
+            while is_process_alive(pid, created):
+                wait(5)
+            wait(10)
+            with management_lock():
+                if (self.root / "logs" / "manual-stop").exists():
+                    return 0
+                previous = self.status()
+                if previous["running"] or previous.get("other_running"):
+                    return 0
+                # Retry only a process that had completed initialization.
+                if previous.get("last_process_stage") != "ready" or previous.get("wecom_state") != "online":
+                    return 0
+                require_interactive_session()
+                self._start_locked()
+        updater._log_event(self.root, "client recovery retry limit reached")
+        return max_restarts
+
     def start(self) -> int:
         with management_lock():
-            return self._start_locked()
+            started = self._start_locked()
+            (self.root / "logs" / "manual-stop").unlink(missing_ok=True)
+            return started
 
     def stop(self) -> int:
         with management_lock():
+            marker = self.root / "logs" / "manual-stop"
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
             return self._stop_locked()
 
     def restart(self) -> int:
         with management_lock():
             require_interactive_session()
             self._stop_locked()
-            return self._start_locked()
+            started = self._start_locked()
+            (self.root / "logs" / "manual-stop").unlink(missing_ok=True)
+            return started
 
     def _start_locked(self) -> int:
         self._require_stopped()

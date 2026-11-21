@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from uuid import uuid4
 from pathlib import Path
 
 import pytest
@@ -39,8 +40,9 @@ time.sleep(30)
 
 @pytest.mark.skipif(sys.platform != "win32", reason="命名互斥体是 Windows 特性")
 def test_named_mutex_is_exclusive_across_processes() -> None:
+    lock = f"{MUTEX_NAME}-test-{uuid4().hex}"
     holder = subprocess.Popen(
-        [sys.executable, "-c", HOLD_SCRIPT, MUTEX_NAME],
+        [sys.executable, "-c", HOLD_SCRIPT, lock],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -50,7 +52,7 @@ def test_named_mutex_is_exclusive_across_processes() -> None:
         assert line == "ACQUIRED", f"第一个进程没能拿到锁：{line!r}"
 
         second = subprocess.run(
-            [sys.executable, "-c", HOLD_SCRIPT, MUTEX_NAME],
+            [sys.executable, "-c", HOLD_SCRIPT, lock],
             capture_output=True,
             text=True,
             timeout=20,

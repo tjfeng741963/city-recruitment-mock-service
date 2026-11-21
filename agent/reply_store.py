@@ -347,6 +347,22 @@ def mark_held(message_id: str, conv_id: str, reason: str) -> None:
         con.close()
 
 
+def hold_before(cutoff: float) -> int:
+    """Keep aged customer inputs available for review. Never touch unknown sends."""
+    con = _conn()
+    try:
+        result = con.execute(
+            """UPDATE reply_log SET status='held',last_step='held',
+               error='消息已超过自动恢复时限，请人工核对'
+               WHERE status IN ('pending','failed') AND msg_time>0 AND msg_time<?""",
+            (cutoff,),
+        )
+        con.commit()
+        return result.rowcount
+    finally:
+        con.close()
+
+
 def retry_held() -> int:
     con = _conn()
     try:

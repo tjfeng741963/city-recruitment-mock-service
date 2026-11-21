@@ -142,7 +142,7 @@ compat.apply_click_input()
 compat.apply_input_focus_retry()
 
 from wecom_io_core import send as core_send  # noqa: E402
-from wecom_io_core.store import Store, find_data_dir  # noqa: E402
+from wecom_io_core.store import Store, find_data_dir, _pb_text, direction_of  # noqa: E402
 
 # 企微自带的应用/系统会话，前缀命中就不回复
 SYSTEM_PREFIXES = (
@@ -222,6 +222,7 @@ REPORT_STATE = ROOT / ".report_state.json"   # 游标 + 上次成功的 device_c
 GREET_STATE = ROOT / ".greeted.json"
 GREET_STATE_LIMIT = 2000                     # 只留最近 N 个会话，文件不会无限长
 REPORT_INTERVAL = 30.0                       # 心跳/上报间隔（按时间戳判断，不 sleep）
+RECOVERY_REPLY_MAX_AGE = 3600
 REPORT_MAX_MESSAGES = 50                     # 单次上报最多条数
 REPORT_FIRST_WINDOW = 24 * 3600              # 首次没有游标时只补最近 24 小时
 
@@ -531,6 +532,58 @@ def pending_count() -> int:
         return 0
 
 
+class RuntimeHeartbeat:
+    """A bounded connection heartbeat driven by recent sender observations."""
+
+    def __init__(self, bridge):
+        self.bridge = bridge
+        self.sample = ("unknown", "", "starting", time.monotonic(), None)
+        self.last_error = ""
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="bridge-heartbeat")
+
+    def start(self):
+        self._thread.start()
+
+    def close(self):
+        self._stop.set()
+
+    def observe(self, wecom, account="", reason="starting", reporter=None):
+        self.sample = (wecom, account, reason, time.monotonic(), reporter)
+
+    def payload(self) -> dict:
+        wecom, account, reason, observed, reporter = self.sample
+        if time.monotonic() - observed > 90:
+            reason = "loop_stalled"
+        if self.last_error == "authorization" and reason != "loop_stalled":
+            reason = "authorization"
+        queued = len(reporter._bridge_pending) if reporter is not None else 0
+        quarantined = reporter._bridge_quarantined if reporter is not None else 0
+        remaining = reporter._bridge_remaining if reporter is not None else 0
+        sync = "error" if reporter is not None and (reporter._bridge_capture_error or quarantined) else "catching_up" if queued or remaining else "current"
+        if reporter is None or (not reporter._bridge_sampled and not reporter._bridge_capture_error):
+            sync = "unknown"
+        bridge_state = "online" if wecom == "online" and account else "scanning" if wecom == "login_required" else "offline"
+        return {"state": bridge_state, "account_id": account,
+                "runtime": {"wecom_available": wecom == "online" and bool(account),
+                            "reply_ready": reason == "ready", "reason": reason,
+                            "sync": sync, "backlog": min(1_000_000, queued + remaining)}}
+
+    def _loop(self):
+        path = f"/api/v1/bridge/devices/{quote(self.bridge.device_code, safe='')}/heartbeat"
+        while not self._stop.is_set():
+            try:
+                self.bridge._request("POST", path, self.payload())
+                self.last_error = ""
+            except HTTPError as exc:
+                self.last_error = "authorization" if exc.code in (401, 403) else "network"
+                log(f"[客户端状态] 心跳 HTTP {exc.code}", level="warning")
+            except Exception as exc:  # Network loss must not stop the worker.
+                self.last_error = "network"
+                log(f"[客户端状态] 心跳失败：{type(exc).__name__}", level="warning")
+            self._stop.wait(15)
+
+
 class Reporter:
     """心跳 + 会话增量上报。
 
@@ -568,6 +621,7 @@ class Reporter:
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._last_at = 0.0
+        self.runtime_heartbeat = None
 
         self._state = self._load()
         # device_code 来源优先级：显式传入 > state 里上次成功的值 > client 上已配置的值。
@@ -584,6 +638,13 @@ class Reporter:
             str(k): int(v) for k, v in (self._state.get("cursor") or {}).items()
         }
         self._bridge_pending: dict[str, dict] = dict(self._state.get("bridge_pending") or {})
+        self._bridge_pages = dict(self._state.get("bridge_pages") or {})
+        self._bridge_remaining = 0
+        self._bridge_capture_error = False
+        self._bridge_sampled = False
+        self._bridge_account = ""
+        self._bridge_paged = False
+        self._bridge_quarantined = 0
         # 首次没有游标时，只把最近 24 小时当作"新增"，避免把历史全灌一遍
         self._baseline = int(self._state.get("baseline_ts") or 0) or int(
             time.time() - REPORT_FIRST_WINDOW
@@ -603,6 +664,7 @@ class Reporter:
                 "device_code": self.device_code,
                 "cursor": dict(self._cursor),
                 "bridge_pending": dict(self._bridge_pending),
+                "bridge_pages": dict(self._bridge_pages),
                 "baseline_ts": self._baseline,
                 "last_report_at": datetime.now(timezone.utc).isoformat(),
             }
@@ -624,7 +686,23 @@ class Reporter:
         if self._thread is not None and self._thread.is_alive():
             return  # 上一批还没回来，本轮跳过
         self._last_at = now
-        batch = self._collect()
+        batch = self._collect() if self.api is not None else {"messages": []}
+        if self.bridge is not None and self.bridge.enabled:
+            self._bridge_paged = True
+            batch["bridge_paged"] = True
+            try:
+                self._bridge_account = str(self.store.self_id() or "")
+                active = [item for item in self._bridge_pending.values()
+                          if item.get("destination") == self._bridge_destination()]
+                current_queued = sum(item.get("account") == self._bridge_account for item in active)
+                self._bridge_quarantined = len(active) - current_queued
+                if current_queued < 500:
+                    # Store.refresh replaces the decrypted files in place. Read
+                    # them on the sender thread, then hand the page to HTTP.
+                    batch["bridge_page"] = self._collect_bridge_page()
+            except Exception as exc:
+                self._bridge_capture_error = True
+                log(f"[桥接] 读取消息快照失败：{type(exc).__name__}", level="warning")
         heartbeat = {
             "wecom_state": wecom_state,
             "queue_size": int(queue_size),
@@ -721,6 +799,58 @@ class Reporter:
         batch["conversations"] = list(convs.values())
         return batch
 
+    def _collect_bridge_page(self) -> dict:
+        account = str(self.store.self_id() or "")
+        if not account or account == "unknown":
+            raise RuntimeError("企微账号未确认")
+        self._bridge_account = account
+        scope = json.dumps([*self._bridge_destination(), account], ensure_ascii=False)
+        with self._lock:
+            checkpoint = self._bridge_pages.get(scope)
+        # Legacy report state kept only a recent window and per-conversation
+        # high watermarks. Replay from its known baseline once; server event
+        # IDs make that replay safe even if the old window had holes.
+        after = checkpoint if checkpoint is not None else (0, "")
+        connection = self.store._conn("message.db")
+        if connection is None:
+            raise RuntimeError("企微消息快照尚不可读")
+        try:
+            rows = connection.execute(
+                """SELECT message_id,conversation_id,send_time,sender_id,content_type,content
+                   FROM message_table WHERE (message_id,conversation_id)>(?,?)
+                   AND (send_time>=? AND send_time<32503680000 OR send_time>=?)
+                   ORDER BY message_id,conversation_id LIMIT ?""",
+                (*after, self._baseline, self._baseline * 1000, REPORT_MAX_MESSAGES),
+            ).fetchall()
+            if rows:
+                tail = tuple(rows[-1])[:2]
+                remaining = connection.execute(
+                    "SELECT COUNT(*) FROM message_table WHERE (message_id,conversation_id)>(?,?) AND (send_time>=? AND send_time<32503680000 OR send_time>=?)",
+                    (*tail, self._baseline, self._baseline * 1000),
+                ).fetchone()[0]
+            else:
+                tail = after
+                remaining = 0
+        finally:
+            connection.close()
+
+        names = {str(row["id"]): str(row["name"] or "") for row in self.store.sessions(limit=10000)}
+        conversations = []
+        messages = []
+        for message_id, cid, stamp, sender, kind, content in rows:
+            if not cid or message_id is None or is_system_conv(cid, names.get(cid, "")):
+                continue
+            text = _pb_text(content) if kind in (2, 573) else ""
+            direction = direction_of(str(sender), account, cid)
+            conversations.append({"external_id": cid, "name": names.get(cid, "")})
+            messages.append({
+                "external_conversation_id": cid, "external_msgid": str(message_id),
+                "direction": direction, "content": (text or "")[:20000],
+                "content_type": "text" if text else f"type{kind or 0}", "sent_at": _iso(_to_ts(stamp)),
+            })
+        return {"messages": messages, "conversations": conversations,
+                "bridge_checkpoint": (scope, tail), "bridge_remaining": remaining}
+
     def _drop_echoes(self, echoes: list[tuple[dict, dict, float]]) -> None:
         """丢弃回声并把游标推过去，避免同一条消息每轮被反复挑出来刷日志。"""
         with self._lock:
@@ -748,10 +878,11 @@ class Reporter:
         except Exception as exc:  # noqa: BLE001
             log(f"[心跳] 异常（忽略）：{agent_client.describe_error(exc)}")
         # 双通道：与主心跳同一处触发，不另起线程；任何桥接异常都不影响主心跳
-        try:
-            self._send_bridge(heartbeat.get("wecom_state") or "unknown")
-        except Exception as exc:  # noqa: BLE001
-            log(f"[桥接] 异常（忽略）：{agent_client.describe_error(exc)}")
+        if self.runtime_heartbeat is None:
+            try:
+                self._send_bridge(heartbeat.get("wecom_state") or "unknown")
+            except Exception as exc:  # noqa: BLE001
+                log(f"[桥接] 异常（忽略）：{agent_client.describe_error(exc)}")
         try:
             self._send_config_sync()
         except Exception as exc:  # noqa: BLE001
@@ -774,11 +905,17 @@ class Reporter:
             log(f"[远端配置] 异常（忽略）：{agent_client.describe_error(exc)}")
         # Persist bridge work before the primary ingest can advance the shared cursor.
         try:
-            if not self._queue_bridge_messages(batch):
+            if batch.get("bridge_paged"):
+                page = batch.get("bridge_page")
+                if page is not None:
+                    self._bridge_capture_error = not self._queue_bridge_messages(page)
+                    self._bridge_remaining = page["bridge_remaining"]
+                    self._bridge_sampled = not self._bridge_capture_error
+            elif not self._queue_bridge_messages(batch):
                 return
         except Exception as exc:  # noqa: BLE001
+            self._bridge_capture_error = True
             log(f"[桥接] pending persistence failed: {agent_client.describe_error(exc)}")
-            return
         try:
             self._send_ingest(batch)
         except Exception as exc:  # noqa: BLE001
@@ -872,6 +1009,10 @@ class Reporter:
             for c in (batch.get("conversations") or [])
         }
         destination = self._bridge_destination()
+        checkpoint = batch.get("bridge_checkpoint")
+        if checkpoint:
+            with self._lock:
+                previous_queue = dict(self._bridge_pending)
         for m in batch.get("messages") or []:
             direction = m.get("direction")
             if direction not in ("inbound", "outbound"):
@@ -893,7 +1034,7 @@ class Reporter:
             if is_system_conv(cid, name):
                 continue  # 系统/官方会话不进 4222 会话页
             event_id = f"{cid}:{msg_id}"
-            key = json.dumps([*destination, event_id], ensure_ascii=False)
+            key = json.dumps([*destination, *([self._bridge_account] if checkpoint else []), event_id], ensure_ascii=False)
             with self._lock:
                 staged = self._bridge_pending.get(key)
                 if staged is not None and staged.get("direction") != direction:
@@ -904,11 +1045,28 @@ class Reporter:
                 if staged is None:
                     self._bridge_pending[key] = {
                         "destination": destination,
+                        "account": self._bridge_account if checkpoint else "",
                         "direction": direction,
                         "event": {"event_id": event_id, "contact_id": cid, "content": text,
                                   "nickname": name, "sent_at": m.get("sent_at") or ""},
                     }
-        return self._save() if self._bridge_pending else True
+        if not checkpoint:
+            return self._save() if self._bridge_pending else True
+        scope, cursor = checkpoint
+        with self._lock:
+            previous = self._bridge_pages.get(scope)
+            if previous == list(cursor) and previous_queue == self._bridge_pending:
+                return True
+            self._bridge_pages[scope] = list(cursor)
+        if self._save():
+            return True
+        with self._lock:
+            self._bridge_pending = previous_queue
+            if previous is None:
+                self._bridge_pages.pop(scope, None)
+            else:
+                self._bridge_pages[scope] = previous
+        return False
 
     def _advance_cursor_locked(self, event: dict) -> None:
         """按已成功上报的事件推进会话游标（调用方必须已持 self._lock）。
@@ -935,10 +1093,13 @@ class Reporter:
         with self._lock:
             pending = [
                 (key, item.get("direction", "inbound"), item["event"]) for key, item in self._bridge_pending.items()
-                if item["destination"] == destination
-            ][:REPORT_MAX_MESSAGES]
+                if item["destination"] == destination and (item.get("account") == self._bridge_account if self._bridge_paged else not item.get("account") or item["account"] == self._bridge_account)
+            ]
+        if not pending:
+            return
+        batch = pending[:REPORT_MAX_MESSAGES]
         sent = 0
-        for key, direction, event in pending:
+        for key, direction, event in batch:
             try:
                 bridge._request("POST", f"/api/v1/bridge/devices/{quote(bridge.device_code, safe='')}/{direction}", event)
                 with self._lock:
@@ -973,7 +1134,15 @@ class Reporter:
                     log(f"[桥接] {direction} {event['event_id']} 服务器已处理但自动回复投递失败，放弃重试")
                     continue
                 log(f"[桥接] {direction} {event['event_id']} 失败（忽略）：{desc}; retry next cycle")
-                # 单条失败不堵队：继续发后面的 pending
+                status = exc.code if isinstance(exc, HTTPError) else None
+                if self._bridge_paged and (isinstance(exc, (TimeoutError, OSError)) and status is None
+                        or status in (401, 403, 408, 429) or (status is not None and status >= 500)):
+                    break  # Connectivity, authorization or server outage affects the whole batch.
+                if self._bridge_paged:
+                    with self._lock:
+                        failed = self._bridge_pending.pop(key, None)
+                        if failed is not None:
+                            self._bridge_pending[key] = failed
                 continue
         if sent:
             log(f"[桥接] messages 上报 {sent} 条")
@@ -1427,6 +1596,11 @@ def _flow_summary(cid: str) -> list[str]:
     return [str(row.get("body") or row.get("media_name") or "").strip() for row in rows if row.get("status") == "sent" and (row.get("body") or row.get("media_name"))]
 
 
+def _flow_recovery_expired(row: dict, now: float) -> bool:
+    stamp = _to_ts(row.get("last_inbound_at")) or _to_ts(row.get("await_since"))
+    return bool(stamp and stamp < now - RECOVERY_REPLY_MAX_AGE)
+
+
 def _flow_tick(store: Store, cfg: dict, wecom_state: str) -> None:
     """Run at most one due follow-up per minute, then close stale follow-ups."""
     global _last_flow_followup_at
@@ -1452,6 +1626,9 @@ def _flow_tick(store: Store, cfg: dict, wecom_state: str) -> None:
         if not name or name == cid or is_system_conv(cid, name):
             state.set_phase(cid, "held", error="流程续发缺少会话名")
             continue
+        if cfg.get("_reply_mode_enabled") and _flow_recovery_expired(row, now):
+            state.set_phase(cid, "held", error="流程已超过自动恢复时限，请人工核对")
+            continue
         saved = _flow_for_row(row, None)
         if saved is None:
             state.set_phase(cid, "held", error="流程续发缺少快照")
@@ -1471,6 +1648,9 @@ def _flow_tick(store: Store, cfg: dict, wecom_state: str) -> None:
             continue
         if not name or name == cid or is_system_conv(cid, name):
             state.set_phase(cid, "held", error="复聊目标没有可验证的会话名")
+            continue
+        if cfg.get("_reply_mode_enabled") and _flow_recovery_expired(row, now):
+            state.set_phase(cid, "held", error="复聊已超过自动恢复时限，请人工核对")
             continue
         row_flow = _flow_for_row(row, flow)
         if row_flow is None:
@@ -1508,9 +1688,25 @@ def _reply_desktop_active() -> bool:
     if not wts.WTSQuerySessionInformationW(None, session.value, 8, ctypes.byref(buffer), ctypes.byref(size)):
         return False
     try:
-        return size.value >= ctypes.sizeof(ctypes.c_int) and ctypes.cast(buffer, ctypes.POINTER(ctypes.c_int))[0] == 0
+        if size.value < ctypes.sizeof(ctypes.c_int) or ctypes.cast(buffer, ctypes.POINTER(ctypes.c_int))[0] != 0:
+            return False
     finally:
         wts.WTSFreeMemory(buffer)
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.OpenInputDesktop.argtypes = (wt.DWORD, wt.BOOL, wt.DWORD)
+    user32.OpenInputDesktop.restype = wt.HANDLE
+    user32.CloseDesktop.argtypes = (wt.HANDLE,)
+    user32.GetUserObjectInformationW.argtypes = (wt.HANDLE, ctypes.c_int, wt.LPVOID, wt.DWORD, ctypes.POINTER(wt.DWORD))
+    desktop = user32.OpenInputDesktop(0, False, 0x0001)
+    if not desktop:
+        return False
+    try:
+        name = ctypes.create_unicode_buffer(64)
+        length = wt.DWORD()
+        return bool(user32.GetUserObjectInformationW(desktop, 2, name, ctypes.sizeof(name), ctypes.byref(length))
+                    and name.value.casefold() == "default")
+    finally:
+        user32.CloseDesktop(desktop)
 
 
 def _check_reply_mode(wecom_state: str, reporter=None) -> bool:
@@ -1666,6 +1862,10 @@ def _prefetch_media(parts: list[str], cfg: dict) -> None:
         log(f"    [媒体] 预取异常（忽略，只发文字）：{type(exc).__name__}: {exc}")
 
 
+def _hold_expired_replies() -> int:
+    return rlog.hold_before(time.time() - RECOVERY_REPLY_MAX_AGE)
+
+
 def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "online") -> dict:
     """按消息时间正序处理 pending + failed。
 
@@ -1692,6 +1892,8 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             )
         return stats
 
+    if not dry and cfg.get("_reply_mode_enabled"):
+        stats["blocked"] += _hold_expired_replies()
     items = rlog.pending(include_failed=True)
     # 每个会话选一条作为回复目标：优先「有文本」的最新一条。
     # 企业微信在加好友、撤回、系统提示时会插入 type=1011 之类的空文本记录，
@@ -1821,6 +2023,11 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                         break  # do not expand a wrong-target failure to another contact
                     continue
             elif flow_row.get("phase") == "running":
+                if cfg.get("_reply_mode_enabled") and _flow_recovery_expired(flow_row, time.time()):
+                    flow_state.set_phase(cid, "held", error="流程已超过自动恢复时限，请人工核对")
+                    rlog.mark_held(mid, cid, "旧流程需要人工核对")
+                    stats["blocked"] += 1
+                    continue
                 result = _run_flow(store, cfg, cid, name, flow, node_key=str(flow_row.get("node_key")), step_index=int(flow_row.get("step_index") or 0), hint=hint)
                 # Keep the new inbound pending; only the interrupted output ran.
                 if str(mid) == flow_row.get("last_inbound_id"):
@@ -2769,6 +2976,11 @@ def main() -> int:
     # extraction is allowed to fail while WXWork is still on its login page;
     # that must not prevent the QR from reaching the web console.
     remote_client = _make_bridge(cfg, resolve_device_code(cfg))
+    runtime_bridge = _make_bridge(cfg, resolve_device_code(cfg))
+    runtime_heartbeat = RuntimeHeartbeat(runtime_bridge) if runtime_bridge is not None else None
+    if runtime_heartbeat is not None:
+        runtime_bridge.timeout = min(runtime_bridge.timeout, 5)
+        runtime_heartbeat.start()
     qr_pusher = login_qr.LoginQrPusher()
     code_fetcher = login_code.LoginCodeFetcher()
 
@@ -2780,6 +2992,8 @@ def main() -> int:
         qr_state = "login_required" if _consecutive_send_failures >= 2 else state
         qr_pusher.tick(qr_state, remote_client, log=log)
         code_fetcher.tick(state, remote_client, log=log)
+        if runtime_heartbeat is not None:
+            runtime_heartbeat.observe(state, reason="wechat_login" if state == "login_required" else "starting")
         return state
 
     wecom_state = probe_wecom()
@@ -2847,6 +3061,28 @@ def main() -> int:
         log(f"有 {leftover} 条待补发（含上次失败/未发的），本轮会处理")
 
     reporter = _make_reporter(cfg, store)
+    if reporter is not None:
+        reporter.runtime_heartbeat = runtime_heartbeat
+
+    def reception_ready(state: str) -> bool:
+        allowed = _check_reply_mode(state, reporter)
+        if runtime_heartbeat is not None:
+            mode = getattr(_brain, "reply_mode_status", {})
+            issue = mode.get("local_issue", "") if isinstance(mode, dict) else ""
+            if state == "login_required":
+                reason = "wechat_login"
+            elif state != "online":
+                reason = "wechat_unavailable"
+            elif issue == "auth":
+                reason = "authorization"
+            elif not _reply_desktop_active():
+                reason = "desktop_unavailable"
+            elif allowed and not cfg.get("dry_run"):
+                reason = "auto_send_failed" if _consecutive_send_failures else "ready"
+            else:
+                reason = "reply_paused"
+            runtime_heartbeat.observe(state, str(store.self_id() or ""), reason, reporter)
+        return allowed
 
     # 远端配置（Node 4222 下发）：启动拉一次，成功则合并运行参数并缓存
     # config.remote.json；拉不到时 RemoteConfig 内部用缓存兜底，只记一行日志。
@@ -2870,9 +3106,9 @@ def main() -> int:
             reporter.tick(wecom_state, pending_count(), force=True)
         scan_added_contacts(store, cfg)
         scan(store, cfg)
-        if _check_reply_mode(wecom_state, reporter):
+        if reception_ready(wecom_state):
             result = drain(store, cfg, dry=cfg["dry_run"], wecom_state=wecom_state)
-            if _check_reply_mode(wecom_state, reporter):
+            if reception_ready(wecom_state):
                 _flow_tick(store, cfg, wecom_state)
                 pump_safely(store, cfg, reporter, wecom_state)
         else:
@@ -2887,9 +3123,9 @@ def main() -> int:
     write_client_state("ready", detail="数据库初始化完成，可处理消息", wecom_state=wecom_state)
     scan_added_contacts(store, cfg)
     scan(store, cfg)
-    if _check_reply_mode(wecom_state, reporter):
+    if reception_ready(wecom_state):
         drain(store, cfg, dry=cfg["dry_run"], wecom_state=wecom_state)
-        if _check_reply_mode(wecom_state, reporter):
+        if reception_ready(wecom_state):
             _flow_tick(store, cfg, wecom_state)
             pump_safely(store, cfg, reporter, wecom_state)
     _flow_report(cfg)
@@ -2907,6 +3143,7 @@ def main() -> int:
                         f"[账号] 企微账号目录已变化：{store.data_dir} → {switched}；"
                         "本进程退出，由计划任务重启并重新解析"
                     )
+                    write_client_state("stopped", detail="检测到企微账号变化，请核对后重新启动")
                     return ACCOUNT_SWITCH_EXIT_CODE
             # 每轮开头先自检：非 online 时 drain 里一条都不发，只把心跳继续发出去
             state = detect_wecom_state()
@@ -2935,6 +3172,10 @@ def main() -> int:
             qr_state = "login_required" if _consecutive_send_failures >= 2 else wecom_state
             qr_pusher.tick(qr_state, remote_client, log=log)
             code_fetcher.tick(wecom_state, remote_client, log=log)
+            if runtime_heartbeat is not None and wecom_state != "online":
+                runtime_heartbeat.observe(wecom_state, str(store.self_id() or ""),
+                                          "wechat_login" if wecom_state == "login_required" else "wechat_unavailable",
+                                          reporter)
             if reporter is not None:
                 reporter.tick(wecom_state, pending_count())
 
@@ -2947,9 +3188,9 @@ def main() -> int:
             n += scan(store, cfg)
             if n:
                 log(f"新登记 {n} 条")
-            if _check_reply_mode(wecom_state, reporter):
+            if reception_ready(wecom_state):
                 drain(store, cfg, dry=cfg["dry_run"], wecom_state=wecom_state)
-                if _check_reply_mode(wecom_state, reporter):
+                if reception_ready(wecom_state):
                     _flow_tick(store, cfg, wecom_state)
                     pump_safely(store, cfg, reporter, wecom_state)
             _flow_report(cfg)

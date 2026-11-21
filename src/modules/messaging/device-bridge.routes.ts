@@ -245,6 +245,8 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
         // 状态变化的 device_events 落表与推送都收敛在 store.heartbeat 里：
         // 只有真正变化才落一条 reason='reported' 的事件并推 device.updated。
         store.heartbeat(code, state as "online" | "offline" | "scanning", field(body, "account_id"));
+        if (body.runtime === undefined) store.clearRuntimeHealth(code);
+        else store.updateRuntimeHealth(code, body.runtime);
         return { device: store.status(code) };
       }
       if (action === "claim") {

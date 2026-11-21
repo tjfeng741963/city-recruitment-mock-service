@@ -204,3 +204,18 @@ def test_reporter_omits_invalid_installed_commit_without_stopping_reports(tmp_pa
     rep._run({"wecom_state": "online", "queue_size": 0, "last_error": ""}, {"messages": []})
 
     brain.report_config_sync.assert_called_once_with("")
+
+
+def test_runtime_heartbeat_remains_connected_while_sender_stalls(monkeypatch):
+    autopilot = _load_autopilot()
+    now = [100.0]
+    monkeypatch.setattr(autopilot.time, "monotonic", lambda: now[0])
+    heartbeat = autopilot.RuntimeHeartbeat(FakeBridge())
+    heartbeat.observe("online", "fixture-account", reason="ready")
+    assert heartbeat.payload()["runtime"]["reply_ready"] is True
+    now[0] += 91
+    stalled = heartbeat.payload()
+    assert stalled["state"] == "online"
+    assert stalled["runtime"]["wecom_available"] is True
+    assert stalled["runtime"]["reply_ready"] is False
+    assert stalled["runtime"]["reason"] == "loop_stalled"
