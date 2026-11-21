@@ -5,8 +5,8 @@
         返回普通视图
       </el-button>
       <div class="page-heading">
-        <h2 class="page-title">话术流程</h2>
-        <p class="page-desc">查看和配置各岗位当前保存的招聘对话流程</p>
+        <h2 class="page-title">话术流程 <el-tag effect="plain" type="primary">系统 Agent</el-tag></h2>
+        <p class="page-desc">编排消息顺序、发送间隔和等待条件。</p>
       </div>
       <div class="header-actions">
         <el-button v-if="viewMode === 'edit'" type="primary" :icon="Check"
@@ -254,6 +254,13 @@
                           @click="removePart(selectedNode!, index)"
                         />
                       </div>
+                      <el-select v-if="part.kind === 'text' && savedOpeningTexts.length"
+                        aria-label="选用已保存开场文字" class="full-width opening-picker" filterable
+                        placeholder="选用已保存开场文字" :model-value="undefined"
+                        @change="(id: number) => useOpeningText(part, id)">
+                        <el-option v-for="opening in savedOpeningTexts" :key="opening.id" :value="opening.id!"
+                          :label="'开场 ' + opening.seq + ' · ' + opening.content?.slice(0, 52)" />
+                      </el-select>
                       <el-input
                         v-if="part.kind === 'text'"
                         v-model="part.body"
@@ -439,11 +446,25 @@ const fullscreen = ref(false)
 const enterFullscreenButton = ref<{ $el: HTMLElement } | null>(null)
 const exitFullscreenButton = ref<{ $el: HTMLElement } | null>(null)
 const inspectorWidth = ref(360)
-const viewMode = ref<'runtime' | 'edit'>('runtime')
+const viewMode = ref<'runtime' | 'edit'>(route.query.edit === '1' ? 'edit' : 'runtime')
 const runtimeDetails = ref(false)
 const testVisible = ref(route.query.test_engine === 'dify' || route.query.test_engine === 'agent')
 const savedFlow = ref<AgentFlow | null>(null)
 const legacyOpenings = ref<LegacyOpening[]>([])
+const savedOpeningTexts = computed(() => legacyOpenings.value.filter(opening =>
+  opening.kind === 'text' && opening.id != null && opening.content?.trim() && opening.content.length <= 2000,
+))
+function useOpeningText(part: AgentFlowPart, id: number): void {
+  const opening = savedOpeningTexts.value.find(item => item.id === id)
+  const content = opening?.content
+  if (!content || part.kind !== 'text') return
+  if (part.body?.trim() && part.body !== content && part.body !== '请填写此节点要发送的内容') {
+    void ElMessageBox.confirm('用选中的开场文字替换此节点的正文？', '选用开场文字', {type: 'warning'})
+      .then(() => { part.body = content }).catch(() => {})
+    return
+  }
+  part.body = content
+}
 const openingVersion = ref<string | null>(null)
 const clientSync = ref<Record<string, ConfigSyncEvidence | null>>({})
 const evidenceNow = ref(Date.now())
@@ -1124,6 +1145,7 @@ onBeforeUnmount(() => { loadSequence += 1; if(evidenceTimer)clearInterval(eviden
 </script>
 
 <style scoped>
+.opening-picker { margin-bottom: 8px; }
 .flow-page { min-width: 0; }
 .flow-page.is-fullscreen { position: fixed; z-index: 1800; inset: 0; display: flex; flex-direction: column; padding: 16px 20px 12px; overflow: hidden; background: var(--el-bg-color-page, #f5f7fb); }
 .is-fullscreen .page-header { flex-shrink: 0; margin-bottom: 10px; gap: 12px; }

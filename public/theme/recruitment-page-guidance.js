@@ -33,7 +33,7 @@
   }
 
   function adjustCityPage() {
-    if (location.pathname !== "/cities" || !["城市管理","城市与项目"].includes(currentPage())) return;
+    if (location.pathname !== "/cities" || !["城市管理","城市与项目","城市"].includes(currentPage())) return;
     const header = document.querySelector(".page-header");
     const description = document.querySelector(".page-desc");
     const descriptionText = "维护城市完整招聘资料；模式二 Dify 实时读取这里的城市资料和现有知识库。";
@@ -81,7 +81,7 @@
       if (/^(添加|编辑|复制)城市/.test(title)) {
         if (body.firstElementChild) addNote(body.firstElementChild, "city-drawer-" + title, "完整城市资料已恢复。模式二 Dify 实时读取已保存城市资料；下方完整原文编辑可维护旧版本的自定义话术段落。模式一的岗位配置不随本次恢复改动。", "rk-recruitment-drawer-note", true);
       } else if (/^(添加|编辑|复制)岗位/.test(title)) {
-        if (body.firstElementChild) addNote(body.firstElementChild, "position-drawer-" + title, "本页保存的岗位事实进入 Agent 回复；年龄、身高、住宿、薪资、工时、要求和面试地址会参与 dry QA。", "rk-recruitment-drawer-note", true);
+        if (body.firstElementChild) addNote(body.firstElementChild, "position-drawer-" + title, "字段旁的标签说明适用的回复线路。可在接待测试中核对两条线路的实际取值。", "rk-recruitment-drawer-note", true);
         if (title === "添加岗位") bindCityTemplate(drawer);
       }
     }
@@ -131,13 +131,14 @@
           ["招聘要求", requirements.raw],
           ["社保情况", city.social_insurances],
           ["面试时间", interview.time || interview.raw_time],
+          ["默认面试地址", interview.location || interview.raw_address || city.interview_site_name],
           ["面试/工作地址", interview.location || interview.raw_address || city.interview_site_name],
         ];
         let filled = 0;
         for (const [label, rawValue] of values) {
           const value = String(rawValue || "").trim();
           const item = [...drawer.querySelectorAll(".el-form-item")].find((candidate) =>
-            candidate.querySelector(".el-form-item__label")?.textContent.trim() === label,
+            (candidate.querySelector("[data-position-field-name]") || candidate.querySelector(".el-form-item__label"))?.textContent.trim() === label,
           );
           const input = item?.querySelector("input.el-input__inner, textarea.el-textarea__inner");
           if (!input) continue;

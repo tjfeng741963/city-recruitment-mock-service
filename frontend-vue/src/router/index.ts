@@ -46,7 +46,7 @@ const router = createRouter({
           path: 'cities',
           name: 'cities',
           component: () => import('../views/CityView.vue'),
-          meta: { title: '城市与项目', group: '招聘资料' },
+          meta: { title: '城市', group: '招聘资料' },
         },
         {
           path: 'factories',

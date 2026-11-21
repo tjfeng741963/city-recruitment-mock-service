@@ -43,6 +43,7 @@ export interface Factory {
 export interface ServicePosition {
   id: number
   position_name: string
+  city_id?: number
   city_name?: string
   factory_id?: number | null
   is_featured?: boolean

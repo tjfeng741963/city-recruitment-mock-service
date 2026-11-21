@@ -2,7 +2,7 @@
   <section>
     <div class="page-header">
       <div>
-        <h2 class="page-title">城市与项目</h2>
+        <h2 class="page-title">城市</h2>
         <p class="page-desc">管理各城市招聘配置，包括薪资、面试、线路等信息</p>
       </div>
       <div class="header-actions">

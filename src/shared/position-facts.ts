@@ -2,6 +2,18 @@ type Values = Record<string, unknown>;
 
 const text = (value: unknown): string => String(value ?? "").trim();
 
+export function normalizeInterviewPoints(value: unknown): Array<{name: string; address: string}> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap(item => {
+    if (typeof item === "string") return item.trim() ? [{name: item.trim(), address: ""}] : [];
+    if (!item || typeof item !== "object") return [];
+    const point = item as Values;
+    const name = typeof point.name === "string" ? point.name.trim() : "";
+    const address = typeof point.address === "string" ? point.address.trim() : "";
+    return name ? [{name, address}] : [];
+  });
+}
+
 export function normalizePositionFacts(source: Values): Values {
   const result = { ...source };
   const sections = source.base_sections && typeof source.base_sections === "object"
@@ -23,7 +35,10 @@ export function normalizePositionFacts(source: Values): Values {
   if (has(source, "accommodation") || has(sections, "meal_dorm") || has(sections, "social_insurance")) {
     result.welfare_text = [...new Set([source.accommodation, sections.meal_dorm, sections.social_insurance].map(text).filter(Boolean))].join("；");
   }
-  if (has(source, "address") || has(source, "store_address")) {
+  if (has(source, "work_address")) {
+    result.place = text(source.work_address);
+    if (has(source, "interview_address")) result.interview_address = text(source.interview_address);
+  } else if (has(source, "address") || has(source, "store_address")) {
     const address = text(source.address) || text(source.store_address);
     result.place = address;
     result.interview_address = address;
@@ -70,6 +85,12 @@ export function applyCityDefaultsToPosition(city: Values, body: Values): Values 
   fill(result, "hours_text", sections.work_hours || sections.shift_info);
   fill(result, "basic_requirements", sections.requirements);
   fill(result, "interview_time", interview.time || interview.raw_time);
-  fill(result, "address", interview.location || interview.raw_address || city.interview_site_name);
+  const defaultAddress = interview.location || interview.raw_address || city.interview_site_name;
+  if (Object.prototype.hasOwnProperty.call(body, "work_address")) {
+    if (!normalizeInterviewPoints(body.interview_points).length) fill(result, "interview_address", defaultAddress);
+    result.address = text(result.interview_address) || text(result.work_address);
+  } else {
+    fill(result, "address", defaultAddress);
+  }
   return result;
 }

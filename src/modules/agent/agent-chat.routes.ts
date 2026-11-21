@@ -9,7 +9,7 @@ import { isValidDeviceToken } from "./position-scripts.routes.js";
 import { firstFlowSegment } from "./agent-flow.routes.js";
 import { complete, llmConfig, parseJsonObject } from "./agent-llm.js";
 import { deviceReplyProvider, generateDifyReply, hasDifyDeviceToken, ownsReplyDevice } from "../dify/dify-reply.js";
-import { normalizePositionFacts } from "../../shared/position-facts.js";
+import { normalizeInterviewPoints, normalizePositionFacts } from "../../shared/position-facts.js";
 import { positionKnowledge } from './position-knowledge.js';
 import {
   buildOrchestration,
@@ -118,6 +118,9 @@ function buildFacts(db: DatabaseSync, row: PositionRow | undefined): Record<stri
     // 「几点面试 / 怎么走」，不硬提取、不硬编码。
     interview_time_text: text(data.interview_time_text),
     interview_address: text(data.interview_address),
+    interview_points: normalizeInterviewPoints(data.interview_points)
+      .map(point => point.address && point.address !== point.name ? `${point.name}（${point.address}）` : point.name)
+      .join("；"),
     interview_material: text(data.interview_material),
     basic_requirements: text(data.basic_requirements),
     onboarding_notes: text(data.onboarding_notes),
