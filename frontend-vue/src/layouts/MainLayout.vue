@@ -66,11 +66,11 @@ function groupIcon(key: string): string {
   return ({operations:'ChatDotRound',basic:'Briefcase',knowledge:'ChatLineRound',system:'Tools'} as Record<string,string>)[key] || 'Grid'
 }
 function itemIcon(path: string): string {
-  return ({'/conversations':'ChatLineRound','/candidates':'User','/archive':'Tickets','/agent-devices':'Monitor','/cities':'Location','/service-positions':'Briefcase','/recruitment-flow':'Share','/knowledge':'Reading','/media':'Picture','/users':'Lock','/settings':'Setting','/recruiters':'Avatar'} as Record<string,string>)[path] || 'Star'
+  return ({'/conversations':'ChatLineRound','/candidates':'User','/archive':'Tickets','/agent-devices':'Monitor','/cities':'Location','/service-positions':'Briefcase','/recruitment-flow':'Share','/users':'Lock','/settings':'Setting','/recruiters':'Avatar'} as Record<string,string>)[path] || 'Star'
 }
 function menuTarget(path: string): string {
   const id = readPositionContext(auth.user?.id ?? auth.user?.username ?? '')
-  return ['/knowledge','/media','/recruitment-flow'].includes(path) && id ? `${path}?position_id=${id}` : path
+  return path === '/recruitment-flow' && id ? `${path}?position_id=${id}` : path
 }
 // 对齐 theme/sidebar.js：收起状态记忆在 localStorage，窄屏（≤1200px）自动收起
 const NAV_COLLAPSED_KEY = 'rk-nav-collapsed'
@@ -96,12 +96,16 @@ const onNarrowChange = (event: MediaQueryListEvent): void => {
 
 const initial = computed(() => (auth.user?.username || 'L').slice(0, 1).toUpperCase())
 
-/** /device-report 复用监控看板菜单项的高亮 */
-const activeMenu = computed(() => menuTarget(route.path === '/device-report' ? '/dashboard' : route.path))
+const navPath = computed(() => {
+  if (route.path === '/device-report') return '/dashboard'
+  if (route.path === '/knowledge' || route.path === '/media') return '/recruitment-flow'
+  return route.path
+})
+const activeMenu = computed(() => menuTarget(navPath.value))
 
 /** 打开当前所在分组 */
 const defaultOpeneds = computed(() => {
-  return navigation.value.filter(group => group.items.some(item => item.path === route.path)).map(group => group.key)
+  return navigation.value.filter(group => group.items.some(item => item.path === navPath.value)).map(group => group.key)
 })
 
 onMounted(() => {
