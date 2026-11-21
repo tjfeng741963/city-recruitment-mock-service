@@ -1,4 +1,5 @@
 import { archiveCandidates } from './archive-candidates.js';
+import { recruitmentCandidates, candidateConversation } from './recruitment-candidates.js';
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
@@ -453,18 +454,20 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       const page = Math.max(1, Number(q.page ?? 1) || 1);
       const pageSize = Math.min(200, Math.max(1, Number(q.page_size ?? 50) || 50));
 
-      const all = archiveCandidates(db);
+      const all = recruitmentCandidates(db);
       const stats = {
         total: all.length,
         invited: all.filter((item) => item.status === "invited").length,
         disqualified: all.filter((item) => item.status === "disqualified").length,
         checked_in: all.filter((item) => item.status === "checked_in").length,
+        communicating: all.filter((item) => item.status === 'communicating').length,
+        pending_information: all.filter((item) => item.status === 'pending_information').length,
       };
 
       const filtered = all.filter((item) => {
-        if (item.status !== status) return false;
+        if (status !== 'all' && item.status !== status) return false;
         if (recruiterFilter && item.recruiter_id !== recruiterFilter) return false;
-        if (eventDate && !item.event_at.startsWith(eventDate)) return false;
+        if (eventDate && !String(item.event_at || '').startsWith(eventDate)) return false;
         if (interviewDate && item.interview_date !== interviewDate) return false;
         return true;
       });
@@ -481,11 +484,12 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
   // 面试到达状态：运营在面试登记面板把约定时间到了的客户标记「已到达/爽约」。
   app.get<{Params:{key:string};Querystring:{before_id?:string}}>("/api/v1/agent/candidates/:key/messages",async(request,reply)=>{
     if(request.auth?.role!=='admin') return reply.code(403).send({detail:'Admin access required'});
+    const direct = candidateConversation(db,request.params.key);
     const archive=db.prepare('SELECT session_key FROM agent_archive WHERE session_key=?').get(request.params.key);
-    if(!archive) return reply.code(404).send({detail:'登记不存在'});
+    if(!archive && !direct) return reply.code(404).send({detail:'记录不存在或没有关联对话'});
     const matches=(db.prepare('SELECT COUNT(*) n FROM agent_conversations WHERE external_conversation_id=?').get(request.params.key) as {n:number}).n;
-    if(matches>1) return reply.code(409).send({detail:'此旧登记关联多个设备，需先核对会话，不能自动选择对话记录'});
-    const conversation=db.prepare(`SELECT device_code,customer_id,nickname FROM agent_conversations
+    if(!direct && matches>1) return reply.code(409).send({detail:'此旧登记关联多个设备，需先核对会话，不能自动选择对话记录'});
+    const conversation=direct || db.prepare(`SELECT device_code,customer_id,nickname FROM agent_conversations
       WHERE external_conversation_id=? ORDER BY updated_at DESC,id DESC LIMIT 1`).get(request.params.key) as {device_code:string;customer_id:string;nickname:string}|undefined;
     if(!conversation) return reply.code(404).send({detail:'这条登记没有关联对话'});
     const before=Number(request.query.before_id)||Number.MAX_SAFE_INTEGER;
