@@ -5,6 +5,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { isProfileTokenValid } from "./profile.routes.js";
 import {
+  DIFY_MEDIA_NAME,
+  difyMediaName,
   MEDIA_MAX_BYTES,
   mediaAbsolutePath,
   mediaDir,
@@ -188,10 +190,13 @@ export async function registerPositionScriptRoutes(app: FastifyInstance, db: Dat
       return reply.code(403).send({ detail: "Not authenticated" });
     }
     const name = request.params.name;
-    const row = db.prepare("SELECT name,storage_path,sha256,kind FROM media_assets WHERE name=? AND status='enabled'")
-      .get(name) as { name: string; storage_path: string; sha256: string; kind: string } | undefined;
-    if (!row) return reply.code(404).send({ detail: "Media not found" });
-    const absolute = mediaAbsolutePath(row.storage_path);
+    const alias = DIFY_MEDIA_NAME.exec(name);
+    const row = (alias
+      ? db.prepare("SELECT id,name,storage_path,sha256,kind FROM media_assets WHERE id=? AND sha256=? AND status='enabled'").get(Number(alias[1]),alias[2])
+      : db.prepare("SELECT id,name,storage_path,sha256,kind FROM media_assets WHERE name=? AND status='enabled'").get(name));
+    const asset = row as { id:number; name:string; storage_path:string; sha256:string; kind:MediaKind } | undefined;
+    if (!asset || (alias && difyMediaName(asset)!==name)) return reply.code(404).send({ detail: "Media not found" });
+    const absolute = mediaAbsolutePath(asset.storage_path);
     // storage_path 来自库内，但仍做一次越界检查：迁移写错也不能读到 data 之外。
     if (!absolute) return reply.code(404).send({ detail: "Media not found" });
     let buffer: Buffer;
@@ -200,13 +205,13 @@ export async function registerPositionScriptRoutes(app: FastifyInstance, db: Dat
     } catch {
       return reply.code(404).send({ detail: "Media file missing" });
     }
-    const storageMime = mimeOfName(row.storage_path);
+    const storageMime = mimeOfName(asset.storage_path);
     return reply
       .code(200)
-      .header("X-Content-SHA256", String(row.sha256))
+      .header("X-Content-SHA256", String(asset.sha256))
       .header("Content-Length", String(buffer.length))
       .header("Cache-Control", "private, max-age=3600")
-      .type(storageMime === "application/octet-stream" ? mimeOfName(row.name) : storageMime)
+      .type(storageMime === "application/octet-stream" ? mimeOfName(asset.name) : storageMime)
       .send(buffer);
   });
 }
