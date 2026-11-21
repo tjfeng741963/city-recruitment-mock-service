@@ -71,6 +71,153 @@ describe("agent chat routes", () => {
     expect(body.llm.configured).toBe(false);
   });
 
+  it("city defaults are copied once to new position facts read by the agent", async () => {
+    const city = await app.inject({
+      method: "POST",
+      url: "/api/v1/cities",
+      headers: admin,
+      payload: {
+        city_name: "模板测试城",
+        salary: { raw: "22元/小时，综合月薪6500元" },
+        work_hours: { raw: "两班倒，每天工作10小时" },
+        requirements: { raw: "年龄18-40岁，身体健康" },
+        social_insurances: "转正后缴纳五险",
+        interview: { time: "周一至周六上午", location: "测试招聘点" },
+      },
+    });
+    expect(city.statusCode).toBe(200);
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/service-positions",
+      headers: admin,
+      payload: {
+        position_name: "模板岗位",
+        city_id: city.json().id,
+        age_range: "",
+        address: "",
+        interview_time: "",
+        base_sections: { salary_detail: "", work_hours: "", requirements: "" },
+      },
+    });
+    expect(created.statusCode).toBe(200);
+
+    const context = await app.inject({
+      method: "GET",
+      url: `/api/v1/agent/context?position_id=${created.json().id}`,
+      headers: admin,
+    });
+    expect(context.statusCode).toBe(200);
+    expect(context.json().facts).toMatchObject({
+      wage_text: "22元/小时，综合月薪6500元",
+      hours_text: "两班倒，每天工作10小时",
+      basic_requirements: "年龄18-40岁，身体健康",
+      welfare_text: "转正后缴纳五险",
+      interview_time: "周一至周六上午",
+      interview_address: "测试招聘点",
+    });
+  });
+
+  it("maps existing position form fields into the agent fact card", async () => {
+    const updated = await app.inject({
+      method: "PUT",
+      url: `/api/v1/service-positions/${positionId}`,
+      headers: admin,
+      payload: {
+        age_range: "18-38岁",
+        height_require: "男170cm以上",
+        accommodation: "包住，水电平摊",
+        address: "广州市番禺区招聘点",
+        base_sections: {
+          salary_detail: "底薪3000元，综合月薪6500元",
+          work_hours: "两班倒，每天10小时",
+          requirements: "身体健康，无犯罪记录",
+          work_content: "地铁站安全检查",
+          dorm_env: "宿舍4人间，空调热水器齐全",
+        },
+      },
+    });
+    expect(updated.statusCode).toBe(200);
+
+    const context = await app.inject({
+      method: "GET",
+      url: `/api/v1/agent/context?position_id=${positionId}`,
+      headers: admin,
+    });
+    expect(context.json().facts).toMatchObject({
+      age_text: "18-38岁",
+      height_text: "男170cm以上",
+      welfare_text: "包住，水电平摊",
+      place: "广州市番禺区招聘点",
+      wage_text: "底薪3000元，综合月薪6500元",
+      hours_text: "两班倒，每天10小时",
+      basic_requirements: "身体健康，无犯罪记录",
+      job_content: "地铁站安全检查",
+      additional_info: expect.stringContaining("宿舍4人间，空调热水器齐全"),
+    });
+
+    const dry = await app.inject({
+      method: "POST",
+      url: "/api/v1/agent/chat",
+      headers: admin,
+      payload: { position_id: positionId, text: "面试在哪里", dry: true },
+    });
+    expect(dry.json().messages[0].content).toContain("- 面试地址：广州市番禺区招聘点");
+    expect(dry.json().messages[0].content).toContain("- 招聘要求：身体健康，无犯罪记录");
+  });
+
+  it("blocks live replies from a disabled position while allowing dry QA", async () => {
+    await app.inject({
+      method: "PUT",
+      url: `/api/v1/service-positions/${positionId}`,
+      headers: admin,
+      payload: { is_active: false },
+    });
+    const live = await app.inject({
+      method: "POST",
+      url: "/api/v1/agent/chat",
+      headers: admin,
+      payload: { position_id: positionId, text: "多少钱" },
+    });
+    expect(live.statusCode).toBe(409);
+    expect(live.json().detail).toContain("已停用");
+    const dry = await app.inject({
+      method: "POST",
+      url: "/api/v1/agent/chat",
+      headers: admin,
+      payload: { position_id: positionId, text: "多少钱", dry: true },
+    });
+    expect(dry.statusCode).toBe(200);
+  });
+
+  it("does not return opening messages for a disabled position", async () => {
+    const deviceCode = "opening-disabled-test";
+    app.db.prepare("INSERT INTO agent_devices(device_name,status,data_json) VALUES ('测试设备','enabled',?)")
+      .run(JSON.stringify({ device_code: deviceCode, position_id: positionId }));
+    app.db.prepare("INSERT INTO position_opening(position_id,seq,kind,content) VALUES (?,1,'text','欢迎了解岗位')")
+      .run(positionId);
+
+    const enabled = await app.inject({
+      method: "GET",
+      url: `/api/v1/agent/opening?device_code=${deviceCode}`,
+      headers: admin,
+    });
+    expect(enabled.json().items).toHaveLength(1);
+
+    await app.inject({
+      method: "PUT",
+      url: `/api/v1/service-positions/${positionId}`,
+      headers: admin,
+      payload: { is_active: false },
+    });
+    const disabled = await app.inject({
+      method: "GET",
+      url: `/api/v1/agent/opening?device_code=${deviceCode}`,
+      headers: admin,
+    });
+    expect(disabled.json()).toMatchObject({ position_id: positionId, persona: "", items: [], detail: "岗位已停用" });
+  });
+
   it("非管理员读不到上下文，也调不了对话", async () => {
     expect(
       (
