@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { afterEach, expect, it } from "vitest";
 import { buildServer } from "../src/server.js";
 import { DeviceBridgeStore } from "../src/modules/messaging/device-bridge.js";
@@ -46,4 +47,17 @@ it("persists an acknowledged two-way transition and rejects stale receipts", asy
   expect((await control({ id: third.id, step: "applied", provider: "dify", wecom_online: true })).statusCode).toBe(409);
   expect((await control({ id: undo.id, step: "prepared", wecom_online: true })).json().phase).toBe("applying");
   expect((await control({ id: undo.id, step: "applied", provider: "agent", wecom_online: true })).json()).toMatchObject({ phase: "cancelled", effective: "agent", generation: second.id });
+});
+
+it("mounts the actual mode switch in the account table with both options", () => {
+  const page = readFileSync("frontend-vue/src/views/AgentDeviceView.vue", "utf8");
+  const control = readFileSync("frontend-vue/src/components/agent/ReplyModeSwitch.vue", "utf8");
+  const location = page.indexOf("<ReplyModeSwitch");
+  expect(location).toBeGreaterThan(page.indexOf('label="回复来源" width='));
+  expect(location).toBeLessThan(page.indexOf('label="负责人" min-width='));
+  expect(page.match(/<ReplyModeSwitch\b/g)).toHaveLength(1);
+  expect(control.includes("<el-select")).toBe(true);
+  expect(control.includes('value="agent"')).toBe(true);
+  expect(control.includes('value="dify"')).toBe(true);
+  expect(control.includes("devicesApi.requestReplyMode")).toBe(true);
 });
