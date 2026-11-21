@@ -1,3 +1,4 @@
+import { replyModePending } from "../dify/reply-mode-transition.js";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import type { MessageChannelProvider, OutboundMessageInput, OutboundMessageResult } from "./message-channel-provider.js";
@@ -31,6 +32,7 @@ export class DeviceBridgeStore {
     try {
       this.db.prepare(`INSERT INTO bridge_devices(device_code,token_hash) VALUES (?,?)
         ON CONFLICT(device_code) DO UPDATE SET token_hash=excluded.token_hash,state='offline',heartbeat_at=0`).run(code, digest(token));
+      this.db.prepare("UPDATE reply_mode_transition SET client_at=0,client_ready=0 WHERE device_code=?").run(code);
       // Rotating credentials cannot silently replay commands that may have been sent.
       for (const command of pending) {
         command.status = command.status === "claimed" ? "unknown" : "failed";
@@ -281,7 +283,7 @@ export class DeviceBridgeStore {
 
   claim(code: string): (BridgeCommand & { nickname: string }) | null {
     this.expireClaims(code);
-    if (this.status(code)?.state !== "online") return null;
+    if (replyModePending(this.db, code) || this.status(code)?.state !== "online") return null;
     const next = this.db.prepare("SELECT id FROM bridge_commands WHERE device_code=? AND status='queued' ORDER BY created_at,rowid LIMIT 1").get(code) as { id: string } | undefined;
     if (!next) return null;
     const claimed = this.db.prepare("UPDATE bridge_commands SET status='claimed',lease_token=?,lease_until=? WHERE id=? AND status='queued'")

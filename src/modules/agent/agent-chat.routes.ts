@@ -1,3 +1,4 @@
+import { replyModePending } from "../dify/reply-mode-transition.js";
 import { archiveCandidates } from './archive-candidates.js';
 import { recruitmentCandidates, candidateConversation } from './recruitment-candidates.js';
 import { randomUUID } from "node:crypto";
@@ -588,6 +589,9 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
     if (!isAdmin(request) && !isValidDeviceToken(db, request)) return reply.code(403).send(ADMIN_REQUIRED);
     const body = request.body ?? {};
     const deviceCode = text(body.device_code).trim();
+    if (deviceCode && replyModePending(db, deviceCode)) {
+      return { ok: false, code: "reply_mode_pending", error: "回复来源正在切换" };
+    }
     if (deviceCode && deviceReplyProvider(db, deviceCode) === "dify") {
       if (!ownsReplyDevice(db, request, deviceCode)) return reply.code(403).send(ADMIN_REQUIRED);
       const input = text(body.text).trim();

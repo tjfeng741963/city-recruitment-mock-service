@@ -1,3 +1,4 @@
+import { replyModeRow } from "../dify/reply-mode-transition.js";
 import type { FastifyInstance } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
 import { DeviceBridgeStore } from "../messaging/device-bridge.js";
@@ -317,7 +318,7 @@ export async function registerAgentFlowRoutes(app: FastifyInstance, db: Database
       .get(deviceCode) as { data_json: string } | undefined;
     const metadata = {
       device_code: deviceCode,
-      reply_provider: row ? deviceReplyProvider(db, deviceCode) : null,
+      reply_provider: row ? replyModeRow(db, deviceCode)?.effective ?? deviceReplyProvider(db, deviceCode) : null,
       bridge_state: row ? deviceStore.status(deviceCode)?.state ?? null : null,
     };
     const stored = parseObject(parseObject(row?.data_json).config_sync);
@@ -356,11 +357,13 @@ export async function registerAgentFlowRoutes(app: FastifyInstance, db: Database
   app.get<{ Querystring: { device_code?: string } }>("/api/v1/agent/flow", async (request, reply) => {
     const code = str(request.query.device_code).trim();
     if (!deviceAllowed(request, code)) return reply.code(403).send({ detail: "Device token or scope invalid" });
-    if (deviceReplyProvider(db, code) === "dify") return { ok: true, provider: "dify", version: 0, nodes: [], edges: [], status: "disabled" };
+    const mode = replyModeRow(db, code);
+    const reply_mode_id = mode?.phase === "applying" && !mode.rollback ? mode.id : mode?.generation || "";
+    if (deviceReplyProvider(db, code) === "dify") return { ok: true, provider: "dify", reply_mode_id, version: 0, nodes: [], edges: [], status: "disabled" };
     const positionId = devicePositionId(db, code);
     const result = readFlow(db, positionId);
     // 停用只阻止新会话；在途会话使用本地持久化快照。
-    return result.status === "enabled" ? result : { ...result, nodes: [], edges: [] };
+    return { ...result, ...(result.status === "enabled" ? {} : { nodes: [], edges: [] }), reply_mode_id };
   });
 
   app.post<{ Body: Json }>("/api/v1/agent-flow/migrate", async (request, reply) => {

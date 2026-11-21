@@ -246,6 +246,12 @@ class ManagerService:
 
         if owned:
             result["process_identities"] = owned
+            try:
+                mode = json.loads((self.root / "logs" / "reply-mode-state.json").read_text(encoding="utf-8"))
+                if isinstance(mode, dict) and mode.get("pid") in owned_pids:
+                    result["reply_mode"] = mode
+            except (OSError, ValueError, TypeError):
+                pass
         return result
 
     def watch_status(self, previous: dict) -> dict:
@@ -258,7 +264,7 @@ class ManagerService:
             detail = runtime.get("detail") if runtime.get("status") == "failed" else None
             return {**previous, "running": 0, "startup_status": "failed", "wecom_state": None,
                     "startup_detail": detail or "自动回复进程已退出，请查看日志。",
-                    "process_identities": []}
+                    "process_identities": [], "reply_mode": None}
         return self._status(surviving, previous.get("other_running", 0), previous.get("task_enabled"))
 
     def check(self) -> dict[str, str]:

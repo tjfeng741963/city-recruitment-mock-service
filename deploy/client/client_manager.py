@@ -39,6 +39,44 @@ def friendly_error(exc: Exception) -> str:
     return text or type(exc).__name__
 
 
+def reply_mode_text(state: dict | None, now: float | None = None) -> str:
+    if not state or not state.get("running"):
+        return ""
+    mode = state.get("reply_mode")
+    if not mode:
+        return "正在确认回复来源"
+    now = time.time() if now is None else now
+    names = {"agent": "系统 Agent", "dify": "Dify"}
+    effective = names.get(mode.get("effective"), "待确认")
+    target = names.get(mode.get("target"), "待确认")
+    stage = mode.get("phase")
+    elapsed = max(0, int((mode.get("elapsed_seconds") or 0) + now - (mode.get("local_at") or now)))
+    age = f"{elapsed // 60} 分 {elapsed % 60} 秒" if elapsed >= 60 else f"{elapsed} 秒"
+    if now - (mode.get("local_at") or 0) > 20:
+        return f"上次确认 {effective} · 状态暂未更新"
+    if stage in {"waiting", "applying"}:
+        if mode.get("local_issue") in {"network", "auth"}:
+            detail = "设备鉴权失败，请检查配对" if mode.get("local_issue") == "auth" else "等待网络恢复"
+        else:
+            reasons = {
+                "wechat": "等待企业微信登录",
+                "receipt": "等待发送回执",
+                "local_state": "核对本地发送记录",
+                "configuration": "配置未匹配，正在重试",
+                "desktop": "等待 Windows 桌面",
+            }
+            detail = reasons.get(mode.get("local_issue") or mode.get("issue")) or (
+                "正在应用配置" if stage == "applying" else "等待当前任务结束"
+            )
+        action = "恢复" if mode.get("rollback") else "切换"
+        return f"{effective} → {target} · {action}中 · {detail} · 已等待 {age}"
+    if not mode.get("ready"):
+        detail = "设备鉴权失败，请检查配对" if mode.get("local_issue") == "auth" else "等待网络、配置或企微就绪"
+        return f"上次确认 {effective} · {detail}"
+    suffix = " · 已切换" if stage == "completed" else " · 已恢复" if stage == "cancelled" else ""
+    return f"正在使用 {effective}{suffix}"
+
+
 class ManagerWindow:
     def __init__(self, window: tk.Tk, service: ManagerService):
         self.window = window
@@ -56,6 +94,7 @@ class ManagerWindow:
         self.latest_text = tk.StringVar(value="点击「检查更新」获取")
         self.runtime_text = tk.StringVar(value="正在读取本机状态…")
         self.schedule_text = tk.StringVar(value="")
+        self.mode_text = tk.StringVar(value="")
         self.message_text = tk.StringVar(value="更新代码与启动自动回复分别操作。")
         self.stage_text = tk.StringVar(value="就绪")
         self._build()
@@ -90,6 +129,7 @@ class ManagerWindow:
         self.runtime_label = tk.Label(status, textvariable=self.runtime_text, bg="white", fg=INK, font=("Microsoft YaHei UI", 13, "bold"))
         self.runtime_label.pack(anchor="w")
         tk.Label(status, textvariable=self.schedule_text, bg="white", fg=MUTED).pack(anchor="w", pady=(5, 0))
+        tk.Label(status, textvariable=self.mode_text, bg="white", fg=INK, wraplength=790, justify="left").pack(anchor="w", pady=(5, 0))
 
         versions = tk.Frame(outer, bg=BACKGROUND)
         versions.pack(fill="x", pady=(16, 12))
@@ -182,6 +222,7 @@ class ManagerWindow:
 
     def _apply_state(self, state, *, watched=False):
         self.state = state
+        self.mode_text.set(reply_mode_text(state))
         if state is None:
             self.current_text.set("状态不可用，请刷新")
             self.runtime_text.set("状态读取失败，请刷新后再操作")
@@ -204,7 +245,11 @@ class ManagerWindow:
         self.runtime_text.set(status_text.get(startup_status, "自动回复状态未知"))
         if state.get("startup_detail") and (not watched or startup_status == "failed"):
             self.message_text.set(state["startup_detail"])
-        self.runtime_label.configure(fg="#15724a" if startup_status == "ready" and count == 1 else INK)
+        mode = state.get("reply_mode")
+        if startup_status == "ready" and mode and (not mode.get("ready") or time.time() - (mode.get("local_at") or 0) > 20):
+            self.runtime_text.set("自动回复等待确认")
+        self.runtime_label.configure(fg="#15724a" if startup_status == "ready" and count == 1
+                                     and mode and mode.get("ready") and time.time() - (mode.get("local_at") or 0) <= 20 else INK)
         enabled = state["task_enabled"]
         schedule = "登录自动启动已启用" if enabled is True else "登录自动启动已暂停" if enabled is False else "未能读取登录自动启动任务"
         if state.get("other_running"):
