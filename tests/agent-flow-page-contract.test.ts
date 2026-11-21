@@ -11,9 +11,9 @@ describe("招聘流程图入口接线", () => {
 
     expect(router).toContain("path: 'recruitment-flow'");
     expect(router).toContain("component: () => import('../views/AgentFlowView.vue')");
-    expect(router).toContain("title: '招聘流程图', group: '知识管理'");
-    expect(menu).toContain('index="/recruitment-flow"');
-    expect(menu).toContain("<template #title>流程图</template>");
+    expect(router).toContain("title: '话术流程', group: 'AI 接待'");
+    expect(read("frontend-vue/src/layouts/navigation.ts")).toContain("path: '/recruitment-flow'");
+    expect(read("frontend-vue/src/layouts/navigation.ts")).toContain("label: '话术流程'");
   });
 
   it("sends the current drawer position to the unified flow page instead of editing a second graph", () => {

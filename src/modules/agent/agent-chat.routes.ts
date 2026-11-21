@@ -6,6 +6,8 @@ import { isValidDeviceToken } from "./position-scripts.routes.js";
 import { firstFlowSegment } from "./agent-flow.routes.js";
 import { complete, llmConfig, parseJsonObject } from "./agent-llm.js";
 import { deviceReplyProvider, generateDifyReply, ownsReplyDevice } from "../dify/dify-reply.js";
+import { normalizePositionFacts } from "../../shared/position-facts.js";
+import { positionKnowledge } from './position-knowledge.js';
 import {
   buildOrchestration,
   guessCustomerName,
@@ -39,6 +41,7 @@ const ADMIN_REQUIRED = { detail: "Admin access required" } as const;
 type PositionRow = {
   id: number;
   position_name: string;
+  status: string;
   data_json: string;
   factory_name: string | null;
   city_name: string | null;
@@ -79,7 +82,7 @@ function safeJson(raw: string | null | undefined): Record<string, unknown> {
 function positionRow(db: DatabaseSync, positionId: number): PositionRow | undefined {
   return db
     .prepare(
-      `SELECT p.id, p.position_name, p.data_json,
+      `SELECT p.id, p.position_name, p.status, p.data_json,
               f.factory_name AS factory_name, c.city_name AS city_name
          FROM service_positions p
          LEFT JOIN factories f ON f.id = p.factory_id
@@ -96,7 +99,7 @@ function positionOfDevice(db: DatabaseSync, deviceCode: string): number {
 
 function buildFacts(db: DatabaseSync, row: PositionRow | undefined): Record<string, string> {
   if (!row) return {};
-  const data = safeJson(row.data_json);
+  const data = normalizePositionFacts(safeJson(row.data_json));
   const merged: Record<string, string> = {
     city: text(data.city) || String(row.city_name || ""),
     factory_name: text(data.factory_name) || String(row.factory_name || ""),
@@ -118,6 +121,7 @@ function buildFacts(db: DatabaseSync, row: PositionRow | undefined): Record<stri
     tattoo_policy: text(data.tattoo_policy),
     cert_text: text(data.cert_text),
     job_content: text(data.job_content),
+    additional_info: text(data.additional_info),
   };
   // 岗位专属媒体（2026-11-17 媒体分层）：通用素材（工作内容/安检视频/宿舍）
   // 全岗位共用、模型按媒体库清单随取；面试地点图各城市地址不同，绑定到岗位
@@ -252,6 +256,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         },
         persona,
         facts,
+        knowledge: positionKnowledge(db, positionId, facts),
         opening,
         scripts: parseScripts(persona).map((script) => ({
           id: script.id,
@@ -280,6 +285,10 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       const positionId = positionOfDevice(db, deviceCode);
       if (positionId <= 0) {
         return { position_id: 0, persona: "", items: [], detail: "设备未绑定岗位" };
+      }
+      const position = positionRow(db, positionId);
+      if (position && position.status !== "enabled") {
+        return { position_id: positionId, persona: "", items: [], detail: "岗位已停用" };
       }
       return {
         position_id: positionId,
@@ -637,6 +646,10 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       return generateDifyReply(db, { deviceCode, positionId: positionOfDevice(db, deviceCode), sessionKey: text(body.session_key).trim().slice(0,120), text: input, dry: body.dry === true });
     }
     const positionId = int(body.position_id) || (deviceCode ? positionOfDevice(db, deviceCode) : 0);
+    if (body.preview === true) {
+      if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
+      if (body.session_key || deviceCode) return reply.code(422).send({ detail: '模拟回答不能绑定真实会话或设备' });
+    }
     if (positionId <= 0) return reply.code(422).send({ detail: "position_id or device_code is required" });
 
     const input = text(body.text).trim();
@@ -647,6 +660,9 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
 
     const row = positionRow(db, positionId);
     if (!row) return reply.code(404).send({ detail: "position not found" });
+    if (row.status !== "enabled" && body.dry !== true && body.preview !== true) {
+      return reply.code(409).send({ detail: "该岗位已停用，不能生成真实回复" });
+    }
 
     // ── 会话记忆在服务端（2026-11-17）──────────────────────────
     // 传 session_key 时，全量上下文存 agent_session 表，客户端只报
@@ -702,7 +718,8 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
     }));
     // 编排：system(人设+今天日期+事实+话术库+规则) + 开场序列 + 全量历史 + 当前这句
     // （DeepSeek 无状态多轮拼接；上下文归服务端持有）
-    const { messages, scripts } = buildOrchestration({ persona, facts, opening, now: nowLabel, history, input, sentSummary });
+    const knowledge = positionKnowledge(db, positionId, facts);
+    const { messages, scripts } = buildOrchestration({ persona, facts, opening, now: nowLabel, history, input, sentSummary, knowledge });
 
     // dry：只回拼好的 prompt，不调模型、不写会话。调试台用它确认
     // 「人设 + 事实 + 话术库 + 开场 + 历史」有没有喂对。
@@ -710,6 +727,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       return {
         ok: true,
         dry: true,
+        knowledge,
         session_key: sessionKey || null,
         messages,
         facts,
@@ -781,6 +799,11 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         }
         replyPayload.messages = resolved;
       }
+
+      if (body.preview === true) return {
+        ok: true, preview: true, reply: replyPayload, facts, knowledge,
+        model: result.model, usage: result.usage, latency_ms: result.latency_ms,
+      };
 
       // 信任模式：不做代码级护栏，模型按 prompt 约束引用话术原文（2026-11-17）。
       // 会话成功才有记忆：客户这句 + 模型完整 JSON 输出（messages/capture/

@@ -1,0 +1,1 @@
+const o=e=>`recruitment-position:${e}`;function n(e){const t=Number(localStorage.getItem(o(e)));return Number.isSafeInteger(t)&&t>0?t:0}function r(e,t){t>0?localStorage.setItem(o(e),String(t)):localStorage.removeItem(o(e))}export{n as r,r as s};
