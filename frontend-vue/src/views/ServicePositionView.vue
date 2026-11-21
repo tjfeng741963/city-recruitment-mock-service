@@ -32,7 +32,7 @@
         <el-option label="全部" value="" />
         <el-option label="仅看主推" value="featured" />
       </el-select>
-      <el-select v-model="cityFilter" class="filter-select" placeholder="全部城市" clearable>
+      <el-select v-model="cityFilter" class="filter-select" placeholder="全部城市" clearable @change="changeCityFilter">
         <el-option label="全部城市" value="" />
         <el-option v-for="city in cityOptions" :key="city" :label="city" :value="city" />
       </el-select>
@@ -145,6 +145,7 @@
       v-model="formVisible"
       :mode="formMode"
       :position-id="activePositionId"
+      :initial-city-id="linkedCityId || cities.find(city => city.city_name === cityFilter)?.id"
       @saved="load"
     />
     <PositionImportDialog v-model="importVisible" @imported="load" />
@@ -167,7 +168,7 @@
 <script setup lang="ts">
 import {  computed, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { positionLink } from '../layouts/navigation'
 import { Plus, Refresh, Search, Star, StarFilled, Upload } from '@element-plus/icons-vue'
 import { citiesApi, factoriesApi, positionsApi, apiErrorMessage } from '../api/core'
@@ -179,6 +180,7 @@ import PositionFactoryBindingDialog from '../components/basic/PositionFactoryBin
 import PositionHolidaysDialog from '../components/basic/PositionHolidaysDialog.vue'
 
 const router = useRouter()
+const route = useRoute()
 interface PositionRow extends ServicePosition {
   opening_count: number
   saving?: boolean
@@ -196,7 +198,27 @@ const cities = ref<City[]>([])
 const loading = ref(false)
 const keyword = ref('')
 const featuredFilter = ref('')
-const cityFilter = ref('')
+const cityFilter = ref(typeof route.query.city_name === 'string' ? route.query.city_name : '')
+const linkedCityId = computed(() => {
+  const value = route.query.city_id
+  return typeof value === 'string' && /^[1-9][0-9]*$/.test(value) ? Number(value) : 0
+})
+watch([linkedCityId, cities, positions], ([id]) => {
+  if (!id) return
+  cityFilter.value = cities.value.find(city => city.id === id)?.city_name
+    || positions.value.find(position => position.city_id === id)?.city_name || ''
+}, { immediate: true })
+
+function changeCityFilter(): void {
+  if (!linkedCityId.value && !route.query.city_name) return
+  const query = { ...route.query }
+  delete query.city_id
+  delete query.city_name
+  const city = cities.value.find(city => city.city_name === cityFilter.value)
+  if (city) query.city_id = String(city.id)
+  else if (cityFilter.value) query.city_name = cityFilter.value
+  void router.replace({ query })
+}
 const statusFilter = ref('')
 const page = ref(1)
 const pageSize = ref(20)
@@ -223,7 +245,9 @@ const filteredPositions = computed(() => {
   const key = keyword.value.trim()
   return positions.value.filter((item) => {
     if (featuredFilter.value === 'featured' && !item.is_featured) return false
-    if (cityFilter.value && item.city_name !== cityFilter.value) return false
+    if (linkedCityId.value) {
+      if (Number(item.city_id) !== linkedCityId.value) return false
+    } else if (cityFilter.value && item.city_name !== cityFilter.value) return false
     if (statusFilter.value === 'active' && !item.is_active) return false
     if (statusFilter.value === 'inactive' && item.is_active) return false
     if (key && !item.position_name.includes(key)) return false
@@ -238,7 +262,7 @@ const pagedPositions = computed(() => {
 
 
 // 筛选变化时回到第 1 页，避免停在空页
-watch([[keyword], [featuredFilter], [cityFilter], [statusFilter]], () => {
+watch([keyword, featuredFilter, cityFilter, linkedCityId, statusFilter], () => {
   page.value = 1
 })
 
@@ -264,6 +288,7 @@ async function load(): Promise<void> {
     )
     positions.value = toArray<ServicePosition>(positionRes.data).map((position) => ({
       ...position,
+      city_name: cities.value.find(city => city.id === Number(position.city_id))?.city_name || position.city_name,
       opening_count: personaMap.get(position.id)?.opening_count ?? 0,
     }))
   } catch (error: any) {

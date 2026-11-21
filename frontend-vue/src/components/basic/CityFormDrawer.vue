@@ -26,30 +26,6 @@
           </div>
         </el-form-item>
 
-        <div class="grid-2">
-          <el-form-item label="面试点名称">
-            <el-input v-model="form.interview_site_name" placeholder="如：深圳北站面试点" />
-          </el-form-item>
-          <el-form-item label="社保说明">
-            <el-input v-model="form.social_insurances" placeholder="如：转正缴纳五险" />
-          </el-form-item>
-        </div>
-
-        <div class="section-title">线路与区域</div>
-        <el-form-item label="主线路（可多选/输入后回车新增）">
-          <el-select
-            v-model="form.available_lines"
-            class="full"
-            multiple
-            filterable
-            allow-create
-            default-first-option
-            :reserve-keyword="false"
-            placeholder="如：1号线、6号线"
-          >
-            <el-option v-for="line in form.available_lines" :key="line" :label="line" :value="line" />
-          </el-select>
-        </el-form-item>
         <el-form-item label="区域 / 区县（可多选/输入后回车新增）">
           <el-select
             v-model="form.districts"
@@ -65,84 +41,115 @@
           </el-select>
         </el-form-item>
 
-        <div class="section-title">招聘配置</div>
-        <div class="grid-3">
-          <el-form-item label="流程类型">
-            <el-select v-model="form.flow_type" class="full">
-              <el-option label="标准流程" value="standard" />
-              <el-option label="简化流程" value="simple" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="工厂模式">
-            <el-select v-model="form.factory_mode" class="full">
-              <el-option label="不启用" value="none" />
-              <el-option label="单工厂" value="single" />
-              <el-option label="多工厂" value="multi" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="男女住宿策略">
-            <el-select v-model="form.gender_accommodation_policy" class="full">
-              <el-option label="不区分" value="none" />
-              <el-option label="男女同宿" value="same" />
-              <el-option label="男女分宿" value="separate" />
-            </el-select>
-          </el-form-item>
-        </div>
-        <div class="grid-3">
-          <el-form-item label="是否主推城市">
-            <el-switch v-model="form.is_primary" />
-          </el-form-item>
-          <el-form-item label="是否询问住宿">
-            <el-switch v-model="form.ask_accommodation" />
-          </el-form-item>
-          <el-form-item label="排序">
-            <el-input-number v-model="form.sort_order" :min="0" :max="9999" class="full" />
-          </el-form-item>
-        </div>
+        <details :key="defaultSectionKey" class="city-defaults">
+          <summary>城市默认资料</summary>
+          <p class="hint">仅在同城岗位共用时填写。Dify 有对应城市资料时会优先使用，新建岗位也会用这些资料填充空白项。</p>
+          <el-button v-if="mode === 'edit' && cityId" :disabled="loading" :data-city-default-materials="cityId">
+            编辑完整城市原文资料
+          </el-button>
+          <div class="grid-2">
+            <el-form-item label="面试点名称">
+              <el-input v-model="form.interview_site_name" placeholder="如：深圳北站面试点" />
+            </el-form-item>
+            <el-form-item label="社保说明">
+              <el-input v-model="form.social_insurances" placeholder="如：转正缴纳五险" />
+            </el-form-item>
+          </div>
 
-        <div class="section-title">薪资与要求</div>
-        <el-form-item label="薪资原文">
-          <el-input v-model="form.salaryRaw" type="textarea" :rows="2" placeholder="如：综合月薪 5500-7000 元" />
-        </el-form-item>
-        <el-form-item label="工作时间">
-          <el-input v-model="form.workHoursRaw" placeholder="如：8 小时三班倒" />
-        </el-form-item>
-        <el-form-item label="招聘要求">
-          <el-input v-model="form.requirementsRaw" type="textarea" :rows="2" placeholder="如：18-35 岁，男女不限" />
-        </el-form-item>
+          <div class="section-title">线路</div>
+          <el-form-item label="主线路（可多选/输入后回车新增）">
+            <el-select
+              v-model="form.available_lines"
+              class="full"
+              multiple
+              filterable
+              allow-create
+              default-first-option
+              :reserve-keyword="false"
+              placeholder="如：1号线、6号线"
+            >
+              <el-option v-for="line in form.available_lines" :key="line" :label="line" :value="line" />
+            </el-select>
+          </el-form-item>
+          <div class="section-title">招聘配置</div>
+          <div class="grid-3">
+            <el-form-item label="流程类型">
+              <el-select v-model="form.flow_type" class="full">
+                <el-option label="标准流程" value="standard" />
+                <el-option label="简化流程" value="simple" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="工厂模式">
+              <el-select v-model="form.factory_mode" class="full">
+                <el-option label="不启用" value="none" />
+                <el-option label="单工厂" value="single" />
+                <el-option label="多工厂" value="multi" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="男女住宿策略">
+              <el-select v-model="form.gender_accommodation_policy" class="full">
+                <el-option label="不区分" value="none" />
+                <el-option label="男女同宿" value="same" />
+                <el-option label="男女分宿" value="separate" />
+              </el-select>
+            </el-form-item>
+          </div>
+          <div class="grid-3">
+            <el-form-item label="是否主推城市">
+              <el-switch v-model="form.is_primary" />
+            </el-form-item>
+            <el-form-item label="是否询问住宿">
+              <el-switch v-model="form.ask_accommodation" />
+            </el-form-item>
+            <el-form-item label="排序">
+              <el-input-number v-model="form.sort_order" :min="0" :max="9999" class="full" />
+            </el-form-item>
+          </div>
 
-        <div class="section-title">面试信息</div>
-        <div class="grid-2">
-          <el-form-item label="面试时间">
-            <el-input v-model="form.interviewTime" placeholder="如：每天 14:30" />
+          <div class="section-title">薪资与要求</div>
+          <el-form-item label="薪资原文">
+            <el-input v-model="form.salaryRaw" type="textarea" :rows="2" placeholder="如：综合月薪 5500-7000 元" />
           </el-form-item>
-          <el-form-item label="面试地点">
-            <el-input v-model="form.interviewLocation" placeholder="如：福田区 XX 大厦" />
+          <el-form-item label="工作时间">
+            <el-input v-model="form.workHoursRaw" placeholder="如：8 小时三班倒" />
           </el-form-item>
-        </div>
-        <div class="grid-2">
-          <el-form-item label="面试坐标">
-            <el-input v-model="form.interviewCoordinates" placeholder="纬度,经度" />
+          <el-form-item label="招聘要求">
+            <el-input v-model="form.requirementsRaw" type="textarea" :rows="2" placeholder="如：18-35 岁，男女不限" />
           </el-form-item>
-          <el-form-item label="签到码">
-            <el-input v-model="form.interviewCheckInCode" />
+
+          <div class="section-title">面试信息</div>
+          <div class="grid-2">
+            <el-form-item label="面试时间">
+              <el-input v-model="form.interviewTime" placeholder="如：每天 14:30" />
+            </el-form-item>
+            <el-form-item label="面试地点">
+              <el-input v-model="form.interviewLocation" placeholder="如：福田区 XX 大厦" />
+            </el-form-item>
+          </div>
+          <div class="grid-2">
+            <el-form-item label="面试坐标">
+              <el-input v-model="form.interviewCoordinates" placeholder="纬度,经度" />
+            </el-form-item>
+            <el-form-item label="签到码">
+              <el-input v-model="form.interviewCheckInCode" />
+            </el-form-item>
+          </div>
+          <el-form-item label="联系人">
+            <el-input v-model="form.interviewContact" />
           </el-form-item>
-        </div>
-        <el-form-item label="联系人">
-          <el-input v-model="form.interviewContact" />
-        </el-form-item>
-        <el-form-item label="面试通知模板">
-          <el-input v-model="form.interviewNotice" type="textarea" :rows="2" />
-        </el-form-item>
-        <el-form-item label="面试指引">
-          <el-input v-model="form.interviewGuide" type="textarea" :rows="2" />
-        </el-form-item>
+          <el-form-item label="面试通知模板">
+            <el-input v-model="form.interviewNotice" type="textarea" :rows="2" />
+          </el-form-item>
+          <el-form-item label="面试指引">
+            <el-input v-model="form.interviewGuide" type="textarea" :rows="2" />
+          </el-form-item>
+        </details>
       </el-form>
     </div>
 
     <template #footer>
       <el-button @click="emit('update:modelValue', false)">取消</el-button>
-      <el-button type="primary" :loading="saving" @click="submit">保存</el-button>
+      <el-button type="primary" :loading="saving" :disabled="loading || (mode !== 'create' && !base.id)" @click="submit">保存</el-button>
     </template>
   </el-drawer>
 </template>
@@ -171,6 +178,7 @@ const formRef = ref<FormInstance>()
 const loading = ref(false)
 const saving = ref(false)
 const base = ref<Record<string, unknown>>({})
+const defaultSectionKey = ref(0)
 
 const form = reactive({
   city_name: '',
@@ -248,6 +256,7 @@ function fill(source: Record<string, unknown>): void {
 }
 
 async function reset(): Promise<void> {
+  defaultSectionKey.value += 1
   formRef.value?.clearValidate()
   base.value = {}
   fill({})
@@ -305,7 +314,7 @@ function buildPayload(): Record<string, unknown> {
 }
 
 async function submit(): Promise<void> {
-  if (!formRef.value) return
+  if (!formRef.value || (props.mode !== 'create' && !base.value.id)) return
   const valid = await formRef.value.validate().catch(() => false)
   if (!valid) return
   saving.value = true
@@ -342,6 +351,10 @@ defineExpose({ prefill })
 </script>
 
 <style scoped>
+.city-defaults { margin-top: 18px; border-top: 1px solid var(--el-border-color-light); }
+.city-defaults summary { padding: 14px 0; font-weight: 600; cursor: pointer; }
+.city-defaults .hint { margin: 0 0 10px; line-height: 1.6; }
+
 .drawer-body {
   padding-bottom: 8px;
 }

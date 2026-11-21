@@ -9,9 +9,10 @@
  async function api(path,method='GET',body){const r=await fetch(path,{method,headers:{authorization:'Bearer '+token(),'content-type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});const d=await r.json();if(!r.ok)throw new Error(typeof d.detail==='string'?d.detail:`HTTP ${r.status}`);return d;}
  function style(){if(document.getElementById('city-dify-sources-style'))return;const s=node('style');s.id='city-dify-sources-style';s.textContent='.cds-box{margin:12px 0;padding:14px;border:1px solid #c9d8f0;border-radius:10px;background:#f5f8ff;color:#234}.cds-box button,.cds-dialog button{padding:7px 12px;margin:4px;border:1px solid #bac9de;border-radius:6px;background:white;color:#174fcb;cursor:pointer}.cds-box select,.cds-dialog select{padding:8px;max-width:100%;border:1px solid #bbc9d8;border-radius:6px}.cds-dialog{width:min(850px,90vw);max-height:90vh;border:0;border-radius:12px;padding:22px;box-shadow:0 12px 60px #2345}.cds-dialog::backdrop{background:#17243a66}.cds-dialog label{display:block;font-weight:600;margin-top:14px}.cds-dialog textarea,.cds-box textarea{box-sizing:border-box;width:100%;padding:9px;border:1px solid #bbc9d8;border-radius:6px;font:inherit;min-height:70px}.cds-dialog pre,.cds-box pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow:auto;background:#fff;padding:10px;font-size:12px}.cds-muted{font-size:12px;color:#58677c}.cds-result{white-space:pre-wrap;padding:10px;background:white;border-radius:6px;margin-top:8px}';document.head.append(s);}
  function field(parent,label,value){const l=node('label',label),a=node('textarea');a.value=String(value||'');l.append(a);parent.append(l);return a;}
- async function cityEditor(initialCityName){
+ async function cityEditor(cityId){
+  style();
   const dialog=node('dialog');dialog.className='cds-dialog';dialog.setAttribute('aria-label','城市完整招聘资料');
-  const head=node('h2','城市完整招聘资料 · 模式二 Dify 来源'),note=node('p','这里直接编辑原系统城市资料。保存后模式二每轮实时读取；没有填写的项才回退岗位资料。不会覆盖模式一岗位人设。');note.className='cds-muted';
+  const head=node('h2','完整城市默认资料'),note=node('p','同一字段优先使用城市资料，城市留空时 Dify 读取岗位资料。');note.className='cds-muted';
   const select=node('select');select.setAttribute('aria-label','选择要编辑的城市');const blank=node('option','请选择城市');blank.value='';select.append(blank);
   const state=node('p'),form=node('div'),close=node('button','关闭'),save=node('button','保存完整城市资料');close.onclick=()=>dialog.close();save.disabled=true;
   dialog.append(head,note,select,state,form,save,close);document.body.append(dialog);dialog.addEventListener('close',()=>dialog.remove(),{once:true});dialog.showModal();
@@ -35,7 +36,14 @@
    const advanced=node('details');advanced.append(node('summary','历史附加字段（不含上方已编辑字段）'));inputs.advanced=field(advanced,'附加结构化资料 JSON',JSON.stringify({salary:extras(salary,['raw']),hours:extras(hours,['raw']),interview:extras(interview,['days','time','raw_time','location','raw_address','coordinates','contact','interview_notice','interview_guide']),requirements:rec(base.requirements)},null,2));form.append(advanced);
    state.textContent='已读取「'+base.city_name+'」。只保存此窗口修改的城市，不修改岗位或发送消息。';save.disabled=false;
   }catch(e){state.textContent=e.message;}};
-  if(typeof initialCityName==='string'){const option=[...select.options].find(o=>o.textContent===initialCityName);if(option){select.value=option.value;select.onchange();}}
+  const initialOption = [...select.options].find(option => option.value === cityId);
+  if (initialOption) {
+    select.value = initialOption.value;
+    await select.onchange();
+  } else {
+    state.textContent = '未能定位当前城市，请关闭后重试。';
+    select.disabled = true;
+  }
   save.onclick=async()=>{save.disabled=true;select.disabled=true;try{const advanced=JSON.parse(inputs.advanced.value);const sections={...rec(base.prompt_sections)};for(const[key,a]of Object.entries(inputs.sections))sections[key]=a.value;for(const[key,input]of Object.entries(canonicalSections))if(key in sections)sections[key]=inputs[input].value;
    const body={knowledge_vertical_id:inputs.category.value?Number(inputs.category.value):null,salary:{...rec(advanced.salary),raw:inputs.salary.value},work_hours:{...rec(advanced.hours),raw:inputs.hours.value},social_insurances:inputs.insurance.value,interview:{...rec(advanced.interview),time:inputs.time.value,raw_time:inputs.time.value,location:inputs.address.value,raw_address:inputs.address.value,coordinates:inputs.coordinates.value,contact:inputs.contact.value,interview_notice:inputs.notice.value,interview_guide:inputs.guide.value},requirements:rec(advanced.requirements),prompt_sections:sections,prompt_section_labels:{...labels,...rec(base.prompt_section_labels)}};
    if(!categoriesLoaded||Number(body.knowledge_vertical_id)===Number(base.knowledge_vertical_id)&&!categories.some(x=>Number(x.id)===Number(body.knowledge_vertical_id)))delete body.knowledge_vertical_id;
@@ -47,11 +55,11 @@
    if(cancel)cancel.click();
   }catch(e){state.textContent='保存失败：'+e.message;}finally{save.disabled=false;select.disabled=false;}};
  }
- function render(){style();if(location.pathname==='/cities'){
-  for(const drawer of document.querySelectorAll('.el-drawer')){const heading=drawer.querySelector('.el-drawer__header')?.textContent.trim()||'';if(heading==='编辑城市'&&!drawer.querySelector('[data-city-material-open]')){const button=node('button','编辑完整城市原文资料');button.type='button';button.dataset.cityMaterialOpen='1';button.className='el-button';button.onclick=()=>{const item=[...drawer.querySelectorAll('.el-form-item')].find(x=>x.querySelector('.el-form-item__label')?.textContent.trim()==='城市名称');cityEditor(item?.querySelector('input')?.value||'');};drawer.querySelector('.el-drawer__body')?.append(button);}}
-  for(const item of document.querySelectorAll('.el-drawer .el-form-item,.el-drawer .el-collapse-item'))if(item.style.display==='none')item.style.display='';
-  const header=document.querySelector('.page-header');if(header&&!document.querySelector('[data-city-dify-editor]')){const b=node('button','完整城市资料 · Dify 来源');b.dataset.cityDifyEditor='1';b.className='el-button';b.onclick=()=>cityEditor();(header.querySelector('.header-actions')||header).append(b);}
- }
- }
- let queued=false;const schedule=()=>{if(queued)return;queued=true;requestAnimationFrame(()=>{queued=false;render();});};new MutationObserver(schedule).observe(document.documentElement,{childList:true,subtree:true});window.addEventListener('popstate',schedule);document.readyState==='loading'?document.addEventListener('DOMContentLoaded',schedule,{once:true}):schedule();
+ document.addEventListener('click', event => {
+  if (location.pathname !== '/cities' || !(event.target instanceof Element)) return;
+  const button = event.target.closest('button[data-city-default-materials]');
+  const cityId = button?.dataset.cityDefaultMaterials;
+  if (!button || button.disabled || !cityId || !/^[1-9][0-9]*$/.test(cityId)) return;
+  void cityEditor(cityId);
+ }, { capture: true });
 })();

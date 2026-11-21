@@ -241,6 +241,7 @@ const props = defineProps<{
   modelValue: boolean
   mode: Mode
   positionId?: number | null
+  initialCityId?: number
 }>()
 
 const emit = defineEmits<{
@@ -474,7 +475,15 @@ async function reset(): Promise<void> {
   loading.value = true
   try {
     await loadOptions()
-    if (props.mode === 'create' || !props.positionId) return
+    if (props.mode === 'create') {
+      const city = cities.value.find(item => item.id === props.initialCityId)
+      if (city) {
+        form.city_id = city.id
+        onCityChange(city.id)
+      }
+      return
+    }
+    if (!props.positionId) return
     const { data } = await positionsApi.get(props.positionId)
     original.value = data
     base.value = data as unknown as Record<string, unknown>

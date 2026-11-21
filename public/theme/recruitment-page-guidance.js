@@ -3,7 +3,6 @@
 
   const STYLE_ID = "recruitment-page-guidance-style";
   const NOTE_ATTR = "data-rk-recruitment-note";
-  const HIDDEN_CITY_FIELDS = new Set([]);
 
   function styles() {
     if (document.getElementById(STYLE_ID)) return;
@@ -32,29 +31,6 @@
     return title?.textContent.trim() || "";
   }
 
-  function adjustCityPage() {
-    if (location.pathname !== "/cities" || !["城市管理","城市与项目","城市"].includes(currentPage())) return;
-    const header = document.querySelector(".page-header");
-    const description = document.querySelector(".page-desc");
-    const descriptionText = "维护城市完整招聘资料；模式二 Dify 实时读取这里的城市资料和现有知识库。";
-    if (description && description.textContent !== descriptionText) description.textContent = descriptionText;
-    addNote(header, "city-template", "模式二：每轮读取城市工资、工时、面试资料和适用知识；城市空白项回退岗位资料。模式一仍按岗位事实与人设运行。", "");
-    for (const drawer of document.querySelectorAll(".el-drawer")) {
-      if (!/^(添加|编辑|复制)城市/.test(drawer.querySelector(".el-drawer__header")?.textContent.trim() || "")) continue;
-      for (const item of drawer.querySelectorAll(".el-form-item")) {
-        const label = item.querySelector(".el-form-item__label")?.textContent.trim();
-        if (HIDDEN_CITY_FIELDS.has(label)) item.style.display = "none";
-      }
-      for (const group of drawer.querySelectorAll(".el-collapse-item")) {
-        const fields = [...group.querySelectorAll(".el-form-item")];
-        if (fields.length && fields.every((item) => item.style.display === "none")) group.style.display = "none";
-      }
-    }
-    for (const item of document.querySelectorAll(".el-dropdown-menu__item")) {
-      if (item.textContent.trim() === "切换状态") item.style.display = "none";
-    }
-  }
-
   function adjustPositionPage() {
     if (location.pathname !== "/service-positions" || !["岗位管理","招聘岗位"].includes(currentPage())) return;
     const header = document.querySelector(".page-header");
@@ -78,9 +54,7 @@
       const body = drawer.querySelector(".el-drawer__body");
       if (!heading || !body) continue;
       const title = heading.textContent.trim();
-      if (/^(添加|编辑|复制)城市/.test(title)) {
-        if (body.firstElementChild) addNote(body.firstElementChild, "city-drawer-" + title, "完整城市资料已恢复。模式二 Dify 实时读取已保存城市资料；下方完整原文编辑可维护旧版本的自定义话术段落。模式一的岗位配置不随本次恢复改动。", "rk-recruitment-drawer-note", true);
-      } else if (/^(添加|编辑|复制)岗位/.test(title)) {
+      if (/^(添加|编辑|复制)岗位/.test(title)) {
         if (body.firstElementChild) addNote(body.firstElementChild, "position-drawer-" + title, "字段旁的标签说明适用的回复线路。可在接待测试中核对两条线路的实际取值。", "rk-recruitment-drawer-note", true);
         if (title === "添加岗位") bindCityTemplate(drawer);
       }
@@ -167,7 +141,6 @@
 
   function run() {
     styles();
-    adjustCityPage();
     adjustPositionPage();
     adjustDrawers();
   }
