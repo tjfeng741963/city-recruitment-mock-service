@@ -3,6 +3,10 @@ import { buildServer } from "../src/server.js";
 import type { FastifyInstance } from "fastify";
 import { DeviceBridgeStore } from "../src/modules/messaging/device-bridge.js";
 import { difyContext, difyContextConflict, difyInput } from '../src/modules/dify/dify-context.js';
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createHash } from "node:crypto";
 
 describe("Dify second reply route", () => {
   let app: FastifyInstance;
@@ -33,6 +37,70 @@ describe("Dify second reply route", () => {
     bridge.heartbeat(code,"online","test-account");return result;
   };
   const chat=(session="S:test",text="工资多少？",headers=device)=>app.inject({method:"POST",url:"/api/v1/agent/chat",headers,payload:{device_code:code,session_key:session,text}});
+  it("sends configured media and map search through the existing text and media contract", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "dify-media-"));
+    const old = process.env.REA_MEDIA_DIR;
+    process.env.REA_MEDIA_DIR = dir;
+    try {
+      const vertical=app.db.prepare("SELECT id FROM vertical WHERE code='subway'").get() as {id:number};
+      const city=app.db.prepare("INSERT INTO cities(city_name,province,data_json) VALUES ('验收市','测试省',?) RETURNING id")
+        .get(JSON.stringify({knowledge_vertical_id:vertical.id})) as { id:number };
+      app.db.prepare("INSERT INTO cities(city_name,province) VALUES ('另一市','测试省')").run();
+      app.db.prepare("UPDATE service_positions SET city_id=?,data_json=json_set(data_json,'$.interview_points',json(?)) WHERE id=?")
+        .run(city.id,JSON.stringify([{name:"东门接待处",address:"青竹路18号"}]),position);
+      const insert=app.db.prepare("INSERT INTO media_assets (name,kind,storage_path,sha256,bytes,status,position_id) VALUES (?,?,?,?,?,?,?)");
+      for(const [name,kind,scope,status] of [
+        ["面试地点.png","image",position,"enabled"],["另一市面试点.jpg","image",0,"enabled"],
+        ["工作内容(1).jpg","image",0,"enabled"],["安检.mp4","video",0,"enabled"],
+        ["工作环境图片.jpg","image",position,"disabled"],["宿舍图.jpg","image",position,"enabled"],
+      ] as const) {
+        const bytes=Buffer.from(name);
+        if(name!=="宿舍图.jpg") writeFileSync(join(dir,name),bytes);
+        insert.run(name,kind,name,createHash("sha256").update(bytes).digest("hex"),bytes.length,status,scope);
+      }
+      await select();
+      const network=vi.fn();
+      vi.stubGlobal("fetch",network);
+      const media=(await chat("S:media","发一下工作图片和视频")).json().reply.messages;
+      expect(media.slice(1)).toEqual([
+        {type:"image",name:expect.stringMatching(/^dify-asset-\d+-[a-f0-9]{64}\.jpg$/),content:"图片 · 工作内容(1).jpg"},
+        {type:"video",name:expect.stringMatching(/^dify-asset-\d+-[a-f0-9]{64}\.mp4$/),content:"视频 · 安检.mp4"},
+      ]);
+      const assetDownload = await app.inject({url:`/api/v1/agent/media/${media[1].name}`,headers:device});
+      expect(assetDownload.statusCode).toBe(200);
+      expect(assetDownload.body).toBe("工作内容(1).jpg");
+      app.db.prepare("UPDATE media_assets SET sha256=? WHERE name=?").run("a".repeat(64),"工作内容(1).jpg");
+      expect((await app.inject({url:`/api/v1/agent/media/${media[1].name}`,headers:device})).statusCode).toBe(404);
+      const map=(await chat("S:media","发面试地址和定位")).json().reply.messages;
+      expect(map[0].content).toContain("青竹路18号");
+      const link=new URL(map[0].content.match(/https:\/\/\S+/)[0]);
+      expect(link.hostname).toBe("uri.amap.com");
+      expect(link.searchParams.get("keyword")).toBe("青竹路18号");
+      expect(link.searchParams.get("city")).toBe("验收市");
+      expect(map.slice(1)).toEqual([{type:"image",name:expect.stringMatching(/\.png$/),content:"图片 · 面试地点.png"}]);
+      const other=(await chat("S:media","发另一市的面试定位")).json().reply.messages;
+      expect(other[0].content).toContain("推荐岗位");
+      expect(other).toHaveLength(1);
+      const missing=(await chat("S:media","有没有宿舍照片？")).json().reply.messages;
+      expect(missing[0].content).toContain("暂无");
+      expect(missing).toHaveLength(1);
+      const dormMap=(await chat("S:media","发个宿舍地图图片")).json().reply.messages;
+      expect(dormMap[0].content).toContain("宿舍");
+      expect(dormMap[0].content).not.toContain("青竹路");
+      app.db.prepare("UPDATE service_positions SET data_json=json_set(data_json,'$.interview_points',json(?)) WHERE id=?")
+        .run(JSON.stringify([{name:"东门接待处",address:"青竹路18号"},{name:"西门面试点",address:"青竹路20号"}]),position);
+      const ambiguous=(await chat("S:media","发面试定位")).json().reply.messages;
+      expect(ambiguous).toEqual([{type:"text",content:expect.stringContaining("有多个面试点")}]);
+      const explicit=(await chat("S:media","发西门面试点的定位")).json().reply.messages;
+      expect(explicit).toEqual([{type:"text",content:expect.stringContaining("青竹路20号")}]);
+      expect(explicit[0].content).not.toContain("青竹路18号");
+      expect(network).not.toHaveBeenCalled();
+    } finally {
+      if(old===undefined)delete process.env.REA_MEDIA_DIR;
+      else process.env.REA_MEDIA_DIR=old;
+      rmSync(dir,{recursive:true,force:true});
+    }
+  });
   it("recommends a scoped job, keeps that choice, and records an explicitly confirmed interview once", async () => {
     const city = app.db.prepare("INSERT INTO cities(city_name,province,data_json) VALUES ('验收市','验收省',?) RETURNING id")
       .get(JSON.stringify({ districts: ["青竹区"] })) as { id: number };

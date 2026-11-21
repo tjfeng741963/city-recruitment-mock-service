@@ -26,6 +26,14 @@ export type MediaRef = { name: string; kind: MediaKind };
 /** media_assets 的一行（对外字段）。 */
 export type MediaAsset = { id: number; name: string; kind: MediaKind; sha256: string; bytes: number };
 
+export const DIFY_MEDIA_NAME = /^dify-asset-(\d+)-([a-f0-9]{64})\.(jpe?g|png|mp4)$/;
+
+export function difyMediaName(asset:{id:number;storage_path:string;kind:MediaKind;sha256:string}):string | undefined {
+  const ext = path.extname(asset.storage_path).slice(1).toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(asset.sha256) || !(asset.kind === "video" ? ext === "mp4" : /^(jpe?g|png)$/.test(ext))) return;
+  return `dify-asset-${asset.id}-${asset.sha256}.${ext}`;
+}
+
 /** 下发给客户端的媒体引用：名字 + 类型 + 校验和。 */
 export type ResolvedMedia = { name: string; kind: MediaKind; sha256: string };
 

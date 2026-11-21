@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import type { DatabaseSync } from "node:sqlite";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { difyContext, difyContextConflict, difyInput } from "./dify-context.js";
+import { configuredMaterialReply } from "./dify-material-reply.js";
 import { DeviceBridgeStore } from "../messaging/device-bridge.js";
 import { devicePositionId } from "../../shared/device-factories.js";
 import { canAccessCity, getUserScope } from "../../auth/user-scopes.js";
@@ -253,6 +254,13 @@ export async function generateDifyReply(db: DatabaseSync, input:{deviceCode:stri
     if(!facts)return failure("dify_position_unavailable","岗位不可用");
     const conflict=difyContextConflict(facts);
     if(conflict)return failure('dify_context_conflict',conflict);
+    if (!input.dry) {
+      const messages=configuredMaterialReply(db,positionId,input.text,facts);
+      if (messages) {
+        return {ok:true,provider:"dify",model:"Dify 招聘流程",session_key:input.sessionKey,
+          reply:{messages},latency_ms:0};
+      }
+    }
     const selected=difyInput(facts,input.text);
     if(!selected)return failure('dify_context_too_large','城市关键字段过长，请精简薪资、时间或面试地点；完整话术请放入原文段落或知识库');
     // Keep the published Dify conversation per application and selected position.
