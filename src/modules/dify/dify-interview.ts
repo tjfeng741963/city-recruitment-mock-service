@@ -1,3 +1,4 @@
+import { normalizeInterviewPoints, normalizePositionFacts } from "../../shared/position-facts.js";
 import type { DatabaseSync } from "node:sqlite";
 import { parseDeviceData } from "../../shared/device-factories.js";
 
@@ -64,14 +65,9 @@ export function interviewSchedule(db: DatabaseSync, positionId: number, facts: {
   const explicitDays = days.length ? days : weekdays(position.interview_days);
   const configuredDays = explicitDays.length && byText.length ? explicitDays.filter(day=>byText.includes(day))
     : explicitDays.length ? explicitDays : byText;
-  const points = Array.isArray(position.interview_points) ? position.interview_points.flatMap(item => {
-    if (typeof item === "string" && item.trim()) return [{ name: item.trim(), address: "" }];
-    const point = record(item);
-    const name = readText(point.name);
-    return name ? [{ name, address: readText(point.address) }] : [];
-  }) : [];
+  const points = normalizeInterviewPoints(position.interview_points);
   const cityInterview = record(city.interview);
-  const address = readText(cityInterview.location) || readText(cityInterview.raw_address) || readText(position.interview_address);
+  const address = readText(cityInterview.location) || readText(cityInterview.raw_address) || readText(facts.interview_address) || readText(normalizePositionFacts(position).interview_address);
   const uniquePoints = points.filter((point, index) => points.findIndex(p => p.name === point.name) === index);
   if (uniquePoints.length === 1 && !uniquePoints[0].address) uniquePoints[0].address = address;
   if (!uniquePoints.length && address) uniquePoints.push({ name: address, address });

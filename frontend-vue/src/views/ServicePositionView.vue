@@ -3,7 +3,7 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">招聘岗位</h2>
-        <p class="page-desc">管理服务员岗位配置，包括招聘要求、薪资、面试安排等</p>
+        <p class="page-desc">维护各城市的岗位、招聘资料和面试安排</p>
       </div>
       <div class="header-actions">
         <el-button :icon="Upload" @click="importVisible = true">鲸才导入 / 导入导出</el-button>
@@ -113,9 +113,9 @@
         </el-table-column>
         <el-table-column label="操作" width="280">
           <template #default="{ row }">
-            <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
+            <el-button link type="primary" @click="openEdit(row)">编辑岗位</el-button>
             <el-button link type="primary" @click="openCopy(row)">复制</el-button>
-            <el-button link type="primary" @click="router.push(positionLink('/recruitment-flow', row.id))">岗位配置</el-button>
+            <el-button link type="primary" @click="router.push(positionLink('/recruitment-flow', row.id))">话术流程</el-button>
             <el-dropdown trigger="click" @command="(cmd: string) => onCommand(cmd, row)">
               <el-button link type="primary">更多</el-button>
               <template #dropdown>

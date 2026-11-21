@@ -16,10 +16,10 @@ describe("city template prefill in the position form", () => {
     };
     const items = [
       cityItem,
-      ...[["薪资详情", salary], ["面试/工作地址", address]].map(([label, field]) => ({
+      ...[["薪资详情", salary], ["默认面试地址", address]].map(([label, field]) => ({
         querySelector: (selector: string) => selector === ".el-form-item__label"
           ? { textContent: label }
-          : field,
+          : selector.includes("textarea.el-textarea__inner") ? field : null,
       })),
     ];
     const events: Record<string, () => Promise<void>> = {};

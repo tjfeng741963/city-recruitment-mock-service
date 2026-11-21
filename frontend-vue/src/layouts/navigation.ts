@@ -9,7 +9,7 @@ export function navigationForRole(role: string): NavigationGroup[] {
       { path: '/archive', label: '面试登记' }, { path: '/agent-devices', label: '微信账号' },
     ] },
     { key: 'basic', label: '招聘资料', items: [
-      { path: '/cities', label: '城市与项目' }, { path: '/service-positions', label: '招聘岗位' },
+      { path: '/cities', label: '城市' }, { path: '/service-positions', label: '招聘岗位' },
       ...(role === 'recruiter' ? [{ path: '/recruiter-featured', label: '岗位推荐' }] : []),
     ] },
     { key: 'knowledge', label: 'AI 接待', items: [

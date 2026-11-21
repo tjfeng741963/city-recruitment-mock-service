@@ -1,27 +1,26 @@
 <template>
-  <el-drawer
-    :model-value="modelValue"
-    size="640px"
-    :close-on-click-modal="false"
+  <component :is="embedded ? 'section' : ElDrawer"
+    v-bind="embedded ? {} : { modelValue, size: '640px', closeOnClickModal: false }"
     @update:model-value="(v: boolean) => emit('update:modelValue', v)"
     @open="load(true)"
   >
-    <template #header>
+    <template v-if="!embedded" #header>
       <div class="drawer-head">
         <b>Agent 配置</b>
         <span class="head-sub">{{ position?.position_name }}</span>
       </div>
     </template>
 
-    <el-tabs v-model="tab">
+    <el-alert v-if="loadError" :title="loadError" type="error" :closable="false" show-icon />
+    <el-tabs v-else v-model="tab">
       <el-tab-pane label="人设" name="persona">
         <el-alert
           class="persona-note"
           type="info"
           show-icon
           :closable="false"
-          title="人设决定 Agent 的身份、语气和话术边界"
-          description="厂名、工价、地点、面试时间由系统自动注入，不要写在这段文字里——岗位数据一改，人设里写死的数字就会和事实对不上。"
+          title="人设设定系统 Agent 的身份、语气和回复要求"
+          description="工资、地点和面试时间从岗位资料读取。这里填写怎样和候选人沟通。"
         />
         <div class="field">
           <div class="field-label">
@@ -38,16 +37,18 @@
         </div>
         <div class="foot">
           <span v-if="personaDirty" class="dirty-hint">未保存</span>
-          <el-button type="primary" :loading="savingPersona" @click="savePersona">保存人设</el-button>
+          <el-button v-if="personaDirty" :disabled="savingPersona" @click="persona = savedPersona">取消修改</el-button>
+          <el-button type="primary" :disabled="loading || !personaDirty" :loading="savingPersona" @click="savePersona">保存人设</el-button>
         </div>
       </el-tab-pane>
 
       <el-tab-pane :label="`开场（${openings.length}）`" name="opening">
         <div class="opening-toolbar">
-          <el-button size="small" class="pill-btn" @click="startAdd('text')">+ 文本</el-button>
-          <el-button size="small" class="pill-btn" @click="startAdd('image')">+ 图片</el-button>
-          <el-button size="small" class="pill-btn" @click="startAdd('video')">+ 视频</el-button>
-          <span class="opening-hint">按顺序发送；设置每条发送后的最少等待，客户端安全冷却可能更长</span>
+          <el-button size="small" :disabled="loading" class="pill-btn" @click="startAdd('text')">+ 文本</el-button>
+          <el-button size="small" :disabled="loading" class="pill-btn" @click="startAdd('image')">+ 图片</el-button>
+          <el-button size="small" :disabled="loading" class="pill-btn" @click="startAdd('video')">+ 视频</el-button>
+          <span class="opening-hint" v-if="embedded">先填消息正文。旧版开场使用这里保存的内容。使用节点流程的岗位，请在画布选入文字、编排顺序并保存。</span>
+          <span class="opening-hint" v-else>旧版开场按此顺序发送。启用的节点流程以画布保存的顺序为准。</span>
         </div>
 
         <div v-if="draft" ref="editorRef" class="opening-edit">
@@ -80,7 +81,7 @@
             </div>
             <el-input v-model="draft.content" placeholder="配文（可选）" class="media-caption" />
           </template>
-          <el-form-item label="间隔（秒）" class="delay-row">
+          <el-form-item v-if="!embedded" label="间隔（秒）" class="delay-row">
             <el-input-number v-model="delaySeconds" :min="2" :max="120" controls-position="right" />
           </el-form-item>
           <div class="edit-tools">
@@ -90,7 +91,7 @@
 
         <div v-if="loading" class="opening-empty">加载中…</div>
         <div v-else-if="!openings.length" class="opening-empty">
-          还没有开场。客户首次对话时 Agent 会按顺序发送这里的内容。
+          还没有开场。点「文本」新增要发送的内容。
         </div>
 
         <div
@@ -102,8 +103,9 @@
           <div class="opening-head">
             <span class="kind-tag" :class="entry.kind">{{ KIND_LABEL[entry.kind] }} · 第 {{ index + 1 }} 条</span>
             <div class="opening-tools">
-              <el-button link size="small" :disabled="index === 0" title="上移" @click="move(index, -1)">↑</el-button>
+              <el-button v-if="!embedded" link size="small" :disabled="index === 0" title="上移" @click="move(index, -1)">↑</el-button>
               <el-button
+                v-if="!embedded"
                 link
                 size="small"
                 :disabled="index === openings.length - 1"
@@ -123,17 +125,17 @@
               <span v-if="entry.content" class="opening-caption">配文：{{ entry.content }}</span>
             </template>
           </div>
-          <div class="opening-delay">间隔 {{ Math.round((entry.delay_ms || 0) / 1000) }} 秒后发下一条</div>
+          <div v-if="!embedded" class="opening-delay">间隔 {{ Math.round((entry.delay_ms || 0) / 1000) }} 秒后发下一条</div>
         </div>
       </el-tab-pane>
 
     </el-tabs>
-  </el-drawer>
+  </component>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { computed, nextTick, onMounted, ref } from 'vue'
+import { ElDrawer, ElMessage, ElMessageBox } from 'element-plus'
 import { agentApi } from '../../api/agent'
 import { mediaApi } from '../../api/core'
 import type { ServicePosition } from '../../api/types'
@@ -172,11 +174,12 @@ const KIND_LABEL: Record<string, string> = { text: '文本', image: '图片', vi
 const MIN_DELAY_MS = 2000
 const MAX_BYTES = 20 * 1024 * 1024
 
-const props = withDefaults(defineProps<{ modelValue: boolean; position: ServicePosition | null; initialTab?: AgentDrawerTab }>(), { initialTab: 'persona' })
+const props = withDefaults(defineProps<{ modelValue: boolean; position: ServicePosition | null; initialTab?: AgentDrawerTab; embedded?: boolean }>(), { initialTab: 'persona' })
 const emit = defineEmits<{ (e: 'update:modelValue', value: boolean): void; (e: 'changed'): void }>()
 
 const tab = ref<AgentDrawerTab>('persona')
 const loading = ref(false)
+const loadError = ref('')
 const persona = ref('')
 const savedPersona = ref('')
 const openings = ref<PersonaOpening[]>([])
@@ -207,6 +210,7 @@ function acceptOf(kind: string): string {
 async function load(opening = false): Promise<void> {
   if (!props.position) return
   loading.value = true
+  loadError.value = ''
   draft.value = null
   tab.value = drawerTabForLoad(tab.value, props.initialTab, opening)
   try {
@@ -215,7 +219,7 @@ async function load(opening = false): Promise<void> {
     savedPersona.value = persona.value
     openings.value = (Array.isArray(data.openings) ? data.openings : []) as unknown as PersonaOpening[]
   } catch (error: any) {
-    ElMessage.error(error?.response?.data?.detail || 'Agent 配置加载失败')
+    loadError.value = error?.response?.data?.detail || 'Agent 配置加载失败，请重新打开岗位设置。'
   } finally {
     loading.value = false
   }
@@ -264,7 +268,7 @@ function startEdit(entry: PersonaOpening): void {
     kind: entry.kind,
     content: entry.content || '',
     media_name: entry.media_name || '',
-    delay_ms: entry.delay_ms || MIN_DELAY_MS,
+    delay_ms: entry.delay_ms ?? MIN_DELAY_MS,
     seq: entry.seq,
   }
   revealEditor()
@@ -313,6 +317,10 @@ async function onMediaFile(event: Event): Promise<void> {
 async function saveDraft(): Promise<void> {
   const entry = draft.value
   if (!entry || !props.position) return
+  if (entry.content.length > 2000) {
+    ElMessage.warning('消息正文最多 2000 字。')
+    return
+  }
   if (entry.kind === 'text' && !entry.content.trim()) {
     ElMessage.warning('正文不能为空')
     return
@@ -345,12 +353,13 @@ async function saveDraft(): Promise<void> {
 
 async function removeEntry(entry: PersonaOpening): Promise<void> {
   try {
+    await ElMessageBox.confirm('删除后，旧版开场将跳过此条。已保存的画布节点仍使用编排时选入的文字。', '删除开场', { type: 'warning' })
     await agentApi.removeOpening(entry.id)
     ElMessage.success('已删除')
     await load()
     emit('changed')
   } catch (error: any) {
-    ElMessage.error(error?.response?.data?.detail || '删除失败')
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(error?.response?.data?.detail || '删除失败')
   }
 }
 
@@ -368,6 +377,11 @@ async function move(index: number, offset: number): Promise<void> {
     ElMessage.error(error?.response?.data?.detail || '排序失败')
   }
 }
+onMounted(() => {
+  if (props.embedded) void load(true)
+})
+
+defineExpose({ hasPendingChanges: () => personaDirty.value || draft.value !== null || savingPersona.value || savingOpening.value })
 </script>
 
 <style scoped>

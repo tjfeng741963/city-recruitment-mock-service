@@ -121,6 +121,11 @@ export function serializeServicePosition(row: Row): Row {
   result.sort_order = Number(result.sort_order) || 0;
   result.interview_days = Array.isArray(result.interview_days) ? result.interview_days : [];
   result.interview_points = Array.isArray(result.interview_points) ? result.interview_points : [];
+  if (typeof row.city_id === "number") result.city_id = row.city_id;
+  if (typeof source.work_address === "string") {
+    result.work_address = source.work_address;
+    result.interview_address = fact("interview_address");
+  }
   const sections = result.base_sections && typeof result.base_sections === "object" ? result.base_sections as Row : {};
   // 网页允许新增语义字段；读回时保留它们，否则保存后再次编辑就会丢失。
   const sectionKeys = [...new Set([...Object.keys(POSITION_DEFAULTS.base_section_labels as Row), ...Object.keys(sections)])];

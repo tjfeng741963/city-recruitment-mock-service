@@ -91,7 +91,16 @@
           </el-tab-pane>
 
           <el-tab-pane label="岗位资料" name="sections">
-            <p class="tab-tip">以下文本段用于 Agent 与岗位详情展示，按分组填写。</p>
+            <div class="line-legend">
+              <el-tag effect="plain" type="primary">系统 Agent</el-tag>
+              <span>读取本岗位资料。</span>
+              <el-tag effect="plain" type="warning">Dify 工作流</el-tag>
+              <span>工资、班次等字段优先读取城市资料，城市对应字段为空时读取岗位。</span>
+            </div>
+            <div v-if="cityOverrides.length" class="line-legend">
+              <el-tag effect="plain" type="warning">Dify 当前城市取值</el-tag>
+              <span v-for="value in cityOverrides" :key="value">{{ value }}</span>
+            </div>
             <el-collapse v-model="openGroups">
               <el-collapse-item
                 v-for="group in sectionGroups"
@@ -99,7 +108,14 @@
                 :title="group.title"
                 :name="group.key"
               >
-                <el-form-item v-for="key in group.keys" :key="key" :label="sectionLabel(key)">
+                <el-form-item v-for="key in group.keys" :key="key">
+                  <template #label>
+                    <span class="field-label-with-line">
+                      <span data-position-field-name>{{ sectionLabel(key) }}</span>
+                      <el-tag size="small" effect="plain" type="primary">系统 Agent</el-tag>
+                      <el-tag v-if="difyFallbackFields.has(key)" size="small" effect="plain" type="warning">Dify · 城市优先</el-tag>
+                    </span>
+                  </template>
                   <el-input
                     v-model="form.sections[key]"
                     type="textarea"
@@ -112,6 +128,10 @@
           </el-tab-pane>
 
           <el-tab-pane label="面试与门店" name="interview">
+            <div class="line-legend">
+              <el-tag effect="plain" type="primary">系统 Agent</el-tag><span>根据已填地址和面试点回答。</span>
+              <el-tag effect="plain" type="warning">Dify 工作流</el-tag><span>默认时间和地址优先取城市资料。具体预约使用所选面试点。</span>
+            </div>
             <div class="grid-2">
               <el-form-item label="面试时间">
                 <el-input v-model="form.interview_time" placeholder="如：周一至周六 14:30" />
@@ -121,14 +141,20 @@
               </el-form-item>
             </div>
             <div class="grid-2">
-              <el-form-item label="面试/工作地址">
-                <el-input v-model="form.address" placeholder="如：福田区 XX 路 1 号" />
+              <el-form-item label="工作地址">
+                <el-input v-model="form.work_address" placeholder="填写实际工作地点" />
               </el-form-item>
-              <el-form-item label="地址坐标">
+              <el-form-item label="默认面试地址">
+                <el-input v-model="form.interview_address" placeholder="填写默认集合或面试地点" />
+              </el-form-item>
+              <el-form-item label="岗位地址坐标">
                 <el-input v-model="form.coordinates" placeholder="纬度,经度" />
               </el-form-item>
             </div>
-            <el-form-item label="面试日期（输入后回车新增）">
+            <el-form-item>
+              <template #label>
+                <span class="field-label-with-line">可面试星期 <el-tag size="small" effect="plain" type="warning">Dify · 预约规则</el-tag></span>
+              </template>
               <el-select
                 v-model="form.interview_days"
                 class="full"
@@ -142,20 +168,23 @@
                 <el-option v-for="day in form.interview_days" :key="day" :label="day" :value="day" />
               </el-select>
             </el-form-item>
-            <el-form-item label="面试点（输入后回车新增）">
-              <el-select
-                v-model="form.interview_points"
-                class="full"
-                multiple
-                filterable
-                allow-create
-                default-first-option
-                :reserve-keyword="false"
-                placeholder="如：福田地铁站 A 出口"
-              >
-                <el-option v-for="point in form.interview_points" :key="point" :label="point" :value="point" />
-              </el-select>
-            </el-form-item>
+            <section class="interview-points" aria-label="面试点">
+              <div class="section-title point-heading">
+                <span>面试点</span>
+                <el-button type="primary" plain @click="form.interview_points.push({ name: '', address: '' })">新增面试点</el-button>
+              </div>
+              <div v-for="(point, index) in form.interview_points" :key="index" class="point-row">
+                <el-form-item label="面试点名称" :prop="'interview_points.' + index + '.name'"
+                  :rules="[{ required: true, whitespace: true, message: '请输入面试点名称', trigger: 'blur' }]">
+                  <el-input v-model="point.name" placeholder="如：东门接待处" />
+                </el-form-item>
+                <el-form-item label="详细地址">
+                  <el-input v-model="point.address" placeholder="如：兴业路 8 号东门" />
+                </el-form-item>
+                <el-button link type="danger" :aria-label="'移除面试点 ' + (index + 1)" @click="form.interview_points.splice(index, 1)">移除</el-button>
+              </div>
+              <p class="tab-tip">正式预约需要详细地址。以前保存的面试点名称可补录地址。</p>
+            </section>
             <el-form-item label="岗位图片地址">
               <el-input v-model="form.image_url" placeholder="https://..." />
             </el-form-item>
@@ -173,20 +202,34 @@
               </el-form-item>
             </div>
           </el-tab-pane>
+          <el-tab-pane v-if="auth.user?.role === 'admin'" label="系统 Agent" name="agent">
+            <div class="agent-intro">
+              <el-tag effect="plain" type="primary">系统 Agent</el-tag>
+              <span>先保存人设与消息正文，再到画布编排发送顺序和等待条件。</span>
+              <el-button v-if="editableAgentPosition" size="small" plain @click="openAgentCanvas">去画布编排</el-button>
+            </div>
+            <p v-if="!editableAgentPosition" class="tab-tip">先保存岗位，重新打开后可编辑本岗位的 Agent 话术。</p>
+            <PositionAgentDrawer v-else-if="modelValue && agentEditorOpened" ref="agentEditor" :key="editableAgentPosition.id"
+              :position="editableAgentPosition" :model-value="true" embedded />
+          </el-tab-pane>
         </el-tabs>
       </el-form>
     </div>
 
     <template #footer>
       <el-button @click="emit('update:modelValue', false)">取消</el-button>
-      <el-button type="primary" :loading="saving" @click="submit">保存</el-button>
+      <el-button v-if="activeTab !== 'agent'" type="primary"
+        :disabled="loading || (mode !== 'create' && !original)" :loading="saving" @click="submit">保存岗位资料</el-button>
     </template>
   </el-drawer>
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { computed, reactive, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
+import { useAuthStore } from '../../stores/auth'
+import PositionAgentDrawer from './PositionAgentDrawer.vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { citiesApi, factoriesApi, positionsApi, apiErrorMessage } from '../../api/core'
 import type { City, Factory, ServicePosition } from '../../api/core'
@@ -239,10 +282,35 @@ const loading = ref(false)
 const saving = ref(false)
 const activeTab = ref('base')
 const openGroups = ref<string[]>(['recruit'])
+const auth = useAuthStore()
+const router = useRouter()
+const agentEditor = ref<InstanceType<typeof PositionAgentDrawer> | null>(null)
+const agentEditorOpened = ref(false)
+watch(activeTab, tab => { if (tab === 'agent') agentEditorOpened.value = true })
+const formBaseline = ref('')
+const difyFallbackFields = new Set(['salary_detail', 'salary_ask', 'work_hours', 'shift_info', 'work_content', 'meal_dorm', 'social_insurance'])
 const cities = ref<City[]>([])
 const factories = ref<Factory[]>([])
 const base = ref<Record<string, unknown>>({})
 const original = ref<ServicePosition | null>(null)
+const editableAgentPosition = computed(() => props.mode === 'edit' ? original.value : null)
+
+async function openAgentCanvas(): Promise<void> {
+  if (!editableAgentPosition.value) return
+  if (agentEditor.value?.hasPendingChanges()) {
+    ElMessage.warning('请先保存或取消当前 Agent 文字编辑。')
+    return
+  }
+  if (formBaseline.value !== JSON.stringify(form)) {
+    try {
+      await ElMessageBox.confirm('岗位资料有未保存的修改。离开前可以返回并保存岗位资料。', '打开话术画布', {
+        confirmButtonText: '放弃修改并打开画布', cancelButtonText: '返回岗位', type: 'warning',
+      })
+    } catch { return }
+  }
+  const id = editableAgentPosition.value.id
+  await router.push({ path: '/recruitment-flow', query: { position_id: String(id), edit: '1' } })
+}
 
 const form = reactive({
   position_name: '',
@@ -261,14 +329,15 @@ const form = reactive({
   is_active: true,
   interview_time: '',
   contact_phone: '',
-  address: '',
+  work_address: '',
+  interview_address: '',
   coordinates: '',
   image_url: '',
   store_name: '',
   store_address: '',
   store_coordinates: '',
   interview_days: [] as string[],
-  interview_points: [] as string[],
+  interview_points: [] as Array<{name: string; address: string; original?: unknown}>,
   sections: { ...SECTION_LABELS } as Record<string, string>,
 })
 
@@ -290,6 +359,19 @@ const title = computed(() => {
 const cityFactories = computed(() =>
   factories.value.filter((item) => !form.city_id || Number(item.city_id) === form.city_id),
 )
+const cityOverrides = computed(() => {
+  const city = cities.value.find(item => Number(item.id) === form.city_id)
+  if (!city) return []
+  const sections = (city.prompt_sections ?? {}) as Record<string, unknown>
+  const values = [
+    ['工资', (city.salary as {raw?: string} | undefined)?.raw, sections.salary_detail, sections.salary_ask],
+    ['班次', (city.work_hours as {raw?: string} | undefined)?.raw, sections.work_hours, sections.shift_info],
+  ]
+  return values.flatMap(([label, ...options]) => {
+    const value = options.find(option => typeof option === 'string' && option.trim())
+    return typeof value === 'string' ? [`${label} ${value.trim()}`] : []
+  })
+})
 
 function sectionLabel(key: string): string {
   return SECTION_LABELS[key] ?? key
@@ -302,8 +384,8 @@ function readStrings(value: unknown): string[] {
 async function loadOptions(): Promise<void> {
   if (cities.value.length && factories.value.length) return
   const [cityRes, factoryRes] = await Promise.all([
-    citiesApi.list(),
-    factoriesApi.list().catch(() => ({ data: { items: [] } })),
+    citiesApi.list({page: 1, page_size: 1000}),
+    factoriesApi.list({page: 1, page_size: 1000}).catch(() => ({ data: { items: [] } })),
   ])
   cities.value = toArray<City>(cityRes.data)
   factories.value = toArray<Factory>((factoryRes as { data: unknown }).data)
@@ -312,8 +394,10 @@ async function loadOptions(): Promise<void> {
 function fill(source: ServicePosition): void {
   form.position_name = String(source.position_name ?? '')
   form.city_name = String(source.city_name ?? '')
-  const matched = cities.value.find((city) => city.city_name === form.city_name)
-  form.city_id = matched ? Number(matched.id) : null
+  const cityId = source.city_id
+  const matched = cities.value.find(city => cityId ? Number(city.id) === cityId : city.city_name === form.city_name)
+  form.city_id = cityId || (matched ? Number(matched.id) : null)
+  if (!form.city_name && matched) form.city_name = matched.city_name
   form.factory_id = typeof source.factory_id === 'number' ? source.factory_id : null
   form.recruiter_id = String(source.recruiter_id ?? '')
   form.gender = String(source.gender ?? '')
@@ -327,14 +411,22 @@ function fill(source: ServicePosition): void {
   form.is_active = source.is_active !== false
   form.interview_time = String(source.interview_time ?? '')
   form.contact_phone = String(source.contact_phone ?? '')
-  form.address = String(source.address ?? '')
+  const legacyAddress = String(source.address || source.store_address || '')
+  form.work_address = typeof source.work_address === 'string' ? source.work_address : legacyAddress
+  form.interview_address = typeof source.interview_address === 'string' ? source.interview_address : legacyAddress
   form.coordinates = String(source.coordinates ?? '')
   form.image_url = String(source.image_url ?? '')
   form.store_name = String(source.store_name ?? '')
   form.store_address = String(source.store_address ?? '')
   form.store_coordinates = String(source.store_coordinates ?? '')
   form.interview_days = readStrings(source.interview_days)
-  form.interview_points = readStrings(source.interview_points)
+  form.interview_points = Array.isArray(source.interview_points) ? source.interview_points.flatMap(point => {
+    if (typeof point === 'string' && point.trim()) return [{ name: point, address: '', original: point }]
+    if (point && typeof point.name === 'string' && point.name.trim()) {
+      return [{ name: point.name, address: typeof point.address === 'string' ? point.address : '', original: point }]
+    }
+    return []
+  }) : []
   const sections = (source.base_sections || {}) as Record<string, unknown>
   const labels = (source.base_section_labels || {}) as Record<string, unknown>
   for (const key of Object.keys(SECTION_LABELS)) {
@@ -350,6 +442,7 @@ function fill(source: ServicePosition): void {
 async function reset(): Promise<void> {
   formRef.value?.clearValidate()
   activeTab.value = 'base'
+  agentEditorOpened.value = false
   base.value = {}
   original.value = null
   form.position_name = ''
@@ -368,7 +461,8 @@ async function reset(): Promise<void> {
   form.is_active = true
   form.interview_time = ''
   form.contact_phone = ''
-  form.address = ''
+  form.work_address = ''
+  form.interview_address = ''
   form.coordinates = ''
   form.image_url = ''
   form.store_name = ''
@@ -390,6 +484,7 @@ async function reset(): Promise<void> {
   } catch (error: any) {
     ElMessage.error(apiErrorMessage(error, '岗位详情加载失败'))
   } finally {
+    formBaseline.value = JSON.stringify(form)
     loading.value = false
   }
 }
@@ -426,14 +521,22 @@ function buildPayload(): Record<string, unknown> {
     is_active: form.is_active,
     interview_time: form.interview_time,
     contact_phone: form.contact_phone,
-    address: form.address,
+    address: form.interview_address.trim() || form.work_address.trim(),
+    work_address: form.work_address.trim(),
+    interview_address: form.interview_address.trim(),
     coordinates: form.coordinates,
     image_url: form.image_url,
     store_name: form.store_name,
     store_address: form.store_address,
     store_coordinates: form.store_coordinates,
     interview_days: [...form.interview_days],
-    interview_points: [...form.interview_points],
+    interview_points: form.interview_points.map(point => {
+      const name = point.name.trim()
+      const address = point.address.trim()
+      if (typeof point.original === 'string' && point.original === name && !address) return point.original
+      const previous = point.original && typeof point.original === 'object' ? point.original : {}
+      return { ...previous, name, address }
+    }),
     base_sections: { ...form.sections },
     base_section_labels: labelMap,
   }
@@ -446,6 +549,13 @@ function buildPayload(): Record<string, unknown> {
 
 async function submit(): Promise<void> {
   if (!formRef.value) return
+  if (props.mode !== 'create' && !original.value) return
+  const names = form.interview_points.map(point => point.name.trim().toLowerCase())
+  if (names.some(name => !name) || new Set(names).size !== names.length) {
+    activeTab.value = 'interview'
+    ElMessage.warning('请为每个面试点填写不同的名称。')
+    return
+  }
   const valid = await formRef.value.validate().catch(() => false)
   if (!valid) return
   saving.value = true
@@ -469,6 +579,12 @@ async function submit(): Promise<void> {
 </script>
 
 <style scoped>
+.line-legend, .agent-intro, .field-label-with-line { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.line-legend, .agent-intro { margin: 4px 0 16px; color: var(--el-text-color-regular); font-size: 13px; }
+.point-heading { display: flex; justify-content: space-between; align-items: center; }
+.point-row { display: grid; grid-template-columns: 1fr 1.5fr auto; gap: 12px; align-items: center; }
+@media (max-width: 640px) { .point-row { grid-template-columns: 1fr; gap: 0; } }
+
 .drawer-body {
   min-height: 320px;
 }
