@@ -10,6 +10,13 @@ const record=(raw:unknown):Record<string,unknown>=>{
 const text=(v:unknown)=>typeof v==='string'?v.trim():'';
 const first=(...values:unknown[])=>values.map(text).find(Boolean)||'';
 
+// These are the free-text sections in the position form. Structured facts
+// such as pay and hours already have their own city-first mapping below.
+const sharedPositionSections = [
+  'positions', 'requirements', 'factory_env', 'dorm_env', 'work_env',
+  'uniform', 'medical_fee', 'luggage_question', 'interview_notice', 'checkin_guide', 'registration_form',
+] as const;
+
 /** Mode two reads city materials live. Existing position facts only fill missing city fields. */
 export function difyContext(db:DatabaseSync,id:number){
   const row=db.prepare(`SELECT p.position_name,p.status,p.data_json,c.id city_id,c.city_name,c.data_json city_json,f.factory_name
@@ -19,6 +26,7 @@ export function difyContext(db:DatabaseSync,id:number){
   if(!row||row.status!=='enabled')return null;
   const position=normalizePositionFacts(record(row.data_json)),city=record(row.city_json);
   const sections=record(city.prompt_sections),salary=record(city.salary),hours=record(city.work_hours),interview=record(city.interview);
+  const positionSections = record(position.base_sections);
   const cityFields:Record<string,string>={
     wage_text:first(salary.raw,sections.salary_detail,sections.salary_ask),
     hours_text:first(hours.raw,sections.work_hours,sections.shift_info),
@@ -34,19 +42,43 @@ export function difyContext(db:DatabaseSync,id:number){
   };
   const facts:Record<string,string>={job_title:row.position_name,city:first(row.city_name,position.city),factory_name:first(position.factory_name,row.factory_name)};
   const sources:Record<string,string>={};
+  const positionFields: Record<string, string> = {
+    interview_notice: first(positionSections.interview_notice, position.interview_notice),
+    interview_guide: first(positionSections.checkin_guide, position.interview_guide),
+  };
   for(const key of Object.keys(cityFields)){
-    const value=cityFields[key]||first(position[key]);
+    const value=cityFields[key]||first(positionFields[key], position[key]);
     if(value){facts[key]=value;sources[key]=cityFields[key]?'city':'position_fallback';}
   }
-  // Preserve custom city sections as data, never as system instructions or eligibility decisions.
-  const materials=Object.fromEntries(Object.entries(sections).filter(([,v])=>text(v)));
+  // Keep the published Chatflow's city_materials input, including original custom city sections.
+  const materials = Object.fromEntries(Object.entries(sections).flatMap(([key, value]) => {
+    const content = text(value);
+    return content ? [[key, content]] : [];
+  }));
+  const sectionSources: Record<string, string> = {};
+  for (const key of sharedPositionSections) {
+    const structuredKey = key === 'interview_notice' ? 'interview_notice'
+      : key === 'checkin_guide' ? 'interview_guide' : '';
+    if (structuredKey && facts[structuredKey]) {
+      materials[key] = facts[structuredKey];
+      sectionSources[key] = sources[structuredKey];
+    } else if (materials[key]) {
+      sectionSources[key] = 'city';
+    } else {
+      const content = text(positionSections[key]);
+      if (content) {
+        materials[key] = content;
+        sectionSources[key] = 'position_fallback';
+      }
+    }
+  }
   const mapped:Record<string,string>={salary_detail:'wage_text',salary_ask:'wage_text',work_hours:'hours_text',shift_info:'hours_text',meal_dorm:'welfare_text',social_insurance:'welfare_text',work_content:'job_content',interview_notice:'interview_notice',checkin_guide:'interview_guide'};
   for(const[key,fact]of Object.entries(mapped))if(key in materials&&facts[fact])materials[key]=facts[fact];
   const verticalId=Number(city.knowledge_vertical_id)||null;
   const knowledge=positionKnowledge(db,id,facts,verticalId);
   const schedule=interviewSchedule(db,id,facts);
   return {...facts,city_materials:materials,knowledge,interview_days:schedule.dayLabels,interview_points:schedule.points,
-    sources:{city_id:row.city_id,position_id:id,fields:sources,knowledge_scope:'global_and_current_position',knowledge_vertical_id:verticalId}};
+    sources:{city_id:row.city_id,position_id:id,fields:sources,sections:sectionSources,knowledge_scope:'global_and_current_position',knowledge_vertical_id:verticalId}};
 }
 
 /** Catch an explicit address/guide floor disagreement without guessing missing details. */
@@ -65,7 +97,7 @@ export function difyContextConflict(context:NonNullable<ReturnType<typeof difyCo
 /** Keep complete relevant entries within the published Chatflow's 20k input limit. */
 export function difyInput(context:NonNullable<ReturnType<typeof difyContext>>,query:string){
   const {city_materials,knowledge,...core}=context;
-  const result={...core,city_materials:{} as Record<string,unknown>,knowledge:[] as typeof knowledge,
+  const result={...core,sources:{...core.sources,sections:{} as Record<string,string>},city_materials:{} as Record<string,unknown>,knowledge:[] as typeof knowledge,
     retrieval:{omitted:0,limit:20000}};
   const tokens=[...new Set((query.toLowerCase().match(/[a-z0-9]+|[\u4e00-\u9fff]{1,2}/g)||[]))];
   const rank=(s:string)=>tokens.reduce((n,t)=>n+(s.toLowerCase().includes(t)?t.length:0),0);
@@ -74,9 +106,16 @@ export function difyInput(context:NonNullable<ReturnType<typeof difyContext>>,qu
     .sort((a,b)=>b.score-a.score);
   if(JSON.stringify(result).length>19000)return null;
   for(const entry of entries){
-    if(entry.kind==='city')result.city_materials[entry.key]=entry.value;else result.knowledge.push(entry.value);
+    if (entry.kind === 'city') {
+      result.city_materials[entry.key] = entry.value;
+      const source = core.sources.sections[entry.key];
+      if (source) result.sources.sections[entry.key] = source;
+    } else result.knowledge.push(entry.value);
     if(JSON.stringify(result).length>19500){
-      if(entry.kind==='city')delete result.city_materials[entry.key];else result.knowledge.pop();
+      if (entry.kind === 'city') {
+        delete result.city_materials[entry.key];
+        delete result.sources.sections[entry.key];
+      } else result.knowledge.pop();
       result.retrieval.omitted++;
     }
   }
