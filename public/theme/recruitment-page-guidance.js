@@ -51,7 +51,8 @@
     if (location.pathname !== "/cities" || currentPage() !== "城市管理") return;
     const header = document.querySelector(".page-header");
     const description = document.querySelector(".page-desc");
-    if (description) description.textContent = "维护城市资料和新岗位默认值；现有岗位的招聘回复由岗位资料控制。";
+    const descriptionText = "维护城市资料和新岗位默认值；现有岗位的招聘回复由岗位资料控制。";
+    if (description && description.textContent !== descriptionText) description.textContent = descriptionText;
     addNote(header, "city-template", "城市里的薪资、工时、要求和面试资料只作为新岗位默认值；创建时带入一次，修改城市不会覆盖已有岗位。", "");
     for (const drawer of document.querySelectorAll(".el-drawer")) {
       if (!/^(添加|编辑|复制)城市/.test(drawer.querySelector(".el-drawer__header")?.textContent.trim() || "")) continue;
@@ -73,7 +74,8 @@
     if (location.pathname !== "/service-positions" || currentPage() !== "岗位管理") return;
     const header = document.querySelector(".page-header");
     const description = document.querySelector(".page-desc");
-    if (description) description.textContent = "编辑岗位招聘事实和 AI 接待配置；保存的岗位资料将进入回复与 QA。";
+    const descriptionText = "编辑岗位招聘事实和 AI 接待配置；保存的岗位资料将进入回复与 QA。";
+    if (description && description.textContent !== descriptionText) description.textContent = descriptionText;
     addNote(header, "position-facts", "岗位资料是 AI 回复依据。新岗位的空白项会带入所属城市默认值；保存后请核对岗位资料，再启用接待。", "");
     addNote(header, "position-import", "Excel 导入暂未接入岗位数据；当前导出只包含岗位索引信息。", "");
     for (const button of document.querySelectorAll("button, .el-button")) {
