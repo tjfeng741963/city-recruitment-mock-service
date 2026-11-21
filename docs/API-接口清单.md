@@ -96,7 +96,7 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |---|---|---|---|
-| GET | `/api/v1/agent/context?position_id=:id` | admin | 调试台用：事实 / 人设 / 开场 / 话术库 / 模型是否配置 |
+| GET | `/api/v1/agent/context?position_id=:id` | admin | 调试台用：事实 / 人设 / 开场 / 话术库 / 适用问答 knowledge / 模型是否配置 |
 | GET | `/api/v1/agent/opening?device_code=:code` | 设备令牌或服务令牌 | 默认保持旧开场；显式加 `mode=flow` 只展开首个等待闸门前的流程消息；岗位停用时返回空清单和“岗位已停用” |
 | POST | `/api/v1/agent/opening/log` | 设备令牌或服务令牌 | 客户端逐条回执：`{session_key,device_code,position_id,seq,kind,status,error}` |
 | GET | `/api/v1/agent/archive?session_key=:key` | admin | 查面试档案：姓名 / 电话 / 城市 / 面试日期与时段（模型 JSON 判断结果累积） |
@@ -115,6 +115,12 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 <!-- api-check:end -->
 
 **`/api/v1/agent/chat` 的请求**
+
+`dry:true` 返回岗位事实和适用问答 `knowledge:[{id,question,answer,scope}]` 及 prompt，不调用模型、不写业务状态。`preview:true` 仅管理员可用，禁止同时传 `session_key` 或 `device_code`；调用现有非思考模型生成模拟回答，在任何会话/档案/群通知写入前返回。
+
+素材上传 `POST /api/v1/media` 若提供 `position_id>0`，会校验岗位存在，不存在返回 422。网页上传开始时固定目标岗位，文件读取期间切换页面不会把文件误绑到其他岗位。
+
+运行链路每轮读取启用且通过治理检查的通用问答（无品类限定）和本岗位专属问答。共享占位符按岗位事实渲染，缺字段的答案跳过；其他品类、城市及招工方限定的历史问答不自动泛用。知识库保存即对下一轮 Node Agent 调用生效，旧 Python 发布入口不参与此链路。流程等待闸门的推进方式不因本次问答接线改变。
 
 | 字段 | 必填 | 说明 |
 |---|---|---|

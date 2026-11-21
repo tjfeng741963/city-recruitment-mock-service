@@ -45,6 +45,21 @@ describe("candidate table columns", () => {
     expect(table.children.default()).toHaveLength(once);
   });
 
+  it('keeps columns already supplied by the Vue source instead of adding duplicate labels', () => {
+    const {table,root,create,context,columnType}=build();
+    table.children.default=()=>[
+      {type:columnType,props:{label:'设备'}},
+      {type:columnType,props:{label:'归属账号',prop:'recruiter_id'}},
+      {type:columnType,props:{label:'面试时间',prop:'interview_time'}},
+      {type:columnType,props:{label:'登记摘要',prop:'registration_text'}},
+      {type:columnType,props:{label:'省市区'}},
+    ] as any;
+    addRegistrationColumn(root,create,context);
+    const labels=table.children.default().map((column:any)=>column.props?.label);
+    for(const name of ['归属账号','面试时间','登记摘要']) expect(labels.filter(label=>label===name)).toHaveLength(1);
+    expect(labels).not.toContain('省/市/区');
+  });
+
   it("leaves unrelated elements and tables without column components alone", () => {
     const children = [null, "plain text", { type: "div", children: [] }];
     const root = { children };

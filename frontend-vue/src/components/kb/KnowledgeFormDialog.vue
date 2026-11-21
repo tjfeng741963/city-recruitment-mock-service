@@ -7,6 +7,14 @@
     @update:model-value="close"
   >
     <el-form ref="formRef" :model="form" label-width="96px" @submit.prevent>
+      <el-form-item label="适用范围">
+        <el-select v-model="form.scope" :disabled="!!item">
+          <el-option label="所有岗位通用" value="global" />
+          <el-option :label="positionName ? `仅用于：${positionName}` : '当前岗位专属（先选岗位）'" value="position" :disabled="!positionId" />
+          <el-option v-if="item && !['global','position'].includes(item.scope_level)" :label="`原范围：${item.scope_level}`" :value="item.scope_level" />
+        </el-select>
+        <span class="kb-sort-hint">工资、地址等事实在招聘岗位维护；通用回答可引用 {wage_text}。</span>
+      </el-form-item>
       <el-form-item label="问题" required>
         <el-input v-model="form.question" maxlength="500" show-word-limit placeholder="例如：厂里管吃住吗？" />
       </el-form-item>
@@ -45,7 +53,7 @@
         </div>
       </el-form-item>
 
-      <el-row :gutter="12">
+      <el-row v-if="item && !['global','position'].includes(item.scope_level)" :gutter="12">
         <el-col :span="12">
           <el-form-item label="分类">
             <el-select v-model="form.vertical_id" clearable placeholder="全部分类" class="w-full" @change="onVerticalChange">
@@ -67,7 +75,7 @@
         </el-col>
       </el-row>
 
-      <el-form-item label="雇主">
+      <el-form-item v-if="item && !['global','position'].includes(item.scope_level)" label="雇主">
         <el-select v-model="form.employer_id" clearable filterable placeholder="不限雇主" class="w-full" @change="onEmployerChange">
           <el-option
             v-for="employer in employerOptions"
@@ -112,6 +120,8 @@ import type { Employer, KnowledgeDraft, KnowledgeItem, LocationNode, Vertical } 
 const props = withDefaults(
   defineProps<{
     modelValue: boolean
+    positionId?: number
+    positionName?: string
     item?: KnowledgeItem | null
     verticals: Vertical[]
     locations: LocationNode[]
@@ -130,6 +140,7 @@ const formRef = ref()
 const keywordInput = ref('')
 const originalScope = ref('')
 const form = reactive({
+  scope: 'global',
   question: '',
   answer: '',
   keywords: [] as string[],
@@ -149,6 +160,7 @@ const employerOptions = computed(() => {
 
 function reset(): void {
   const item = props.item
+  form.scope = item?.scope_level || (props.positionId ? 'position' : 'global')
   form.question = item?.question ?? ''
   form.answer = item?.answer ?? ''
   form.keywords = [...(item?.keywords ?? [])]
@@ -210,15 +222,7 @@ function onEmployerChange(): void {
 }
 
 function buildDraft(): KnowledgeDraft {
-  const scopeLevel = form.employer_id
-    ? 'employer'
-    : form.city_id
-      ? 'city'
-      : originalScope.value === 'global'
-        ? 'global'
-        : form.vertical_id
-          ? 'vertical'
-          : 'global'
+  const scopeLevel = props.item?.scope_level || form.scope
   return {
     question: form.question.trim(),
     answer: form.answer.trim(),
@@ -226,6 +230,7 @@ function buildDraft(): KnowledgeDraft {
     vertical_id: form.vertical_id,
     scope_level: scopeLevel,
     scope_location_id: scopeLevel === 'city' ? form.city_id : null,
+    scope_position_id: scopeLevel === 'position' ? (props.item?.scope_position_id ?? props.positionId ?? null) : null,
     scope_employer_id: scopeLevel === 'employer' ? form.employer_id : null,
     status: form.enabled ? 'enabled' : 'disabled',
     sort_order: form.sort_order ?? 0,

@@ -56,6 +56,7 @@ export interface KnowledgeItem {
   vertical_id: number | null
   scope_level: string
   scope_location_id: number | null
+  scope_position_id?: number | null
   scope_employer_id: number | null
   template_item_id: number | null
   updated_at: string
@@ -71,6 +72,7 @@ export interface KnowledgeDraft {
   vertical_id: number | null
   scope_level: string
   scope_location_id: number | null
+  scope_position_id?: number | null
   scope_employer_id: number | null
   status: string
   sort_order: number
@@ -236,6 +238,7 @@ function mapFaqRow(row: Record<string, unknown>): KnowledgeItem {
     vertical_id: asNullableId(row.vertical_id),
     scope_level: asString(row.scope_level, 'global'),
     scope_location_id: asNullableId(row.scope_location_id),
+    scope_position_id: asNullableId(row.scope_position_id),
     scope_employer_id: asNullableId(row.scope_employer_id),
     template_item_id: asNullableId(row.template_item_id),
     updated_at: asString(row.updated_at),
@@ -258,39 +261,20 @@ export function getKnowledgeSource(): KnowledgeSource {
 
 /** 一次取回全部（后端 page_size=1000），筛选与分页在前端做。 */
 export async function listKnowledgeItems(): Promise<KnowledgeListResult> {
-  let nativeItems: KnowledgeItem[] = []
-  let nativeError: unknown = null
-  try {
-    const { data } = await http.get<PageResult<Record<string, unknown>>>('/api/v1/knowledge', {
-      params: { page: 1, page_size: 1000 },
-    })
-    cachedNativeRows = itemsOf<Record<string, unknown>>(data)
-    nativeItems = cachedNativeRows.map(mapKnowledgeRow)
-  } catch (error) {
-    nativeError = error
-  }
-
-  if (nativeItems.length) {
-    activeSource = 'knowledge'
-    return { items: nativeItems, total: nativeItems.length, source: activeSource }
-  }
-
-  const { data: faqData } = await http.get<PageResult<Record<string, unknown>>>('/api/v1/kb-faqs', {
-    params: { page: 1, page_size: 1000 },
-  })
-  cachedFaqRows = itemsOf<Record<string, unknown>>(faqData)
-  const faqItems = cachedFaqRows.map(mapFaqRow)
-
-  if (faqItems.length || !nativeError) {
-    activeSource = faqItems.length ? 'kb_faq' : 'knowledge'
-    return {
-      items: activeSource === 'kb_faq' ? faqItems : nativeItems,
-      total: activeSource === 'kb_faq' ? faqItems.length : nativeItems.length,
-      source: activeSource,
-    }
-  }
-
-  throw nativeError
+  const rows: Record<string, unknown>[] = []
+  let page = 1
+  let total = 0
+  do {
+    const { data } = await http.get<PageResult<Record<string, unknown>>>('/api/v1/kb-faqs', { params: { page, page_size: 1000 } })
+    const batch = itemsOf<Record<string, unknown>>(data)
+    rows.push(...batch)
+    total = totalOf(data, rows.length)
+    if (!batch.length) break
+    page++
+  } while (rows.length < total)
+  cachedFaqRows = rows
+  activeSource = 'kb_faq'
+  return { items: rows.map(mapFaqRow), total, source: activeSource }
 }
 
 export async function getKnowledgeItem(
@@ -385,6 +369,7 @@ function toFaqPayload(draft: KnowledgeDraft): Record<string, unknown> {
     scope_level: draft.scope_level,
     scope_location_id: draft.scope_level === 'city' ? draft.scope_location_id : null,
     scope_employer_id: draft.scope_level === 'employer' ? draft.scope_employer_id : null,
+    scope_position_id: draft.scope_level === 'position' ? draft.scope_position_id : null,
     priority: draft.sort_order,
     status: draft.status === 'disabled' ? 'disabled' : 'enabled',
   }
@@ -401,21 +386,9 @@ function toNativePayload(draft: KnowledgeDraft): Record<string, unknown> {
 }
 
 export async function createKnowledgeItem(draft: KnowledgeDraft): Promise<KnowledgeItem> {
-  if (activeSource === 'kb_faq') {
-    const { data } = await http.post<Record<string, unknown>>('/api/v1/kb-faqs', toFaqPayload(draft))
-    return mapFaqRow(data ?? {})
-  }
-
-  const { data } = await http.post<Record<string, unknown>>('/api/v1/knowledge', toNativePayload(draft))
-  // 兼容层未挂载时 POST 只回 {"success": true}，没有 id；此时切到 kb_faq 重写。
-  if (data && data.id !== undefined) {
-    activeSource = 'knowledge'
-    return mapKnowledgeRow(data)
-  }
-
+  const { data } = await http.post<Record<string, unknown>>('/api/v1/kb-faqs', toFaqPayload(draft))
   activeSource = 'kb_faq'
-  const { data: faqData } = await http.post<Record<string, unknown>>('/api/v1/kb-faqs', toFaqPayload(draft))
-  return mapFaqRow(faqData ?? {})
+  return mapFaqRow(data ?? {})
 }
 
 export async function updateKnowledgeItem(
@@ -502,7 +475,7 @@ function csvCell(value: unknown): string {
 }
 
 function toCsv(items: KnowledgeItem[], categoryName: (id: number | null) => string): string {
-  const header = ['问题', '答案', '关键词', '分类', '状态', '排序']
+  const header = ['问题', '答案', '关键词', '分类', '状态', '排序', 'scope_level', 'scope_position_id']
   const lines = items.map((item) =>
     [
       item.question,
@@ -511,6 +484,8 @@ function toCsv(items: KnowledgeItem[], categoryName: (id: number | null) => stri
       categoryName(item.vertical_id),
       item.status === 'enabled' ? '启用' : '停用',
       item.sort_order,
+      item.scope_level,
+      item.scope_position_id || '',
     ]
       .map(csvCell)
       .join(','),
@@ -524,15 +499,6 @@ export async function exportKnowledge(
   categoryName: (id: number | null) => string,
 ): Promise<{ blob: Blob; filename: string; degraded: boolean }> {
   const filename = `knowledge-${new Date().toISOString().slice(0, 10)}.csv`
-  try {
-    const { data } = await http.get<Blob>('/api/v1/knowledge/batch/export', { responseType: 'blob' })
-    const text = data instanceof Blob ? await data.text() : ''
-    if (text.trim() && !/placeholder/i.test(text)) {
-      return { blob: data, filename, degraded: false }
-    }
-  } catch {
-    // 后端不可用时走前端导出
-  }
   const csv = `\uFEFF${toCsv(items, categoryName)}`
   return {
     blob: new Blob([csv], { type: 'text/csv;charset=utf-8' }),

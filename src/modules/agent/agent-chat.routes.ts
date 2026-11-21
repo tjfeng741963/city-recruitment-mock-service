@@ -6,6 +6,7 @@ import { isValidDeviceToken } from "./position-scripts.routes.js";
 import { firstFlowSegment } from "./agent-flow.routes.js";
 import { complete, llmConfig, parseJsonObject } from "./agent-llm.js";
 import { normalizePositionFacts } from "../../shared/position-facts.js";
+import { positionKnowledge } from './position-knowledge.js';
 import {
   buildOrchestration,
   guessCustomerName,
@@ -254,6 +255,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         },
         persona,
         facts,
+        knowledge: positionKnowledge(db, positionId, facts),
         opening,
         scripts: parseScripts(persona).map((script) => ({
           id: script.id,
@@ -633,6 +635,10 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
     const body = request.body ?? {};
     const deviceCode = text(body.device_code).trim();
     const positionId = int(body.position_id) || (deviceCode ? positionOfDevice(db, deviceCode) : 0);
+    if (body.preview === true) {
+      if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
+      if (body.session_key || deviceCode) return reply.code(422).send({ detail: '模拟回答不能绑定真实会话或设备' });
+    }
     if (positionId <= 0) return reply.code(422).send({ detail: "position_id or device_code is required" });
 
     const input = text(body.text).trim();
@@ -643,7 +649,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
 
     const row = positionRow(db, positionId);
     if (!row) return reply.code(404).send({ detail: "position not found" });
-    if (row.status !== "enabled" && body.dry !== true) {
+    if (row.status !== "enabled" && body.dry !== true && body.preview !== true) {
       return reply.code(409).send({ detail: "该岗位已停用，不能生成真实回复" });
     }
 
@@ -701,7 +707,8 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
     }));
     // 编排：system(人设+今天日期+事实+话术库+规则) + 开场序列 + 全量历史 + 当前这句
     // （DeepSeek 无状态多轮拼接；上下文归服务端持有）
-    const { messages, scripts } = buildOrchestration({ persona, facts, opening, now: nowLabel, history, input, sentSummary });
+    const knowledge = positionKnowledge(db, positionId, facts);
+    const { messages, scripts } = buildOrchestration({ persona, facts, opening, now: nowLabel, history, input, sentSummary, knowledge });
 
     // dry：只回拼好的 prompt，不调模型、不写会话。调试台用它确认
     // 「人设 + 事实 + 话术库 + 开场 + 历史」有没有喂对。
@@ -709,6 +716,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       return {
         ok: true,
         dry: true,
+        knowledge,
         session_key: sessionKey || null,
         messages,
         facts,
@@ -780,6 +788,11 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         }
         replyPayload.messages = resolved;
       }
+
+      if (body.preview === true) return {
+        ok: true, preview: true, reply: replyPayload, facts, knowledge,
+        model: result.model, usage: result.usage, latency_ms: result.latency_ms,
+      };
 
       // 信任模式：不做代码级护栏，模型按 prompt 约束引用话术原文（2026-11-17）。
       // 会话成功才有记忆：客户这句 + 模型完整 JSON 输出（messages/capture/

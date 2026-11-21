@@ -48,7 +48,7 @@
   }
 
   function adjustCityPage() {
-    if (location.pathname !== "/cities" || currentPage() !== "城市管理") return;
+    if (location.pathname !== "/cities" || !["城市管理","城市与项目"].includes(currentPage())) return;
     const header = document.querySelector(".page-header");
     const description = document.querySelector(".page-desc");
     const descriptionText = "维护城市资料和新岗位默认值；现有岗位的招聘回复由岗位资料控制。";
@@ -71,7 +71,7 @@
   }
 
   function adjustPositionPage() {
-    if (location.pathname !== "/service-positions" || currentPage() !== "岗位管理") return;
+    if (location.pathname !== "/service-positions" || !["岗位管理","招聘岗位"].includes(currentPage())) return;
     const header = document.querySelector(".page-header");
     const description = document.querySelector(".page-desc");
     const descriptionText = "编辑岗位招聘事实和 AI 接待配置；保存的岗位资料将进入回复与 QA。";

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildServer } from "../src/server.js";
 
@@ -216,6 +216,57 @@ describe("agent chat routes", () => {
       headers: admin,
     });
     expect(disabled.json()).toMatchObject({ position_id: positionId, persona: "", items: [], detail: "岗位已停用" });
+  });
+
+  it("uses only applicable enabled FAQ knowledge and renders facts in dry QA", async () => {
+    const insert = (scope: string, pid: number | null, question: string, answer: string, status = 'enabled') => {
+      app.db.prepare("INSERT INTO kb_faq(tenant_id,scope_level,scope_position_id,question,answer,keywords,media,status) VALUES (1,?,?,?,?, '[]','[]',?)")
+        .run(scope, pid, question, answer, status);
+    };
+    insert('global', null, '工资多少', '{wage_text}');
+    insert('global', null, '怎么称呼', '叫我陈姐就好');
+    insert('global', null, '旧错误工资', '工资999元');
+    insert('position', positionId, '集合后做什么', '到岗先联系带队老师');
+    const other = app.db.prepare("INSERT INTO service_positions(position_name) VALUES ('另一个岗位') RETURNING id").get() as { id: number };
+    insert('position', other.id, '其他岗位', '另一个厂的秘密答案');
+    insert('position', positionId, '停用答案', '此答案不能发送', 'disabled');
+    insert('global', null, '缺失字段', '{height_text}');
+    const res = await app.inject({ method: 'POST', url: '/api/v1/agent/chat', headers: admin,
+      payload: { position_id: positionId, text: '工资多少', dry: true } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().knowledge).toEqual(expect.arrayContaining([
+      expect.objectContaining({ question: '工资多少', answer: '22元/小时' }),
+      expect.objectContaining({ question: '集合后做什么', answer: '到岗先联系带队老师' }),
+    ]));
+    const prompt = res.json().messages[0].content;
+    expect(prompt).toContain('叫我陈姐就好');
+    expect(prompt).toContain('到岗先联系带队老师');
+    for (const forbidden of ['另一个厂的秘密答案', '工资999元', '此答案不能发送', '缺失字段']) expect(prompt).not.toContain(forbidden);
+  });
+
+  it('requires admin for generated previews and never accepts a live session for preview', async () => {
+    const res = await app.inject({method:'POST',url:'/api/v1/agent/chat',headers:admin,
+      payload:{position_id:positionId,text:'你好',preview:true,session_key:'real-customer'}});
+    expect(res.statusCode).toBe(422);
+    expect(res.json().detail).toContain('模拟');
+  });
+
+  it('generates a preview without recording a session, archive or send command', async () => {
+    process.env.AGENT_LLM_API_KEY = 'local-test-placeholder';
+    vi.stubGlobal('fetch', async () => new Response(JSON.stringify({model:'deepseek-chat',choices:[{message:{content:JSON.stringify({
+      messages:[{type:'text',content:'先联系带队老师'}],capture:{name:'测试',phone:'13800000000'},
+      interview:{date:'2026-12-01',time:'10:00',confirmed:true},handoff:false,done:false,
+    })}}]}),{status:200}));
+    const count = (table:string) => (app.db.prepare(`SELECT COUNT(*) n FROM ${table}`).get() as {n:number}).n;
+    const tables=['agent_session','agent_archive','bridge_commands'];
+    const before=tables.map(count);
+    try {
+      const res=await app.inject({method:'POST',url:'/api/v1/agent/chat',headers:admin,
+        payload:{position_id:positionId,text:'集合后做什么',preview:true}});
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({ok:true,preview:true,reply:{messages:[{type:'text',content:'先联系带队老师'}]}});
+      expect(tables.map(count)).toEqual(before);
+    } finally { vi.unstubAllGlobals(); }
   });
 
   it("非管理员读不到上下文，也调不了对话", async () => {
