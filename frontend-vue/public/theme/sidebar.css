@@ -116,6 +116,50 @@
   transform: scale(1.08);
 }
 
+/* Vue owns collapse state on the aside; keep its rail on the same center axis. */
+:root body .sidebar.collapsed {
+  width: 76px;
+}
+:root body .sidebar.collapsed .sidebar-logo {
+  justify-content: center;
+  padding: 20px 0 16px;
+}
+:root body .sidebar.collapsed .sidebar-menu {
+  width: 100%;
+  padding: 4px 10px 12px;
+  border-right: 0;
+}
+:root body .sidebar.collapsed .sidebar-menu > .el-menu-item,
+:root body .sidebar.collapsed .sidebar-menu > .el-sub-menu > .el-sub-menu__title {
+  width: 100%;
+  justify-content: center;
+  padding: 0 !important;
+}
+:root body .sidebar.collapsed .el-menu-item > .el-menu-tooltip__trigger {
+  inset: 0;
+  width: 100%;
+  padding: 0 !important;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+:root body .sidebar.collapsed .sidebar-menu .el-icon {
+  margin: 0 !important;
+}
+:root body .sidebar.collapsed .el-sub-menu__icon-arrow {
+  display: none;
+}
+:root body .sidebar.collapsed .sidebar-footer {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 12px;
+  height: 40px;
+  margin: 0;
+  padding: 0;
+  justify-content: center;
+}
+
 /* ---------- Tooltip for the rail ---------- */
 .rk-nav-tip {
   position: fixed;
