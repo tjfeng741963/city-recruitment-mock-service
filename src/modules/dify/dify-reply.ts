@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { DatabaseSync } from "node:sqlite";
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { difyContext, difyInput } from "./dify-context.js";
+import { difyContext, difyContextConflict, difyInput } from "./dify-context.js";
 import { DeviceBridgeStore } from "../messaging/device-bridge.js";
 import { devicePositionId } from "../../shared/device-factories.js";
 import { canAccessCity, getUserScope } from "../../auth/user-scopes.js";
@@ -38,6 +38,11 @@ export function registerReplyProviderRoutes(app: FastifyInstance, db: DatabaseSy
     const row=db.prepare('SELECT * FROM cities WHERE id=?').get(id) as {data_json:string}|undefined;
     if(!row)return reply.code(404).send({detail:"城市不存在"});
     const next=object(row.data_json||'{}'),body=req.body||{};
+    if('knowledge_vertical_id' in body){
+      const value=body.knowledge_vertical_id;
+      if(value!==null&&(!Number.isSafeInteger(value)||Number(value)<=0||!db.prepare("SELECT 1 FROM vertical WHERE id=? AND tenant_id=1 AND status='enabled'").get(Number(value))))return reply.code(422).send({detail:'请选择有效且启用的知识品类，或留空'});
+      next.knowledge_vertical_id=value;
+    }
     for(const key of ['salary','work_hours','requirements','interview','prompt_sections','prompt_section_labels']){
       if(!(key in body))continue;
       if(!body[key]||typeof body[key]!=='object'||Array.isArray(body[key]))return reply.code(422).send({detail:`${key} must be an object`});
@@ -111,6 +116,8 @@ export async function generateDifyReply(db: DatabaseSync, input:{deviceCode:stri
     if(blocked()) return failure("human_takeover","设备停用、已切换账号或会话已接管");
     const facts=difyContext(db,input.positionId);
     if(!facts)return failure("dify_position_unavailable","岗位不可用");
+    const conflict=difyContextConflict(facts);
+    if(conflict)return failure('dify_context_conflict',conflict);
     const selected=difyInput(facts,input.text);
     if(!selected)return failure('dify_context_too_large','城市关键字段过长，请精简薪资、时间或面试地点；完整话术请放入原文段落或知识库');
     const payload={inputs:{position_data:JSON.stringify(selected),current_time:new Date().toLocaleString("sv-SE",{timeZone:"Asia/Shanghai"})},query:input.text,response_mode:"blocking",user:`recruit-${identity}`};
@@ -128,7 +135,7 @@ export async function generateDifyReply(db: DatabaseSync, input:{deviceCode:stri
       db.prepare("INSERT INTO dify_reply_sessions(identity,device_code,conversation_id) VALUES (?,?,?) ON CONFLICT(identity) DO UPDATE SET conversation_id=excluded.conversation_id,updated_at=CURRENT_TIMESTAMP").run(identity,input.deviceCode,body.conversation_id);
       const answer=typeof body.answer==="string"?body.answer.trim():"";
       if(!answer||answer.length>12000||/##[^#\n]+##|https?:\/\/|图片[（(]|文件[（(]|【\s*(?:图片|视频|文件)\s*[:：]/i.test(answer))throw new Error("dify_invalid_reply");
-      const amounts=(value:string)=>[...value.matchAll(/(\d+(?:\.\d+)?)(?:\s*[-~到至]\s*(\d+(?:\.\d+)?))?\s*(?:(?:元|块)(?:\s*[/每]\s*(小时|时|天|班次?|月|晚))?|[/每]\s*(小时|时|天|班次?|月|晚))/g)].flatMap(m=>{
+      const amounts=(value:string)=>[...value.matchAll(/(\d+(?:\.\d+)?)(?:\s*[-~～–—到至]\s*(\d+(?:\.\d+)?))?\s*(?:(?:元|块)(?:\s*[/每]\s*(小时|时|天|班次?|月|晚))?|[/每]\s*(小时|时|天|班次?|月|晚))/g)].flatMap(m=>{
         const units:Record<string,string>={小时:'hour',时:'hour',天:'day',班:'shift',班次:'shift',月:'month',晚:'night'};
         const unit=units[m[3]||m[4]]||'currency';return [m[1],m[2]].filter(Boolean).map(n=>`${Number(n)}:${unit}`);
       });

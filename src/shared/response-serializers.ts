@@ -2,7 +2,7 @@ type Row = Record<string, unknown>;
 type JsonObject = Record<string, unknown>;
 
 const CITY_FIELDS = [
-  "city_name", "province", "interview_site_name", "social_insurances", "districts",
+  "city_name", "province", "interview_site_name", "social_insurances", "districts", "knowledge_vertical_id",
   "recruitment_status", "flow_type", "ask_accommodation", "is_primary",
   "gender_accommodation_policy", "factory_mode", "salary", "interview", "available_lines",
   "work_hours", "requirements", "prompt_sections", "prompt_section_labels", "sort_order",
