@@ -82,6 +82,7 @@
                 {{ nodeContentLabel(node) }}
               </el-tag>
             </div>
+            <FlowMediaPreview v-if="previewPart(node)" :name="previewPart(node)!.media_name!" :kind="previewPart(node)!.kind" compact @preview="selectNode(node.node_key)" />
             <div class="node-summary">{{ nodeSummary(node) }}</div>
             <div class="node-footer">
               <span>{{ nodeExecutionLabel(node) }}</span>
@@ -101,6 +102,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { FullScreen, Minus, Plus } from '@element-plus/icons-vue'
 import type { AgentFlow, AgentFlowEdge, AgentFlowNode } from '../../api/agent'
 import { dragFlowPoint } from '../basic/flow-graph'
+import FlowMediaPreview from './FlowMediaPreview.vue'
 import { fitCanvasZoom, panCanvasScroll, zoomCanvasAt } from './canvas-navigation'
 
 const NODE_WIDTH = 272
@@ -263,6 +265,10 @@ function nodeContentLabel(node: AgentFlowNode): string {
   return kinds.length ? kinds.map(nodeTypeLabel).join(' + ') : nodeTypeLabel(node.node_type)
 }
 
+function previewPart(node: AgentFlowNode) {
+  return node.parts?.find(part => ['image', 'video'].includes(part.kind) && part.media_name)
+}
+
 function nodeSummary(node: AgentFlowNode): string {
   if (node.node_type.startsWith('system_')) return String(node.body || '')
   if (node.node_type === 'branch') return '按关键词或默认条件分流'
@@ -279,6 +285,7 @@ function nodeExecutionLabel(node: AgentFlowNode): string {
   if (node.status === 'disabled') return '跳过内容与等待'
   if (node.node_type === 'system_start') return '满足首次触发条件'
   if (node.node_type === 'system_ai') return '按客户问题生成回复'
+  if (node.node_type === 'system_media') return 'AI 按需选择 · 非固定顺序'
   if (node.node_type === 'end') return '固定流程结束'
   if (node.node_type === 'branch') return '关键词优先，否则走默认'
   if (node.node_type === 'followup') return '超时后发送 · 最多 1 次'

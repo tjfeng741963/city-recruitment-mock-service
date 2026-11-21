@@ -48,16 +48,22 @@ function factsText(facts: Record<string, string>): string {
     ["place", "工作地点"],
     ["interview_address", "面试地址"],
     ["interview_time", "面试时间"],
-    ["basic_requirements", "招聘要求"],
+    ["interview_time_text", "面试时间与休息日说明"],
+    ["interview_material", "面试材料"],
+    ["basic_requirements", "基本招聘要求"],
+    ["onboarding_notes", "入职注意事项"],
     ["additional_info", "岗位补充资料"],
     ["height_text", "身高要求"],
     ["tattoo_policy", "纹身要求"],
     ["cert_text", "证件与学历"],
     ["job_content", "工作内容"],
+    ["media_catalog", "通用工作与住宿素材清单"],
+    ["interview_address_image", "本岗位面试地点图片"],
+    ["interview_video", "本岗位面试说明视频"],
   ];
   const lines = labels
     .filter(([key]) => facts[key])
-    .map(([key, label]) => `- ${label}：${facts[key]}`);
+    .map(([key, label]) => `- ${label}（${key}）：${facts[key]}`);
   return lines.length ? lines.join("\n") : "（这个岗位还没有填事实，任何数字都不要说）";
 }
 

@@ -10,7 +10,7 @@ import { buildServer } from "../src/server.js";
  * 媒体资源库（迁移 031）契约回归：
  * - POST /api/v1/media 落盘到 <data>/media/<sha256>.<ext> 并入库；
  * - sha256 与文件字节一致；GET /api/v1/agent/media/:name 下载内容一致；
- * - 下载鉴权接受设备 token 或 X-Profile-Token；
+ * - 下载鉴权接受管理员 JWT、设备 token 或 X-Profile-Token；
  * - 同名重传是替换，不是报 409。
  */
 
@@ -140,5 +140,38 @@ describe("media assets", () => {
     });
     expect(res.statusCode).toBe(200);
     expect(String(res.headers["content-type"])).toContain("video/mp4");
+  });
+
+  it("allows an authenticated administrator to preview media but rejects other user JWTs", async () => {
+    await upload("管理员预览.png");
+    const url = `/api/v1/agent/media/${encodeURIComponent("管理员预览.png")}`;
+    const preview = await app.inject({ method: "GET", url, headers: admin });
+    expect(preview.statusCode).toBe(200);
+    expect(preview.rawPayload.equals(PNG_BUFFER)).toBe(true);
+    expect(preview.headers["x-content-sha256"]).toBe(PNG_SHA);
+
+    for (const username of ["local-recruiter", "local-customer"]) {
+      const login = await app.inject({
+        method: "POST", url: "/api/v1/auth/login",
+        payload: { username, password: "local-demo-only" },
+      });
+      expect(login.statusCode).toBe(200);
+      const result = await app.inject({
+        method: "GET", url, headers: { authorization: `Bearer ${login.json().access_token}` },
+      });
+      expect(result.statusCode).toBe(403);
+    }
+  });
+
+  it("serves an extensionless video using the storage file MIME type", async () => {
+    expect((await upload("安检工作", "video")).statusCode).toBe(200);
+    expect(app.db.prepare("SELECT storage_path FROM media_assets WHERE name=?").get("安检工作"))
+      .toMatchObject({ storage_path: `media/${PNG_SHA}.mp4` });
+    const res = await app.inject({
+      method: "GET", url: `/api/v1/agent/media/${encodeURIComponent("安检工作")}`, headers: svc,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(String(res.headers["content-type"])).toContain("video/mp4");
+    expect(res.rawPayload.equals(PNG_BUFFER)).toBe(true);
   });
 });

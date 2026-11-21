@@ -143,6 +143,8 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 | `dry` | 否 | `true` 只返回拼好的 messages，不调模型、不写会话 |
 | `sent_summary` | 否 | 已真实发送的流程摘要数组，最多 50 项；显式传空数组也会停止注入完整旧开场，省略则保持旧客户端兼容 |
 
+`dry=true` 返回的 `messages` 是实际模型请求使用的完整 prompt，可用于核对事实是否进入模型上下文。事实区包含岗位基本字段，以及面试时间说明、面试地址、面试材料、基本招聘要求、入职注意事项、通用素材清单 `media_catalog` 和本岗位启用的面试图片/视频 `interview_address_image`、`interview_video`；事实标签同时显示字段 key。其他岗位专属素材及停用素材不注入。素材出现在 prompt 只证明模型可选用该素材，不代表客户端已经发送或客户已经收到。
+
 **节点流程配置与状态（2026-11-19）**
 
 - `PUT /agent-flow`：传 `position_id, version, entry_key, status, nodes, edges, canvas`。`version` 不匹配返回 409；前端必须携带读取时版本，重新载入后再编辑。`status=disabled` 保存草稿，启用时校验文本数字是否存在于本岗位事实字段。数字集合校验只能挡住未知数字，不能替代工价含义与单位的人工审核。
@@ -205,7 +207,7 @@ HTTP 仍是 200——调用方按 `ok` 判断，不要按状态码。模型输�
 | GET | `/api/v1/media` | admin | 素材库列表 |
 | POST | `/api/v1/media` | admin | 上传，body `{name,kind,data_base64}`，单文件 ≤ 20MB |
 | DELETE | `/api/v1/media/:id` | admin | 删记录（文件按 sha 复用，不删文件） |
-| GET | `/api/v1/agent/media/:name` | 设备令牌 | 客户端下载素材 |
+| GET | `/api/v1/agent/media/:name` | admin JWT、设备令牌或服务令牌 | 客户端下载/管理员预览素材；普通用户 JWT 不允许 |
 
 ---
 

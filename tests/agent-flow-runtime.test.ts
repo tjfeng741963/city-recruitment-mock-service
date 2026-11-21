@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildRuntimeFlow, describeRuntimeNode, compareOpeningContents } from '../frontend-vue/src/components/agent/flow-runtime.js';
+import { buildRuntimeFlow, describeRuntimeNode, compareOpeningContents, buildAiMediaBranches } from '../frontend-vue/src/components/agent/flow-runtime.js';
 
 const legacy = [
   { id: 1, seq: 1, kind: 'text', content: '招聘要求', status: 'enabled', delay_ms: 2000 },
@@ -89,5 +89,25 @@ describe('actual recruitment flow presentation', () => {
       {from_key:'intro',to_key:'',trigger:'keyword',condition_value:'工资'},
     ]};
     expect(buildRuntimeFlow(continuous,[]).edges.some(edge=>edge.from_key==='intro'&&edge.trigger==='keyword')).toBe(false);
+  });
+
+  it('expands AI conditional media without claiming the images are fixed opening steps', () => {
+    const assets = [
+      {name:'工作内容.jpg',kind:'image',position_id:0},
+      {name:'宿舍照片.jpg',kind:'image',position_id:0},
+      {name:'安检.mp4',kind:'video',position_id:0},
+      {name:'深圳地点.png',kind:'image',position_id:25},
+      {name:'其他岗位.png',kind:'image',position_id:22},
+    ];
+    const branches = buildAiMediaBranches(assets, {media_catalog:'工作内容.jpg、宿舍照片.jpg、安检.mp4',interview_address_image:'深圳地点.png'},25);
+    expect(branches.map(item=>item.name)).toEqual(['工作内容.jpg','宿舍照片.jpg','安检.mp4','深圳地点.png']);
+    const displayed=buildRuntimeFlow({...flow,status:'disabled'},legacy,branches);
+    const image=displayed.nodes.find(node=>node.parts?.[0]?.media_name==='工作内容.jpg')!;
+    expect(image.node_type).toBe('system_media');
+    expect(displayed.edges.find(edge=>edge.to_key===image.node_key)?.from_key).toBe('__runtime_ai');
+    expect(displayed.edges.find(edge=>edge.to_key===image.node_key)?.runtime_label).toContain('按需');
+    expect(displayed.nodes.find(node=>node.node_key==='legacy_2')?.parts?.[0]?.kind).toBe('video');
+    expect(describeRuntimeNode(image,displayed,true).join(' ')).toContain('不是开场必发');
+    expect(flow.nodes).toHaveLength(1);
   });
 });
