@@ -1,35 +1,34 @@
 <template>
   <div class="mode-control">
-    <el-alert v-if="loadError" title="暂时无法核对切换状态" type="warning" :closable="false" />
-    <template v-if="status">
-      <div class="mode-summary">
-        <strong>{{ status.client_ready && !pending ? "正在使用" : "上次确认" }} {{ label(status.effective) }}</strong>
-        <el-tag v-if="pending" type="warning">{{ status.rollback ? '正在恢复' : '正在切换' }}至 {{ label(status.target) }}</el-tag>
-        <el-tag v-else-if="status.phase === 'completed'" type="success">已切换</el-tag>
-        <el-tag v-else-if="status.phase === 'cancelled'" type="info">已恢复</el-tag>
-      </div>
-      <div v-if="pending" class="mode-progress">
-        <el-steps :active="status.phase === 'applying' ? 1 : 0" simple>
-          <el-step title="等待当前任务结束" />
-          <el-step title="Win 应用配置" />
-          <el-step title="确认完成" />
-        </el-steps>
-        <div class="mode-note" aria-live="polite">{{ explanation }}</div>
-        <div class="mode-note">已等待 {{ elapsed }}{{ seconds >= 45 ? '，切换比平时慢' : '' }}</div>
-        <el-button v-if="!status.rollback" size="small" :loading="working" :disabled="loadError"
+    <el-select
+      :model-value="status?.effective ?? currentProvider"
+      :disabled="!status?.supported || pending || working || confirming || loadError || requestUnconfirmed"
+      size="small"
+      :aria-label="'回复来源 ' + deviceCode"
+      placeholder="正在读取"
+      @change="switchMode"
+    >
+      <el-option label="系统 Agent" value="agent" />
+      <el-option label="Dify 工作流" value="dify" />
+    </el-select>
+
+    <div class="mode-feedback" aria-live="polite">
+      <template v-if="pending && status">
+        <span class="mode-pending">{{ status.rollback ? '正在恢复至' : '正在切换至' }} {{ label(status.target) }} · {{ elapsed }}</span>
+        <span>{{ explanation }}{{ seconds >= 45 ? ' 处理时间较长。' : '' }}</span>
+        <el-button v-if="!status.rollback" link size="small" :loading="working" :disabled="loadError || requestUnconfirmed"
           @click="cancel">撤回切换</el-button>
-      </div>
-      <div v-else-if="status.supported" class="mode-actions">
-        <el-button size="small" :loading="working" :disabled="loadError" @click="switchMode">
-          切换至 {{ label(alternate) }}
-        </el-button>
-        <span v-if="!status.client_connected" class="mode-note">Win 重连后执行</span>
-        <span v-else-if="!status.client_ready" class="mode-note">等待客户端确认当前模式</span>
-      </div>
-      <div v-else class="mode-note">请更新并启动 Windows 客户端，等待它上报后即可切换。</div>
-    </template>
-    <div v-else-if="!loadError" class="mode-note">正在读取设备当前模式…</div>
-    <el-alert v-if="operationError" :title="operationError" type="error" :closable="false" />
+      </template>
+      <span v-else-if="working" class="mode-pending">正在提交切换请求…</span>
+      <span v-else-if="loadError">状态读取失败，正在重试。</span>
+      <span v-else-if="!status">正在核对客户端…</span>
+      <span v-else-if="!status.supported">需更新并启动 Win 客户端。</span>
+      <span v-else-if="status.phase === 'completed'" class="mode-success">已切换 · Win 已确认</span>
+      <span v-else-if="status.phase === 'cancelled'">已恢复 · Win 已确认</span>
+      <span v-else-if="!status.client_connected">Win 重连后执行切换。</span>
+      <span v-else-if="!status.client_ready">等待 Win 确认当前模式。</span>
+      <span v-if="operationError" :class="requestUnconfirmed ? 'mode-pending' : 'mode-error'">{{ operationError }}</span>
+    </div>
   </div>
 </template>
 
@@ -38,12 +37,14 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { devicesApi, type ReplyModeStatus, type ReplyProvider } from '../../api/agent'
 
-const props = defineProps<{ deviceCode: string }>()
+const props = defineProps<{ deviceCode: string; currentProvider?: ReplyProvider }>()
 const emit = defineEmits<{ confirmed: [] }>()
 const status = ref<ReplyModeStatus>()
 const loadError = ref(false)
 const operationError = ref('')
 const working = ref(false)
+const confirming = ref(false)
+const requestUnconfirmed = ref(false)
 const sampledAt = ref(Date.now())
 const now = ref(Date.now())
 let read: AbortController | undefined
@@ -52,7 +53,6 @@ let clock: ReturnType<typeof setInterval> | undefined
 let disposed = false
 
 const pending = computed(() => status.value?.phase === 'waiting' || status.value?.phase === 'applying')
-const alternate = computed<ReplyProvider>(() => status.value?.effective === 'agent' ? 'dify' : 'agent')
 const seconds = computed(() => (status.value?.elapsed_seconds || 0) +
   (pending.value ? Math.max(0, Math.floor((now.value - sampledAt.value) / 1000)) : 0))
 const elapsed = computed(() => seconds.value < 60 ? seconds.value + ' 秒'
@@ -84,7 +84,14 @@ async function refresh() {
   read = controller
   try {
     const { data } = await devicesApi.replyMode(props.deviceCode, controller.signal)
-    if (!disposed && !controller.signal.aborted) { apply(data); loadError.value = false }
+    if (disposed || controller.signal.aborted) return
+    const previousId = status.value?.id
+    apply(data)
+    loadError.value = false
+    if (requestUnconfirmed.value) {
+      requestUnconfirmed.value = false
+      operationError.value = data.id !== previousId ? '' : '服务端尚无这次操作记录，可重新选择。'
+    }
   } catch {
     if (!disposed && !controller.signal.aborted) loadError.value = true
   } finally {
@@ -95,29 +102,44 @@ async function refresh() {
 async function request(payload: { provider: ReplyProvider; id: string } | { cancel: true; id: string }) {
   if (working.value || disposed) return
   read?.abort()
+  read = undefined
   working.value = true
   operationError.value = ''
   try {
     const { data } = await devicesApi.requestReplyMode(props.deviceCode, payload)
     if (!disposed) apply(data)
   } catch (err: any) {
-    if (!disposed) operationError.value = err?.response?.data?.detail || '请求结果暂未确认，正在重新读取状态。'
+    if (disposed) return
+    const response = err?.response
+    requestUnconfirmed.value = !response || response.status >= 500
+    operationError.value = requestUnconfirmed.value
+      ? '提交结果待确认，正在重新读取状态。'
+      : '切换请求未执行。' + (response.data?.detail || '请刷新后重试。')
   } finally {
     working.value = false
     void refresh()
   }
 }
 
-async function switchMode() {
+async function switchMode(target: unknown) {
   const current = status.value
-  if (!current) return
-  const target = alternate.value
+  if (!current?.supported || loadError.value || pending.value || working.value || confirming.value
+    || requestUnconfirmed.value || target === current.effective || (target !== 'agent' && target !== 'dify')) return
+
+  confirming.value = true
   try {
-    await ElMessageBox.confirm('Win 将在当前任务结束后切换到 ' + label(target) + '。如有未确认发送，会保留待核对。', '切换回复来源', {
-      confirmButtonText: '确认切换', cancelButtonText: '取消', type: 'warning',
-    })
-  } catch { return }
-  await request({ provider: target, id: current.id })
+    await ElMessageBox.confirm(
+      (current.client_connected ? 'Win 完成当前任务后将切换至 ' : 'Win 重连后将切换至 ')
+        + label(target) + '。发送结果不明的记录会保留待核对。',
+      '切换回复来源',
+      { confirmButtonText: '确认切换', cancelButtonText: '取消', type: 'warning' },
+    )
+    await request({ provider: target, id: current.id })
+  } catch {
+    // Closing the dialog keeps the confirmed mode selected.
+  } finally {
+    confirming.value = false
+  }
 }
 
 function cancel() {
@@ -138,11 +160,11 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-.mode-control { width: 100%; display: grid; gap: 8px; }
-.mode-summary, .mode-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.mode-progress { display: grid; gap: 6px; width: 100%; }
-.mode-progress > .el-button { justify-self: start; }
-.mode-note { color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.55; }
-.mode-progress :deep(.el-steps) { padding: 8px; }
-.mode-progress :deep(.el-step__title) { font-size: 12px; }
+.mode-control { display: grid; gap: 5px; min-width: 0; padding-block: 3px; }
+.mode-feedback { display: grid; gap: 2px; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.mode-feedback:empty { display: none; }
+.mode-feedback > .el-button { justify-self: start; margin-left: 0; }
+.mode-pending { color: var(--el-color-warning-dark-2); }
+.mode-success { color: var(--el-color-success-dark-2); }
+.mode-error { color: var(--el-color-danger-dark-2); }
 </style>

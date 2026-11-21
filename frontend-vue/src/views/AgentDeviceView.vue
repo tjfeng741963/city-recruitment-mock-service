@@ -91,9 +91,12 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="回复来源" width="125">
+        <el-table-column label="回复来源" width="216">
           <template #default="{ row }">
-            <el-tag :type="row.reply_provider === 'dify' ? 'warning' : 'info'" effect="light">
+            <ReplyModeSwitch v-if="canSwitchMode && row.device_code && !isWebTestDevice(row)"
+              :key="row.device_code" :device-code="row.device_code" :current-provider="row.reply_provider"
+              @confirmed="load(true)" />
+            <el-tag v-else :type="row.reply_provider === 'dify' ? 'warning' : 'info'" effect="light">
               {{ row.reply_provider === 'dify' ? 'Dify 工作流' : row.reply_provider === 'agent' ? '系统 Agent' : '待确认' }}
             </el-tag>
           </template>
@@ -179,10 +182,6 @@
               自动生成
             </el-button>
           </div>
-        </el-form-item>
-        <el-form-item v-if="editingId && canSwitchMode && !editingWebTest" label="回复来源">
-          <ReplyModeSwitch :key="form.device_code" :device-code="form.device_code" v-if="formVisible"
-            @confirmed="load(true)" />
         </el-form-item>
         <el-form-item label="账号备注">
           <el-input v-model="form.name" placeholder="如：广州安检招聘号" />
@@ -316,7 +315,6 @@ import { formatDateTime } from '../utils/format'
 
 const auth = useAuthStore()
 const canSwitchMode = computed(() => auth.user?.role === 'admin')
-const editingWebTest = computed(() => isWebTestDevice({ device_code: form.device_code }))
 const devices = ref<AgentDeviceItem[]>([])
 const loading = ref(false)
 const error = ref('')
