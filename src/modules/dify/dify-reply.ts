@@ -2,9 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { DatabaseSync } from "node:sqlite";
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { normalizePositionFacts } from "../../shared/position-facts.js";
+import { difyContext, difyInput } from "./dify-context.js";
 import { DeviceBridgeStore } from "../messaging/device-bridge.js";
 import { devicePositionId } from "../../shared/device-factories.js";
+import { canAccessCity, getUserScope } from "../../auth/user-scopes.js";
 
 const object = (raw: string): Record<string, unknown> => {
   try { const data = JSON.parse(raw); return data && typeof data === "object" && !Array.isArray(data) ? data : {}; }
@@ -30,6 +31,34 @@ export function ownsReplyDevice(db: DatabaseSync, request: FastifyRequest, code:
   return Boolean(token && row?.device_code === code);
 }
 export function registerReplyProviderRoutes(app: FastifyInstance, db: DatabaseSync) {
+  app.put<{Params:{id:string};Body:Record<string,unknown>}>("/api/v1/dify/cities/:id/materials",async(req,reply)=>{
+    const id=Number(req.params.id);
+    if(!Number.isSafeInteger(id)||id<=0)return reply.code(422).send({detail:"Invalid city id"});
+    if(!canAccessCity(getUserScope(db,req.auth!),id))return reply.code(403).send({detail:"City scope required"});
+    const row=db.prepare('SELECT * FROM cities WHERE id=?').get(id) as {data_json:string}|undefined;
+    if(!row)return reply.code(404).send({detail:"城市不存在"});
+    const next=object(row.data_json||'{}'),body=req.body||{};
+    for(const key of ['salary','work_hours','requirements','interview','prompt_sections','prompt_section_labels']){
+      if(!(key in body))continue;
+      if(!body[key]||typeof body[key]!=='object'||Array.isArray(body[key]))return reply.code(422).send({detail:`${key} must be an object`});
+      if(JSON.stringify(body[key]).length>100000)return reply.code(422).send({detail:`${key} is too large`});
+      if(key.startsWith('prompt_')&&Object.values(body[key] as Record<string,unknown>).some(v=>typeof v!=='string'))return reply.code(422).send({detail:`${key} values must be text`});
+      next[key]={...(next[key]&&typeof next[key]==='object'?next[key] as Record<string,unknown>:{}),...body[key] as Record<string,unknown>};
+    }
+    if('social_insurances' in body){if(typeof body.social_insurances!=='string')return reply.code(422).send({detail:'social_insurances must be text'});next.social_insurances=body.social_insurances;}
+    db.exec('BEGIN IMMEDIATE');
+    try{db.prepare('INSERT INTO city_history(city_id,snapshot_json) VALUES (?,?)').run(id,JSON.stringify(row));db.prepare('UPDATE cities SET data_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(JSON.stringify(next),id);db.exec('COMMIT');}
+    catch(e){db.exec('ROLLBACK');throw e;}
+    return {ok:true,city_id:id};
+  });
+  app.post<{Body:{position_id?:unknown;text?:unknown;session_key?:unknown;dry?:unknown}}>("/api/v1/dify/preview",async(req,reply)=>{
+    if(req.auth?.role!=="admin")return reply.code(403).send({detail:"Admin access required"});
+    const positionId=Number(req.body?.position_id),input=typeof req.body?.text==='string'?req.body.text.trim():'';
+    if(!Number.isSafeInteger(positionId)||positionId<=0||!input||input.length>2000)return reply.code(422).send({detail:"position_id and text (max 2000) required"});
+    const session=typeof req.body.session_key==='string'?req.body.session_key.trim():'';
+    if(req.body.dry!==true&&!/^dify-preview:[A-Za-z0-9-]{1,80}$/.test(session))return reply.code(422).send({detail:"preview session_key must start with dify-preview:"});
+    return generateDifyReply(db,{deviceCode:`preview-admin-${req.auth.id}`,positionId,sessionKey:session,text:input,dry:req.body.dry===true,preview:true});
+  });
   for (const method of ["get", "put"] as const) {
     app[method]<{Params:{code:string};Body:{provider?:unknown;fresh_client_state_confirmed?:unknown}}>("/api/v1/agent/devices/:code/reply-provider", async (req, reply) => {
       if (req.auth?.role !== "admin") return reply.code(403).send({detail:"Admin access required"});
@@ -53,17 +82,6 @@ export function registerReplyProviderRoutes(app: FastifyInstance, db: DatabaseSy
     });
   }
 }
-function positionData(db: DatabaseSync, id: number) {
-  const row=db.prepare("SELECT p.position_name,p.status,p.data_json,c.city_name,f.factory_name FROM service_positions p LEFT JOIN factories f ON f.id=p.factory_id LEFT JOIN cities c ON c.id=COALESCE(p.city_id,f.city_id) WHERE p.id=?").get(id) as {position_name:string;status:string;data_json:string;city_name:string;factory_name:string} | undefined;
-  if (!row || row.status !== "enabled") return null;
-  const facts=normalizePositionFacts(object(row.data_json));
-  // Only neutral job information: no persona, eligibility rules or captured customer data.
-  const data: Record<string,string>={job_title:row.position_name,city:String(facts.city||row.city_name||""),factory_name:String(facts.factory_name||row.factory_name||"")};
-  for (const key of ["wage_text","hours_text","welfare_text","place","interview_time","interview_time_text","interview_address","job_content"]) {
-    if (typeof facts[key]==="string" && facts[key].trim()) data[key]=facts[key].trim();
-  }
-  return data;
-}
 function validBase(base: string): boolean {
   try {
     const u=new URL(base), h=u.hostname;
@@ -74,7 +92,7 @@ function validBase(base: string): boolean {
   } catch {return false;}
 }
 const queues=new Map<string,Promise<unknown>>();
-export async function generateDifyReply(db: DatabaseSync, input:{deviceCode:string;positionId:number;sessionKey:string;text:string;dry?:boolean}) {
+export async function generateDifyReply(db: DatabaseSync, input:{deviceCode:string;positionId:number;sessionKey:string;text:string;dry?:boolean;preview?:boolean}) {
   const account=db.prepare("SELECT account_id FROM bridge_devices WHERE device_code=?").get(input.deviceCode) as {account_id:string} | undefined;
   const cfg=config();
   const identity=digest(JSON.stringify([input.deviceCode,account?.account_id||"",input.sessionKey,input.positionId,cfg.base,digest(cfg.key)]));
@@ -83,6 +101,7 @@ export async function generateDifyReply(db: DatabaseSync, input:{deviceCode:stri
   try {return await pending;} finally {if(queues.get(identity)===pending)queues.delete(identity);}
   async function run() {
     const blocked=()=>{
+      if(input.preview)return false;
       const dev=db.prepare("SELECT status,data_json FROM agent_devices WHERE json_extract(data_json,'$.device_code')=?").get(input.deviceCode) as {status:string;data_json:string}|undefined;
       if (!dev || dev.status!=="enabled" || devicePositionId(db,input.deviceCode)!==input.positionId || deviceReplyProvider(db,input.deviceCode)!=="dify") return true;
       const conv=db.prepare("SELECT takeover FROM agent_conversations WHERE device_code=? AND external_conversation_id=?").get(input.deviceCode,input.sessionKey) as {takeover:number}|undefined;
@@ -90,9 +109,11 @@ export async function generateDifyReply(db: DatabaseSync, input:{deviceCode:stri
       return Boolean(conv?.takeover || nowAccount?.account_id!==account?.account_id);
     };
     if(blocked()) return failure("human_takeover","设备停用、已切换账号或会话已接管");
-    const facts=positionData(db,input.positionId);
+    const facts=difyContext(db,input.positionId);
     if(!facts)return failure("dify_position_unavailable","岗位不可用");
-    const payload={inputs:{position_data:JSON.stringify(facts),current_time:new Date().toLocaleString("sv-SE",{timeZone:"Asia/Shanghai"})},query:input.text,response_mode:"blocking",user:`recruit-${identity}`};
+    const selected=difyInput(facts,input.text);
+    if(!selected)return failure('dify_context_too_large','城市关键字段过长，请精简薪资、时间或面试地点；完整话术请放入原文段落或知识库');
+    const payload={inputs:{position_data:JSON.stringify(selected),current_time:new Date().toLocaleString("sv-SE",{timeZone:"Asia/Shanghai"})},query:input.text,response_mode:"blocking",user:`recruit-${identity}`};
     if(input.dry)return {ok:true,provider:"dify",dry:true,position_id:input.positionId,inputs:payload.inputs};
     if(!input.sessionKey)return failure("dify_session_required","Dify 模式需要 session_key");
     if(!cfg.key||!validBase(cfg.base))return failure("dify_not_configured","Dify 服务端地址或应用密钥未配置");
@@ -111,10 +132,10 @@ export async function generateDifyReply(db: DatabaseSync, input:{deviceCode:stri
         const units:Record<string,string>={小时:'hour',时:'hour',天:'day',班:'shift',班次:'shift',月:'month',晚:'night'};
         const unit=units[m[3]||m[4]]||'currency';return [m[1],m[2]].filter(Boolean).map(n=>`${Number(n)}:${unit}`);
       });
-      const knownAmounts=new Set(amounts(Object.values(facts).join(" ")));
+      const knownAmounts=new Set(amounts(JSON.stringify(selected)));
       if(amounts(answer).some(amount=>!knownAmounts.has(amount)))throw new Error("dify_fact_mismatch");
       if(blocked())throw new Error("human_takeover");
-      if (JSON.stringify(positionData(db,input.positionId)) !== JSON.stringify(facts)) throw new Error("dify_position_changed");
+      if (JSON.stringify(difyContext(db,input.positionId)) !== JSON.stringify(facts)) throw new Error("dify_position_changed");
       const messages=answer.split("###").map(s=>s.trim()).filter(Boolean).map(content=>({type:"text",content}));
       if(!messages.length)throw new Error("dify_invalid_reply");
       return {ok:true,provider:"dify",model:"Dify Chatflow",session_key:input.sessionKey,reply:{messages},latency_ms:Date.now()-started};

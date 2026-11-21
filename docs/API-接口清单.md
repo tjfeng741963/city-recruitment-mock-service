@@ -119,6 +119,17 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 
 **Dify 第二回复路线（按设备）**
 
+模式二取数已恢复为所属城市资料优先，城市空白项才回退当前岗位，适用知识来自现有 `kb_faq` 中已启用并通过校验的通用及当前岗位问答。城市原文 `prompt_sections` 和 `prompt_section_labels` 保留并可编辑；不修改模式一的岗位事实语义。
+
+每轮输入限制在 Dify 的 20000 字符以内：关键工资/时间/地点完整保留，原文段落和知识按本轮问题相关性选取完整条目，`retrieval.omitted` 显示未进入本轮的条目数；关键字段本身过长时返回 `dify_context_too_large`，不截断事实。保存资料不等于所有条目每轮都进入模型。生成前后仍对完整城市/知识上下文核验，变化时暂停旧回复。
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| PUT | `/api/v1/dify/cities/:id/materials` | 城市访问权限 | 合并保存城市完整资料：`salary/work_hours/requirements/interview/prompt_sections/prompt_section_labels/social_insurances`；保留未提交字段和原嵌套键，写入城市历史 |
+| POST | `/api/v1/dify/preview` | admin | `{position_id,text,dry:true}` 查看实际城市/岗位回退来源与适用知识；非 dry 需独立 `session_key:dify-preview:...`，生成模拟回答，不发送消息、不切换设备 |
+
+首页 `/api/v1/agent/status/dashboard` 的 `errors.failed_today/ai_abnormal/dify_health/degraded` 读取北京时间当天真实 Dify 调用记录，按设备权限过滤；`queue.pending` 读取实际待发/已领取桥接命令。普通发送失败不计为 Dify 调用失败。
+
 | 方法 | 路径 | 鉴权 | 说明 |
 |---|---|---|---|
 | GET | `/api/v1/agent/devices/:code/reply-provider` | admin | 返回 `{provider:agent/dify,configured:boolean}`，不返回密钥 |
