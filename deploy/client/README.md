@@ -67,9 +67,9 @@ deploy/client/
 
 ### 流水线更新
 
-Win 端不是 Git checkout。合并到 `main` 后，CI 通过测试与 Linux 部署才会发布同一提交 SHA 对应的不可变 Windows client Release。Win 更新器在 `CloudPilot` 的交互登录任务触发时查询当前 main SHA，只安装该 SHA 的包，并逐文件校验哈希。
+Win 端不是 Git checkout。合并到 `main` 后，CI 通过测试与 Linux 部署才会发布同一提交 SHA 对应的不可变 Windows client Release。启用 `CloudPilot` 后，交互登录直接启动本机已安装的版本。需要升级时，在客户端管理器中手动检查并安装已发布的完整包。
 
-一次性迁移任务定义需使用 `bootstrap-client-updater.ps1`。先在停止客户端时运行 `-DryRun`，确认 action 和交互登录触发；应用后保留原来的 Enabled 状态。当前事故处置中的 `CloudPilot` 为 Disabled，bootstrap 不会启用它；是否恢复任务需另行人工决定。没有对应 Release、校验失败、冻结 core 不符、autopilot 仍运行或本机 `login_code.py` 缺失时，更新器停止且不启动 autopilot。
+一次性迁移任务定义需使用 `bootstrap-client-updater.ps1`。先在停止客户端时运行 `-DryRun`，确认 action 和交互登录触发；应用后保留原来的 Enabled 状态。当前事故处置中的 `CloudPilot` 为 Disabled，bootstrap 不会启用它；是否恢复任务需另行人工决定。更新失败时保留当前安装。运行前会独立检查本地启动文件、冻结核心、交互桌面和进程状态。
 
 更新过程日志写在 `C:\agent\logs\update.log`，只记录提交 SHA、变更文件数和阶段结果，不写配置或客户聊天内容。
 

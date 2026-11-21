@@ -39,12 +39,13 @@ def test_bootstrap_changes_only_cloudpilot_action_and_interactive_logon_trigger(
     assert not re.search(r"(?i)taskkill\s+/im\s+python|stop-process\s+.*python", text)
 
 
-def test_startup_stops_without_launching_autopilot_when_updater_fails():
+def test_startup_reports_local_launch_failure_and_does_not_chain_another_launcher():
     text = STARTUP.read_text(encoding="utf-8")
     assert "c:\\progra~1\\python311\\python.exe" in text.lower()
     assert "client_updater.py" in text.lower()
     assert "if errorlevel 1" in text.lower()
     assert "start-pilot.cmd" not in text.lower()
+    assert "更新未完成" not in text
 
 
 def test_workflow_restricts_release_publication_to_deployed_main():

@@ -19,8 +19,8 @@ function Get-NormalizedSha256([string]$Path) {
     }
 }
 $assets = @(
-    @{ Source = Join-Path $sourceRoot 'client_updater.py'; Name = 'client_updater.py'; Sha256 = '49847a3bfe99b91619b8fa1df4a8d1d17092b2a60c56529b5875fa931608df72' },
-    @{ Source = Join-Path $sourceRoot 'client-startup.cmd'; Name = 'client-startup.cmd'; Sha256 = 'cf7f461525e7048cc1112b5c4446b8dd5aad5e56f0ed2a72fbcaef46db6fd49d' },
+    @{ Source = Join-Path $sourceRoot 'client_updater.py'; Name = 'client_updater.py'; Sha256 = 'fac8091ed484b77d95ae312735af4343e7c1d6ef7ca6386aac14c8f7a74d831a' },
+    @{ Source = Join-Path $sourceRoot 'client-startup.cmd'; Name = 'client-startup.cmd'; Sha256 = 'bf1b85d4c1621a40366c79f1f0f68895273839ab1567523872bd7f3b8b602215' },
     @{ Source = Join-Path $sourceRoot 'frozen-core-sha256.json'; Name = 'frozen-core-sha256.json'; Sha256 = '331bd03d756ea740b08be1275245f0d8f5b0bc84386ebb4242c9e44fc02bd43a' },
     @{ Source = Join-Path $sourceRoot 'client_manager.py'; Name = 'client_manager.py'; Sha256 = '1e9beaca2e186e84a6dc06955c3c59bd3ff3aac6fbb45f39872a2a225e68736f' },
     @{ Source = Join-Path $sourceRoot 'client_manager_service.py'; Name = 'client_manager_service.py'; Sha256 = '7423a842e99acbbdaa6bbae2418652b6f010f5a1d66a6a023690c14b39149864' },

@@ -117,66 +117,31 @@ def test_release_assets_reject_duplicate_asset_names():
         UPDATER.release_asset_urls(COMMIT, release)
 
 
-def test_main_starts_existing_client_only_after_successful_update(monkeypatch):
-    events = []
-    monkeypatch.setattr(UPDATER, "ROOT", Path("/tmp/client"))
-    monkeypatch.setattr(UPDATER, "_acquire_mutex", lambda: None)
-    monkeypatch.setattr(UPDATER, "_log_event", lambda *a: None)
-    monkeypatch.setattr(UPDATER, "_running_autopilot", lambda: False)
-    monkeypatch.setattr(UPDATER, "fetch_release_package", lambda: (COMMIT, b"package", "a" * 64))
-    monkeypatch.setattr(
-        UPDATER,
-        "apply_package",
-        lambda *args, **kwargs: events.append("apply") or {"commit": COMMIT, "changed": ["autopilot.py"]},
-    )
-    monkeypatch.setattr(UPDATER, "_start_existing_client", lambda root: events.append(("start", root)))
-    monkeypatch.setattr(UPDATER.sys, "stdout", None)
-
+@pytest.mark.parametrize("reason", ["GitHub unreachable", "main package not published"])
+def test_startup_uses_installed_client_without_accessing_the_release(monkeypatch, tmp_path, reason):
+    from types import SimpleNamespace
+    starts = []
+    monkeypatch.setattr(UPDATER, "ROOT", tmp_path)
+    monkeypatch.setattr(UPDATER, "_log_event", lambda *_: None)
+    def unavailable():
+        raise UPDATER.UpdateError(reason)
+    monkeypatch.setattr(UPDATER, "fetch_release_package", unavailable)
+    monkeypatch.setattr(UPDATER, "apply_package", lambda *args, **kwargs: pytest.fail("startup must never install"))
+    manager = SimpleNamespace(ManagerService=lambda root: SimpleNamespace(start=lambda: starts.append(root) or 1))
+    monkeypatch.setitem(sys.modules, "client_manager_service", manager)
     assert UPDATER.main() == 0
-    assert events == ["apply", ("start", Path("/tmp/client"))]
+    assert starts == [tmp_path]
 
 
-def test_main_fails_closed_without_starting_client_when_update_fails(monkeypatch):
-    events = []
-    monkeypatch.setattr(UPDATER, "_acquire_mutex", lambda: None)
-    monkeypatch.setattr(UPDATER, "_log_event", lambda *a: None)
-    monkeypatch.setattr(UPDATER, "_running_autopilot", lambda: False)
-    monkeypatch.setattr(
-        UPDATER,
-        "fetch_release_package",
-        lambda: (_ for _ in ()).throw(UPDATER.UpdateError("release unavailable")),
-    )
-    monkeypatch.setattr(UPDATER, "_start_existing_client", lambda root: events.append("start"))
-    monkeypatch.setattr(UPDATER.sys, "stderr", None)
-
+def test_startup_reports_local_start_failure(monkeypatch, capsys):
+    from types import SimpleNamespace
+    def fail():
+        raise UPDATER.UpdateError("本机启动校验失败")
+    manager = SimpleNamespace(ManagerService=lambda root: SimpleNamespace(start=fail))
+    monkeypatch.setitem(sys.modules, "client_manager_service", manager)
+    monkeypatch.setattr(UPDATER, "_log_event", lambda *_: None)
     assert UPDATER.main() == 1
-    assert events == []
-
-
-def test_main_refuses_update_when_autopilot_is_running(monkeypatch):
-    events = []
-    monkeypatch.setattr(UPDATER, "_acquire_mutex", lambda: None)
-    monkeypatch.setattr(UPDATER, "_log_event", lambda *a: None)
-    monkeypatch.setattr(UPDATER, "_running_autopilot", lambda: True)
-    monkeypatch.setattr(UPDATER, "fetch_release_package", lambda: events.append("network"))
-    monkeypatch.setattr(UPDATER, "_start_existing_client", lambda root: events.append("start"))
-    monkeypatch.setattr(UPDATER.sys, "stderr", None)
-
-    assert UPDATER.main() == 1
-    assert events == []
-
-
-def test_main_rechecks_live_sender_after_download(monkeypatch):
-    states = iter([False, True])
-    events = []
-    monkeypatch.setattr(UPDATER, "_acquire_mutex", lambda: None)
-    monkeypatch.setattr(UPDATER, "_log_event", lambda *a: None)
-    monkeypatch.setattr(UPDATER, "_running_autopilot", lambda: next(states))
-    monkeypatch.setattr(UPDATER, "fetch_release_package", lambda: (COMMIT, b"package", "a" * 64))
-    monkeypatch.setattr(UPDATER, "apply_package", lambda *a, **kw: events.append("apply"))
-    monkeypatch.setattr(UPDATER, "_start_existing_client", lambda root: events.append("start"))
-    assert UPDATER.main() == 1
-    assert events == []
+    assert "本机启动校验失败" in capsys.readouterr().err
 
 
 def test_applies_verified_package_and_preserves_all_local_runtime_data(tmp_path):

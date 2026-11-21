@@ -479,32 +479,19 @@ def _release_mutex(handle: Any) -> None:
 
 
 def main() -> int:
-    handle = None
-    commit = "unknown"
+    from client_manager_service import ManagerService
+
     try:
-        _log_event(ROOT, "startup update check")
-        handle = _acquire_mutex()
-        if _running_autopilot():
-            raise UpdateError("autopilot is already running; refusing to update live client files")
-        commit, package, checksum = fetch_release_package()
-        if _running_autopilot():
-            raise UpdateError("autopilot started while downloading; refusing file replacement")
-        result = apply_package(package, expected_commit=commit, expected_sha256=checksum, root=ROOT)
-        summary = f"commit={commit} changed={len(result['changed'])}"
-        _log_event(ROOT, f"update applied: {summary}")
-        print(f"client update: {summary}")
-        if _running_autopilot():
-            raise UpdateError("autopilot started while downloading; refusing duplicate launch")
-        _start_existing_client(ROOT)
-        _log_event(ROOT, f"client launcher started: commit={commit}")
+        _log_event(ROOT, "starting the installed client")
+        ManagerService(ROOT).start()
         return 0
     except (UpdateError, OSError, subprocess.SubprocessError) as exc:
-        _log_event(ROOT, f"update stopped: commit={commit} reason={exc}")
-        print(f"client update stopped: {exc}", file=sys.stderr)
+        _log_event(ROOT, f"installed client start failed: {exc}")
+        print(f"installed client start failed: {exc}", file=sys.stderr)
         return 1
-    finally:
-        _release_mutex(handle)
 
 
 if __name__ == "__main__":
+    # The manager imports this module for its local startup checks.
+    sys.modules["client_updater"] = sys.modules[__name__]
     raise SystemExit(main())
