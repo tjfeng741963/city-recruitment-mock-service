@@ -112,6 +112,8 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 | GET | `/api/v1/agent/flow?device_code=:code` | 设备令牌 | 客户端读取设备岗位的启用流程 |
 | GET | `/api/v1/agent/state?device_code=:code` | 设备令牌；`summary=1` 仅管理员 | 客户端读取会话状态用于重连对账；管理员读取单设备去标识汇总 |
 | POST | `/api/v1/agent/state` | 设备令牌 | 客户端批量上报会话阶段和流程快照 |
+| GET | `/api/v1/agent/config-sync?device_code=:code` | admin | 单设备最近配置拉取摘要；未上报不推断已同步 |
+| POST | `/api/v1/agent/config-sync` | 对应设备令牌 | 上报客户端实际检查/同步的流程与旧开场版本，不含正文 |
 
 <!-- api-check:end -->
 
@@ -151,6 +153,10 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 `dry=true` 返回的 `messages` 是实际模型请求使用的完整 prompt，可用于核对事实是否进入模型上下文。事实区包含岗位基本字段，以及面试时间说明、面试地址、面试材料、基本招聘要求、入职注意事项、通用素材清单 `media_catalog` 和本岗位启用的面试图片/视频 `interview_address_image`、`interview_video`；事实标签同时显示字段 key。其他岗位专属素材及停用素材不注入。素材出现在 prompt 只证明模型可选用该素材，不代表客户端已经发送或客户已经收到。
 
 **节点流程配置与状态（2026-11-19）**
+
+- `GET /agent/opening` 响应和 `GET /agent-persona?position_id=` 响应新增 `opening_version`：SHA-256（64 位十六进制），由共享算法对 `position_id` 与启用开场的 `seq,kind,content,media_name,delay_ms` 规范化计算；不包括人设、数据库 ID 或更新时间。顺序、增删、文字、素材、间隔和岗位变化会改变版本，空清单也有稳定版本。正常旧开场响应与岗位管理员响应使用同一版本；设备未绑定、岗位停用或 Dify 模式的设备空清单按实际 `position_id + []` 计算版本，`mode=flow` 按其实际展开清单计算。
+- 设备 `POST /agent/config-sync`：`{device_code,client_commit,flow:{position_id,version,status,synced_at,checked_at,state,error},opening:{position_id,version,synced_at,checked_at,state,error}}`，只允许设备令牌上报自身且设备必须启用。流程 version 为非负整数或 null，旧开场 version 为 64 位 SHA-256 或 null；初始未知的岗位、版本、状态和时间允许 null。状态为 `synced/stale/blocked/error`；错误只允许空串或短码 `auth/network/http/invalid_response/cache/read/write/unknown/timeout`，不接受异常正文。时间要求带时区 ISO 8601 并规范化为 UTC `Z`；`checked_at` 是最近检查、`synced_at` 是最近成功拉取，不能混用。40 位十六进制 `client_commit` 才保留，无效或缺失归为 null。
+- 同步摘要仅白名单存入 `agent_devices.data_json.config_sync`，其余传入字段丢弃。服务端生成 `server_received_at`，POST 返回 `{ok:true,server_received_at}`。管理员 GET 必须指定单设备码。返回 `{available,device_code,reply_provider,bridge_state}`，有报告时另含 `client_commit,flow,opening,server_received_at`。回复来源为 agent 或 dify，企微桥接状态为 online、offline、scanning 或 null，不含 token、客户正文或会话快照。该摘要仅证明客户端配置拉取，不等于企微在线或消息已送达。
 
 - `PUT /agent-flow`：传 `position_id, version, entry_key, status, nodes, edges, canvas`。`version` 不匹配返回 409；前端必须携带读取时版本，重新载入后再编辑。`status=disabled` 保存草稿，启用时校验文本数字是否存在于本岗位事实字段。数字集合校验只能挡住未知数字，不能替代工价含义与单位的人工审核。
 - 节点 `node_type` 仅为 `text/image/video/followup/branch/end`；等待使用独立布尔 `await_reply`。`parts` 为数组，每节点 1–6 条，文本每条最多 2000 字；`followup` 仅允许一条文本且 `max_times` 固定为 1。`branch/end` 不带消息。媒体必须来自本岗位或通用池。

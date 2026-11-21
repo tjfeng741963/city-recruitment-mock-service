@@ -126,6 +126,107 @@ def test_legacy_first_contact_does_not_call_chat_after_opening(agent):
     agent._brain.chat.assert_called_once()
 
 
+def test_revoked_legacy_opening_holds_without_falling_back_to_ai(agent):
+    agent._brain.flow.return_value = {"nodes": [], "version": 0}
+    agent._brain.opening.return_value = {"ok": False, "blocked": True, "items": [], "detail": "设备鉴权失效"}
+    incoming(agent)
+
+    result = agent.drain(MagicMock(), CFG)
+
+    assert result["blocked"] == 1
+    agent._brain.chat.assert_not_called()
+    agent.core_send.send.assert_not_called()
+    assert agent.rlog.recent()[0]["status"] == "held"
+
+
+def test_legacy_opening_initial_sync_pending_does_not_fall_back_to_ai(agent):
+    agent._brain.flow.return_value = {"nodes": [], "version": 0}
+    agent._brain.opening.return_value = {"ok": False, "pending": True, "items": [], "detail": "配置尚未成功同步"}
+    incoming(agent)
+    result = agent.drain(MagicMock(), CFG)
+    assert result["blocked"] == 1
+    agent._brain.chat.assert_not_called()
+    agent.core_send.send.assert_not_called()
+    assert agent.rlog.recent()[0]["status"] == "pending"
+    agent._brain.opening.return_value = {"ok": True, "items": [
+        {"seq": 1, "kind": "text", "content": "配置同步后的欢迎", "media_name": "", "delay_ms": 0},
+    ]}
+
+    agent.drain(MagicMock(), CFG)
+
+    agent._brain.chat.assert_not_called()
+    agent.core_send.send.assert_called_once()
+    assert agent.core_send.send.call_args.args[2] == "配置同步后的欢迎"
+
+
+def test_flow_initial_sync_pending_never_falls_back_to_legacy_or_ai(agent):
+    agent._brain.flow.return_value = {"ok": False, "pending": True, "nodes": [], "version": 0}
+    incoming(agent)
+    assert agent.drain(MagicMock(), CFG)["blocked"] == 1
+    agent._brain.opening.assert_not_called()
+    agent._brain.chat.assert_not_called()
+    agent.core_send.send.assert_not_called()
+    assert agent.rlog.recent()[0]["status"] == "pending"
+
+
+def test_legacy_welcome_keeps_one_snapshot_when_cached_opening_changes_mid_send(agent):
+    agent._brain.flow.return_value = {"nodes": [], "version": 0}
+    shared = {"ok": True, "items": [
+        {"seq": 1, "kind": "text", "content": "旧首句", "media_name": "", "delay_ms": 0},
+        {"seq": 2, "kind": "text", "content": "旧第二句", "media_name": "", "delay_ms": 0},
+    ]}
+    agent._brain.opening.return_value = shared
+    sent = []
+    def send(store, name, body, **kwargs):
+        sent.append(body)
+        shared["items"][1]["content"] = "新第二句"
+        return {"ok": True, "conversation_id": "S:customer", "detail": "sent"}
+    agent.core_send.send.side_effect = send
+
+    start(agent)
+
+    assert sent == ["旧首句", "旧第二句"]
+
+
+@pytest.mark.parametrize("kind", ["text", "image", "video"])
+def test_legacy_opening_waits_each_configured_delay_after_success(agent, monkeypatch, kind):
+    agent._brain.flow.return_value = {"nodes": [], "version": 0}
+    agent._brain.opening.return_value = {"ok": True, "items": [
+        {"seq": 1, "kind": kind, "content": "开场文本", "media_name": "test.png", "delay_ms": 3500},
+    ]}
+    waits = []
+    agent.core_send.paste_media.return_value = (True, "sent")
+    monkeypatch.setattr(agent.time, "sleep", waits.append)
+
+    start(agent)
+
+    assert waits == [3.5]
+    if kind == "text":
+        agent.core_send.send.assert_called_once()
+    else:
+        agent.core_send.paste_media.assert_called_once()
+
+
+@pytest.mark.parametrize("kind", ["text", "image", "video"])
+def test_failed_legacy_opening_does_not_add_success_delay_or_retry(agent, monkeypatch, kind):
+    agent._brain.flow.return_value = {"nodes": [], "version": 0}
+    agent._brain.opening.return_value = {"ok": True, "items": [
+        {"seq": 1, "kind": kind, "content": "开场文本", "media_name": "test.png", "delay_ms": 3500},
+    ]}
+    agent.core_send.send.return_value = {"ok": False, "detail": "failed"}
+    agent.core_send.paste_media.return_value = (False, "failed")
+    waits = []
+    monkeypatch.setattr(agent.time, "sleep", waits.append)
+
+    start(agent)
+
+    assert waits == []
+    if kind == "text":
+        agent.core_send.send.assert_called_once()
+    else:
+        agent.core_send.paste_media.assert_called_once()
+
+
 @pytest.mark.parametrize("result,status", [
     ({"ok": False, "detail": "发到了别的会话"}, "failed"),
     ({"ok": True, "detail": "回读失败", "conversation_id": ""}, "unknown"),
@@ -276,6 +377,22 @@ def test_followup_failure_never_marked_sent(agent, monkeypatch):
     agent._flow_tick(MagicMock(), CFG, "online")
     assert agent._flow_state.get("S:customer")["phase"] == "held"
     assert agent._flow_state.get("S:customer")["followup_sent_at"] is None
+
+
+@pytest.mark.parametrize("phase", ["running", "awaiting"])
+def test_background_flow_waits_for_authorization_before_sending_snapshot(agent, monkeypatch, phase):
+    now = datetime(2026, 11, 19, 4, tzinfo=timezone.utc).timestamp()
+    monkeypatch.setattr(agent.time, "time", lambda: now)
+    start(agent)
+    state = agent._flow_state
+    state.set_phase("S:customer", phase, await_since=now - 121)
+    agent.core_send.send.reset_mock()
+    agent._brain.flow.return_value = {"ok": False, "blocked": True, "nodes": []}
+
+    agent._flow_tick(MagicMock(), CFG, "online")
+
+    agent.core_send.send.assert_not_called()
+    assert state.get("S:customer")["phase"] == phase
 
 
 def test_media_without_verified_text_never_pastes(agent):

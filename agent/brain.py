@@ -18,6 +18,10 @@ from __future__ import annotations
 
 import time
 import json
+import re
+import threading
+from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +52,20 @@ class Brain:
         self.timeout = timeout
         self._opening: dict[str, Any] | None = None
         self._flow: dict[str, Any] | None = None
-        self._flow_checked_at = 0.0
+        self._opening_checked_at: float | None = None
+        self._flow_checked_at: float | None = None
+        self._state_lock = threading.RLock()
+        self._refresh_locks = {"opening": threading.Lock(), "flow": threading.Lock()}
+        self._report_lock = threading.Lock()
+        self._last_sync_report_at: float | None = None
+        self._config_timeout = min(5.0, float(timeout))
+        self._sync = {
+            "flow": {"position_id": 0, "version": 0, "status": "disabled", "synced_at": None,
+                     "checked_at": None, "state": "error", "error": ""},
+            "opening": {"position_id": 0, "version": None, "synced_at": None,
+                        "checked_at": None, "state": "error", "error": ""},
+        }
+        self._flow_cache_loaded = False
         # Kept separate from RemoteConfig's file: two writers must never replace
         # each other's config.remote.json keys. Cache is bound to server+device.
         self._flow_cache_path = Path(flow_cache_path) if flow_cache_path else Path(__file__).parent / "state" / "flow.remote.json"
@@ -58,16 +75,18 @@ class Brain:
     def _headers(self) -> dict[str, str]:
         return {"authorization": f"Bearer {self.device_token}"}
 
-    def _get(self, path: str, params: dict[str, str] | None = None) -> dict[str, Any]:
+    def _get(self, path: str, params: dict[str, str] | None = None, *, timeout: float | None = None) -> dict[str, Any]:
         response = self._client.get(
-            f"{self.base_url}{path}", params=params, headers=self._headers()
+            f"{self.base_url}{path}", params=params, headers=self._headers(),
+            **({"timeout": timeout} if timeout is not None else {}),
         )
         response.raise_for_status()
         return response.json()
 
-    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _post(self, path: str, payload: dict[str, Any], *, timeout: float | None = None) -> dict[str, Any]:
         response = self._client.post(
-            f"{self.base_url}{path}", json=payload, headers=self._headers()
+            f"{self.base_url}{path}", json=payload, headers=self._headers(),
+            **({"timeout": timeout} if timeout is not None else {}),
         )
         if response.status_code != 200:
             raise RuntimeError(f"HTTP {response.status_code}: {response.text[:120]}")
@@ -76,28 +95,167 @@ class Brain:
     # ── 开场 ──────────────────────────────────────────────
 
     def opening(self, force: bool = False) -> dict[str, Any]:
-        """设备绑定的岗位开场清单。进程内缓存一份，配置改动要重启客户端。"""
-        if self._opening is None or force:
+        """Refresh at most every minute; each caller receives an isolated welcome snapshot."""
+        self._refresh_config("opening", force)
+        return self._config_snapshot("opening")
+
+    @staticmethod
+    def _utc_now() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    @staticmethod
+    def _error_code(exc: Exception) -> str:
+        if isinstance(exc, httpx.HTTPStatusError):
+            return "auth" if exc.response.status_code in (401, 403) else "http"
+        if isinstance(exc, httpx.RequestError):
+            return "network"
+        return "invalid_response" if isinstance(exc, (ValueError, TypeError, KeyError)) else "unknown"
+
+    def _config_snapshot(self, kind: str) -> dict[str, Any]:
+        with self._state_lock:
+            summary = self._sync[kind]
+            cached = self._opening if kind == "opening" else self._flow
+            if summary["state"] == "blocked":
+                return {"ok": False, "blocked": True, "items": [], "nodes": [], "edges": [],
+                        "detail": "设备鉴权失效", "position_id": summary["position_id"], "version": summary["version"]}
+            if cached is None:
+                return {"ok": False, "pending": True, "items": [], "nodes": [], "edges": [], "version": 0,
+                        "detail": "配置尚未成功同步"}
+            return deepcopy(cached)
+
+    def _load_flow_cache(self) -> None:
+        with self._state_lock:
+            if self._flow_cache_loaded:
+                return
+            self._flow_cache_loaded = True
+        try:
+            cached = json.loads(self._flow_cache_path.read_text(encoding="utf-8"))
+            if cached.get("base_url") != self.base_url or cached.get("device_code") != self.device_code:
+                return
+            data = cached.get("flow")
+            if not isinstance(data, dict):
+                return
+            summary = cached.get("sync") or {}
+            with self._state_lock:
+                if self._flow is None:
+                    self._flow = deepcopy(data)
+                    self._sync["flow"].update({"position_id": int(data.get("position_id") or 0),
+                        "version": int(data.get("version") or 0), "status": "enabled" if data.get("status") == "enabled" else "disabled",
+                        "synced_at": summary.get("synced_at"),
+                        "state": "blocked" if data.get("blocked") or summary.get("state") == "blocked" else "stale",
+                        "error": "auth" if data.get("blocked") or summary.get("state") == "blocked" else "cache"})
+        except (OSError, ValueError, AttributeError, TypeError):
+            pass
+
+    def _refresh_config(self, kind: str, force: bool = False) -> None:
+        # Never hold a state lock during network IO. In particular a Reporter
+        # refresh must not make the sender wait for that request to finish.
+        if not self._refresh_locks[kind].acquire(blocking=False):
+            return
+        try:
+            if kind == "flow":
+                self._load_flow_cache()
+            now = time.monotonic()
+            with self._state_lock:
+                last = self._flow_checked_at if kind == "flow" else self._opening_checked_at
+                if not force and last is not None and now - last < 60:
+                    return
+                if kind == "flow":
+                    self._flow_checked_at = now
+                else:
+                    self._opening_checked_at = now
+                self._sync[kind]["checked_at"] = self._utc_now()
             try:
-                data = self._get("/api/v1/agent/opening", {"device_code": self.device_code})
-                items = data.get("items") or []
-                self._opening = {
-                    "ok": bool(items),
-                    "items": [
-                        {
-                            "seq": int(item.get("seq") or 0),
-                            "kind": str(item.get("kind") or "text"),
-                            "content": str(item.get("content") or ""),
-                            "media_name": str(item.get("media_name") or ""),
-                            "delay_ms": int(item.get("delay_ms") or 2000),
-                        }
-                        for item in items
-                    ],
-                    "detail": str(data.get("detail") or ("" if items else "岗位没有配置开场")),
-                }
-            except Exception as exc:  # noqa: BLE001
-                self._opening = {"ok": False, "items": [], "detail": f"{type(exc).__name__}: {exc}"}
-        return self._opening
+                data = self._get(f"/api/v1/agent/{kind}", {"device_code": self.device_code}, timeout=self._config_timeout)
+                if not isinstance(data, dict):
+                    raise ValueError("invalid config response")
+                stamp = self._utc_now()
+                position_id = int(data.get("position_id") or 0)
+                if kind == "opening":
+                    items = data.get("items")
+                    if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+                        raise ValueError("invalid opening items")
+                    version = data.get("opening_version")
+                    version = version if isinstance(version, str) and re.fullmatch(r"[0-9a-fA-F]{64}", version) else None
+                    result = {"ok": bool(items), "position_id": position_id, "version": version,
+                        "synced_at": stamp,
+                        "items": [{"seq": int(item.get("seq") or 0), "kind": str(item.get("kind") or "text"),
+                            "content": str(item.get("content") or ""), "media_name": str(item.get("media_name") or ""),
+                            "delay_ms": int(item.get("delay_ms") if item.get("delay_ms") is not None else 2000)} for item in items],
+                        "detail": str(data.get("detail") or ("" if items else "岗位没有配置开场"))}
+                    summary = {"position_id": position_id, "version": version, "synced_at": stamp}
+                else:
+                    if not isinstance(data.get("nodes"), list):
+                        raise ValueError("invalid flow nodes")
+                    result = deepcopy(data)
+                    result["synced_at"] = stamp
+                    summary = {"position_id": position_id, "version": int(data.get("version") or 0),
+                        "status": "enabled" if data.get("status") == "enabled" else "disabled", "synced_at": stamp}
+                with self._state_lock:
+                    if kind == "opening":
+                        self._opening = result
+                    else:
+                        self._flow = result
+                    self._sync[kind].update({**summary, "state": "synced", "error": ""})
+                if kind == "flow":
+                    try:
+                        self._flow_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                        tmp = self._flow_cache_path.with_suffix(".tmp")
+                        tmp.write_text(json.dumps({"base_url": self.base_url, "device_code": self.device_code,
+                            "flow": result, "sync": summary}, ensure_ascii=False), encoding="utf-8")
+                        tmp.replace(self._flow_cache_path)
+                    except OSError:
+                        with self._state_lock:
+                            self._sync[kind]["error"] = "write"
+            except Exception as exc:  # noqa: BLE001 - keep the last successful response for transient failures
+                error = self._error_code(exc)
+                with self._state_lock:
+                    cached = self._opening if kind == "opening" else self._flow
+                    prior = self._sync[kind]["state"]
+                    self._sync[kind].update({"state": "blocked" if error == "auth" or prior == "blocked" else "stale" if cached is not None else "error",
+                                            "error": "auth" if prior == "blocked" else error})
+                if kind == "flow" and error == "auth":
+                    # Do not let an offline restart revive a previously revoked
+                    # device from its last successful on-disk configuration.
+                    try:
+                        self._flow_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                        tmp = self._flow_cache_path.with_suffix(".tmp")
+                        with self._state_lock:
+                            sync = deepcopy(self._sync[kind])
+                        tmp.write_text(json.dumps({"base_url": self.base_url, "device_code": self.device_code,
+                            "flow": {"blocked": True, "position_id": sync["position_id"], "version": sync["version"],
+                                     "status": sync["status"], "nodes": [], "edges": []}, "sync": sync}, ensure_ascii=False), encoding="utf-8")
+                        tmp.replace(self._flow_cache_path)
+                    except OSError:
+                        pass
+        finally:
+            self._refresh_locks[kind].release()
+
+    def sync_status(self) -> dict[str, Any]:
+        """Read only successful configuration identity and the latest check outcome."""
+        with self._state_lock:
+            return deepcopy(self._sync)
+
+    def report_config_sync(self, client_commit: str = "") -> bool:
+        """Reporter-only minute poll + receipt. Network IO never holds the state lock."""
+        if not self._report_lock.acquire(blocking=False):
+            return False
+        try:
+            now = time.monotonic()
+            if self._last_sync_report_at is not None and now - self._last_sync_report_at < 60:
+                return True
+            self._last_sync_report_at = now
+            self.flow()
+            self.opening()
+            payload = {"device_code": self.device_code, **self.sync_status()}
+            if isinstance(client_commit, str) and re.fullmatch(r"[0-9a-fA-F]{40}", client_commit):
+                payload["client_commit"] = client_commit.lower()
+            try:
+                return bool(self._post("/api/v1/agent/config-sync", payload, timeout=self._config_timeout).get("ok"))
+            except Exception:  # noqa: BLE001 - telemetry failure cannot stop sending
+                return False
+        finally:
+            self._report_lock.release()
 
     def log_receipt(
         self,
@@ -127,32 +285,8 @@ class Brain:
 
     def flow(self, force: bool = False) -> dict[str, Any]:
         """Poll at most once a minute, fall back to a scoped durable cache."""
-        if self._flow is None:
-            try:
-                cached = json.loads(self._flow_cache_path.read_text(encoding="utf-8"))
-                if cached.get("base_url") == self.base_url and cached.get("device_code") == self.device_code:
-                    self._flow = cached.get("flow")
-            except (OSError, ValueError, AttributeError):
-                pass
-        if force or not self._flow_checked_at or time.monotonic() - self._flow_checked_at >= 60:
-            self._flow_checked_at = time.monotonic()
-            try:
-                data = self._get("/api/v1/agent/flow", {"device_code": self.device_code})
-                self._flow = data if isinstance(data, dict) else {"nodes": [], "edges": [], "version": 0}
-                self._flow_cache_path.parent.mkdir(parents=True, exist_ok=True)
-                tmp = self._flow_cache_path.with_suffix(".tmp")
-                tmp.write_text(json.dumps({"base_url": self.base_url, "device_code": self.device_code, "flow": self._flow}, ensure_ascii=False), encoding="utf-8")
-                tmp.replace(self._flow_cache_path)
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code in (401, 403):
-                    self._flow = {"ok": False, "blocked": True, "nodes": [], "edges": [], "version": 0, "detail": "设备鉴权失效"}
-                elif self._flow is None:
-                    self._flow = {"ok": False, "nodes": [], "edges": [], "version": 0, "detail": "流程服务暂不可用"}
-            except Exception as exc:  # noqa: BLE001
-                if self._flow is None:
-                    self._flow = {"ok": False, "nodes": [], "edges": [], "version": 0,
-                                  "detail": f"{type(exc).__name__}: {exc}"}
-        return self._flow
+        self._refresh_config("flow", force)
+        return self._config_snapshot("flow")
 
     def states(self) -> list[dict[str, Any]] | None:
         """None means mirror unavailable; an empty list is a confirmed empty mirror."""

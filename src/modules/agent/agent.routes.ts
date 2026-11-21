@@ -148,6 +148,7 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     // 与 /bridge/devices/:code/register 的自注册路径保持一致：那里也写 true。
     // 只有调用方明确传 observe_only:false 时（企微官方客服 API 通道）才放行。
     const data = { observe_only: true, ...(request.body ?? {}) } as Record<string, unknown>;
+    delete data.config_sync; // 仅对应设备令牌的专用上报接口可生成配置同步证据。
     const factoryIds = readDeviceFactoryIds(db, data.factory_ids);
     try {
       normalizeDevicePosition(db, data, factoryIds, "position_id" in (request.body ?? {}));
@@ -167,6 +168,8 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
       return reply.code(404).send({ detail: "设备不存在" });
     }
     const merged = { ...data, ...(request.body ?? {}) } as Record<string, unknown>;
+    if (data.config_sync === undefined) delete merged.config_sync;
+    else merged.config_sync = data.config_sync;
     if (data.reply_provider === undefined) delete merged.reply_provider;
     else merged.reply_provider = data.reply_provider;
     // Dify 已全链路下线（2026-11-17）：本次提交与历史遗留的 dify 字段一律不落库

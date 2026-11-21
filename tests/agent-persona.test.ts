@@ -122,6 +122,51 @@ describe("agent persona & opening routes", () => {
         payload: { position_id: positionId, kind: "text", content, delay_ms: delay },
       });
 
+    it("opening_version is stable across persona edits and changes for every executable opening change", async () => {
+      const deviceCode = "opening-version-device";
+      app.db.prepare("INSERT INTO agent_devices(device_name,status,data_json) VALUES ('版本测试设备','enabled',?)")
+        .run(JSON.stringify({ device_code: deviceCode, position_id: positionId }));
+      const pair = await app.inject({ method: "POST", url: `/api/v1/bridge/devices/${deviceCode}/pair`, headers: admin });
+      const headers = { authorization: `Bearer ${pair.json().device_token}` };
+      const read = async () => {
+        const persona = await app.inject({ method: "GET", url: `/api/v1/agent-persona?position_id=${positionId}`, headers: admin });
+        const opening = await app.inject({ method: "GET", url: `/api/v1/agent/opening?device_code=${deviceCode}`, headers });
+        expect(persona.statusCode).toBe(200);
+        expect(opening.statusCode).toBe(200);
+        expect(persona.json().opening_version).toMatch(/^[a-f0-9]{64}$/);
+        expect(opening.json().opening_version).toBe(persona.json().opening_version);
+        return persona.json().opening_version as string;
+      };
+      let version = await read();
+      expect(await read()).toBe(version);
+      const otherEmpty = await app.inject({ method: "GET", url: `/api/v1/agent-persona?position_id=${otherPositionId}`, headers: admin });
+      expect(otherEmpty.json().opening_version).not.toBe(version);
+      const first = await addText("第一条", 2000);
+      expect(first.statusCode).toBe(200);
+      const firstId = first.json().id;
+      let changed = await read(); expect(changed).not.toBe(version); version = changed;
+      await app.inject({ method: "PUT", url: "/api/v1/agent-persona", headers: admin, payload: { position_id: positionId, content: "更新人设" } });
+      expect(await read()).toBe(version);
+      const second = await addText("第二条", 2000);
+      const secondId = second.json().id;
+      changed = await read(); expect(changed).not.toBe(version); version = changed;
+      await app.inject({ method: "POST", url: "/api/v1/agent-opening/reorder", headers: admin, payload: { position_id: positionId, ids: [secondId, firstId] } });
+      changed = await read(); expect(changed).not.toBe(version); version = changed;
+      await app.inject({ method: "PUT", url: `/api/v1/agent-opening/${firstId}`, headers: admin, payload: { content: "第一条已修改" } });
+      changed = await read(); expect(changed).not.toBe(version); version = changed;
+      await app.inject({ method: "PUT", url: `/api/v1/agent-opening/${firstId}`, headers: admin, payload: { delay_ms: 4500 } });
+      changed = await read(); expect(changed).not.toBe(version); version = changed;
+      await app.inject({ method: "PUT", url: `/api/v1/agent-opening/${firstId}`, headers: admin, payload: { kind: "image", media_name: "素材甲.jpg" } });
+      changed = await read(); expect(changed).not.toBe(version); version = changed;
+      await app.inject({ method: "PUT", url: `/api/v1/agent-opening/${firstId}`, headers: admin, payload: { media_name: "素材乙.jpg" } });
+      changed = await read(); expect(changed).not.toBe(version); version = changed;
+      await app.inject({ method: "PUT", url: `/api/v1/agent-opening/${firstId}`, headers: admin, payload: { status: "disabled" } });
+      changed = await read(); expect(changed).not.toBe(version); version = changed;
+      await app.inject({ method: "DELETE", url: `/api/v1/agent-opening/${secondId}`, headers: admin });
+      changed = await read(); expect(changed).not.toBe(version);
+      expect(await read()).toBe(changed);
+    });
+
     it("按 seq 递增追加，delay 下限被夹到 2000", async () => {
       const first = await addText("第一条", 0);
       expect(first.statusCode).toBe(200);

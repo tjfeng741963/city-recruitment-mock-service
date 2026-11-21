@@ -20,6 +20,7 @@ import {
   type OpeningItem,
 } from "./agent-orchestrator.js";
 import { devicePositionId } from "../../shared/device-factories.js";
+import { openingVersion } from "../../shared/opening-version.js";
 
 /**
  * Agent 会话接口 + 调试台的后端（迁移 038 的消费侧）。
@@ -282,26 +283,26 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       if (!deviceCode) return reply.code(422).send({ detail: "device_code is required" });
       if (deviceReplyProvider(db, deviceCode) === "dify") {
         if (!ownsReplyDevice(db, request, deviceCode)) return reply.code(403).send(ADMIN_REQUIRED);
-        return { position_id: positionOfDevice(db, deviceCode), persona: "", items: [], provider: "dify", detail: "开场与对话由 Dify 管理" };
+        const positionId = positionOfDevice(db, deviceCode);
+        return { position_id: positionId, persona: "", items: [], opening_version: openingVersion(positionId, []), provider: "dify", detail: "开场与对话由 Dify 管理" };
       }
       const positionId = positionOfDevice(db, deviceCode);
       if (positionId <= 0) {
-        return { position_id: 0, persona: "", items: [], detail: "设备未绑定岗位" };
+        return { position_id: 0, persona: "", items: [], opening_version: openingVersion(0, []), detail: "设备未绑定岗位" };
       }
       const position = positionRow(db, positionId);
       if (position && position.status !== "enabled") {
-        return { position_id: positionId, persona: "", items: [], detail: "岗位已停用" };
+        return { position_id: positionId, persona: "", items: [], opening_version: openingVersion(positionId, []), detail: "岗位已停用" };
       }
+      const items = request.query.mode === "flow" ? firstFlowSegment(db, positionId) : openingOf(db, positionId).map((item) => ({
+        seq: Number(item.seq), kind: String(item.kind), content: String(item.content ?? ""),
+        media_name: String(item.media_name ?? ""), delay_ms: Number(item.delay_ms ?? 2000),
+      }));
       return {
         position_id: positionId,
         persona: personaOf(db, positionId),
-        items: request.query.mode === "flow" ? firstFlowSegment(db, positionId) : openingOf(db, positionId).map((item) => ({
-          seq: Number(item.seq),
-          kind: String(item.kind),
-          content: String(item.content ?? ""),
-          media_name: String(item.media_name ?? ""),
-          delay_ms: Number(item.delay_ms ?? 2000),
-        })),
+        items,
+        opening_version: openingVersion(positionId, items),
       };
     },
   );

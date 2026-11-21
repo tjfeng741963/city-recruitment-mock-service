@@ -175,3 +175,32 @@ def test_hidden_reports_offline(tmp_path, capsys):
     assert bridge.calls == [("offline", "1688858186855249")]
     out = capsys.readouterr().out
     assert "[桥接] pc-office-01 → offline ok=True" in out
+
+
+def test_reporter_posts_config_sync_after_bridge_with_valid_installed_commit(tmp_path, monkeypatch):
+    autopilot = _load_autopilot()
+    monkeypatch.setattr(autopilot, "ROOT", tmp_path)
+    (tmp_path / ".client-version.json").write_text(json.dumps({"commit": "a" * 40}), encoding="utf-8")
+    brain = MagicMock()
+    autopilot._brain = brain
+    events = []
+    rep = make_reporter(autopilot, FakeApi(), FakeBridge(), tmp_path)
+    rep._send_bridge = lambda state: events.append("bridge")
+    brain.report_config_sync.side_effect = lambda commit: events.append(commit)
+
+    rep._run({"wecom_state": "online", "queue_size": 0, "last_error": ""}, {"messages": []})
+
+    assert events[:2] == ["bridge", "a" * 40]
+
+
+def test_reporter_omits_invalid_installed_commit_without_stopping_reports(tmp_path, monkeypatch):
+    autopilot = _load_autopilot()
+    monkeypatch.setattr(autopilot, "ROOT", tmp_path)
+    (tmp_path / ".client-version.json").write_text(json.dumps({"commit": "invalid"}), encoding="utf-8")
+    brain = MagicMock()
+    autopilot._brain = brain
+    rep = make_reporter(autopilot, FakeApi(), FakeBridge(), tmp_path)
+
+    rep._run({"wecom_state": "online", "queue_size": 0, "last_error": ""}, {"messages": []})
+
+    brain.report_config_sync.assert_called_once_with("")
