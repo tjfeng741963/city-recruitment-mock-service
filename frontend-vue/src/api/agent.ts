@@ -1,5 +1,6 @@
 import http from './http'
 import type { AgentDevice, Factory, OkResult, PageQuery, PageResult, ServicePosition } from './types'
+import type { ConfigSyncEvidence } from '../components/agent/config-sync-view'
 
 /** ---------- 坐席设备 ---------- */
 export interface AgentDeviceFactory {
@@ -274,7 +275,7 @@ export interface FlowStateSummary {
 export const agentApi = {
   persona: () => http.get<Record<string, unknown>>('/api/v1/agent-persona'),
   personaGet: (positionId: number | string) =>
-    http.get<{ persona?: { content?: string; status?: string }; openings?: Record<string, unknown>[] }>(
+    http.get<{ persona?: { content?: string; status?: string }; openings?: Record<string, unknown>[]; opening_version?: string }>(
       '/api/v1/agent-persona',
       { params: { position_id: positionId } },
     ),
@@ -298,6 +299,8 @@ export const agentApi = {
     http.post<AgentFlow>('/api/v1/agent-flow/migrate', { position_id: positionId }),
   flowSave: (payload: AgentFlow) =>
     http.put<AgentFlow>('/api/v1/agent-flow', payload),
+  configSync: (deviceCode: string) =>
+    http.get<ConfigSyncEvidence>('/api/v1/agent/config-sync', { params: { device_code: deviceCode } }),
   flowStateSummary: (deviceCode: string) =>
     http.get<{ device_code: string; items: FlowStateSummary[] }>('/api/v1/agent/state', {
       params: { device_code: deviceCode, summary: 1 },

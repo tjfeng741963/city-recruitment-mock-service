@@ -73,6 +73,8 @@ describe('actual recruitment flow presentation', () => {
     const video = displayed.nodes.find(node => node.node_key === 'legacy_2')!;
     const explanation = describeRuntimeNode(video, displayed, true).join(' ');
     expect(explanation).toContain('冷却配置');
+    expect(explanation).toContain('发送后至少间隔 2 秒');
+    expect(explanation).not.toContain('暂不读取');
     expect(explanation).toContain('媒体失败会记录失败并继续');
     expect(explanation).not.toContain('本轮先成功发送文本');
   });

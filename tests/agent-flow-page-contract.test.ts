@@ -68,4 +68,13 @@ describe("招聘流程图入口接线", () => {
     expect(page).toContain('agentApi.context');
     expect(inspector).toContain('FlowMediaPreview');
   });
+
+  it('connects the existing opening editor, reports actual sync evidence and removes the unused node delay',()=>{
+    const page=read('frontend-vue/src/views/AgentFlowView.vue');
+    expect(page).toContain('PositionAgentDrawer');
+    expect(page).toContain('@edit-opening="openOpeningEditor"');
+    expect(page).toContain('agentApi.configSync');
+    expect(page).not.toContain('label="节点间隔（秒）"');
+    expect(page).not.toContain('function setNodeDelay');
+  });
 });

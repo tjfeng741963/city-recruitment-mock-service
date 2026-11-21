@@ -4,7 +4,7 @@
     size="640px"
     :close-on-click-modal="false"
     @update:model-value="(v: boolean) => emit('update:modelValue', v)"
-    @open="load"
+    @open="load(true)"
   >
     <template #header>
       <div class="drawer-head">
@@ -47,7 +47,7 @@
           <el-button size="small" class="pill-btn" @click="startAdd('text')">+ 文本</el-button>
           <el-button size="small" class="pill-btn" @click="startAdd('image')">+ 图片</el-button>
           <el-button size="small" class="pill-btn" @click="startAdd('video')">+ 视频</el-button>
-          <span class="opening-hint">按顺序发送；每条至少间隔 2 秒</span>
+          <span class="opening-hint">按顺序发送；设置每条发送后的最少等待，客户端安全冷却可能更长</span>
         </div>
 
         <div v-if="draft" ref="editorRef" class="opening-edit">
@@ -166,6 +166,7 @@ import { ElMessage } from 'element-plus'
 import { agentApi, type AgentFlow } from '../../api/agent'
 import { mediaApi } from '../../api/core'
 import type { ServicePosition } from '../../api/types'
+import { drawerTabForLoad, type AgentDrawerTab } from '../agent/flow-edit-entry'
 
 interface PersonaOpening {
   id: number
@@ -200,11 +201,11 @@ const KIND_LABEL: Record<string, string> = { text: '文本', image: '图片', vi
 const MIN_DELAY_MS = 2000
 const MAX_BYTES = 20 * 1024 * 1024
 
-const props = defineProps<{ modelValue: boolean; position: ServicePosition | null }>()
+const props = withDefaults(defineProps<{ modelValue: boolean; position: ServicePosition | null; initialTab?: AgentDrawerTab }>(), { initialTab: 'persona' })
 const emit = defineEmits<{ (e: 'update:modelValue', value: boolean): void; (e: 'changed'): void }>()
 const router = useRouter()
 
-const tab = ref<'persona' | 'opening' | 'flow'>('persona')
+const tab = ref<AgentDrawerTab>('persona')
 const loading = ref(false)
 const persona = ref('')
 const savedPersona = ref('')
@@ -235,12 +236,12 @@ function acceptOf(kind: string): string {
   return kind === 'image' ? 'image/*' : 'video/*'
 }
 
-async function load(): Promise<void> {
+async function load(opening = false): Promise<void> {
   if (!props.position) return
   loading.value = true
   draft.value = null
   flowLoading.value = true
-  tab.value = 'persona'
+  tab.value = drawerTabForLoad(tab.value, props.initialTab, opening)
   try {
     const [personaResult, flowResult] = await Promise.all([
       agentApi.personaGet(props.position.id),
@@ -407,6 +408,7 @@ async function move(index: number, offset: number): Promise<void> {
   try {
     await agentApi.reorderOpenings({ position_id: props.position.id, ids: swapped })
     await load()
+    emit('changed')
   } catch (error: any) {
     ElMessage.error(error?.response?.data?.detail || '排序失败')
   }

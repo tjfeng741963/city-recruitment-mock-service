@@ -39,6 +39,7 @@ import re
 import subprocess
 import sys
 import threading
+from copy import deepcopy
 import time
 import traceback
 from ctypes import wintypes as wt
@@ -752,6 +753,10 @@ class Reporter:
         except Exception as exc:  # noqa: BLE001
             log(f"[桥接] 异常（忽略）：{agent_client.describe_error(exc)}")
         try:
+            self._send_config_sync()
+        except Exception as exc:  # noqa: BLE001
+            log(f"[配置同步] 摘要上报失败（忽略）：{type(exc).__name__}")
+        try:
             self._send_groups()
         except Exception as exc:  # noqa: BLE001
             log(f"[群聊] 异常（忽略）：{agent_client.describe_error(exc)}")
@@ -799,6 +804,21 @@ class Reporter:
             self._save()
         except Exception as exc:  # noqa: BLE001
             log(f"[心跳] 失败（忽略，下轮自然补）：{agent_client.describe_error(exc)}")
+
+    def _send_config_sync(self) -> None:
+        """Background only: refresh and report configuration identity, not sessions."""
+        brain = _brain
+        if brain is None or not hasattr(brain, "report_config_sync"):
+            return
+        commit = ""
+        try:
+            data = json.loads((ROOT / ".client-version.json").read_text(encoding="utf-8-sig"))
+            candidate = data.get("commit") if isinstance(data, dict) else None
+            if isinstance(candidate, str) and re.fullmatch(r"[0-9a-fA-F]{40}", candidate):
+                commit = candidate.lower()
+        except (OSError, ValueError, TypeError):
+            pass
+        brain.report_config_sync(commit)
 
     def _send_bridge(self, wecom_state: str) -> None:
         """向 Node 桥接（4222）报设备心跳。
@@ -1221,13 +1241,19 @@ def _flow_store() -> flow_state_mod.FlowState:
     return _flow_state
 
 
+class FlowConfigUnavailable(RuntimeError):
+    """The device must wait for its flow configuration before sending."""
+
+
 def _load_flow(*, force: bool = False) -> dict | None:
     global _flow_cache
     if _brain is None or not hasattr(_brain, "flow"):
         return None
     data = _brain.flow(force=force)
     if isinstance(data, dict) and data.get("blocked"):
-        raise RuntimeError("设备流程鉴权失效，暂停自动发送")
+        raise FlowConfigUnavailable("设备流程鉴权失效，暂停自动发送")
+    if isinstance(data, dict) and data.get("pending"):
+        raise FlowConfigUnavailable("流程配置尚未同步成功，保留本轮待发")
     _flow_cache = data if isinstance(data, dict) and data.get("ok", True) and data.get("nodes") else None
     return _flow_cache
 
@@ -1398,6 +1424,10 @@ def _flow_tick(store: Store, cfg: dict, wecom_state: str) -> None:
     state.daily_snapshot(now)
     if wecom_state != "online" or _brain is None or _consecutive_send_failures:
         return
+    try:
+        flow = _load_flow()
+    except FlowConfigUnavailable:
+        return
     # Recovery must not require a fresh customer message to finish an interrupted
     # node. Only rows whose local outbox was reconciled can reach running here.
     for row in state.list(limit=10000):
@@ -1419,7 +1449,6 @@ def _flow_tick(store: Store, cfg: dict, wecom_state: str) -> None:
     china_hour = (datetime.fromtimestamp(now, timezone.utc).hour + 8) % 24
     if china_hour >= 21 or china_hour < 9:
         return
-    flow = _load_flow()
     for row in state.due_followups(now):
         cid = str(row["session_key"])
         name = str(row.get("conv_name") or "")
@@ -1677,7 +1706,14 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         hint = _inbound_hint(it)
         flow_state = _flow_store() if not dry else None
         flow_row = flow_state.get(cid) if flow_state is not None else None
-        flow = _flow_for_row(flow_row, _load_flow())
+        try:
+            flow = _flow_for_row(flow_row, _load_flow())
+        except FlowConfigUnavailable as exc:
+            if time.time() - _last_block_log > 60:
+                _last_block_log = time.time()
+                log(f"[流程] {exc}", level="warning")
+            stats["blocked"] += 1
+            continue
         if flow_row is not None and (flow_row.get("phase") == "held" or
                 (flow is None and flow_row.get("phase") in ("running", "awaiting", "followup_due"))):
             flow_state.set_phase(cid, "held", error=str(flow_row.get("last_error") or "流程快照缺失"))
@@ -1762,7 +1798,16 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 # 文本真发，图片/视频只占位（当前阶段媒体不真实发送），
                 # 每条都上报回执，失败的条目记 failed 继续往下。
                 if not dry and _is_first_contact(cid, greeted):
-                    ores = _brain.opening()
+                    ores = deepcopy(_brain.opening())
+                    if ores.get("blocked"):
+                        raise RuntimeError("设备开场鉴权失效，暂停自动发送")
+                    if ores.get("pending"):
+                        # A background first fetch may still be running. Keep
+                        # this inbound pending so the next loop can welcome it
+                        # after the configuration arrives; no chat fallback.
+                        stats["blocked"] += 1
+                        log("[开场] 配置尚未同步成功，保留待发，下轮检查", scope="flow")
+                        continue
                     if ores.get("ok") and ores.get("items"):
                         sent_items = 0
                         for item in ores["items"]:
@@ -1785,6 +1830,9 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                     _brain.log_receipt(cid, seq, kind, "sent")
                                     sent_items += 1
                                     log(f"    [开场 {seq}/{len(ores['items'])}] 已发送", scope="send")
+                                    # This is the configured orchestration gap,
+                                    # separate from the sender's guarded input timing.
+                                    time.sleep(max(0.0, float(item.get("delay_ms", 2000)) / 1000.0))
                                 else:
                                     rlog.mark_failed(fake_id, cid, result["detail"], "开场")
                                     _brain.log_receipt(cid, seq, kind, "failed", result["detail"])
@@ -1814,6 +1862,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                     _brain.log_receipt(cid, seq, kind, "sent")
                                     sent_items += 1
                                     log(f"    [开场 {seq}] {kind}:{item['media_name']} 已发送", scope="send")
+                                    time.sleep(max(0.0, float(item.get("delay_ms", 2000)) / 1000.0))
                                 else:
                                     rlog.mark_failed(fake_id, cid, f"{kind} 发送失败：{detail_m}", "开场-媒体")
                                     _brain.log_receipt(cid, seq, kind, "failed", detail_m)

@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
+import { openingVersion } from "../../shared/opening-version.js";
 
 /**
  * 岗位人设 + 开场条目（迁移 038）。
@@ -181,6 +182,7 @@ export async function registerAgentPersonaRoutes(app: FastifyInstance, db: Datab
         persona: serializePersona(persona),
         openings,
         total: openings.length,
+        opening_version: openingVersion(positionId, openings),
       };
     },
   );
