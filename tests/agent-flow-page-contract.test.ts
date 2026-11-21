@@ -35,6 +35,15 @@ describe("招聘流程图入口接线", () => {
     expect(inspector).not.toContain("manage-knowledge");
   });
 
+  it('keeps shared knowledge and media accessible before a flow has loaded', () => {
+    const page = read('frontend-vue/src/views/AgentFlowView.vue');
+    const configurationMenu = page.match(/<el-dropdown[^>]*@command="openConfiguration"[^>]*>/)?.[0] || '';
+    expect(configurationMenu.includes('!savedFlow')).toBe(false);
+    expect(page).toContain('positionLink(command');
+    expect(page).toContain('command="knowledge"');
+    expect(page).toContain('command="media"');
+  });
+
   it("keeps the selected position in the flow page route and reads its real graph", () => {
     const page = read("frontend-vue/src/views/AgentFlowView.vue");
 

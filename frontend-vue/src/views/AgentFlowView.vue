@@ -35,16 +35,16 @@
       <span v-if="isDirty" class="dirty-hint">未保存</span>
       <span class="toolbar-spacer" />
       <el-button :icon="Refresh" :disabled="!positionId || saving || migrating" :loading="loading" @click="reloadFlow">刷新</el-button>
-      <el-dropdown trigger="click" :disabled="!savedFlow || loading || saving || migrating" @command="openConfiguration">
-        <el-button type="primary" :disabled="!savedFlow || loading || saving || migrating">
+      <el-dropdown trigger="click" :disabled="positionsLoading || loading || saving || migrating" @command="openConfiguration">
+        <el-button type="primary" :disabled="positionsLoading || loading || saving || migrating">
           岗位配置<el-icon class="el-icon--right"><ArrowDown /></el-icon>
         </el-button>
         <template #dropdown>
           <el-dropdown-menu>
-            <el-dropdown-item command="flow">编辑流程</el-dropdown-item>
-            <el-dropdown-item command="opening">编辑开场</el-dropdown-item>
-            <el-dropdown-item command="persona">编辑人设</el-dropdown-item>
-            <el-dropdown-item command="knowledge" divided>岗位问答</el-dropdown-item>
+            <el-dropdown-item command="flow" :disabled="!savedFlow">编辑流程</el-dropdown-item>
+            <el-dropdown-item command="opening" :disabled="!savedFlow">编辑开场</el-dropdown-item>
+            <el-dropdown-item command="persona" :disabled="!savedFlow">编辑人设</el-dropdown-item>
+            <el-dropdown-item command="knowledge" divided>{{ positionId ? '岗位问答' : '问答知识库' }}</el-dropdown-item>
             <el-dropdown-item command="media">图片与视频</el-dropdown-item>
           </el-dropdown-menu>
         </template>
@@ -411,6 +411,7 @@ import {
 
 import { readPositionContext, savePositionContext } from '../utils/position-context'
 import { useAuthStore } from '../stores/auth'
+import { positionLink } from '../layouts/navigation'
 const auth = useAuthStore()
 const userKey = () => auth.user?.id ?? auth.user?.username ?? ''
 const route = useRoute()
@@ -606,7 +607,7 @@ function openConfiguration(command: 'flow' | 'opening' | 'persona' | 'media' | '
     agentDrawerTab.value = command
     agentDrawerVisible.value = true
   } else {
-    void router.push({ path: command === 'media' ? '/media' : '/knowledge', query: { position_id: String(positionId.value) } })
+    void router.push(positionLink(command === 'media' ? '/media' : '/knowledge', positionId.value))
   }
 }
 
