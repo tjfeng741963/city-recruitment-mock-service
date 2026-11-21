@@ -2,10 +2,12 @@
   <section>
     <div class="page-header">
       <div>
-        <h2 class="page-title">城市管理</h2>
+        <h2 class="page-title">城市与项目</h2>
         <p class="page-desc">管理各城市招聘配置，包括薪资、面试、线路等信息</p>
       </div>
       <div class="header-actions">
+        <el-button @click="$router.push('/factory-overview')">招聘配置检查</el-button>
+        <el-button @click="$router.push('/city-links')">地域与周边城市</el-button>
         <el-button :icon="Refresh" @click="load">刷新</el-button>
         <el-button type="primary" :icon="Plus" @click="openCreate">添加城市</el-button>
       </div>

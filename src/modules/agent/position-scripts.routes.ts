@@ -89,6 +89,9 @@ export async function registerPositionScriptRoutes(app: FastifyInstance, db: Dat
     // 岗位绑定（2026-11-17 媒体分层）：0=通用池（全岗位可发），>0=岗位专属
     // （如面试地点图——各城市地址不同，图跟岗位走）。缺省 0 兼容旧调用。
     const positionId = Math.max(0, int(body.position_id) || 0);
+    if (positionId > 0 && !db.prepare('SELECT id FROM service_positions WHERE id=?').get(positionId)) {
+      return reply.code(422).send({ detail: '岗位不存在' });
+    }
     const base64 = text(body.data_base64);
     if (!base64) return reply.code(422).send({ detail: "data_base64 is required" });
     const decoded = decodeBase64(base64);

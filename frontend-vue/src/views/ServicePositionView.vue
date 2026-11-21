@@ -2,7 +2,7 @@
   <section>
     <div class="page-header">
       <div>
-        <h2 class="page-title">岗位管理</h2>
+        <h2 class="page-title">招聘岗位</h2>
         <p class="page-desc">管理服务员岗位配置，包括招聘要求、薪资、面试安排等</p>
       </div>
       <div class="header-actions">
@@ -68,7 +68,7 @@
             <div class="position-name">{{ row.position_name }}</div>
             <div class="agent-line" title="点击配置 Agent 人设与开场" @click="openAgent(row)">
               <el-tag size="small" type="primary" effect="dark">A</el-tag>
-              <span>Agent</span>
+              <span>接待话术</span>
               <el-tag size="small" type="info" effect="plain">{{ row.opening_count }} 条</el-tag>
             </div>
           </template>
@@ -96,7 +96,7 @@
           </template>
         </el-table-column>
         <el-table-column prop="city_name" label="城市" width="80" />
-        <el-table-column label="配置数" width="80" align="center">
+        <el-table-column label="开场条数" width="80" align="center">
           <template #default="{ row }">
             <span class="muted">{{ row.opening_count }}</span>
           </template>
@@ -115,15 +115,15 @@
             <span class="muted">{{ formatDateTime(row.updated_at) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="250">
+        <el-table-column label="操作" width="370">
           <template #default="{ row }">
             <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
             <el-button link type="primary" @click="openCopy(row)">复制</el-button>
+            <el-button v-for="link in aiLinks" :key="link.path" link type="primary" @click="router.push(positionLink(link.path,row.id))">{{ link.label }}</el-button>
             <el-dropdown trigger="click" @command="(cmd: string) => onCommand(cmd, row)">
               <el-button link type="primary">更多</el-button>
               <template #dropdown>
                 <el-dropdown-menu>
-                  <el-dropdown-item command="agent">Agent 配置</el-dropdown-item>
                   <el-dropdown-item command="binding">厂区绑定</el-dropdown-item>
                   <el-dropdown-item command="holidays">岗位节假日</el-dropdown-item>
                   <el-dropdown-item command="delete" divided>删除岗位</el-dropdown-item>
@@ -176,6 +176,8 @@
 <script setup lang="ts">
 import {  computed, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useRouter } from 'vue-router'
+import { positionLink } from '../layouts/navigation'
 import { Plus, Refresh, Search, Star, StarFilled, Upload } from '@element-plus/icons-vue'
 import { citiesApi, factoriesApi, positionsApi, apiErrorMessage } from '../api/core'
 import type { City, Factory, ServicePosition } from '../api/core'
@@ -186,6 +188,8 @@ import PositionFactoryBindingDialog from '../components/basic/PositionFactoryBin
 import PositionHolidaysDialog from '../components/basic/PositionHolidaysDialog.vue'
 import PositionAgentDrawer from '../components/basic/PositionAgentDrawer.vue'
 
+const router = useRouter()
+const aiLinks = [{path:'/recruitment-flow',label:'话术流程'},{path:'/knowledge',label:'问答'},{path:'/media',label:'图片视频'}]
 interface PositionRow extends ServicePosition {
   opening_count: number
   saving?: boolean

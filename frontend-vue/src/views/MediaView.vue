@@ -2,14 +2,14 @@
   <section>
     <div class="page-header">
       <div>
-        <h2 class="page-title">岗位素材库</h2>
+        <h2 class="page-title">图片与视频</h2>
         <p class="page-desc">
           图 / 视频发给客户用。通用素材所有岗位共用；面试地点图这类各城市不同的，绑定到具体岗位——Agent 只会发本岗位绑定的图。
         </p>
       </div>
       <div class="header-actions">
         <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
-        <el-button type="primary" :icon="Upload" :loading="uploading" @click="pickFile">
+        <el-button type="primary" :icon="Upload" :loading="uploading" :disabled="!contextReady" @click="pickFile">
           上传素材
         </el-button>
         <input
@@ -22,6 +22,7 @@
       </div>
     </div>
 
+    <PositionContext @validated="id => contextReady = id >= 0" />
     <div class="stats-row">
       <div class="stat-card">
         <div class="stat-value">{{ items.length }}</div>
@@ -143,6 +144,8 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
+import PositionContext from '../components/agent/PositionContext.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Picture, Refresh, Search, Upload, VideoCamera } from '@element-plus/icons-vue'
 import http, { backendUrl } from '../api/http'
@@ -160,6 +163,9 @@ interface MediaRow {
   position_name: string | null
 }
 
+const route = useRoute()
+const contextReady=ref(false)
+const positionId = computed(() => Number(route.query.position_id) || 0)
 const items = ref<MediaRow[]>([])
 const positions = ref<ServicePosition[]>([])
 const loading = ref(false)
@@ -205,6 +211,7 @@ const generalCount = computed(() => items.value.filter((i) => !i.position_id).le
 const filtered = computed(() => {
   const key = keyword.value.trim()
   return items.value.filter((item) => {
+    if (positionId.value && item.position_id !== 0 && item.position_id !== positionId.value) return false
     if (kindFilter.value && item.kind !== kindFilter.value) return false
     if (bindFilter.value === 'general' && item.position_id) return false
     if (bindFilter.value === 'position' && !item.position_id) return false
@@ -272,6 +279,8 @@ function readAsBase64(file: File): Promise<string> {
 }
 
 async function onFileChange(event: Event): Promise<void> {
+  if (!contextReady.value) return
+  const targetPositionId = positionId.value
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
   input.value = ''
@@ -284,7 +293,7 @@ async function onFileChange(event: Event): Promise<void> {
   uploading.value = true
   try {
     const data_base64 = await readAsBase64(file)
-    await http.post('/api/v1/media', { name: file.name, kind, position_id: 0, data_base64 })
+    await http.post('/api/v1/media', { name: file.name, kind, position_id: targetPositionId, data_base64 })
     ElMessage.success('素材已上传')
     await load()
   } catch (error: any) {

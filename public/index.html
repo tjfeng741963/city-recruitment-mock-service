@@ -6,31 +6,31 @@
     <title>城市招聘配置管理</title>
     <!-- 实时注入层：必须是普通脚本且先于 Vue 主体执行，才能抢在轮询器创建前劫持 setInterval -->
     <script src="/theme/realtime.js"></script>
-    <!-- 扩展入口安装候选人列，沿用现有 bundle 的应用与路由。 -->
-    <link rel="modulepreload" crossorigin href="/assets/index-4s8S8yiB.js">
-    <script type="module" crossorigin src="/theme/candidate-registration.js"></script>
+    <!-- 使用 Vue 源码构建入口；候选人 OA 补列在 main.ts 中安装。 -->
+
     <script type="module" src="/admin-enhancements.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-BU7ZV6Gd.css">
+    <link rel="stylesheet" crossorigin href="/assets/index-DZxw3lYJ.css">
+    <link rel="stylesheet" href="/legacy/assets/index-CmyDhzRL.css" />
+    <link rel="stylesheet" href="/legacy/assets/MainLayout-vaLAHi9W.css" />
+    <link rel="stylesheet" href="/legacy/assets/LoginView-DfjFEAay.css" />
+    <link rel="stylesheet" href="/legacy/assets/ServicePositionView-BJe9V203.css" />
+    <link rel="stylesheet" href="/legacy/assets/CityForm-ChqBe9bx.css" />
     <link rel="preload" href="/theme/fonts/google-sans-flex-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="stylesheet" href="/theme/theme.css">
     <link rel="stylesheet" href="/theme/motion.css">
     <link rel="stylesheet" href="/theme/glass.css">
     <link rel="stylesheet" href="/theme/sidebar.css">
     <link rel="stylesheet" href="/theme/candidate-registration.css">
-    <script src="/theme/sidebar.js"></script>
     <script src="/theme/device-code.js"></script>
-    <script src="/theme/kb-console.js"></script>
     <script src="/theme/city-factories.js"></script>
     <script src="/theme/device-factories.js"></script>
     <script src="/theme/device-qr.js"></script>
-    <script src="/theme/position-agent.js"></script>
-    <script src="/theme/factory-overview.js"></script>
-    <script src="/theme/position-factory.js"></script>
+    <script src="/theme/recruitment-page-guidance.js"></script>
     <script src="/theme/archive-panel.js"></script>
-    <script src="/theme/media-panel.js"></script>
     <script src="/theme/nav-adjust.js"></script>
     <script type="module" src="/theme/login-motion.js"></script>
     <script type="module" src="/theme/interaction.js"></script>
+    <script type="module" crossorigin src="/assets/index-BNvtl7IK.js"></script>
   </head>
   <body>
     <div id="app"></div>

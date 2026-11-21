@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
 import { parsePagination } from "../../shared/pagination.js";
 import { serializeCity, serializeFactory, serializeServicePosition } from "../../shared/response-serializers.js";
+import { applyCityDefaultsToPosition, normalizePositionFacts } from "../../shared/position-facts.js";
 import { canAccessCity, cityConstraint, getUserScope, type UserScope } from "../../auth/user-scopes.js";
 
 function mergePositionData(raw: string, body: Record<string, unknown>): Record<string, unknown> {
@@ -181,7 +182,17 @@ export async function registerCoreRoutes(app: FastifyInstance, db: DatabaseSync)
     return list(db, "service_positions", request.query, serializeServicePosition, typeof city === "string" ? " WHERE city_id=(SELECT id FROM cities WHERE city_name=?)" : "", typeof city === "string" ? [city] : [], cityConstraint(scopeFor(request.auth!), "city_id"));
   });
   app.get<{ Params: { id: string } }>("/api/v1/service-positions/:id", async (request, reply) => { const row = db.prepare("SELECT * FROM service_positions WHERE id=?").get(Number(request.params.id)) as (Record<string, unknown> & { city_id: number }) | undefined; return row && canAccessCity(scopeFor(request.auth!), Number(row.city_id)) ? serializeServicePosition(row) : reply.code(404).send({ detail: "岗位不存在" }); });
-  app.post<{ Body: Record<string, unknown> }>("/api/v1/service-positions", async (request, reply) => { const cityId = typeof request.body?.city_id === "number" ? request.body.city_id : null; if (cityId === null || denyCityWrite(scopeFor(request.auth!), cityId, reply)) return reply.sent ? reply : reply.code(422).send({ detail: "city_id is required" }); const row = db.prepare("INSERT INTO service_positions(position_name,factory_id,city_id,data_json) VALUES (?,?,?,?) RETURNING *").get(String(request.body?.position_name ?? request.body?.name ?? "本地岗位"), typeof request.body?.factory_id === "number" ? request.body.factory_id : null, cityId, JSON.stringify(request.body ?? {})) as Record<string, unknown>; return serializeServicePosition(row); });
+  app.post<{ Body: Record<string, unknown> }>("/api/v1/service-positions", async (request, reply) => {
+    const cityId = typeof request.body?.city_id === "number" ? request.body.city_id : null;
+    if (cityId === null || denyCityWrite(scopeFor(request.auth!), cityId, reply)) return reply.sent ? reply : reply.code(422).send({ detail: "city_id is required" });
+    const cityRow = db.prepare("SELECT city_name,data_json FROM cities WHERE id=?").get(cityId) as { city_name: string; data_json: string } | undefined;
+    const cityData = cityRow ? JSON.parse(cityRow.data_json || "{}") as Record<string, unknown> : {};
+    const positionData = normalizePositionFacts(applyCityDefaultsToPosition({ ...cityData, city_name: cityRow?.city_name ?? "" }, request.body ?? {}));
+    const status = positionData.is_active === false ? "disabled" : "enabled";
+    const row = db.prepare("INSERT INTO service_positions(position_name,factory_id,city_id,status,data_json) VALUES (?,?,?,?,?) RETURNING *")
+      .get(String(positionData.position_name ?? positionData.name ?? "本地岗位"), typeof positionData.factory_id === "number" ? positionData.factory_id : null, cityId, status, JSON.stringify(positionData)) as Record<string, unknown>;
+    return serializeServicePosition(row);
+  });
   app.put<{ Params: { id: string }; Body: Record<string, unknown> }>("/api/v1/service-positions/:id", async (request, reply) => {
     const id = Number(request.params.id);
     const current = db.prepare("SELECT city_id,data_json FROM service_positions WHERE id=?").get(id) as { city_id: number; data_json: string } | undefined;
@@ -190,11 +201,14 @@ export async function registerCoreRoutes(app: FastifyInstance, db: DatabaseSync)
     const cityId = typeof body.city_id === "number" ? body.city_id : Number(current.city_id);
     if (denyCityWrite(scopeFor(request.auth!), cityId, reply)) return reply;
     const name = body.position_name ?? body.name;
-    const result = db.prepare("UPDATE service_positions SET position_name=COALESCE(?,position_name),factory_id=COALESCE(?,factory_id),city_id=COALESCE(?,city_id),data_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(
+    const positionData = normalizePositionFacts(mergePositionData(current.data_json, body));
+    const status = typeof body.is_active === "boolean" ? (body.is_active ? "enabled" : "disabled")
+      : typeof body.status === "string" ? body.status : null;
+    const result = db.prepare("UPDATE service_positions SET position_name=COALESCE(?,position_name),factory_id=COALESCE(?,factory_id),city_id=COALESCE(?,city_id),status=COALESCE(?,status),data_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(
       typeof name === "string" ? name : null,
       typeof body.factory_id === "number" ? body.factory_id : null,
       typeof body.city_id === "number" ? body.city_id : null,
-      JSON.stringify(mergePositionData(current.data_json, body)), id,
+      status, JSON.stringify(positionData), id,
     );
     return result.changes ? serializeServicePosition(db.prepare("SELECT * FROM service_positions WHERE id=?").get(id) as Record<string, unknown>) : reply.code(404).send({ detail: "岗位不存在" });
   });

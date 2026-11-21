@@ -2,24 +2,27 @@
   <section>
     <div class="page-header">
       <div>
-        <h2 class="page-title">知识库配置</h2>
-        <p class="page-desc">管理 FAQ 知识库，包括问题、答案和关键词匹配</p>
+        <h2 class="page-title">问答知识库</h2>
+        <p class="page-desc">编辑通用和岗位问答；启用且通过校验的问答会进入当前岗位 AI 回复，无需重复发布。</p>
       </div>
       <div class="header-actions">
         <el-button :icon="Files" @click="templateVisible = true">模板包</el-button>
-        <el-button :icon="Promotion" @click="publishVisible = true">发布</el-button>
-        <el-button :icon="Clock" @click="historyVisible = true">发布历史</el-button>
-        <el-button :icon="Upload" @click="pickImportFile">导入</el-button>
+        <el-button v-if="false" :icon="Promotion" @click="publishVisible = true">发布</el-button>
+        <el-button v-if="false" :icon="Clock" @click="historyVisible = true">发布历史</el-button>
+        <el-button :icon="Upload" disabled title="旧导入不能完整保留岗位作用范围，完善前请使用新增问答">导入（待完善）</el-button>
         <el-button :icon="Download" :disabled="!items.length" @click="handleExport">导出</el-button>
-        <el-button type="primary" :icon="Plus" @click="openCreate">新增知识</el-button>
+        <el-button type="primary" :icon="Plus" :disabled="!contextReady" @click="openCreate">新增知识</el-button>
       </div>
     </div>
 
+    <PositionContext @validated="id => contextReady = id >= 0" />
+    <PositionQa :position-id="positionId" />
+    <el-alert v-if="activeTab !== 'library'" title="历史资料与治理工具；当前接待只读取通用和本岗位问答。这里的旧实体范围不代表已接入回复。" type="info" :closable="false" />
     <el-tabs v-model="activeTab" class="kb-tabs">
       <el-tab-pane label="知识库" name="library">
         <div class="stats-row">
           <div class="stat-card">
-            <div class="stat-value">{{ items.length }}</div>
+            <div class="stat-value">{{ scopedItems.length }}</div>
             <div class="stat-label">总条目</div>
           </div>
           <div class="stat-card stat-active">
@@ -131,6 +134,9 @@
                 <div class="kb-answer muted">{{ row.answer || '（暂无答案内容）' }}</div>
               </template>
             </el-table-column>
+            <el-table-column label="适用范围" min-width="130">
+              <template #default="{ row }">{{ row.scope_level === 'position' ? (Number(row.scope_position_id) === positionId ? positionName || '当前岗位' : '岗位专属') : row.scope_level === 'global' && !row.vertical_id ? '所有岗位通用' : '历史限定范围' }}</template>
+            </el-table-column>
             <el-table-column label="分类" width="110">
               <template #default="{ row }">
                 <span>{{ verticalName(row.vertical_id) }}</span>
@@ -192,19 +198,19 @@
         </div>
       </el-tab-pane>
 
-      <el-tab-pane label="品类" name="vertical" lazy>
+      <el-tab-pane label="历史品类" name="vertical" lazy>
         <KbEntityPanel kind="vertical" />
       </el-tab-pane>
-      <el-tab-pane label="区域" name="location" lazy>
+      <el-tab-pane label="历史区域" name="location" lazy>
         <KbEntityPanel kind="location" />
       </el-tab-pane>
-      <el-tab-pane label="招工方" name="employer" lazy>
+      <el-tab-pane label="历史招工方" name="employer" lazy>
         <KbEntityPanel kind="employer" />
       </el-tab-pane>
-      <el-tab-pane label="设备绑定" name="device" lazy>
+      <el-tab-pane label="历史绑定" name="device" lazy>
         <KbDeviceBinding />
       </el-tab-pane>
-      <el-tab-pane label="FAQ 治理" name="faq" lazy>
+      <el-tab-pane label="问答检查" name="faq" lazy>
         <FaqGovernancePanel
           ref="faqPanelRef"
           :verticals="verticals"
@@ -217,6 +223,8 @@
     <KnowledgeFormDialog
       v-model="dialogVisible"
       :item="editing"
+      :position-id="positionId"
+      :position-name="positionName"
       :verticals="verticals"
       :locations="locations"
       :employers="employers"
@@ -239,7 +247,11 @@
 </template>
 
 <script setup lang="ts">
+import PositionQa from '../components/agent/PositionQa.vue'
 import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
+import PositionContext from '../components/agent/PositionContext.vue'
+import { positionsApi } from '../api/core'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Clock, Download, Files, Plus, Promotion, Refresh, Search, Upload } from '@element-plus/icons-vue'
 import {
@@ -272,6 +284,10 @@ import FaqGovernancePanel from '../components/kb/FaqGovernancePanel.vue'
 import KbEntityPanel from '../components/kb/KbEntityPanel.vue'
 import KbDeviceBinding from '../components/kb/KbDeviceBinding.vue'
 
+const route = useRoute()
+const contextReady=ref(false)
+const positionId = computed(() => Number(route.query.position_id) || 0)
+const positionName = ref('')
 const activeTab = ref('library')
 const items = ref<KnowledgeItem[]>([])
 const loading = ref(false)
@@ -308,8 +324,10 @@ const importing = ref(false)
 const importDone = ref(0)
 const importTotal = ref(0)
 
-const enabledCount = computed(() => items.value.filter((item) => item.status === 'enabled').length)
-const disabledCount = computed(() => items.value.length - enabledCount.value)
+const scopedItems = computed(() => items.value.filter(item => !positionId.value ||
+  item.scope_level === 'global' && !item.vertical_id || item.scope_level === 'position' && Number(item.scope_position_id) === positionId.value))
+const enabledCount = computed(() => scopedItems.value.filter((item) => item.status === 'enabled').length)
+const disabledCount = computed(() => scopedItems.value.length - enabledCount.value)
 const batchPercent = computed(() =>
   batchTotal.value ? Math.round((batchDone.value / batchTotal.value) * 100) : 0,
 )
@@ -320,6 +338,7 @@ const importPercent = computed(() =>
 const filteredItems = computed(() => {
   const key = keyword.value.trim().toLowerCase()
   return items.value.filter((item) => {
+    if (positionId.value && !(item.scope_level === 'global' && !item.vertical_id || item.scope_level === 'position' && Number(item.scope_position_id) === positionId.value)) return false
     if (statusFilter.value && item.status !== statusFilter.value) return false
     if (verticalFilter.value && String(item.vertical_id ?? '') !== verticalFilter.value) return false
     if (key) {
@@ -358,6 +377,14 @@ async function loadOptions(): Promise<void> {
     // 选项加载失败不阻塞列表；筛选/表单会退化为仅有“通用”选项。
   }
 }
+
+watch(positionId, async id => {
+  page.value = 1
+  positionName.value = ''
+  if (id) {
+    try { const {data} = await positionsApi.get(id); positionName.value = data.position_name } catch { /* selector displays failure */ }
+  }
+}, { immediate: true })
 
 async function load(): Promise<void> {
   loading.value = true
@@ -502,6 +529,7 @@ async function batchDelete(): Promise<void> {
 }
 
 function pickImportFile(): void {
+  if (positionId.value) return
   fileInput.value?.click()
 }
 
@@ -510,10 +538,11 @@ async function onImportFile(event: Event): Promise<void> {
   const file = input.files?.[0]
   input.value = ''
   if (!file) return
+  if (positionId.value) { ElMessage.warning('当前岗位视图不支持通用导入，请使用新增岗位问答。'); return }
 
   try {
     await ElMessageBox.confirm(
-      `将导入「${file.name}」。CSV 需要包含“问题”和“答案”两列，已存在的问题不会自动去重。是否继续？`,
+      `将把「${file.name}」导入为通用问答，通过校验的内容可能用于所有岗位。CSV 需要包含“问题”和“答案”两列，已存在的问题不会自动去重。是否继续？`,
       '导入知识',
       { type: 'info', confirmButtonText: '开始导入', cancelButtonText: '取消' },
     )
