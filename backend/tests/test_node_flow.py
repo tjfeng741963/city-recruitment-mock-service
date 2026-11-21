@@ -421,3 +421,21 @@ def test_followup_quiet_and_operator_controls_are_respected(agent, monkeypatch, 
     agent._flow_tick(MagicMock(), CFG, "online")
     assert agent.core_send.send.call_count == 1
     assert agent._flow_state.get("S:customer")["phase"] == "awaiting"
+
+def test_switch_keeps_old_snapshot_and_routes_new_message(agent):
+    start(agent)
+    prior = agent._flow_state.get("S:customer")
+    assert prior["phase"] == "awaiting"
+    agent._brain.reply_mode_generation = "new-mode"
+    agent._brain.reply_provider = "dify"
+    agent._brain.flow.return_value = {"nodes": [], "provider": "dify", "reply_mode_id": "new-mode"}
+    agent._brain.chat.return_value = {"ok": True, "reply": "Dify reply", "parts": ["Dify reply"], "medias": []}
+    agent.core_send.send.reset_mock()
+    incoming(agent, 2, "问新的问题")
+    result = agent.drain(MagicMock(), CFG)
+    assert result["sent"] == 1
+    agent._brain.chat.assert_called_once()
+    assert agent.core_send.send.call_args.args[2] == "Dify reply"
+    after = agent._flow_state.get("S:customer")
+    assert after["phase"] == "held"
+    assert after["snapshot_json"] == prior["snapshot_json"]

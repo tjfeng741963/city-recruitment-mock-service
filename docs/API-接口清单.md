@@ -140,8 +140,11 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |---|---|---|---|
+| GET | /api/v1/agent/devices/:code/reply-mode | admin | 读取设备已确认来源、目标、阶段、客户端最近确认时间、等待秒数和阻塞原因 |
+| POST | /api/v1/agent/devices/:code/reply-mode | admin | {provider} 发起切换，{cancel:true,id} 发起已编号的撤回 |
+| POST | /api/v1/bridge/devices/:code/reply-mode | 对应设备令牌 | 查询及上报切换。prepared 表示当前发送任务及回执已处理，applied 需要对应 id 和 provider。返回持久化切换状态 |
 | GET | `/api/v1/agent/devices/:code/reply-provider` | admin | 返回 `{provider:agent/dify,configured:boolean}`，不返回密钥 |
-| PUT | `/api/v1/agent/devices/:code/reply-provider` | admin | body `{provider:agent/dify,fresh_client_state_confirmed:true}`；切换至 Dify 前须停客户端并核对独立干净状态目录，存在旧流程镜像时拒绝切换 |
+| PUT | `/api/v1/agent/devices/:code/reply-provider` | admin | body `{provider:agent/dify,fresh_client_state_confirmed:true}`；兼容旧客户端的手动方式。客户端报告支持新切换后必须走 reply-mode |
 
 设备选 Dify 后，`GET /agent/opening` 返回空清单与 `provider:dify`，`POST /agent/chat` 使用绑定岗位资料调用 Dify，返回兼容的 `reply.messages`。设备令牌必须匹配 body.device_code；Dify 模式 session_key 必填。`dry:true` 返回中性岗位输入且不调用模型。Dify 会话以设备、当前登录账号、联系人、岗位和应用配置隔离。失败返回 `ok:false,provider:dify,code,error`，不退回 Agent；金额不在当前事实中则暂停。内置人设与开场不参与 Dify 生成。
 

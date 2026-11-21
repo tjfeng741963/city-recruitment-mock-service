@@ -6,6 +6,7 @@ import { difyContext, difyContextConflict, difyInput } from "./dify-context.js";
 import { DeviceBridgeStore } from "../messaging/device-bridge.js";
 import { devicePositionId } from "../../shared/device-factories.js";
 import { canAccessCity, getUserScope } from "../../auth/user-scopes.js";
+import { beginReplyMode, replyModePending, replyModeRow, replyModeView } from "./reply-mode-transition.js";
 import { recruitmentPositionAvailable, recruitmentTurn, selectedRecruitmentPosition } from "./dify-recruitment.js";
 
 const object = (raw: string): Record<string, unknown> => {
@@ -68,12 +69,124 @@ export function registerReplyProviderRoutes(app: FastifyInstance, db: DatabaseSy
     if((req.body.dry!==true||session)&&!/^dify-preview:[A-Za-z0-9-]{1,80}$/.test(session))return reply.code(422).send({detail:"preview session_key must start with dify-preview:"});
     return generateDifyReply(db,{deviceCode:`preview-admin-${req.auth.id}`,positionId,sessionKey:session,text:input,dry:req.body.dry===true,preview:true});
   });
+  const store = new DeviceBridgeStore(db);
+  const currentMode = (code: string) => replyModeView(db, code, deviceReplyProvider(db, code));
+  const deviceRow = (code: string) => db.prepare(
+    "SELECT id,data_json,status FROM agent_devices WHERE json_extract(data_json,'$.device_code')=?",
+  ).get(code) as { id: number; data_json: string; status: string } | undefined;
+
+  app.get<{Params:{code:string}}>("/api/v1/agent/devices/:code/reply-mode", async (req, reply) => {
+    if (req.auth?.role !== "admin") return reply.code(403).send({ detail: "需要管理员权限" });
+    if (!deviceRow(req.params.code)) return reply.code(404).send({ detail: "设备不存在" });
+    return currentMode(req.params.code);
+  });
+
+  app.post<{Params:{code:string}; Body:{provider?:unknown; cancel?:unknown; id?:unknown}}>("/api/v1/agent/devices/:code/reply-mode", async (req, reply) => {
+    if (req.auth?.role !== "admin") return reply.code(403).send({ detail: "需要管理员权限" });
+    const code = req.params.code;
+    const device = deviceRow(code);
+    if (!device) return reply.code(404).send({ detail: "设备不存在" });
+    if (device.status !== "enabled") return reply.code(409).send({ detail: "请先启用该设备" });
+    const row = replyModeRow(db, code);
+    if (!row) return reply.code(409).send({ detail: "请更新 Windows 客户端并等待它上报" });
+    if (req.body?.cancel === true) {
+      if (row.rollback && row.parent_id === req.body.id) return currentMode(code);
+      if (row.id !== req.body.id) return reply.code(409).send({ detail: "状态已变化，请刷新后重试" });
+      if (row.rollback || row.phase === "cancelled") return currentMode(code);
+      if (!replyModePending(db, code)) return reply.code(409).send({ detail: "此切换已完成，请发起反向切换" });
+      // Even a lost prepare response may mean the client has already paused.
+      // A new ID fences off delayed acknowledgments from the cancelled request.
+      beginReplyMode(db, code, row.effective, true);
+      return currentMode(code);
+    }
+    if (!row.client_at) return reply.code(409).send({ detail: "请等待当前配对的 Windows 客户端上报" });
+    const provider = req.body?.provider;
+    if (provider !== "agent" && provider !== "dify") return reply.code(422).send({ detail: "请选择有效的回复来源" });
+    if (replyModePending(db, code)) {
+      if (row.target === provider) return currentMode(code);
+      return reply.code(409).send({ detail: "已有切换正在进行，请等待或撤回" });
+    }
+    if (req.body.id !== undefined && req.body.id !== row.id) return reply.code(409).send({ detail: "状态已变化，请刷新后重试" });
+    if (provider === row.effective) return currentMode(code);
+    if (provider === "dify") {
+      const cfg = config();
+      if (!cfg.key || !validBase(cfg.base)) return reply.code(409).send({ detail: "Dify 尚未完成连接配置" });
+    }
+    if (!devicePositionId(db, code)) return reply.code(409).send({ detail: "请先给设备绑定接待岗位" });
+    beginReplyMode(db, code, provider, false);
+    return currentMode(code);
+  });
+
+  app.post<{Params:{code:string}; Body:{id?:unknown;step?:unknown;provider?:unknown;wecom_online?:unknown;desktop_active?:unknown;issue?:unknown;ready_id?:unknown;ready_provider?:unknown}}>("/api/v1/bridge/devices/:code/reply-mode", async (req, reply) => {
+    const code = req.params.code;
+    if (!hasDifyDeviceToken(db, req, code)) return reply.code(403).send({ detail: "设备鉴权失败" });
+    const device = deviceRow(code);
+    if (!device || device.status !== "enabled") return reply.code(403).send({ detail: "设备已停用" });
+    const body = req.body || {};
+    const now = Date.now();
+    const provider = deviceReplyProvider(db, code);
+    db.prepare("INSERT INTO reply_mode_transition(device_code,effective,target,updated_at,client_at) VALUES (?,?,?,?,?) ON CONFLICT(device_code) DO UPDATE SET client_at=excluded.client_at")
+      .run(code, provider, provider, now, now);
+    const row = replyModeRow(db, code)!;
+    if ((body.step || body.issue) && body.id !== row.id) return reply.code(409).send({ detail: "切换编号已变化" });
+    if (!replyModePending(db, code)) {
+      if (body.step && (body.step !== "applied" || body.provider !== row.effective)) {
+        return reply.code(409).send({ detail: "此切换已结束" });
+      }
+      db.prepare("UPDATE reply_mode_transition SET client_ready=? WHERE device_code=?")
+        .run(Number(body.desktop_active !== false && body.wecom_online === true && ((body.step === "applied" && body.provider === row.effective)
+          || (body.ready_id === row.id && body.ready_provider === row.effective))), code);
+      return currentMode(code);
+    }
+    if (body.desktop_active === false || body.wecom_online !== true) {
+      db.prepare("UPDATE reply_mode_transition SET issue=? WHERE device_code=?").run(body.desktop_active === false ? "desktop" : "wechat", code);
+      return currentMode(code);
+    }
+    const allowedIssues = ["configuration", "local_state", "desktop"];
+    if (typeof body.issue === "string" && allowedIssues.includes(body.issue)) {
+      db.prepare("UPDATE reply_mode_transition SET issue=? WHERE device_code=?").run(body.issue, code);
+      return currentMode(code);
+    }
+    if (!body.step) {
+      if (row.issue === "wechat" || row.issue === "desktop") {
+        db.prepare("UPDATE reply_mode_transition SET issue='' WHERE device_code=?").run(code);
+      }
+      return currentMode(code);
+    }
+    if (body.step === "prepared") {
+      if (row.phase === "applying") return currentMode(code);
+      store.expireClaims(code);
+      if (db.prepare("SELECT 1 FROM bridge_commands WHERE device_code=? AND status='claimed' LIMIT 1").get(code)) {
+        db.prepare("UPDATE reply_mode_transition SET issue='receipt' WHERE device_code=?").run(code);
+        return currentMode(code);
+      }
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        db.prepare("UPDATE agent_devices SET data_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?")
+          .run(JSON.stringify({ ...object(device.data_json), reply_provider: row.target }), device.id);
+        db.prepare("UPDATE reply_mode_transition SET phase='applying',issue='',updated_at=? WHERE device_code=?").run(now, code);
+        db.exec("COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+      return currentMode(code);
+    }
+    if (body.step !== "applied" || row.phase !== "applying" || body.provider !== row.target) {
+      return reply.code(409).send({ detail: "客户端回报与当前切换不符" });
+    }
+    db.prepare("UPDATE reply_mode_transition SET phase=?,effective=target,generation=CASE WHEN rollback=1 THEN generation ELSE id END,issue='',updated_at=?,client_ready=1 WHERE device_code=?")
+      .run(row.rollback ? "cancelled" : "completed", now, code);
+    return currentMode(code);
+  });
+
   for (const method of ["get", "put"] as const) {
     app[method]<{Params:{code:string};Body:{provider?:unknown;fresh_client_state_confirmed?:unknown}}>("/api/v1/agent/devices/:code/reply-provider", async (req, reply) => {
       if (req.auth?.role !== "admin") return reply.code(403).send({detail:"Admin access required"});
       const row = db.prepare("SELECT id,data_json FROM agent_devices WHERE json_extract(data_json,'$.device_code')=?").get(req.params.code) as {id:number;data_json:string} | undefined;
       if (!row) return reply.code(404).send({detail:"设备不存在"});
       if (method === "put") {
+        if (replyModeRow(db, req.params.code)) return reply.code(409).send({ detail: "请使用微信账号中的回复来源切换" });
         if (!["agent","dify"].includes(String(req.body?.provider))) return reply.code(422).send({detail:"provider must be agent or dify"});
         if (req.body.provider !== deviceReplyProvider(db,req.params.code) && new DeviceBridgeStore(db).status(req.params.code)?.state === "online") {
           return reply.code(409).send({detail:"请先停止该设备客户端并等待离线，切换来源后重新启动，以清除开场缓存"});
@@ -111,6 +224,7 @@ export async function generateDifyReply(db: DatabaseSync, input:{deviceCode:stri
   async function run() {
     const blocked=()=>{
       if(input.preview)return false;
+      if(replyModePending(db, input.deviceCode))return true;
       const dev=db.prepare("SELECT status,data_json FROM agent_devices WHERE json_extract(data_json,'$.device_code')=?").get(input.deviceCode) as {status:string;data_json:string}|undefined;
       if (!dev || dev.status!=="enabled" || devicePositionId(db,input.deviceCode)!==input.positionId || deviceReplyProvider(db,input.deviceCode)!=="dify") return true;
       const conv=db.prepare("SELECT takeover FROM agent_conversations WHERE device_code=? AND external_conversation_id=?").get(input.deviceCode,input.sessionKey) as {takeover:number}|undefined;

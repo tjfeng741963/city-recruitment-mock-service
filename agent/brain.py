@@ -23,6 +23,7 @@ import threading
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 from typing import Any
 
 import httpx
@@ -59,6 +60,10 @@ class Brain:
         self._report_lock = threading.Lock()
         self._last_sync_report_at: float | None = None
         self._config_timeout = min(5.0, float(timeout))
+        self.reply_mode_generation: str | None = None
+        self._reply_mode_id: str | None = None
+        self.reply_provider = ""
+        self.reply_mode_status: dict[str, Any] = {}
         self._sync = {
             "flow": {"position_id": 0, "version": 0, "status": "disabled", "synced_at": None,
                      "checked_at": None, "state": "error", "error": ""},
@@ -147,11 +152,11 @@ class Brain:
         except (OSError, ValueError, AttributeError, TypeError):
             pass
 
-    def _refresh_config(self, kind: str, force: bool = False) -> None:
+    def _refresh_config(self, kind: str, force: bool = False) -> bool:
         # Never hold a state lock during network IO. In particular a Reporter
         # refresh must not make the sender wait for that request to finish.
         if not self._refresh_locks[kind].acquire(blocking=False):
-            return
+            return False
         try:
             if kind == "flow":
                 self._load_flow_cache()
@@ -159,7 +164,7 @@ class Brain:
             with self._state_lock:
                 last = self._flow_checked_at if kind == "flow" else self._opening_checked_at
                 if not force and last is not None and now - last < 60:
-                    return
+                    return False
                 if kind == "flow":
                     self._flow_checked_at = now
                 else:
@@ -178,7 +183,7 @@ class Brain:
                     version = data.get("opening_version")
                     version = version if isinstance(version, str) and re.fullmatch(r"[0-9a-fA-F]{64}", version) else None
                     result = {"ok": bool(items), "position_id": position_id, "version": version,
-                        "synced_at": stamp,
+                        "synced_at": stamp, "provider": data.get("provider", "agent"),
                         "items": [{"seq": int(item.get("seq") or 0), "kind": str(item.get("kind") or "text"),
                             "content": str(item.get("content") or ""), "media_name": str(item.get("media_name") or ""),
                             "delay_ms": int(item.get("delay_ms") if item.get("delay_ms") is not None else 2000)} for item in items],
@@ -207,6 +212,7 @@ class Brain:
                     except OSError:
                         with self._state_lock:
                             self._sync[kind]["error"] = "write"
+                return True
             except Exception as exc:  # noqa: BLE001 - keep the last successful response for transient failures
                 error = self._error_code(exc)
                 with self._state_lock:
@@ -228,8 +234,71 @@ class Brain:
                         tmp.replace(self._flow_cache_path)
                     except OSError:
                         pass
+            return False
         finally:
             self._refresh_locks[kind].release()
+
+    def _apply_reply_mode(self, provider: str, generation: str) -> bool:
+        flow_ok = self._refresh_config("flow", force=True)
+        opening_ok = self._refresh_config("opening", force=True)
+        flow = self._config_snapshot("flow")
+        opening = self._config_snapshot("opening")
+        return (flow_ok and opening_ok and flow.get("provider", "agent") == provider
+                and flow.get("reply_mode_id", "") == generation and opening.get("provider", "agent") == provider)
+
+    def sync_reply_mode(self, online: bool, *, can_prepare: bool = True, desktop: bool = True) -> bool:
+        path = f"/api/v1/bridge/devices/{quote(self.device_code, safe='')}/reply-mode"
+
+        def exchange(**fields: Any) -> dict[str, Any]:
+            status = self._post(path, {"wecom_online": online, "desktop_active": desktop, **fields}, timeout=self._config_timeout)
+            if (not isinstance(status, dict) or not isinstance(status.get("id"), str)
+                    or status.get("phase") not in ("idle", "waiting", "applying", "completed", "cancelled")
+                    or status.get("effective") not in ("agent", "dify") or status.get("target") not in ("agent", "dify")):
+                raise ValueError("invalid reply mode response")
+            self.reply_mode_status = status
+            return status
+
+        try:
+            status = exchange(ready_id=self._reply_mode_id, ready_provider=self.reply_provider)
+            if not desktop:
+                self.reply_mode_status = {**status, "local_issue": "desktop"}
+                return False
+            if not online:
+                return False
+            if status["phase"] == "waiting":
+                if not can_prepare:
+                    exchange(id=status["id"], issue="local_state")
+                    return False
+                status = exchange(id=status["id"], step="prepared")
+            if status["phase"] == "waiting":
+                return False
+            if status["phase"] == "applying":
+                request_id, target = status["id"], status["target"]
+                generation = status.get("target_generation", request_id)
+                if not self._apply_reply_mode(target, generation):
+                    exchange(id=request_id, issue="configuration")
+                    return False
+                status = exchange(id=request_id, step="applied", provider=target)
+                if status["id"] != request_id or status["effective"] != target or status["phase"] not in ("completed", "cancelled"):
+                    return False
+                self.reply_mode_generation = generation
+                self._reply_mode_id = request_id
+                self.reply_provider = target
+                return True
+            provider, generation = status["effective"], status.get("generation", status["id"])
+            if (self.reply_mode_generation, self.reply_provider) != (generation, provider):
+                if not self._apply_reply_mode(provider, generation):
+                    self.reply_mode_status = {**status, "local_issue": "configuration"}
+                    return False
+                self.reply_mode_generation = generation
+                self.reply_provider = provider
+            self._reply_mode_id = status["id"]
+            return True
+        except (ValueError, RuntimeError, httpx.HTTPError) as exc:
+            detail = str(exc)
+            issue = "auth" if detail.startswith(("HTTP 401:", "HTTP 403:")) else "network"
+            self.reply_mode_status = {**self.reply_mode_status, "local_issue": issue}
+            return False
 
     def sync_status(self) -> dict[str, Any]:
         """Read only successful configuration identity and the latest check outcome."""
@@ -334,6 +403,7 @@ class Brain:
                 "ok": False,
                 "parts": [],
                 "medias": [],
+                "code": data.get("code"),
                 "detail": str(data.get("error") or data.get("code") or "对话失败"),
             }
 

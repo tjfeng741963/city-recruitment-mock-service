@@ -2,6 +2,22 @@ import http from './http'
 import type { AgentDevice, Factory, OkResult, PageQuery, PageResult, ServicePosition } from './types'
 import type { ConfigSyncEvidence } from '../components/agent/config-sync-view'
 
+export type ReplyProvider = 'agent' | 'dify'
+export interface ReplyModeStatus {
+  id: string
+  phase: 'idle' | 'waiting' | 'applying' | 'completed' | 'cancelled'
+  effective: ReplyProvider
+  target: ReplyProvider
+  supported: boolean
+  client_connected: boolean
+  client_ready: boolean
+  started_at: number | null
+  updated_at: number | null
+  issue: string
+  rollback: boolean
+  elapsed_seconds: number
+}
+
 /** ---------- 坐席设备 ---------- */
 export interface AgentDeviceFactory {
   id: number
@@ -72,6 +88,10 @@ export const devicesApi = {
       `/api/v1/agent/devices/${encodeURIComponent(code)}/verify-code`,
       payload,
     ),
+  replyMode: (code: string, signal?: AbortSignal) =>
+    http.get<ReplyModeStatus>('/api/v1/agent/devices/' + encodeURIComponent(code) + '/reply-mode', { signal, timeout: 6000 }),
+  requestReplyMode: (code: string, data: { provider: ReplyProvider; id: string } | { cancel: true; id: string }) =>
+    http.post<ReplyModeStatus>('/api/v1/agent/devices/' + encodeURIComponent(code) + '/reply-mode', data, { timeout: 6000 }),
   replyProvider: (code: string, signal?: AbortSignal) =>
     http.get<{provider: 'agent' | 'dify'; configured: boolean}>(`/api/v1/agent/devices/${encodeURIComponent(code)}/reply-provider`, { signal }),
   saveReplyProvider: (code: string, provider: 'agent' | 'dify', confirmed: boolean) =>

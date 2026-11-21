@@ -180,6 +180,10 @@
             </el-button>
           </div>
         </el-form-item>
+        <el-form-item v-if="editingId && canSwitchMode && !editingWebTest" label="回复来源">
+          <ReplyModeSwitch :key="form.device_code" :device-code="form.device_code" v-if="formVisible"
+            @confirmed="load(true)" />
+        </el-form-item>
         <el-form-item label="账号备注">
           <el-input v-model="form.name" placeholder="如：广州安检招聘号" />
         </el-form-item>
@@ -299,6 +303,8 @@
 
 <script setup lang="ts">
 import { useRouter } from 'vue-router'
+import { useAuthStore } from '../stores/auth'
+import ReplyModeSwitch from '../components/agent/ReplyModeSwitch.vue'
 import { deviceWorkflowEntry, isWebTestDevice, deviceOnline } from '../components/agent/device-workflow-entry'
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -308,6 +314,9 @@ import { positionsApi } from '../api/core'
 import type { Factory, ServicePosition } from '../api/types'
 import { formatDateTime } from '../utils/format'
 
+const auth = useAuthStore()
+const canSwitchMode = computed(() => auth.user?.role === 'admin')
+const editingWebTest = computed(() => isWebTestDevice({ device_code: form.device_code }))
 const devices = ref<AgentDeviceItem[]>([])
 const loading = ref(false)
 const error = ref('')

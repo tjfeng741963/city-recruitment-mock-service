@@ -1,3 +1,4 @@
+import { replyModeRow } from "../dify/reply-mode-transition.js";
 import type { FastifyInstance } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
 import { difyDashboard } from "../dify/dify-context.js";
@@ -133,6 +134,8 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
           // 后台设备列表直接回显多选结果，不用前端再逐台去拉 /factories。
           const factoryIds = readDeviceFactoryIds(db, parseDeviceData(row.data_json).factory_ids);
           const serialized = serializeAgentDevice(row) as Record<string, unknown>;
+          const mode = replyModeRow(db, String(serialized.device_code ?? ""));
+          if (mode) serialized.reply_provider = mode.effective;
           const bridge = bridgeStore.status(String(serialized.device_code ?? ""));
           if (bridge) {
             const fresh = bridge.heartbeat_at > 0 && Date.now() - bridge.heartbeat_at <= 60_000;
@@ -222,8 +225,16 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     const row = db.prepare("SELECT data_json FROM agent_devices WHERE id=?").get(id) as { data_json: string } | undefined;
     const data = row ? JSON.parse(row.data_json || "{}") as Record<string, unknown> : {};
     if (!row || !canAccessDevice(getUserScope(db, request.auth!), String(data.device_code ?? ""))) return reply.code(404).send({ detail: "Device not found" });
-    const result = db.prepare("DELETE FROM agent_devices WHERE id=?").run(id);
-    return result.changes ? { success: true } : reply.code(404).send({ detail: "Device not found" });
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = db.prepare("DELETE FROM agent_devices WHERE id=?").run(id);
+      if (result.changes) db.prepare("DELETE FROM reply_mode_transition WHERE device_code=?").run(String(data.device_code ?? ""));
+      db.exec("COMMIT");
+      return result.changes ? { success: true } : reply.code(404).send({ detail: "Device not found" });
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
   });
   // 后台运营总览（监控看板页注入卡片的数据源，admin-enhancements.js 调用）。
   // 原 admin-overview 模块在接口精简时删除，这里按卡片需要的 11 个计数重建，

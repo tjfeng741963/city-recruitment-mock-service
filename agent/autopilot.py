@@ -1254,12 +1254,25 @@ def _load_flow(*, force: bool = False) -> dict | None:
         raise FlowConfigUnavailable("设备流程鉴权失效，暂停自动发送")
     if isinstance(data, dict) and data.get("pending"):
         raise FlowConfigUnavailable("流程配置尚未同步成功，保留本轮待发")
+    generation = getattr(_brain, "reply_mode_generation", None)
+    if isinstance(generation, str) and (
+        data.get("reply_mode_id", "") != generation
+        or data.get("provider", "agent") != _brain.reply_provider
+    ):
+        raise FlowConfigUnavailable("本机流程版本与已确认的回复来源不一致")
     _flow_cache = data if isinstance(data, dict) and data.get("ok", True) and data.get("nodes") else None
     return _flow_cache
 
 
 def _flow_node(flow: dict, key: str) -> dict | None:
     return next((node for node in flow.get("nodes", []) if node.get("node_key") == key), None)
+
+
+def _is_prior_flow(snapshot: dict) -> bool:
+    generation = getattr(_brain, "reply_mode_generation", None)
+    return isinstance(generation, str) and (
+        _brain.reply_provider == "dify" or snapshot.get("reply_mode_id", "") != generation
+    )
 
 
 def _flow_for_row(row: dict | None, fallback: dict | None) -> dict | None:
@@ -1270,6 +1283,8 @@ def _flow_for_row(row: dict | None, fallback: dict | None) -> dict | None:
             try:
                 snapshot = json.loads(raw) if isinstance(raw, str) else raw
                 if isinstance(snapshot, dict) and snapshot.get("nodes"):
+                    if _is_prior_flow(snapshot):
+                        return None
                     return snapshot
             except (TypeError, ValueError):
                 pass
@@ -1459,7 +1474,7 @@ def _flow_tick(store: Store, cfg: dict, wecom_state: str) -> None:
             continue
         row_flow = _flow_for_row(row, flow)
         if row_flow is None:
-            state.set_phase(str(row["session_key"]), "expired", error="流程快照不存在")
+            state.set_phase(cid, "held", error="流程快照与当前回复来源不一致或不存在")
             continue
         current = _flow_node(row_flow, str(row.get("node_key") or ""))
         nxt = _flow_next(row_flow, str(row.get("node_key") or ""), "timeout")
@@ -1474,6 +1489,51 @@ def _flow_tick(store: Store, cfg: dict, wecom_state: str) -> None:
         result = _run_flow(store, cfg, cid, name, row_flow, node_key=str(nxt.get("node_key")), step_index=0)
         log(f"[流程] {cid} 复聊结果：{result}", scope="flow")
         break
+
+
+def _reply_desktop_active() -> bool:
+    if sys.platform != "win32":
+        return True
+    session = wt.DWORD()
+    kernel = ctypes.WinDLL("kernel32")
+    if not kernel.ProcessIdToSessionId(os.getpid(), ctypes.byref(session)) or not session.value:
+        return False
+    wts = ctypes.WinDLL("wtsapi32")
+    buffer = ctypes.c_void_p()
+    size = wt.DWORD()
+    wts.WTSQuerySessionInformationW.argtypes = (
+        wt.HANDLE, wt.DWORD, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wt.DWORD)
+    )
+    wts.WTSFreeMemory.argtypes = (ctypes.c_void_p,)
+    if not wts.WTSQuerySessionInformationW(None, session.value, 8, ctypes.byref(buffer), ctypes.byref(size)):
+        return False
+    try:
+        return size.value >= ctypes.sizeof(ctypes.c_int) and ctypes.cast(buffer, ctypes.POINTER(ctypes.c_int))[0] == 0
+    finally:
+        wts.WTSFreeMemory(buffer)
+
+
+def _check_reply_mode(wecom_state: str, reporter=None) -> bool:
+    if _brain is None or not hasattr(_brain, "sync_reply_mode"):
+        return True
+    bridge = reporter.bridge if reporter is not None else None
+    receipts_ready = True
+    if bridge is not None and bridge.enabled:
+        try:
+            receipts_ready = flush_manual_receipts(bridge)
+        except Exception:  # A pending receipt remains in its durable journal.
+            receipts_ready = False
+    desktop = _reply_desktop_active()
+    ready = _brain.sync_reply_mode(wecom_state == "online", can_prepare=receipts_ready, desktop=desktop)
+    status = {**_brain.reply_mode_status, "pid": os.getpid(), "ready": ready, "local_at": time.time()}
+    try:
+        target = CLIENT_STATE_PATH.with_name("reply-mode-state.json")
+        temporary = target.with_suffix(".tmp")
+        temporary.write_text(json.dumps(status, ensure_ascii=False), encoding="utf-8")
+        os.replace(temporary, target)
+    except OSError:
+        pass
+    return ready
 
 
 def _flow_report(cfg: dict) -> None:
@@ -1661,6 +1721,8 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         log(f"同会话合并：{stats['merged']} 条旧消息并入最新一条，不单独回")
 
     for it in sorted(newest.values(), key=lambda x: int(x["msg_time"] or 0)):
+        if not dry and cfg.get("_reply_mode_enabled") and not _check_reply_mode(wecom_state):
+            break
         mid = it["message_id"]
         cid = it["conv_id"]
         name = it["conv_name"] or ""
@@ -1714,6 +1776,21 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 log(f"[流程] {exc}", level="warning")
             stats["blocked"] += 1
             continue
+        if flow_row is not None and flow is None:
+            try:
+                snapshot = json.loads(flow_row.get("snapshot_json") or "{}")
+            except (TypeError, ValueError):
+                snapshot = {}
+            if isinstance(snapshot, dict) and snapshot.get("nodes") and _is_prior_flow(snapshot):
+                if str(mid) == flow_row.get("last_inbound_id"):
+                    rlog.mark_skipped(mid, cid, "旧流程已处理该触发消息")
+                    stats["skipped"] += 1
+                    continue
+                if flow_row.get("phase") in ("running", "awaiting", "followup_due"):
+                    flow_state.set_phase(cid, "held", error="模式切换，保留旧流程待核对")
+                # Keep the durable snapshot, but allow a new input from this
+                # contact through the current provider's regular conversation.
+                flow_row = {**flow_row, "phase": "expired"}
         if flow_row is not None and (flow_row.get("phase") == "held" or
                 (flow is None and flow_row.get("phase") in ("running", "awaiting", "followup_due"))):
             flow_state.set_phase(cid, "held", error=str(flow_row.get("last_error") or "流程快照缺失"))
@@ -1886,6 +1963,9 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     # 服务端自己持有全量上下文（含开场序列），客户端不传历史。
                     res = _brain.chat(hint, cid, sent_summary=_flow_summary(cid) if flow is not None else None)
                     agent_medias = res.get("medias") or []
+                if res.get("code") == "reply_mode_pending":
+                    stats["blocked"] += 1
+                    break  # The server generated no reply. Keep the inbound pending.
                 if res.get("skip"):
                     if not dry:
                         rlog.mark_skipped(mid, cid, res.get("detail") or "流程已结束")
@@ -2664,6 +2744,7 @@ def main() -> int:
 
     global _brain
     _brain = build_brain(cfg, log)
+    cfg["_reply_mode_enabled"] = bool(_brain is not None and hasattr(_brain, "sync_reply_mode"))
 
     if args.retry_held:
         log(f"held/unknown 记录重新入队：{rlog.retry_held()} 条；本次未发送")
@@ -2712,6 +2793,7 @@ def main() -> int:
         log(f"{detail}；数据库初始化将在登录成功后开始")
         while wecom_state != "online":
             try:
+                _check_reply_mode(wecom_state)
                 time.sleep(cfg["interval"])
                 wecom_state = probe_wecom()
                 startup_status = "waiting_login" if wecom_state == "login_required" else "waiting_wecom"
@@ -2788,10 +2870,14 @@ def main() -> int:
             reporter.tick(wecom_state, pending_count(), force=True)
         scan_added_contacts(store, cfg)
         scan(store, cfg)
-        result = drain(store, cfg, dry=cfg["dry_run"], wecom_state=wecom_state)
-        _flow_tick(store, cfg, wecom_state)
+        if _check_reply_mode(wecom_state, reporter):
+            result = drain(store, cfg, dry=cfg["dry_run"], wecom_state=wecom_state)
+            if _check_reply_mode(wecom_state, reporter):
+                _flow_tick(store, cfg, wecom_state)
+                pump_safely(store, cfg, reporter, wecom_state)
+        else:
+            result = {"waiting_reply_mode": True}
         _flow_report(cfg)
-        pump_safely(store, cfg, reporter, wecom_state)
         if reporter is not None:
             reporter.wait(25)  # 等心跳/上报发完再退出，最多 25 秒
         log(f"本轮完成：{result}")
@@ -2801,10 +2887,12 @@ def main() -> int:
     write_client_state("ready", detail="数据库初始化完成，可处理消息", wecom_state=wecom_state)
     scan_added_contacts(store, cfg)
     scan(store, cfg)
-    drain(store, cfg, dry=cfg["dry_run"], wecom_state=wecom_state)
-    _flow_tick(store, cfg, wecom_state)
+    if _check_reply_mode(wecom_state, reporter):
+        drain(store, cfg, dry=cfg["dry_run"], wecom_state=wecom_state)
+        if _check_reply_mode(wecom_state, reporter):
+            _flow_tick(store, cfg, wecom_state)
+            pump_safely(store, cfg, reporter, wecom_state)
     _flow_report(cfg)
-    pump_safely(store, cfg, reporter, wecom_state)
     last_sig = wal_signature(store.data_dir)
     log("开始监听（Ctrl+C 退出）")
     while True:
@@ -2859,10 +2947,12 @@ def main() -> int:
             n += scan(store, cfg)
             if n:
                 log(f"新登记 {n} 条")
-            drain(store, cfg, dry=cfg["dry_run"], wecom_state=wecom_state)
-            _flow_tick(store, cfg, wecom_state)
+            if _check_reply_mode(wecom_state, reporter):
+                drain(store, cfg, dry=cfg["dry_run"], wecom_state=wecom_state)
+                if _check_reply_mode(wecom_state, reporter):
+                    _flow_tick(store, cfg, wecom_state)
+                    pump_safely(store, cfg, reporter, wecom_state)
             _flow_report(cfg)
-            pump_safely(store, cfg, reporter, wecom_state)
         except KeyboardInterrupt:
             log("已停止")
             write_client_state("stopped", detail="用户停止自动回复", wecom_state=wecom_state)

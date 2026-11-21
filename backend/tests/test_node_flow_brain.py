@@ -219,3 +219,34 @@ def test_revoked_device_does_not_use_cached_flow_and_empty_summary_is_sent(tmp_p
     assert client.chat("你好", "S:1", sent_summary=[])["ok"]
     assert requests[0]["sent_summary"] == []
     client.close()
+
+
+def test_reply_mode_waits_for_matching_configuration_before_acknowledging(tmp_path):
+    brain = Brain("https://flow.test", "pc", "fixture", flow_cache_path=tmp_path / "flow.json")
+    applying = {"id": "revision-1", "phase": "applying", "effective": "agent", "target": "dify"}
+    replies = [
+        ("/api/v1/bridge/devices/pc/reply-mode", applying),
+        ("/api/v1/agent/flow", {"nodes": [], "provider": "agent", "reply_mode_id": "revision-1"}),
+        ("/api/v1/agent/opening", {"items": [], "provider": "dify"}),
+        ("/api/v1/bridge/devices/pc/reply-mode", applying),
+        ("/api/v1/bridge/devices/pc/reply-mode", applying),
+        ("/api/v1/agent/flow", {"nodes": [], "provider": "dify", "reply_mode_id": "revision-1"}),
+        ("/api/v1/agent/opening", {"items": [], "provider": "dify"}),
+        ("/api/v1/bridge/devices/pc/reply-mode", {**applying, "phase": "completed", "effective": "dify"}),
+    ]
+    sent = []
+    def handler(request):
+        path, payload = replies.pop(0)
+        assert request.url.path == path
+        if request.method == "POST":
+            sent.append(json.loads(request.content))
+        return httpx.Response(200, json=payload)
+
+    use_transport(brain, handler)
+    assert brain.sync_reply_mode(True) is False
+    assert sent[-1]["issue"] == "configuration"
+    assert brain.sync_reply_mode(True) is True
+    assert sent[-1]["step"] == "applied"
+    assert sent[-1]["id"] == "revision-1"
+    assert brain.reply_mode_generation == "revision-1"
+    assert not replies
