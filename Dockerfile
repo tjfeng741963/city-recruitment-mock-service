@@ -18,6 +18,8 @@ COPY frontend-vue/package.json frontend-vue/package-lock.json ./frontend-vue/
 RUN npm ci --prefix frontend-vue
 COPY frontend-vue ./frontend-vue
 RUN npm run build --prefix frontend-vue
+COPY scripts/publish-vue-assets.mjs ./scripts/publish-vue-assets.mjs
+RUN node scripts/publish-vue-assets.mjs --runtime
 RUN npm run build:all && npm prune --omit=dev
 
 FROM node:22.21.1-bookworm-slim AS runtime
