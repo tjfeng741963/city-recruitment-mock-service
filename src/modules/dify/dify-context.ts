@@ -1,6 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { normalizePositionFacts } from '../../shared/position-facts.js';
 import { positionKnowledge } from '../agent/position-knowledge.js';
+import { interviewSchedule } from './dify-interview.js';
 
 const record=(raw:unknown):Record<string,unknown>=>{
   if(typeof raw==='string'){try{return record(JSON.parse(raw));}catch{return {};}}
@@ -43,7 +44,9 @@ export function difyContext(db:DatabaseSync,id:number){
   for(const[key,fact]of Object.entries(mapped))if(key in materials&&facts[fact])materials[key]=facts[fact];
   const verticalId=Number(city.knowledge_vertical_id)||null;
   const knowledge=positionKnowledge(db,id,facts,verticalId);
-  return {...facts,city_materials:materials,knowledge,sources:{city_id:row.city_id,position_id:id,fields:sources,knowledge_scope:'global_and_current_position',knowledge_vertical_id:verticalId}};
+  const schedule=interviewSchedule(db,id,facts);
+  return {...facts,city_materials:materials,knowledge,interview_days:schedule.dayLabels,interview_points:schedule.points,
+    sources:{city_id:row.city_id,position_id:id,fields:sources,knowledge_scope:'global_and_current_position',knowledge_vertical_id:verticalId}};
 }
 
 /** Catch an explicit address/guide floor disagreement without guessing missing details. */

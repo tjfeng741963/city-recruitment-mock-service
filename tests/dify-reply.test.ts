@@ -33,6 +33,48 @@ describe("Dify second reply route", () => {
     bridge.heartbeat(code,"online","test-account");return result;
   };
   const chat=(session="S:test",text="工资多少？",headers=device)=>app.inject({method:"POST",url:"/api/v1/agent/chat",headers,payload:{device_code:code,session_key:session,text}});
+  it("recommends a scoped job, keeps that choice, and records an explicitly confirmed interview once", async () => {
+    const city = app.db.prepare("INSERT INTO cities(city_name,province,data_json) VALUES ('验收市','验收省',?) RETURNING id")
+      .get(JSON.stringify({ districts: ["青竹区"] })) as { id: number };
+    const factory = app.db.prepare("INSERT INTO factories(city_id,factory_name,status) VALUES (?,'验收厂','enabled') RETURNING id")
+      .get(city.id) as { id: number };
+    app.db.prepare("UPDATE service_positions SET city_id=?,factory_id=? WHERE id=?").run(city.id,factory.id,position);
+    const second = app.db.prepare("INSERT INTO service_positions(city_id,factory_id,position_name,status,data_json) VALUES (?,?,'青竹区分拣岗','enabled',?) RETURNING id")
+      .get(city.id,factory.id,JSON.stringify({ wage_text:"26元/小时",district:"青竹区",interview_days:["周一","周二","周三","周四","周五","周六","周日"],interview_time:"每天 14:00-16:00",interview_points:[{name:"东门接待处",address:"青竹路18号"}] })) as { id: number };
+    const outOfScope = app.db.prepare("INSERT INTO service_positions(position_name,status) VALUES ('外部私有岗','enabled') RETURNING id").get() as { id: number };
+    app.db.prepare("UPDATE agent_devices SET data_json=json_set(data_json,'$.factory_ids',json(?)) WHERE json_extract(data_json,'$.device_code')=?")
+      .run(JSON.stringify([factory.id]),code);
+    await select();
+    const session = "S:test-account_registration";
+    new DeviceBridgeStore(app.db).contact(code,session,"虚构验收联系人");
+    const model = vi.fn().mockImplementation(async () => new Response(JSON.stringify({answer:"工资26元/小时",conversation_id:"recruit-chat"})));
+    vi.stubGlobal("fetch",model);
+    const options = (await chat(session,"我在青竹区，附近有什么岗位？")).json();
+    expect(options.reply.messages[0].content).toContain("青竹区分拣岗");
+    expect(JSON.stringify(options)).not.toContain("外部私有岗");
+    expect((await chat(session,`选择岗位 ${outOfScope.id}`)).json().reply.messages[0].content).toContain("可选范围");
+    await chat(session,`选择岗位 ${second.id}`);
+    expect((await chat(session,"换岗之后的工资多少？")).json()).toMatchObject({ok:true,reply:{messages:[{type:"text",content:"工资26元/小时"}]}});
+    const sent = JSON.parse(model.mock.calls.at(-1)![1].body);
+    expect(JSON.parse(sent.inputs.position_data)).toMatchObject({ wage_text:"26元/小时", interview_points:[{name:"东门接待处",address:"青竹路18号"}] });
+    const date = new Date(Date.now()+3*86400000).toLocaleDateString("sv-SE",{timeZone:"Asia/Shanghai"});
+    const draft = `报名 姓名：小陈 电话：13800000000 日期：${date} 时间：15:00 面试点：东门接待处`;
+    await chat(session,draft);
+    expect(app.db.prepare("SELECT count(*) n FROM agent_archive").get()).toMatchObject({n:0});
+    app.db.prepare("UPDATE service_positions SET data_json=json_set(data_json,'$.interview_points[0].address','青竹路20号') WHERE id=?").run(second.id);
+    expect((await chat(session,"确认报名")).json().reply.messages[0].content).toContain("请核对报名资料");
+    expect(app.db.prepare("SELECT count(*) n FROM agent_archive").get()).toMatchObject({n:0});
+    for (const _ of [1,2]) expect((await chat(session,"确认报名")).json().reply.messages[0].content).toContain("已登记");
+    const candidates = (await app.inject({url:"/api/v1/agent/candidates?status=invited",headers:admin})).json();
+    expect(candidates.items.filter((item:{device_code:string})=>item.device_code===code)).toEqual([
+      expect.objectContaining({name:"小陈",device_code:code,position_id:second.id,interview_date:date,interview_time:"15:00",interview_point:"东门接待处",interview_confirmed:true,has_conversation:true}),
+    ]);
+    expect(app.db.prepare("SELECT count(*) n FROM bridge_commands").get()).toMatchObject({n:0});
+    const previews = ["报名",draft,"确认报名"];
+    for (const text of previews) await app.inject({method:"POST",url:"/api/v1/dify/preview",headers:admin,
+      payload:{position_id:second.id,session_key:"dify-preview:registration",text}});
+    expect(app.db.prepare("SELECT count(*) n FROM agent_archive").get()).toMatchObject({n:1});
+  });
   it("saves provider separately without exposing keys, rejects device writes",async()=>{
     expect([401,403]).toContain((await app.inject({method:"PUT",url:`/api/v1/agent/devices/${code}/reply-provider`,headers:device,payload:{provider:"dify"}})).statusCode);
     expect((await select()).json()).toMatchObject({provider:"dify",configured:true});

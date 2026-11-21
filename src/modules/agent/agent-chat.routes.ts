@@ -7,7 +7,7 @@ import { authorizeProfileRequest } from "./profile.routes.js";
 import { isValidDeviceToken } from "./position-scripts.routes.js";
 import { firstFlowSegment } from "./agent-flow.routes.js";
 import { complete, llmConfig, parseJsonObject } from "./agent-llm.js";
-import { deviceReplyProvider, generateDifyReply, ownsReplyDevice } from "../dify/dify-reply.js";
+import { deviceReplyProvider, generateDifyReply, hasDifyDeviceToken, ownsReplyDevice } from "../dify/dify-reply.js";
 import { normalizePositionFacts } from "../../shared/position-facts.js";
 import { positionKnowledge } from './position-knowledge.js';
 import {
@@ -419,6 +419,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         }
         if (notifyStatus === "pending" && Number(row.group_notified ?? 0)) notifyStatus = "sent";
       }
+      if (sessionKey.startsWith("dify:")) notifyStatus = "archive-only";
       items.push({
         session_key: sessionKey,
         customer_nickname: shared?.nickname || String(row.customer_nickname ?? ""),
@@ -430,6 +431,8 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         interview_date: String(row.interview_date ?? ""),
         interview_time: String(row.interview_time ?? ""),
         interview_confirmed: Boolean(row.interview_confirmed),
+        interview_point: shared?.interview_point || "",
+        interview_address: shared?.interview_address || "",
         arrival_status: String(row.arrival_status ?? ""),
         notify_status: notifyStatus,
         updated_at: String(row.updated_at ?? ""),
@@ -485,6 +488,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
   app.get<{Params:{key:string};Querystring:{before_id?:string}}>("/api/v1/agent/candidates/:key/messages",async(request,reply)=>{
     if(request.auth?.role!=='admin') return reply.code(403).send({detail:'Admin access required'});
     const direct = candidateConversation(db,request.params.key);
+    if (request.params.key.startsWith('dify:') && !direct) return reply.code(404).send({detail:'这条登记没有关联对话'});
     const archive=db.prepare('SELECT session_key FROM agent_archive WHERE session_key=?').get(request.params.key);
     if(!archive && !direct) return reply.code(404).send({detail:'记录不存在或没有关联对话'});
     const matches=(db.prepare('SELECT COUNT(*) n FROM agent_conversations WHERE external_conversation_id=?').get(request.params.key) as {n:number}).n;
@@ -588,7 +592,10 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       if (!ownsReplyDevice(db, request, deviceCode)) return reply.code(403).send(ADMIN_REQUIRED);
       const input = text(body.text).trim();
       if (!input || input.length > 2000) return reply.code(422).send({ detail: "text is required (max 2000)" });
-      return generateDifyReply(db, { deviceCode, positionId: positionOfDevice(db, deviceCode), sessionKey: text(body.session_key).trim().slice(0,120), text: input, dry: body.dry === true });
+      const admin = isAdmin(request);
+      return generateDifyReply(db, { deviceCode, positionId: positionOfDevice(db, deviceCode),
+        sessionKey: admin && body.dry !== true ? `admin:${request.auth?.id}:${text(body.session_key).trim().slice(0,100)}` : text(body.session_key).trim().slice(0,120),
+        text: input, dry: body.dry === true, canWriteRegistration: hasDifyDeviceToken(db,request,deviceCode) });
     }
     const positionId = int(body.position_id) || (deviceCode ? positionOfDevice(db, deviceCode) : 0);
     if (body.preview === true) {
