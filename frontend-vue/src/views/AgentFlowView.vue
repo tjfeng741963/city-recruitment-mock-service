@@ -352,6 +352,7 @@ import { ArrowDown, Check, CircleClose, Clock, Connection, Delete, FullScreen, P
 import AgentFlowCanvas from '../components/agent/AgentFlowCanvas.vue'
 import FlowRuntimeInspector from '../components/agent/FlowRuntimeInspector.vue'
 import { activeOpenings, buildRuntimeFlow, compareOpeningContents, describeRuntimeNode, type LegacyOpening } from '../components/agent/flow-runtime'
+import { availableFlowMedia, normalizeFlowMediaOptions, type FlowMediaOption } from '../components/agent/flow-media-options'
 import { agentApi, devicesApi, type AgentDeviceItem, type AgentFlow, type AgentFlowEdge, type AgentFlowNode, type AgentFlowPart, type FlowStateSummary } from '../api/agent'
 import { mediaApi, positionsApi } from '../api/core'
 import type { ServicePosition } from '../api/types'
@@ -372,13 +373,6 @@ import {
   removeFlowNode,
 } from '../components/basic/flow-graph'
 
-interface MediaOption {
-  name: string
-  kind: string
-  position_id: number
-  status: string
-}
-
 const route = useRoute()
 const router = useRouter()
 const positions = ref<ServicePosition[]>([])
@@ -390,7 +384,7 @@ const pageError = ref('')
 const conflict = ref(false)
 const positionId = ref(0)
 const flow = ref<AgentFlow | null>(null)
-const mediaItems = ref<MediaOption[]>([])
+const mediaItems = ref<FlowMediaOption[]>([])
 const selectedNodeKey = ref('')
 const selectedEdgeIndex = ref<number | null>(null)
 const canvas = ref<InstanceType<typeof AgentFlowCanvas> | null>(null)
@@ -496,12 +490,7 @@ async function loadFlow(id: number): Promise<void> {
     runtimeNodeKey.value = '__runtime_start'
     runtimeEdgeIndex.value = null
     openingsAvailable.value = Array.isArray(personaResult.data.openings) && personaResult.data.openings.length > 0
-    mediaItems.value = toArray<Record<string, unknown>>(mediaResult?.data).map((item) => ({
-      name: String(item.name || ''),
-      kind: String(item.kind || ''),
-      position_id: Number(item.position_id || 0),
-      status: String(item.status || ''),
-    })).filter((item) => item.name)
+    mediaItems.value = normalizeFlowMediaOptions(toArray<Record<string, unknown>>(mediaResult?.data))
     chooseSelection(flow.value)
     baseline.value = snapshot(flow.value)
     void loadRuntimeMirrors(id, sequence)
@@ -940,10 +929,8 @@ function millisecondsToSeconds(value: unknown): number {
   return Number.isFinite(milliseconds) ? Math.round(milliseconds / 1000) : 2
 }
 
-function availableMedia(kind: string): MediaOption[] {
-  return mediaItems.value.filter((item) =>
-    item.kind === kind && item.status === 'enabled' && (item.position_id === 0 || item.position_id === positionId.value),
-  )
+function availableMedia(kind: string): FlowMediaOption[] {
+  return availableFlowMedia(mediaItems.value, kind, positionId.value)
 }
 
 function nodeTitle(nodeKey: string): string {
