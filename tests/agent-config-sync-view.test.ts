@@ -23,6 +23,21 @@ describe('configuration sync evidence shown to operators',()=>{
     expect(configurationSyncView(device,{mode:'flow',positionId:25,version:4},now).state).toBe('pending');
     expect(configurationSyncView({...device,server_received_at:'2026-11-21T09:00:00Z'},{mode:'flow',positionId:25,version:3},now).state).toBe('stale');
   });
+  it('uses the device reply provider rather than comparing Dify to system workflow versions', () => {
+    const view = configurationSyncView({...device, available: false, reply_provider: 'dify'},
+      {mode: 'flow', positionId: 25, version: 3}, now);
+    expect(view.state).toBe('not_applicable');
+    expect(view.label).toContain('Dify');
+  });
+
+  it('shows fresh config without a green readiness status when the device is offline', () => {
+    const view = configurationSyncView({...device, bridge_state: 'offline'},
+      {mode: 'flow', positionId: 25, version: 3}, now);
+    expect(view.state).toBe('not_ready');
+    expect(view.label).toContain('已拉取');
+    expect(view.label).toContain('离线');
+  });
+
   it('compares the actual opening fingerprint when the node flow is disabled',()=>{
     const legacy={...device,flow:{...device.flow,status:'disabled'}};
     expect(configurationSyncView(legacy,{mode:'opening',positionId:25,version:'b'.repeat(64),flowVersion:3},now).state).toBe('synced');

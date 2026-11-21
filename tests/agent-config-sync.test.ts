@@ -54,7 +54,7 @@ describe("agent config sync evidence", () => {
   it("requires the owning device to report and an administrator to read one device", async () => {
     const unknown = await app.inject({ method: "GET", url: `/api/v1/agent/config-sync?device_code=${deviceCode}`, headers: admin });
     expect(unknown.statusCode).toBe(200);
-    expect(unknown.json()).toEqual({ available: false, device_code: deviceCode });
+    expect(unknown.json()).toEqual({ available: false, device_code: deviceCode, reply_provider: "agent", bridge_state: "offline" });
     expect((await app.inject({ method: "GET", url: "/api/v1/agent/config-sync", headers: admin })).statusCode).toBe(422);
     for (const headers of [admin, customer, anotherDevice, {}]) {
       expect((await app.inject({ method: "POST", url: "/api/v1/agent/config-sync", headers, payload: payload() })).statusCode).toBe(403);

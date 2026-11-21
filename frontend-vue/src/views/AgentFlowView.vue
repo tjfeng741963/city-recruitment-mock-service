@@ -60,8 +60,8 @@
     <PositionQa :position-id="positionId" />
     <div v-if="savedFlow && !loading" class="runtime-status-bar">
       <span><strong>绑定设备</strong>：{{ boundDevices.length ? boundDevices.map(device => device.device_code).join('、') : devicesAvailable ? '未绑定设备，当前无人执行该岗位' : '设备列表读取失败，绑定状态未知' }}</span>
-      <span>{{ savedFlow.status === 'enabled' ? '新客户使用已保存节点；在途会话保留原快照' : '节点图停用；绑定设备的新客户走旧开场' }}</span>
-      <span class="field-note">当前使用：{{ savedFlow.status === 'enabled' ? '节点流程' : '旧开场' }}；保存版本 {{ savedFlow.status === 'enabled' ? `v${savedFlow.version}` : openingVersion ? openingVersion.slice(0, 10) : '未知' }}</span>
+      <span>{{ savedFlow.status === 'enabled' ? '系统 Agent 的新客户使用已保存节点，在途会话保留原快照' : '节点图停用，系统 Agent 的新客户走旧开场' }}</span>
+      <span class="field-note">系统 Agent 保存路径：{{ savedFlow.status === 'enabled' ? '节点流程' : '旧开场' }}；保存版本 {{ savedFlow.status === 'enabled' ? `v${savedFlow.version}` : openingVersion ? openingVersion.slice(0, 10) : '未知' }}</span>
       <el-button v-if="savedFlow.status !== 'enabled'" link type="primary" @click="openOpeningEditor">编辑当前开场</el-button>
       <el-button link type="primary" @click="runtimeDetails = !runtimeDetails">{{ runtimeDetails ? '收起运行说明' : '查看运行说明与状态' }}</el-button>
     </div>

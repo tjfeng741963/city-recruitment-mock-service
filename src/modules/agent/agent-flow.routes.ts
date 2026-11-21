@@ -315,15 +315,20 @@ export async function registerAgentFlowRoutes(app: FastifyInstance, db: Database
     if (!deviceCode) return reply.code(422).send({ detail: "device_code is required" });
     const row = db.prepare("SELECT data_json FROM agent_devices WHERE json_extract(data_json,'$.device_code')=?")
       .get(deviceCode) as { data_json: string } | undefined;
+    const metadata = {
+      device_code: deviceCode,
+      reply_provider: row ? deviceReplyProvider(db, deviceCode) : null,
+      bridge_state: row ? deviceStore.status(deviceCode)?.state ?? null : null,
+    };
     const stored = parseObject(parseObject(row?.data_json).config_sync);
-    if (!Object.keys(stored).length) return { available: false, device_code: deviceCode };
+    if (!Object.keys(stored).length) return { available: false, ...metadata };
     try {
       const safe = normalizeConfigSync(stored);
       const serverReceivedAt = isoOrNull(stored.server_received_at);
-      if (!serverReceivedAt) return { available: false, device_code: deviceCode };
-      return { available: true, device_code: deviceCode, ...safe, server_received_at: serverReceivedAt };
+      if (!serverReceivedAt) return { available: false, ...metadata };
+      return { available: true, ...metadata, ...safe, server_received_at: serverReceivedAt };
     } catch {
-      return { available: false, device_code: deviceCode };
+      return { available: false, ...metadata };
     }
   });
 

@@ -162,8 +162,7 @@ def test_legacy_opening_initial_sync_pending_does_not_fall_back_to_ai(agent):
 def test_flow_initial_sync_pending_never_falls_back_to_legacy_or_ai(agent):
     agent._brain.flow.return_value = {"ok": False, "pending": True, "nodes": [], "version": 0}
     incoming(agent)
-    with pytest.raises(RuntimeError, match="流程配置尚未同步成功"):
-        agent.drain(MagicMock(), CFG)
+    assert agent.drain(MagicMock(), CFG)["blocked"] == 1
     agent._brain.opening.assert_not_called()
     agent._brain.chat.assert_not_called()
     agent.core_send.send.assert_not_called()
@@ -378,6 +377,22 @@ def test_followup_failure_never_marked_sent(agent, monkeypatch):
     agent._flow_tick(MagicMock(), CFG, "online")
     assert agent._flow_state.get("S:customer")["phase"] == "held"
     assert agent._flow_state.get("S:customer")["followup_sent_at"] is None
+
+
+@pytest.mark.parametrize("phase", ["running", "awaiting"])
+def test_background_flow_waits_for_authorization_before_sending_snapshot(agent, monkeypatch, phase):
+    now = datetime(2026, 11, 19, 4, tzinfo=timezone.utc).timestamp()
+    monkeypatch.setattr(agent.time, "time", lambda: now)
+    start(agent)
+    state = agent._flow_state
+    state.set_phase("S:customer", phase, await_since=now - 121)
+    agent.core_send.send.reset_mock()
+    agent._brain.flow.return_value = {"ok": False, "blocked": True, "nodes": []}
+
+    agent._flow_tick(MagicMock(), CFG, "online")
+
+    agent.core_send.send.assert_not_called()
+    assert state.get("S:customer")["phase"] == phase
 
 
 def test_media_without_verified_text_never_pastes(agent):

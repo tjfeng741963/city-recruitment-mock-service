@@ -1241,15 +1241,19 @@ def _flow_store() -> flow_state_mod.FlowState:
     return _flow_state
 
 
+class FlowConfigUnavailable(RuntimeError):
+    """The device must wait for its flow configuration before sending."""
+
+
 def _load_flow(*, force: bool = False) -> dict | None:
     global _flow_cache
     if _brain is None or not hasattr(_brain, "flow"):
         return None
     data = _brain.flow(force=force)
     if isinstance(data, dict) and data.get("blocked"):
-        raise RuntimeError("设备流程鉴权失效，暂停自动发送")
+        raise FlowConfigUnavailable("设备流程鉴权失效，暂停自动发送")
     if isinstance(data, dict) and data.get("pending"):
-        raise RuntimeError("流程配置尚未同步成功，保留本轮待发")
+        raise FlowConfigUnavailable("流程配置尚未同步成功，保留本轮待发")
     _flow_cache = data if isinstance(data, dict) and data.get("ok", True) and data.get("nodes") else None
     return _flow_cache
 
@@ -1420,6 +1424,10 @@ def _flow_tick(store: Store, cfg: dict, wecom_state: str) -> None:
     state.daily_snapshot(now)
     if wecom_state != "online" or _brain is None or _consecutive_send_failures:
         return
+    try:
+        flow = _load_flow()
+    except FlowConfigUnavailable:
+        return
     # Recovery must not require a fresh customer message to finish an interrupted
     # node. Only rows whose local outbox was reconciled can reach running here.
     for row in state.list(limit=10000):
@@ -1441,7 +1449,6 @@ def _flow_tick(store: Store, cfg: dict, wecom_state: str) -> None:
     china_hour = (datetime.fromtimestamp(now, timezone.utc).hour + 8) % 24
     if china_hour >= 21 or china_hour < 9:
         return
-    flow = _load_flow()
     for row in state.due_followups(now):
         cid = str(row["session_key"])
         name = str(row.get("conv_name") or "")
@@ -1699,7 +1706,14 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         hint = _inbound_hint(it)
         flow_state = _flow_store() if not dry else None
         flow_row = flow_state.get(cid) if flow_state is not None else None
-        flow = _flow_for_row(flow_row, _load_flow())
+        try:
+            flow = _flow_for_row(flow_row, _load_flow())
+        except FlowConfigUnavailable as exc:
+            if time.time() - _last_block_log > 60:
+                _last_block_log = time.time()
+                log(f"[流程] {exc}", level="warning")
+            stats["blocked"] += 1
+            continue
         if flow_row is not None and (flow_row.get("phase") == "held" or
                 (flow is None and flow_row.get("phase") in ("running", "awaiting", "followup_due"))):
             flow_state.set_phase(cid, "held", error=str(flow_row.get("last_error") or "流程快照缺失"))
