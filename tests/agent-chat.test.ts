@@ -162,8 +162,8 @@ describe("agent chat routes", () => {
       headers: admin,
       payload: { position_id: positionId, text: "面试在哪里", dry: true },
     });
-    expect(dry.json().messages[0].content).toContain("- 面试地址：广州市番禺区招聘点");
-    expect(dry.json().messages[0].content).toContain("- 招聘要求：身体健康，无犯罪记录");
+    expect(dry.json().messages[0].content).toContain("- 面试地址（interview_address）：广州市番禺区招聘点");
+    expect(dry.json().messages[0].content).toContain("- 基本招聘要求（basic_requirements）：身体健康，无犯罪记录");
   });
 
   it("blocks live replies from a disabled position while allowing dry QA", async () => {
