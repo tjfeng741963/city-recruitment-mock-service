@@ -56,6 +56,7 @@ def test_status_does_not_reuse_ready_state_from_an_older_pid(tmp_path, monkeypat
                 "Name": "python.exe",
                 "CommandLine": f'python.exe "{tmp_path / "autopilot.py"}" --watch',
                 "ProcessId": 222,
+                "CreationDate": "2026-11-21T00:00:00Z",
             }],
             "task_enabled": False,
         },
@@ -76,6 +77,7 @@ def test_start_waits_for_business_state_instead_of_pid(tmp_path, monkeypatch):
     monkeypatch.setattr(module.updater, "_acquire_mutex", lambda: None)
     monkeypatch.setattr(module.updater, "_release_mutex", lambda handle: None)
     monkeypatch.setattr(module.updater, "_running_autopilot", lambda: False)
+    monkeypatch.setattr(module, "require_interactive_session", lambda: None)
     monkeypatch.setattr(module.updater, "_verify_installed_core", lambda *args: None)
     monkeypatch.setattr(module.updater, "_start_existing_client", lambda root: None)
     statuses = iter([

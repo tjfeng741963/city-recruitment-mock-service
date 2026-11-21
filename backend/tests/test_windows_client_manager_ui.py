@@ -25,6 +25,13 @@ class FixtureService:
         self.calls.append("status")
         return {"commit": self.installed, "running": self.running, "task_enabled": False, "other_running": 0}
 
+    def watch_status(self, previous):
+        return self.status()
+
+    def restart(self):
+        self.calls.append("restart")
+        return 1
+
     def check(self):
         self.calls.append("check")
         return {"commit": COMMIT}
@@ -46,16 +53,25 @@ class FixtureService:
         return 1
 
 
-@pytest.fixture
-def window(tmp_path):
+@pytest.fixture(scope="module")
+def tk_root():
     import tkinter as tk
-    module = importlib.import_module("client_manager")
     root = tk.Tk()
     root.withdraw()
-    service = FixtureService(tmp_path)
-    app = module.ManagerWindow(root, service)
-    yield app, service
+    yield root
     root.destroy()
+
+
+@pytest.fixture
+def window(tmp_path, tk_root):
+    import tkinter as tk
+    module = importlib.import_module("client_manager")
+    window = tk.Toplevel(tk_root)
+    window.withdraw()
+    service = FixtureService(tmp_path)
+    app = module.ManagerWindow(window, service)
+    yield app, service
+    app.close()
 
 
 def settle(app):
@@ -76,16 +92,20 @@ def test_opening_window_only_reads_local_status(window):
     assert "停止" in app.runtime_text.get()
 
 
-def test_status_does_not_auto_refresh_and_leave_start_button_busy(window):
+def test_running_window_detects_exit_without_manual_refresh(window):
     app, service = window
+    service.running = 1
     settle(app)
-    deadline = time.monotonic() + 5.5
+    service.running = 0
+    deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         app.window.update()
+        if "停止" in app.runtime_text.get():
+            assert not app.busy
+            assert not app.start_button.instate(["disabled"])
+            return
         time.sleep(0.01)
-    assert service.calls.count("status") == 1
-    assert not app.busy
-    assert not app.start_button.instate(["disabled"])
+    pytest.fail("GUI kept an exited process on screen")
 
 
 def test_check_and_install_never_start_sender(window):
