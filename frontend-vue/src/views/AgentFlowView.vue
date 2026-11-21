@@ -2,7 +2,7 @@
   <section class="flow-page" :class="{ 'is-fullscreen': fullscreen }" :style="{ '--inspector-width': `${inspectorWidth}px` }">
     <div class="page-header">
       <div>
-        <h2 class="page-title">招聘流程图</h2>
+        <h2 class="page-title">话术流程</h2>
         <p class="page-desc">查看和配置各岗位当前保存的招聘对话流程</p>
       </div>
       <div class="header-actions">
@@ -41,6 +41,8 @@
       </el-tag>
       <span v-if="flow" class="flow-version">版本 v{{ flow.version }} · {{ flow.nodes.length }} 节点 · {{ flow.edges.length }} 连接</span>
       <span v-if="isDirty" class="dirty-hint">未保存</span>
+      <el-button :disabled="!positionId" @click="router.push({path:'/knowledge',query:{position_id:String(positionId)}})">本岗位问答</el-button>
+      <el-button :disabled="!positionId" @click="router.push({path:'/media',query:{position_id:String(positionId)}})">本岗位图片视频</el-button>
       <span class="toolbar-spacer" />
       <el-radio-group v-model="viewMode" size="small" aria-label="流程视图" @change="changeViewMode">
         <el-radio-button value="runtime">实际执行路径</el-radio-button>
@@ -55,6 +57,7 @@
       />
     </div>
 
+    <PositionQa :position-id="positionId" />
     <div v-if="savedFlow && !loading" class="runtime-status-bar">
       <span><strong>绑定设备</strong>：{{ boundDevices.length ? boundDevices.map(device => device.device_code).join('、') : devicesAvailable ? '未绑定设备，当前无人执行该岗位' : '设备列表读取失败，绑定状态未知' }}</span>
       <span>{{ savedFlow.status === 'enabled' ? '新客户使用已保存节点；在途会话保留原快照' : '节点图停用；绑定设备的新客户走旧开场' }}</span>
@@ -353,6 +356,7 @@
 </template>
 
 <script setup lang="ts">
+import PositionQa from '../components/agent/PositionQa.vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -382,6 +386,10 @@ import {
   removeFlowNode,
 } from '../components/basic/flow-graph'
 
+import { readPositionContext, savePositionContext } from '../utils/position-context'
+import { useAuthStore } from '../stores/auth'
+const auth = useAuthStore()
+const userKey = () => auth.user?.id ?? auth.user?.username ?? ''
 const route = useRoute()
 const router = useRouter()
 const positions = ref<ServicePosition[]>([])
@@ -470,10 +478,11 @@ async function loadPositions(): Promise<void> {
   try {
     const { data } = await positionsApi.list({ page: 1, page_size: 1000 })
     positions.value = toArray<ServicePosition>(data)
-    const requested = Number(route.query.position_id)
+    const requested = Number(route.query.position_id) || readPositionContext(userKey())
     const requestedExists = positions.value.some((position) => position.id === requested)
     const nextId = requestedExists ? requested : positions.value[0]?.id ?? 0
     positionId.value = nextId
+    if (nextId) savePositionContext(userKey(), nextId)
     if (nextId && String(route.query.position_id || '') !== String(nextId)) {
       await router.replace({ query: { ...route.query, position_id: String(nextId) } })
     }
@@ -604,6 +613,7 @@ async function changePosition(rawId: string | number): Promise<void> {
     }
   }
   positionId.value = nextId
+  savePositionContext(userKey(), nextId)
   await router.replace({ query: { ...route.query, position_id: String(nextId) } })
   await loadFlow(nextId)
 }
@@ -626,6 +636,7 @@ watch(() => route.query.position_id, async (rawId) => {
     }
   }
   positionId.value = nextId
+  savePositionContext(userKey(), nextId)
   await loadFlow(nextId)
 })
 

@@ -2,7 +2,7 @@
   <section>
     <div class="page-header">
       <div>
-        <h2 class="page-title">坐席设备管理</h2>
+        <h2 class="page-title">微信账号</h2>
         <p class="page-desc">管理 AI 坐席设备，每个设备对应一个微信账号</p>
       </div>
       <div class="header-actions">

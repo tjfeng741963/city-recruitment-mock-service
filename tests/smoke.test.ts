@@ -50,12 +50,14 @@ describe("local static shell (default)", () => {
   it("serves the re-themed legacy bundle without configuration", async () => {
     const response = await app.inject({ method: "GET", url: "/login" });
     expect(response.body).toMatch(/\/assets\/index-[A-Za-z0-9_-]+\.js/);
-    expect(response.body).toContain('src="/theme/candidate-registration.js"');
+    expect(response.body).not.toContain('src="/theme/candidate-registration.js"');
     expect(response.body).toContain("/theme/theme.css");
     expect(response.body).toContain("/theme/motion.css");
     expect(response.body).toContain("/theme/glass.css");
     expect(response.body).toContain("/theme/sidebar.css");
-    expect(response.body).toContain("/theme/sidebar.js");
+    expect(response.body).not.toContain('src="/theme/sidebar.js"');
+    expect(response.body).not.toContain('src="/theme/kb-console.js"');
+    expect(response.body).not.toContain('src="/theme/media-panel.js"');
     expect(response.body).toContain("/theme/device-code.js");
     expect(response.body).toContain("/theme/interaction.js");
   });

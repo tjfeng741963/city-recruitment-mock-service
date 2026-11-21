@@ -62,6 +62,28 @@ describe("core CRUD modules", () => {
     expect(byCity.json().items.map((f: { factory_name: string }) => f.factory_name)).toEqual(["测试厂区"]);
   });
 
+  it("updates the persisted position status when the form toggles is_active", async () => {
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/service-positions",
+      headers: { authorization: `Bearer ${token}` },
+      payload: { position_name: "停用回归岗位", city_id: 1, is_active: true },
+    });
+    expect(created.statusCode).toBe(200);
+    const id = created.json().id;
+
+    const disabled = await app.inject({
+      method: "PUT",
+      url: `/api/v1/service-positions/${id}`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { is_active: false },
+    });
+    expect(disabled.statusCode).toBe(200);
+    expect(disabled.json().is_active).toBe(false);
+    expect((app as unknown as { db: { prepare: (sql: string) => { get: (...args: unknown[]) => unknown } } })
+      .db.prepare("SELECT status FROM service_positions WHERE id=?").get(id)).toEqual({ status: "disabled" });
+  });
+
   it("rejects manual city status changes (device-binding derived) and toggles a featured service position", async () => {
     // 2026-11-17：招聘状态由设备绑定自动推导，PATCH 手改返回 422
     const city = await app.inject({ method: "PATCH", url: "/api/v1/cities/1/status", headers: { authorization: `Bearer ${token}` }, payload: { recruitment_status: "inactive" } });

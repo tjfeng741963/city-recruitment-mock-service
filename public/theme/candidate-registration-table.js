@@ -108,6 +108,13 @@ export function addRegistrationColumn(node, createVNode, withCtx) {
       const existing = new Set(
         columns.flatMap((column) => [column?.props?.prop, column?.props?.key, column?.key]).filter(Boolean),
       );
+      const labels = new Set(columns.map(column => column?.props?.label));
+      const equivalents = { 'candidate-account': ['归属账号'], 'candidate-interview-time': ['面试时间'],
+        'candidate-region': ['省市区', '省/市/区'], 'candidate-registration': ['登记摘要'],
+        'candidate-status': ['客户状态'], 'candidate-remind': ['提醒到场'], 'candidate-checkin': ['签到'] };
+      for (const [key, names] of Object.entries(equivalents)) {
+        if (names.some(name => labels.has(name))) existing.add(key);
+      }
       const columnType = columns.find((column) => column?.type?.name === "ElTableColumn")?.type;
       if (!columnType) return columns;
 

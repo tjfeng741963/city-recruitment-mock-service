@@ -82,6 +82,12 @@ describe("media assets", () => {
     ]);
   });
 
+  it('rejects binding an uploaded file to a nonexistent position', async () => {
+    const res=await app.inject({method:'POST',url:'/api/v1/media',headers:admin,
+      payload:{name:'invalid-job.png',kind:'image',data_base64:PNG_BASE64,position_id:999999}});
+    expect(res.statusCode).toBe(422);
+  });
+
   it("streams the exact bytes with sha256 and content-type headers", async () => {
     const byProfile = await app.inject({
       method: "GET", url: `/api/v1/agent/media/${encodeURIComponent("联测电子厂_门头.png")}`, headers: svc,
