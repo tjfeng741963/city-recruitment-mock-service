@@ -55,7 +55,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
-import { navigationForRole } from './navigation'
+import { navigationForRole, activeNavigationPath } from './navigation'
 import { readPositionContext } from '../utils/position-context'
 
 const route = useRoute()
@@ -66,7 +66,7 @@ function groupIcon(key: string): string {
   return ({operations:'ChatDotRound',basic:'Briefcase',knowledge:'ChatLineRound',system:'Tools'} as Record<string,string>)[key] || 'Grid'
 }
 function itemIcon(path: string): string {
-  return ({'/conversations':'ChatLineRound','/candidates':'User','/archive':'Tickets','/agent-devices':'Monitor','/cities':'Location','/service-positions':'Briefcase','/recruitment-flow':'Share','/users':'Lock','/settings':'Setting','/recruiters':'Avatar'} as Record<string,string>)[path] || 'Star'
+  return ({'/conversations':'ChatLineRound','/candidates':'User','/archive':'Tickets','/agent-devices':'Monitor','/cities':'Location','/service-positions':'Briefcase','/recruitment-flow':'Share','/knowledge':'Reading','/media':'Picture','/users':'Lock','/settings':'Setting','/recruiters':'Avatar'} as Record<string,string>)[path] || 'Star'
 }
 function menuTarget(path: string): string {
   const id = readPositionContext(auth.user?.id ?? auth.user?.username ?? '')
@@ -96,11 +96,7 @@ const onNarrowChange = (event: MediaQueryListEvent): void => {
 
 const initial = computed(() => (auth.user?.username || 'L').slice(0, 1).toUpperCase())
 
-const navPath = computed(() => {
-  if (route.path === '/device-report') return '/dashboard'
-  if (route.path === '/knowledge' || route.path === '/media') return '/recruitment-flow'
-  return route.path
-})
+const navPath = computed(() => activeNavigationPath(route.path))
 const activeMenu = computed(() => menuTarget(navPath.value))
 
 /** 打开当前所在分组 */

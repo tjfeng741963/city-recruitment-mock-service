@@ -14,12 +14,18 @@ export function navigationForRole(role: string): NavigationGroup[] {
     ] },
     { key: 'knowledge', label: 'AI 接待', items: [
       { path: '/recruitment-flow', label: '话术流程' },
+      { path: '/knowledge', label: '问答知识库' },
+      { path: '/media', label: '图片与视频' },
     ] },
     ...(role === 'admin' ? [{ key: 'system', label: '账号与设置', items: [
       { path: '/recruiters', label: '招聘人员' }, { path: '/users', label: '账号权限' },
       { path: '/settings', label: '系统设置' },
     ] }] : []),
   ];
+}
+
+export function activeNavigationPath(path: string): string {
+  return path === '/device-report' ? '/dashboard' : path;
 }
 
 export function positionLink(path: string, id: number) {
