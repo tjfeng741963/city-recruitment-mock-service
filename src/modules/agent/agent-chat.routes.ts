@@ -1,3 +1,4 @@
+import { archiveCandidates } from './archive-candidates.js';
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
@@ -374,18 +375,21 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
               c.nickname AS customer_nickname, c.device_code
          FROM agent_archive a
          LEFT JOIN agent_conversations c
-           ON c.external_conversation_id = a.session_key
+           ON c.id=(SELECT cc.id FROM agent_conversations cc WHERE cc.external_conversation_id=a.session_key
+             AND (SELECT COUNT(*) FROM agent_conversations same WHERE same.external_conversation_id=a.session_key)=1
+             ORDER BY cc.updated_at DESC,cc.id DESC LIMIT 1)
         WHERE a.name != '' OR a.phone != '' OR a.interview_date != ''
-        ORDER BY a.updated_at DESC
-        LIMIT 200`,
+        ORDER BY a.updated_at DESC`,
     ).all() as Array<Record<string, unknown>>;
     const notifyStmt = db.prepare(
       "SELECT status FROM bridge_commands WHERE idempotency_key=? ORDER BY created_at DESC LIMIT 1",
     );
     const items: Array<Record<string, unknown>> = [];
+    const candidateBySession = new Map(archiveCandidates(db).map(item => [item.session_key,item]));
     for (const row of rows) {
       const sessionKey = String(row.session_key ?? "");
-      const deviceCode = String(row.device_code ?? "");
+      const shared = candidateBySession.get(sessionKey);
+      const deviceCode = shared?.device_code || String(row.device_code ?? "");
       // agent_devices 没有 device_code 列（在 data_json 里），按 JSON 提取匹配
       const devRow = db.prepare(
         "SELECT data_json FROM agent_devices WHERE json_extract(data_json,'$.device_code')=?",
@@ -415,12 +419,12 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       }
       items.push({
         session_key: sessionKey,
-        customer_nickname: String(row.customer_nickname ?? ""),
+        customer_nickname: shared?.nickname || String(row.customer_nickname ?? ""),
         device_code: deviceCode,
         group_chat: groupChat,
-        name: String(row.name ?? ""),
-        phone: String(row.phone ?? ""),
-        city: String(row.city ?? ""),
+        name: shared?.name || String(row.name ?? ""),
+        phone: shared?.phone || String(row.phone ?? ""),
+        city: shared?.city || String(row.city ?? ""),
         interview_date: String(row.interview_date ?? ""),
         interview_time: String(row.interview_time ?? ""),
         interview_confirmed: Boolean(row.interview_confirmed),
@@ -448,87 +452,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       const page = Math.max(1, Number(q.page ?? 1) || 1);
       const pageSize = Math.min(200, Math.max(1, Number(q.page_size ?? 50) || 50));
 
-      const rows = db
-        .prepare(
-          `SELECT a.session_key, a.name, a.phone, a.city,
-                  a.interview_date, a.interview_time, a.interview_confirmed,
-                  a.arrival_status, a.updated_at,
-                  c.nickname AS customer_nickname, c.device_code,
-                  c.recruit_status, c.created_at AS conv_created_at,
-                  sp.position_name AS position_name,
-                  f.factory_name AS factory_name
-             FROM agent_archive a
-             LEFT JOIN agent_conversations c
-               ON c.external_conversation_id = a.session_key
-             LEFT JOIN service_positions sp ON sp.id = a.position_id
-             LEFT JOIN factories f ON f.id = sp.factory_id
-            WHERE a.name != '' OR a.phone != '' OR a.interview_date != ''
-            ORDER BY a.updated_at DESC
-            LIMIT 1000`,
-        )
-        .all() as Array<Record<string, unknown>>;
-
-      const deviceStmt = db.prepare(
-        "SELECT data_json FROM agent_devices WHERE json_extract(data_json,'$.device_code')=?",
-      );
-      const recruiterCache = new Map<string, string>();
-      const recruiterOf = (deviceCode: string): string => {
-        const cached = recruiterCache.get(deviceCode);
-        if (cached !== undefined) return cached;
-        let value = "";
-        try {
-          const row = deviceStmt.get(deviceCode) as { data_json: string } | undefined;
-          const data = JSON.parse(row?.data_json || "{}") as Record<string, unknown>;
-          value = String(data.recruiter_id ?? "").trim();
-        } catch {
-          value = "";
-        }
-        recruiterCache.set(deviceCode, value);
-        return value;
-      };
-
-      type CandidateStatus = "invited" | "disqualified" | "checked_in";
-      const statusOf = (row: Record<string, unknown>): CandidateStatus => {
-        if (String(row.arrival_status ?? "") === "arrived") return "checked_in";
-        if (String(row.recruit_status ?? "") === "disqualified") return "disqualified";
-        return "invited";
-      };
-
-      const all = rows.map((row) => {
-        const deviceCode = String(row.device_code ?? "");
-        const name = String(row.name ?? "");
-        const phone = String(row.phone ?? "");
-        const interviewDateValue = String(row.interview_date ?? "");
-        const interviewTimeValue = String(row.interview_time ?? "");
-        const updatedAt = String(row.updated_at ?? "");
-        const summary = [
-          name ? `姓名 ${name}` : "姓名待补",
-          phone ? `电话 ${phone}` : "",
-          interviewDateValue || interviewTimeValue
-            ? `面试 ${`${interviewDateValue} ${interviewTimeValue}`.trim()}`
-            : "",
-          Boolean(row.interview_confirmed) ? "已确认" : "待确认",
-        ]
-          .filter(Boolean)
-          .join(" · ");
-        return {
-          id: String(row.session_key ?? ""),
-          device_name: deviceCode,
-          recruiter_id: recruiterOf(deviceCode),
-          nickname: String(row.customer_nickname ?? ""),
-          name,
-          phone,
-          event_at: updatedAt,
-          interview_date: interviewDateValue,
-          factory_name: String(row.factory_name ?? ""),
-          interview_time: interviewTimeValue,
-          city: String(row.city ?? ""),
-          summary,
-          created_at: String(row.conv_created_at ?? updatedAt),
-          status: statusOf(row),
-        };
-      });
-
+      const all = archiveCandidates(db);
       const stats = {
         total: all.length,
         invited: all.filter((item) => item.status === "invited").length,
@@ -552,6 +476,22 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       };
     },
   );
+
+  // 面试到达状态：运营在面试登记面板把约定时间到了的客户标记「已到达/爽约」。
+  app.get<{Params:{key:string};Querystring:{before_id?:string}}>("/api/v1/agent/candidates/:key/messages",async(request,reply)=>{
+    if(request.auth?.role!=='admin') return reply.code(403).send({detail:'Admin access required'});
+    const archive=db.prepare('SELECT session_key FROM agent_archive WHERE session_key=?').get(request.params.key);
+    if(!archive) return reply.code(404).send({detail:'登记不存在'});
+    const matches=(db.prepare('SELECT COUNT(*) n FROM agent_conversations WHERE external_conversation_id=?').get(request.params.key) as {n:number}).n;
+    if(matches>1) return reply.code(409).send({detail:'此旧登记关联多个设备，需先核对会话，不能自动选择对话记录'});
+    const conversation=db.prepare(`SELECT device_code,customer_id,nickname FROM agent_conversations
+      WHERE external_conversation_id=? ORDER BY updated_at DESC,id DESC LIMIT 1`).get(request.params.key) as {device_code:string;customer_id:string;nickname:string}|undefined;
+    if(!conversation) return reply.code(404).send({detail:'这条登记没有关联对话'});
+    const before=Number(request.query.before_id)||Number.MAX_SAFE_INTEGER;
+    const items=db.prepare(`SELECT id,direction,content,status,created_at FROM agent_messages
+      WHERE device_code=? AND customer_id=? AND id<? ORDER BY id DESC LIMIT 201`).all(conversation.device_code,conversation.customer_id,before);
+    return {conversation,items:items.slice(0,200).reverse(),has_more:items.length>200};
+  });
 
   // 面试到达状态：运营在面试登记面板把约定时间到了的客户标记「已到达/爽约」。
   app.put<{ Params: { key: string }; Body: Record<string, unknown> }>(
@@ -587,8 +527,8 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
     db.prepare(
       `INSERT INTO agent_archive(session_key, position_id, name, phone, city,
          interview_date, interview_time, interview_confirmed, updated_at)
-       VALUES (?,?,?,NULL,?,?,?,1,CURRENT_TIMESTAMP)`,
-    ).run(sessionKey, Number(body.position_id ?? 0) || 0, name, phone, interviewDate, interviewTime);
+       VALUES (?,?,?,?,?,?,?,1,CURRENT_TIMESTAMP)`,
+    ).run(sessionKey, Number(body.position_id ?? 0) || 0, name, phone, text("city"), interviewDate, interviewTime);
     if (deviceCode) {
       db.prepare(
         `UPDATE agent_archive SET session_key=? WHERE session_key=?`,
@@ -630,7 +570,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         db.prepare("UPDATE agent_archive SET group_notified=1 WHERE session_key=?").run(finalKey);
       }
     }
-    return { ok: true, session_key: sessionKey };
+    return { ok: true, session_key: deviceCode ? `manual:${deviceCode}:${sessionKey}` : sessionKey };
   });
 
   // ── 一轮对话 ──────────────────────────────────────────────────

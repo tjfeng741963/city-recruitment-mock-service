@@ -104,6 +104,7 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 | POST | `/api/v1/agent/archive/manual` | admin | 手动新建约面试（没走 Agent 对话的客户），绑了群聊自动推送 |
 | PUT | `/api/v1/agent/archive/:key/arrival` | admin | 到达状态标记，body `{arrival_status: ""/arrived/noshow}` |
 | GET | `/api/v1/agent/candidates?status=&recruiter_id=&event_date=&interview_date=&page=&page_size=` | admin | 候选人员管理：由面试登记聚合出候选行 + 分页统计 |
+| GET | `/api/v1/agent/candidates/:key/messages?before_id=` | admin | 只读查看登记对应的真实对话，按精确 session_key 关联设备及客户；每页最多 200 条，不清未读、不发送 |
 | POST | `/api/v1/agent/chat` | admin/设备令牌 | 一轮对话，body `{position_id,session_key,text,dry,sent_summary?}`；岗位停用时真实回复返回 409，dry QA 可继续使用 |
 | GET | `/api/v1/agent-flow?position_id=:id` | admin | 读取岗位节点流程、节点、边和画布视口 |
 | PUT | `/api/v1/agent-flow` | admin | 事务保存整张流程图并递增 version |
@@ -126,6 +127,10 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 新增会话与调用表为 `dify_reply_sessions`、`dify_reply_calls`（迁移 047）；调用表只记录状态、错误码及耗时。岗位咨询不等于正式面试登记，未对接登记接口时不写 `agent_archive`。
 
 **`/api/v1/agent/chat` 的请求**
+
+候选人名单与面试登记直接读取同一份 `agent_archive`，不复制名单。档案姓名/电话/面试安排优先，缺失姓名、地区或招聘项目可从精确关联的会话补充；返回 `device_code/customer_id/has_conversation/province/city/district/remind_status`。手动登记保留原始录入资料和设备，返回实际保存的 session_key；没有真实会话时不按昵称或电话猜测关联。候选人页每 15 秒刷新可见页面，面试登记修改或标记到达后同步反映。
+
+对话记录 GET 返回 `{conversation,items,has_more}`，`items` 按消息 ID 升序；`before_id` 向前翻页。提醒状态来自实际提醒任务状态或既有提醒计数，不把群聊转发成功当作已经提醒本人。
 
 `dry:true` 返回岗位事实和适用问答 `knowledge:[{id,question,answer,scope}]` 及 prompt，不调用模型、不写业务状态。`preview:true` 仅管理员可用，禁止同时传 `session_key` 或 `device_code`；调用现有非思考模型生成模拟回答，在任何会话/档案/群通知写入前返回。
 

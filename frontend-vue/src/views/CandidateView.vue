@@ -3,7 +3,7 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">候选人员管理</h2>
-        <p class="page-desc">查看不符合、已邀约、已签到的人员记录</p>
+        <p class="page-desc">与面试登记实时同步，查看候选人信息及对应对话记录</p>
       </div>
       <div class="header-actions">
         <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
@@ -69,34 +69,41 @@
 
     <div class="table-wrapper">
       <el-table v-loading="loading" :data="rows" row-key="id">
-        <el-table-column prop="device_name" label="设备" min-width="140" />
-        <el-table-column prop="recruiter_id" label="归属账号" width="120" />
-        <el-table-column prop="nickname" label="昵称" width="110" />
-        <el-table-column prop="name" label="姓名" width="90" />
-        <el-table-column prop="phone" label="电话" width="130" />
-        <el-table-column prop="event_at" label="事件时间" width="165" />
-        <el-table-column prop="interview_date" label="面试日期" width="110" />
-        <el-table-column prop="factory_name" label="面试工厂" min-width="140" />
-        <el-table-column prop="interview_time" label="面试时间" width="100" />
-        <el-table-column prop="city" label="省市区" width="110" />
-        <el-table-column prop="summary" label="登记摘要" min-width="200" />
-        <el-table-column prop="created_at" label="记录时间" width="165" />
-        <el-table-column label="操作" width="100" fixed="right">
-          <template #default>
-            <span class="muted">-</span>
-          </template>
+        <el-table-column prop="device_name" label="设备" min-width="130" />
+        <el-table-column prop="nickname" label="昵称" min-width="120" show-overflow-tooltip />
+        <el-table-column prop="name" label="姓名" width="100"><template #default="{row}">{{ row.name || '待补充' }}</template></el-table-column>
+        <el-table-column prop="phone" label="电话" width="140" />
+        <el-table-column prop="event_at" label="事件时间" width="175" />
+        <el-table-column label="面试日期" width="130"><template #default="{row}">{{ row.interview_date || '-' }}<div class="muted-value">{{ row.interview_time }}</div></template></el-table-column>
+        <el-table-column prop="factory_name" label="面试工厂" min-width="200" show-overflow-tooltip />
+        <el-table-column label="城市/区县" min-width="190"><template #default="{row}">{{ [row.province,row.city,row.district].filter(Boolean).join('/') || '-' }}</template></el-table-column>
+        <el-table-column label="提醒状态" width="110"><template #default="{row}"><el-tag size="small" :type="row.remind_status === 'sent' ? 'success' : 'info'">{{ reminderLabel(row.remind_status) }}</el-tag></template></el-table-column>
+        <el-table-column prop="created_at" label="记录时间" width="175" />
+        <el-table-column label="操作" width="130" fixed="right">
+          <template #default="{row}"><el-button v-if="row.has_conversation" link type="primary" @click="openHistory(row)">对话记录</el-button><span v-else class="muted-value">{{ row.association_status === 'ambiguous' ? '会话待核对' : '无关联对话' }}</span></template>
         </el-table-column>
-
         <template #empty>
           <el-empty description="暂无候选记录，Agent 对话登记信息后会自动出现在这里" />
         </template>
       </el-table>
     </div>
+    <div class="candidate-pagination"><el-pagination v-model:current-page="page" :page-size="pageSize" :total="total" layout="total, prev, pager, next" @current-change="load" /></div>
+    <el-drawer v-model="historyVisible" :title="`对话记录 · ${historyCandidate?.nickname || historyCandidate?.name || ''}`" size="680px">
+      <p class="history-note">真实消息记录，只读查看，不会触发回复或清除未读。</p>
+      <el-button v-if="historyMore" :loading="historyLoading" @click="loadHistory(true)">加载更早消息</el-button>
+      <el-alert v-if="historyError" :title="historyError" type="error" :closable="false" />
+      <el-empty v-if="!historyLoading && !historyMessages.length && !historyError" description="暂无消息记录" />
+      <div v-for="message in historyMessages" :key="message.id" class="history-message" :class="message.direction">
+        <small>{{ message.direction === 'inbound' ? '候选人' : '招聘方' }} · {{ message.created_at }}</small>
+        <div>{{ message.content }}</div><small v-if="message.direction !== 'inbound'">{{ message.status }}</small>
+      </div>
+      <p v-if="historyLoading">加载中…</p>
+    </el-drawer>
   </section>
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref, watch } from 'vue'
+import { onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { Download, Refresh } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import http from '../api/http'
@@ -107,6 +114,13 @@ import http from '../api/http'
  */
 interface CandidateRow {
   id: string
+  device_code:string
+  customer_id:string
+  province:string
+  district:string
+  has_conversation:boolean
+  association_status:string
+  remind_status:string
   device_name: string
   recruiter_id: string
   nickname: string
@@ -128,6 +142,25 @@ interface CandidateStats {
   checked_in: number
 }
 
+const historyVisible=ref(false),historyLoading=ref(false),historyError=ref(''),historyMore=ref(false)
+const historyCandidate=ref<CandidateRow|null>(null)
+const historyMessages=ref<Array<{id:number;direction:string;content:string;status:string;created_at:string}>>([])
+let historySeq=0
+function reminderLabel(status:string):string {return ({not_reminded:'未提醒',queued:'待发送',claimed:'发送中',sent:'已提醒',succeeded:'已提醒',failed:'提醒失败',unknown:'结果待核实'} as Record<string,string>)[status] || '未提醒'}
+async function openHistory(row:CandidateRow) { historyCandidate.value=row;historyMessages.value=[];historyVisible.value=true;await loadHistory() }
+async function loadHistory(earlier=false) {
+  const row=historyCandidate.value;if(!row)return
+  const seq=++historySeq;historyLoading.value=true;historyError.value=''
+  try {
+    const {data}=await http.get(`/api/v1/agent/candidates/${encodeURIComponent(row.id)}/messages`,{params:{before_id:earlier?historyMessages.value[0]?.id:undefined}})
+    if(seq!==historySeq)return
+    historyMessages.value=earlier?[...data.items,...historyMessages.value]:data.items
+    historyMore.value=!!data.has_more
+  }catch(error:any){if(seq===historySeq)historyError.value=error?.response?.data?.detail || '对话记录读取失败'}
+  finally{if(seq===historySeq)historyLoading.value=false}
+}
+watch(historyVisible,visible=>{if(!visible)historySeq++})
+let timer:ReturnType<typeof setInterval>|undefined
 const loading = ref(false)
 const activeTab = ref('invited')
 const recruiterFilter = ref('')
@@ -139,8 +172,10 @@ const stats = reactive<CandidateStats>({ total: 0, invited: 0, disqualified: 0, 
 const recruiterOptions = ref<Array<{ label: string; value: string }>>([])
 const page = ref(1)
 const pageSize = ref(50)
+let listSeq=0
 
 async function load(): Promise<void> {
+  const seq=++listSeq
   loading.value = true
   try {
     const { data } = await http.get<{
@@ -152,11 +187,12 @@ async function load(): Promise<void> {
         status: activeTab.value,
         recruiter_id: recruiterFilter.value || undefined,
         event_date: eventDate.value || undefined,
-        interview_date: interviewDate.value || undefined,
+        interview_date: activeTab.value === 'invited' ? interviewDate.value || undefined : undefined,
         page: page.value,
         page_size: pageSize.value,
       },
     })
+    if(seq!==listSeq)return
     rows.value = data.items || []
     total.value = Number(data.total || 0)
     if (data.stats) Object.assign(stats, data.stats)
@@ -168,10 +204,11 @@ async function load(): Promise<void> {
     for (const option of recruiterOptions.value) seen.add(option.value)
     recruiterOptions.value = [...seen].map((value) => ({ label: value, value }))
   } catch (error: any) {
+    if(seq!==listSeq)return
     rows.value = []
     ElMessage.error(error?.response?.data?.detail || '候选人员加载失败')
   } finally {
-    loading.value = false
+    if(seq===listSeq)loading.value = false
   }
 }
 
@@ -180,10 +217,13 @@ watch([activeTab, recruiterFilter, eventDate, interviewDate], () => {
   load()
 })
 
-onMounted(load)
+onMounted(()=>{void load();timer=setInterval(()=>{if(!document.hidden&&!loading.value)void load()},15000)})
+onBeforeUnmount(()=>{if(timer)clearInterval(timer);historySeq++;listSeq++})
 </script>
 
 <style scoped>
+.candidate-pagination{display:flex;justify-content:flex-end;margin-top:14px}.history-note{color:var(--bd-text-tertiary);font-size:12px}.history-message{padding:12px;margin:12px 0;border:1px solid var(--bd-border);border-radius:10px;white-space:pre-wrap;overflow-wrap:anywhere}.history-message.outbound{background:var(--el-color-primary-light-9)}.history-message small{display:block;color:var(--bd-text-tertiary);margin-bottom:6px}
+
 .degrade-alert {
   margin-bottom: 16px;
 }
