@@ -3,7 +3,7 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">候选人员管理</h2>
-        <p class="page-desc">与面试登记实时同步，查看候选人信息及对应对话记录</p>
+        <p class="page-desc">汇总全部客户对话、历史候选记录和面试登记；报名成功单独统计，不把沟通中客户算作报名。</p>
       </div>
       <div class="header-actions">
         <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
@@ -30,6 +30,9 @@
     </div>
 
     <el-tabs v-model="activeTab" class="candidate-tabs">
+      <el-tab-pane :label="`全部（${stats.total}）`" name="all" />
+      <el-tab-pane :label="`沟通中（${stats.communicating || 0}）`" name="communicating" />
+      <el-tab-pane :label="`待完善（${stats.pending_information || 0}）`" name="pending_information" />
       <el-tab-pane label="报名成功" name="invited" />
       <el-tab-pane label="不符合" name="disqualified" />
       <el-tab-pane label="已签到" name="checked_in" />
@@ -52,7 +55,7 @@
         class="date-select"
       />
       <el-date-picker
-        v-if="activeTab === 'invited'"
+        v-if="['all','invited'].includes(activeTab)"
         v-model="interviewDate"
         type="date"
         value-format="YYYY-MM-DD"
@@ -71,6 +74,7 @@
       <el-table v-loading="loading" :data="rows" row-key="id">
         <el-table-column prop="device_name" label="设备" min-width="130" />
         <el-table-column prop="nickname" label="昵称" min-width="120" show-overflow-tooltip />
+        <el-table-column label="招聘状态" width="105"><template #default="{row}"><el-tag size="small" :type="row.status === 'invited' || row.status === 'checked_in' ? 'success' : 'info'">{{ candidateStatus(row.status) }}</el-tag></template></el-table-column>
         <el-table-column prop="name" label="姓名" width="100"><template #default="{row}">{{ row.name || '待补充' }}</template></el-table-column>
         <el-table-column prop="phone" label="电话" width="140" />
         <el-table-column prop="event_at" label="事件时间" width="175" />
@@ -121,6 +125,7 @@ interface CandidateRow {
   has_conversation:boolean
   association_status:string
   remind_status:string
+  status:string
   device_name: string
   recruiter_id: string
   nickname: string
@@ -140,11 +145,14 @@ interface CandidateStats {
   invited: number
   disqualified: number
   checked_in: number
+  communicating: number
+  pending_information: number
 }
 
 const historyVisible=ref(false),historyLoading=ref(false),historyError=ref(''),historyMore=ref(false)
 const historyCandidate=ref<CandidateRow|null>(null)
 const historyMessages=ref<Array<{id:number;direction:string;content:string;status:string;created_at:string}>>([])
+function candidateStatus(status:string):string { return ({communicating:'沟通中',pending_information:'待完善',invited:'报名成功',disqualified:'不符合',checked_in:'已签到'} as Record<string,string>)[status] || '待核对' }
 let historySeq=0
 function reminderLabel(status:string):string {return ({not_reminded:'未提醒',queued:'待发送',claimed:'发送中',sent:'已提醒',succeeded:'已提醒',failed:'提醒失败',unknown:'结果待核实'} as Record<string,string>)[status] || '未提醒'}
 async function openHistory(row:CandidateRow) { historyCandidate.value=row;historyMessages.value=[];historyVisible.value=true;await loadHistory() }
@@ -162,13 +170,13 @@ async function loadHistory(earlier=false) {
 watch(historyVisible,visible=>{if(!visible)historySeq++})
 let timer:ReturnType<typeof setInterval>|undefined
 const loading = ref(false)
-const activeTab = ref('invited')
+const activeTab = ref('all')
 const recruiterFilter = ref('')
 const eventDate = ref('')
 const interviewDate = ref('')
 const rows = ref<CandidateRow[]>([])
 const total = ref(0)
-const stats = reactive<CandidateStats>({ total: 0, invited: 0, disqualified: 0, checked_in: 0 })
+const stats = reactive<CandidateStats>({ total: 0, invited: 0, disqualified: 0, checked_in: 0, communicating:0, pending_information:0 })
 const recruiterOptions = ref<Array<{ label: string; value: string }>>([])
 const page = ref(1)
 const pageSize = ref(50)
@@ -187,7 +195,7 @@ async function load(): Promise<void> {
         status: activeTab.value,
         recruiter_id: recruiterFilter.value || undefined,
         event_date: eventDate.value || undefined,
-        interview_date: activeTab.value === 'invited' ? interviewDate.value || undefined : undefined,
+        interview_date: ['all','invited'].includes(activeTab.value) ? interviewDate.value || undefined : undefined,
         page: page.value,
         page_size: pageSize.value,
       },
