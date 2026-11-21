@@ -5,6 +5,7 @@ import { authorizeProfileRequest } from "./profile.routes.js";
 import { isValidDeviceToken } from "./position-scripts.routes.js";
 import { firstFlowSegment } from "./agent-flow.routes.js";
 import { complete, llmConfig, parseJsonObject } from "./agent-llm.js";
+import { deviceReplyProvider, generateDifyReply, ownsReplyDevice } from "../dify/dify-reply.js";
 import { normalizePositionFacts } from "../../shared/position-facts.js";
 import { positionKnowledge } from './position-knowledge.js';
 import {
@@ -277,6 +278,10 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       }
       const deviceCode = text(request.query.device_code).trim();
       if (!deviceCode) return reply.code(422).send({ detail: "device_code is required" });
+      if (deviceReplyProvider(db, deviceCode) === "dify") {
+        if (!ownsReplyDevice(db, request, deviceCode)) return reply.code(403).send(ADMIN_REQUIRED);
+        return { position_id: positionOfDevice(db, deviceCode), persona: "", items: [], provider: "dify", detail: "开场与对话由 Dify 管理" };
+      }
       const positionId = positionOfDevice(db, deviceCode);
       if (positionId <= 0) {
         return { position_id: 0, persona: "", items: [], detail: "设备未绑定岗位" };
@@ -634,6 +639,12 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
     if (!isAdmin(request) && !isValidDeviceToken(db, request)) return reply.code(403).send(ADMIN_REQUIRED);
     const body = request.body ?? {};
     const deviceCode = text(body.device_code).trim();
+    if (deviceCode && deviceReplyProvider(db, deviceCode) === "dify") {
+      if (!ownsReplyDevice(db, request, deviceCode)) return reply.code(403).send(ADMIN_REQUIRED);
+      const input = text(body.text).trim();
+      if (!input || input.length > 2000) return reply.code(422).send({ detail: "text is required (max 2000)" });
+      return generateDifyReply(db, { deviceCode, positionId: positionOfDevice(db, deviceCode), sessionKey: text(body.session_key).trim().slice(0,120), text: input, dry: body.dry === true });
+    }
     const positionId = int(body.position_id) || (deviceCode ? positionOfDevice(db, deviceCode) : 0);
     if (body.preview === true) {
       if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);

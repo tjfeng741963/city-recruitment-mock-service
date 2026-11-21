@@ -155,6 +155,7 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
       return reply.code(422).send({ detail: error instanceof Error ? error.message : String(error) });
     }
     if ("factory_ids" in (request.body ?? {})) data.factory_ids = factoryIds;
+    delete data.reply_provider; // 来源只能经专用管理员接口设置
     return db.prepare("INSERT INTO agent_devices(device_name,status,data_json) VALUES (?,?,?) RETURNING *")
       .get(deviceName, String(request.body?.status ?? "enabled"), JSON.stringify(data));
   });
@@ -166,6 +167,8 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
       return reply.code(404).send({ detail: "设备不存在" });
     }
     const merged = { ...data, ...(request.body ?? {}) } as Record<string, unknown>;
+    if (data.reply_provider === undefined) delete merged.reply_provider;
+    else merged.reply_provider = data.reply_provider;
     // Dify 已全链路下线（2026-11-17）：本次提交与历史遗留的 dify 字段一律不落库
     for (const key of ["dify_url", "dify_key", "dify_key_env"]) delete merged[key];
     // 设备 → 工厂多选绑定：本次提交了 factory_ids 就规范化后落库——

@@ -29,6 +29,7 @@ import { registerKbPublishRoutes } from "./modules/agent/kb-publish.routes.js";
 import { registerPositionScriptRoutes } from "./modules/agent/position-scripts.routes.js";
 import { registerAgentPersonaRoutes } from "./modules/agent/agent-persona.routes.js";
 import { registerAgentChatRoutes } from "./modules/agent/agent-chat.routes.js";
+import { registerReplyProviderRoutes } from "./modules/dify/dify-reply.js";
 import { registerApiDebugRoutes } from "./modules/agent/api-debug.routes.js";
 import { registerAgentFlowRoutes } from "./modules/agent/agent-flow.routes.js";
 import { EventBus, createStreamNotifier } from "./modules/messaging/stream-events.js";
@@ -164,6 +165,12 @@ export function buildServer() {
     const file = path.join(config.frontendDir(), "dev.html");
     return reply.type("text/html; charset=utf-8").send(readFileSync(file));
   });
+  for (const [url, file, contentType] of [
+    ["/dify-connection", "dify-connection.html", "text/html; charset=utf-8"],
+    ["/dify-connection-script", "dify-connection.js", "text/javascript; charset=utf-8"],
+  ]) {
+    app.get(url, async (_request, reply) => reply.type(contentType).send(readFileSync(path.resolve("public", file))));
+  }
 
   registerAuthRoutes(app, auth);  registerCoreRoutes(app, db);
   // knowledge 的旧契约先由兼容层接管（读写 kb_faq，AI 实际回复用的表），
@@ -193,6 +200,7 @@ export function buildServer() {
   registerAgentPersonaRoutes(app, db);
   // Agent 会话 + 调试台：开场清单、开场回执、一轮对话（人设 + 事实 + 历史）
   registerAgentChatRoutes(app, db);
+  registerReplyProviderRoutes(app, db);
   // 接口调试台的后端：把 onRoute 收集到的真实路由原样吐出来
   registerAgentFlowRoutes(app, db);
   registerApiDebugRoutes(app, routeCatalog);
