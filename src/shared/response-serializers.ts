@@ -57,7 +57,7 @@ const DEVICE_KEYS = [
   "config", "last_online", "created_at", "last_offline", "queue_depth", "queue_stale",
   // 群聊绑定（2026-11-18 面试登记页）：登记完成自动推送的目标群聊，
   // 不透出则前端刷新后回显丢失，运营会以为没保存。
-  "group_chat", "position_id",
+  "group_chat", "position_id", "reply_provider",
 ] as const;
 
 const DISTRIBUTION_STATES = [
@@ -225,6 +225,7 @@ export function serializeAgentDevice(row: Row): Row {
     status: Boolean(source.online ?? source.status === true),
     online: Boolean(source.online),
     mode: String(source.mode ?? ""),
+    reply_provider: source.reply_provider === "dify" ? "dify" : "agent",
     config: {
       merge_delay_seconds: Number(rawConfig.merge_delay_seconds ?? 0),
       merge_requery: Boolean(rawConfig.merge_requery),

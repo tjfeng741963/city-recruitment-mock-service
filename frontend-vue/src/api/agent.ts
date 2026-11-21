@@ -11,6 +11,7 @@ export interface AgentDeviceFactory {
 }
 
 export interface AgentDeviceItem extends AgentDevice {
+  reply_provider?: 'agent' | 'dify'
   factory_ids?: number[]
   factories?: AgentDeviceFactory[]
   position_id?: number | null

@@ -263,6 +263,7 @@
 
   // ── 行定位：与 device-factories.js 同一思路，读单元格文本匹配设备码 ──
   function decorateRows(root) {
+    if (document.querySelector('[data-device-settings-native]')) return;
     const rows = (root || document).querySelectorAll("tbody tr");
     rows.forEach((row) => {
       const cells = [...row.querySelectorAll("td .cell")];

@@ -364,6 +364,7 @@ import PositionQa from '../components/agent/PositionQa.vue'
 import PositionAgentDrawer from '../components/basic/PositionAgentDrawer.vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
+import { workflowPositionSelection } from '../components/agent/device-workflow-entry'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown, Check, CircleClose, Clock, Connection, Delete, FullScreen, Plus, Refresh, Share, Upload } from '@element-plus/icons-vue'
 import AgentFlowCanvas from '../components/agent/AgentFlowCanvas.vue'
@@ -491,9 +492,9 @@ async function loadPositions(): Promise<void> {
   try {
     const { data } = await positionsApi.list({ page: 1, page_size: 1000 })
     positions.value = toArray<ServicePosition>(data)
-    const requested = Number(route.query.position_id) || readPositionContext(userKey())
-    const requestedExists = positions.value.some((position) => position.id === requested)
-    const nextId = requestedExists ? requested : positions.value[0]?.id ?? 0
+    const selection = workflowPositionSelection(route.query.position_id, readPositionContext(userKey()), positions.value.map(position => position.id))
+    if (selection.error) { positionId.value = 0; pageError.value = selection.error; return }
+    const nextId = selection.id
     positionId.value = nextId
     if (nextId) savePositionContext(userKey(), nextId)
     if (nextId && String(route.query.position_id || '') !== String(nextId)) {
