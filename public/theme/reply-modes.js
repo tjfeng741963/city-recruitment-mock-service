@@ -1,6 +1,11 @@
 (function () {
   "use strict";
   function render() {
+    if(!document.getElementById('reply-mode-navigation-style')){
+      const style=document.createElement('style');style.id='reply-mode-navigation-style';
+      style.textContent='.sidebar.collapsed [data-reply-mode-navigation],html.rk-nav-collapsed [data-reply-mode-navigation]{display:none}';
+      document.head.append(style);
+    }
     const sidebar=document.querySelector('.sidebar');
     const menu=sidebar?.querySelector('.sidebar-menu');
     if(menu&&!sidebar.querySelector('[data-reply-mode-navigation]')){
