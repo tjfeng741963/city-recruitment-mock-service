@@ -123,3 +123,28 @@ describe("independent device bridge", () => {
     expect((await call("claim")).statusCode).toBe(403);
   });
 });
+
+it("keeps Win connected while pausing replies and expires stale runtime samples", async () => {
+  const previous = process.env.REA_DATABASE_PATH;
+  process.env.REA_DATABASE_PATH = ":memory:";
+  const app = buildServer();
+  await app.ready();
+  try {
+    let time = 100_000;
+    const store = new DeviceBridgeStore(app.db, () => time);
+    store.updateRuntimeHealth("runtime-only", {
+      reason: "desktop_unavailable", wecom_available: true, reply_ready: false, sync: "catching_up", backlog: 250,
+    });
+    expect(store.runtimeHealth("runtime-only")).toEqual({
+      connected: true, wecom_available: true, reply_ready: false, reason: "desktop_unavailable", sync: "catching_up", backlog: 250,
+    });
+    time += 60_001;
+    expect(store.runtimeHealth("runtime-only")).toMatchObject({
+      connected: false, reply_ready: false, reason: "heartbeat_timeout",
+    });
+  } finally {
+    await app.close();
+    if (previous === undefined) delete process.env.REA_DATABASE_PATH;
+    else process.env.REA_DATABASE_PATH = previous;
+  }
+});

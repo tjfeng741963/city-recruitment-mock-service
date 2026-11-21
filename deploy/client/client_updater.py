@@ -483,7 +483,12 @@ def main() -> int:
 
     try:
         _log_event(ROOT, "starting the installed client")
-        ManagerService(ROOT).start()
+        manager = ManagerService(ROOT)
+        if "--supervise" in sys.argv[1:]:
+            if manager.start_on_logon():
+                manager.supervise()
+        else:
+            manager.start()
         return 0
     except (UpdateError, OSError, subprocess.SubprocessError) as exc:
         _log_event(ROOT, f"installed client start failed: {exc}")

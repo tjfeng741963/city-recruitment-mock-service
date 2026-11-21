@@ -108,9 +108,17 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="客户端连接" width="110">
+        <el-table-column label="客户端连接" min-width="164">
           <template #default="{ row }">
-            <el-tag :type="isWebTestDevice(row) ? 'info' : isOnline(row) ? 'success' : 'danger'" effect="light">
+            <template v-if="row.windows_runtime && !isWebTestDevice(row)">
+              <div class="queue-note">{{ row.windows_runtime.connected ? 'Win 已连接' : 'Win 心跳超时' }} · {{ row.windows_runtime.wecom_available ? '企微可用' : '企微不可用' }}</div>
+              <el-tag :type="row.windows_runtime.reply_ready ? 'success' : 'warning'" effect="light">
+                {{ row.windows_runtime.reply_ready ? '自动回复就绪' : (runtimeReasons[row.windows_runtime.reason] || '自动回复暂停') }}
+              </el-tag>
+              <div v-if="row.windows_runtime.sync === 'catching_up'" class="queue-note">正在补同步 · 积压 {{ row.windows_runtime.backlog }}</div>
+              <div v-else-if="row.windows_runtime.sync === 'error'" class="queue-note">同步异常，等待重试</div>
+            </template>
+            <el-tag v-else :type="isWebTestDevice(row) ? 'info' : isOnline(row) ? 'success' : 'danger'" effect="light">
               {{ isWebTestDevice(row) ? '无需连接' : isOnline(row) ? '回复在线' : row.bridge_state === 'scanning' ? '等待扫码' : '离线' }}
             </el-tag>
             <div v-if="row.queue_depth" class="queue-note">队列 {{ row.queue_depth }}</div>
@@ -315,6 +323,11 @@ import { formatDateTime } from '../utils/format'
 
 const auth = useAuthStore()
 const canSwitchMode = computed(() => auth.user?.role === 'admin')
+const runtimeReasons: Record<string, string> = {
+  heartbeat_timeout: '自动回复离线', loop_stalled: '回复进程无进展', wechat_login: '等待企微扫码',
+  wechat_unavailable: '等待企微就绪', desktop_unavailable: '等待交互桌面', authorization: '设备鉴权失败',
+  starting: '等待客户端初始化', reply_paused: '自动回复暂停', auto_send_failed: '自动回复失败，待核对',
+}
 const devices = ref<AgentDeviceItem[]>([])
 const loading = ref(false)
 const error = ref('')
@@ -375,7 +388,14 @@ async function load(silent = false): Promise<void> {
   try {
     const { data } = await devicesApi.list({ page: 1, page_size: 1000 })
     if (request !== latestDeviceRequest) return
-    devices.value = data.items || []
+    const next = data.items || []
+    const previouslyReady = new Set(devices.value.filter(device => device.windows_runtime?.reply_ready).map(device => device.device_code))
+    for (const device of next) {
+      if (previouslyReady.has(device.device_code) && device.windows_runtime && !device.windows_runtime.reply_ready) {
+        ElMessage.warning((device.name || device.device_code) + '：' + (runtimeReasons[device.windows_runtime.reason] || '自动回复暂停'))
+      }
+    }
+    devices.value = next
     if ((page.value - 1) * pageSize.value >= devices.value.length) page.value = 1
   } catch (err: any) {
     if (!silent) error.value = err?.response?.data?.detail || '设备列表加载失败'

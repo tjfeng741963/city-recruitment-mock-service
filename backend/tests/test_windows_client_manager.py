@@ -172,7 +172,10 @@ def test_windows_system_snapshot_executes_real_powershell():
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Exact Windows process termination in synthetic roots")
-def test_windows_stop_revalidates_identity_and_preserves_foreign_process(tmp_path):
+def test_windows_stop_revalidates_identity_and_preserves_foreign_process(tmp_path, monkeypatch):
+    from uuid import uuid4
+
+    monkeypatch.setattr(updater, "LOCK_NAME", f"{updater.LOCK_NAME}-test-{uuid4().hex}")
     module = service_module()
     roots = [tmp_path / "owned", tmp_path / "foreign"]
     children = []
@@ -250,3 +253,22 @@ def test_pending_main_offers_last_complete_release_without_automatically_install
     monkeypatch.setattr(updater, "_download", lambda *_: pytest.fail("must not download on startup fallback"))
     with pytest.raises(updater.UpdateError, match="尚未发布"):
         updater.fetch_release_package()
+
+
+def test_supervisor_honors_manual_stop_and_limits_verified_restarts(tmp_path, monkeypatch):
+    module, service, events = fixture_service(tmp_path, monkeypatch)
+    current = {"running": 1, "process_identities": [(77, "fixture-created")], "other_running": 0}
+    exited = {"running": 0, "other_running": 0, "last_process_stage": "ready", "wecom_state": "online"}
+    snapshots = iter([current, exited, current, exited])
+    monkeypatch.setattr(service, "status", lambda: next(snapshots))
+    monkeypatch.setattr(service, "_start_locked", lambda: events.append("restart"))
+    monkeypatch.setattr(module, "is_process_alive", lambda *_: False)
+    monkeypatch.setattr(module, "require_interactive_session", lambda: None)
+    assert service.supervise(wait=lambda _: None) == 2
+    assert events.count("restart") == 2
+    marker = tmp_path / "logs" / "manual-stop"
+    marker.parent.mkdir(exist_ok=True)
+    marker.touch()
+    monkeypatch.setattr(service, "status", lambda: current)
+    assert service.supervise(wait=lambda _: None) == 0
+    assert events.count("restart") == 2

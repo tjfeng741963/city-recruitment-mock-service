@@ -33,6 +33,7 @@ export class DeviceBridgeStore {
       this.db.prepare(`INSERT INTO bridge_devices(device_code,token_hash) VALUES (?,?)
         ON CONFLICT(device_code) DO UPDATE SET token_hash=excluded.token_hash,state='offline',heartbeat_at=0`).run(code, digest(token));
       this.db.prepare("UPDATE reply_mode_transition SET client_at=0,client_ready=0 WHERE device_code=?").run(code);
+      this.db.prepare("DELETE FROM windows_runtime_health WHERE device_code=?").run(code);
       // Rotating credentials cannot silently replay commands that may have been sent.
       for (const command of pending) {
         command.status = command.status === "claimed" ? "unknown" : "failed";
@@ -87,6 +88,47 @@ export class DeviceBridgeStore {
     if (!row) return null;
     return { ...row, state: row.state === "online" && this.now() - row.heartbeat_at > 60_000 ? "offline" : row.state };
   }
+  runtimeHealth(code: string) {
+    const row = this.db.prepare("SELECT * FROM windows_runtime_health WHERE device_code=?").get(code) as {
+      observed_at: number; wecom_available: number; reply_ready: number; reason: string; sync_state: string; backlog: number;
+    } | undefined;
+    if (!row) return null;
+    const connected = this.now() - row.observed_at <= 60_000;
+    return {
+      connected, wecom_available: connected && Boolean(row.wecom_available),
+      reply_ready: connected && Boolean(row.reply_ready),
+      reason: connected ? row.reason : "heartbeat_timeout",
+      sync: connected ? row.sync_state : "unknown", backlog: row.backlog,
+    };
+  }
+
+  clearRuntimeHealth(code: string) {
+    this.db.prepare("DELETE FROM windows_runtime_health WHERE device_code=?").run(code);
+  }
+
+  updateRuntimeHealth(code: string, value: unknown): void {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return;
+    const data = value as Record<string, unknown>;
+    const reasons = ["ready", "starting", "loop_stalled", "authorization", "wechat_login",
+      "wechat_unavailable", "desktop_unavailable", "reply_paused", "auto_send_failed"];
+    const reason = typeof data.reason === "string" && reasons.includes(data.reason) ? data.reason : "reply_paused";
+    const sync = typeof data.sync === "string" && ["unknown", "current", "catching_up", "error"].includes(data.sync) ? data.sync : "unknown";
+    const backlog = typeof data.backlog === "number" && Number.isSafeInteger(data.backlog)
+      ? Math.max(0, Math.min(1_000_000, data.backlog)) : 0;
+    const old = this.runtimeHealth(code);
+    const available = data.wecom_available === true;
+    const ready = available && data.reply_ready === true && reason === "ready";
+    this.db.prepare("INSERT INTO windows_runtime_health VALUES (?,?,?,?,?,?,?) ON CONFLICT(device_code) DO UPDATE SET observed_at=excluded.observed_at,wecom_available=excluded.wecom_available,reply_ready=excluded.reply_ready,reason=excluded.reason,sync_state=excluded.sync_state,backlog=excluded.backlog")
+      .run(code, this.now(), Number(available), Number(ready), reason, sync, backlog);
+    if (old && old.reply_ready !== ready) {
+      const state = ready ? "online" : "offline";
+      const transition = ready ? "reply_ready" : reason;
+      this.db.prepare("INSERT INTO device_events(device_code,event_type,reason,created_at) VALUES (?,?,?,?)")
+        .run(code, state, transition, new Date(this.now()).toISOString());
+      this.notifier.deviceUpdated(code, state, transition);
+    }
+  }
+
   heartbeat(code: string, state: "online" | "offline" | "scanning", accountId = ""): void {
     const device = this.status(code);
     if (!device) throw new BridgeError("Device not paired", 404);
@@ -284,6 +326,8 @@ export class DeviceBridgeStore {
   claim(code: string): (BridgeCommand & { nickname: string }) | null {
     this.expireClaims(code);
     if (replyModePending(this.db, code) || this.status(code)?.state !== "online") return null;
+    const health = this.runtimeHealth(code);
+    if (health && !health.reply_ready && health.reason !== "auto_send_failed") return null;
     const next = this.db.prepare("SELECT id FROM bridge_commands WHERE device_code=? AND status='queued' ORDER BY created_at,rowid LIMIT 1").get(code) as { id: string } | undefined;
     if (!next) return null;
     const claimed = this.db.prepare("UPDATE bridge_commands SET status='claimed',lease_token=?,lease_until=? WHERE id=? AND status='queued'")
