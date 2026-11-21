@@ -23,12 +23,12 @@ describe("招聘流程图入口接线", () => {
     expect(list).not.toContain("aiLinks");
   });
 
-  it("opens the canvas only on request and keeps edits behind one configuration menu", () => {
+  it("shows the canvas by default in the page layout and keeps one configuration menu", () => {
     const page = read("frontend-vue/src/views/AgentFlowView.vue");
     const inspector = read("frontend-vue/src/components/agent/FlowRuntimeInspector.vue");
     expect(page).toContain("const fullscreen = ref(false)");
-    expect(page).toContain("const canvasExpanded = ref(false)");
-    expect(page).toContain('v-if="canvasExpanded"');
+    expect(page.includes("canvasExpanded")).toBe(false);
+    expect(page).toContain('id="flow-canvas-panel"');
     expect(page).toContain("岗位配置");
     expect(page).toContain('@command="openConfiguration"');
     expect(inspector).not.toContain("edit-opening");
@@ -64,7 +64,7 @@ describe("招聘流程图入口接线", () => {
 
   it('provides a full-screen workspace with a keyboard-accessible resizable inspector', () => {
     const page = read('frontend-vue/src/views/AgentFlowView.vue');
-    expect(page).toContain('退出全屏');
+    expect(page).toMatch(/<el-button v-if="fullscreen"[^>]*@click="exitFullscreen"[^>]*>\s*返回普通视图/);
     expect(page).toContain('role="separator"');
     expect(page).toContain('inspectorWidth');
     expect(page).toContain("event.key === 'Escape'");

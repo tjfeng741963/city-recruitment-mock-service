@@ -1,12 +1,15 @@
 <template>
   <section class="flow-page" :class="{ 'is-fullscreen': fullscreen }" :style="{ '--inspector-width': `${inspectorWidth}px` }">
     <div class="page-header">
-      <div>
+      <el-button v-if="fullscreen" ref="exitFullscreenButton" :icon="ArrowLeft" type="primary" plain @click="exitFullscreen">
+        返回普通视图
+      </el-button>
+      <div class="page-heading">
         <h2 class="page-title">话术流程</h2>
         <p class="page-desc">查看和配置各岗位当前保存的招聘对话流程</p>
       </div>
       <div class="header-actions">
-        <el-button v-if="viewMode === 'edit' && canvasExpanded" type="primary" :icon="Check"
+        <el-button v-if="viewMode === 'edit'" type="primary" :icon="Check"
           :disabled="!isDirty || !flow || loading || migrating" :loading="saving" @click="saveFlow">保存流程</el-button>
       </div>
     </div>
@@ -114,27 +117,23 @@
       <div class="canvas-bar">
         <div class="canvas-summary">
           <strong>{{ viewMode === 'runtime' ? '实际执行路径' : '流程编辑' }}</strong>
-          <span v-if="!canvasExpanded">画布已收起</span>
         </div>
         <div class="canvas-actions">
           <el-switch
-            v-if="canvasExpanded && viewMode === 'edit' && flow.nodes.length"
+            v-if="viewMode === 'edit' && flow.nodes.length"
             :model-value="flow.status === 'enabled'"
             active-text="新会话启用"
             inactive-text="停用"
             @change="(enabled: boolean) => changeFlowStatus(enabled)"
           />
-          <el-button v-if="canvasExpanded && viewMode === 'edit'" :disabled="saving || migrating" @click="showRuntime">查看执行路径</el-button>
-          <el-button v-if="canvasExpanded" :icon="FullScreen" @click="fullscreen = !fullscreen">
-            {{ fullscreen ? '退出全屏' : '全屏画布' }}
-          </el-button>
-          <el-button aria-controls="flow-canvas-panel" :aria-expanded="canvasExpanded" @click="toggleCanvas">
-            {{ canvasExpanded ? '收起画布' : '展开画布' }}
+          <el-button v-if="viewMode === 'edit'" :disabled="saving || migrating" @click="showRuntime">查看执行路径</el-button>
+          <el-button v-if="!fullscreen" ref="enterFullscreenButton" :icon="FullScreen" @click="enterFullscreen">
+            全屏画布
           </el-button>
         </div>
       </div>
 
-      <div v-if="canvasExpanded" id="flow-canvas-panel" class="canvas-panel">
+      <div id="flow-canvas-panel" class="canvas-panel">
         <div v-if="viewMode === 'edit' && !flow.nodes.length" class="empty-flow">
           <el-empty description="该岗位还没有流程图">
             <div class="empty-actions">
@@ -382,7 +381,7 @@ import PositionAgentDrawer from '../components/basic/PositionAgentDrawer.vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowDown, Check, CircleClose, Clock, Connection, Delete, FullScreen, Plus, Refresh, Share, Upload } from '@element-plus/icons-vue'
+import { ArrowDown, ArrowLeft, Check, CircleClose, Clock, Connection, Delete, FullScreen, Plus, Refresh, Share, Upload } from '@element-plus/icons-vue'
 import AgentFlowCanvas from '../components/agent/AgentFlowCanvas.vue'
 import FlowRuntimeInspector from '../components/agent/FlowRuntimeInspector.vue'
 import FlowMediaPreview from '../components/agent/FlowMediaPreview.vue'
@@ -432,7 +431,8 @@ const canvas = ref<InstanceType<typeof AgentFlowCanvas> | null>(null)
 const baseline = ref('')
 const openingsAvailable = ref(false)
 const fullscreen = ref(false)
-const canvasExpanded = ref(false)
+const enterFullscreenButton = ref<{ $el: HTMLElement } | null>(null)
+const exitFullscreenButton = ref<{ $el: HTMLElement } | null>(null)
 const inspectorWidth = ref(360)
 const viewMode = ref<'runtime' | 'edit'>('runtime')
 const runtimeDetails = ref(false)
@@ -601,7 +601,6 @@ function syncView(code: string) {
 function openConfiguration(command: 'flow' | 'opening' | 'persona' | 'media' | 'knowledge'): void {
   if (command === 'flow') {
     viewMode.value = 'edit'
-    canvasExpanded.value = true
     changeViewMode()
   } else if (command === 'opening' || command === 'persona') {
     agentDrawerTab.value = command
@@ -611,9 +610,14 @@ function openConfiguration(command: 'flow' | 'opening' | 'persona' | 'media' | '
   }
 }
 
-function toggleCanvas(): void {
-  canvasExpanded.value = !canvasExpanded.value
-  if (!canvasExpanded.value) fullscreen.value = false
+function enterFullscreen(): void {
+  fullscreen.value = true
+  void nextTick(() => exitFullscreenButton.value?.$el.focus())
+}
+
+function exitFullscreen(): void {
+  fullscreen.value = false
+  void nextTick(() => enterFullscreenButton.value?.$el.focus())
 }
 
 function showRuntime(): void {
@@ -686,7 +690,7 @@ function endInspectorResize(event: PointerEvent): void {
   if (target.hasPointerCapture(event.pointerId)) target.releasePointerCapture(event.pointerId)
 }
 function onWorkspaceKey(event: KeyboardEvent): void {
-  if (event.key === 'Escape' && fullscreen.value) fullscreen.value = false
+  if (event.key === 'Escape' && fullscreen.value && !agentDrawerVisible.value) exitFullscreen()
 }
 
 watch(canvas, value => { if (value) nextTick(() => value.fitToCanvas()) }, { flush: 'post' })
@@ -705,7 +709,6 @@ async function changePosition(rawId: string | number): Promise<void> {
     }
   }
   fullscreen.value = false
-  canvasExpanded.value = false
   viewMode.value = 'runtime'
   runtimeDetails.value = false
   positionId.value = nextId
@@ -732,7 +735,6 @@ watch(() => route.query.position_id, async (rawId) => {
     }
   }
   fullscreen.value = false
-  canvasExpanded.value = false
   viewMode.value = 'runtime'
   runtimeDetails.value = false
   positionId.value = nextId
@@ -1110,7 +1112,8 @@ onBeforeUnmount(() => { loadSequence += 1; if(evidenceTimer)clearInterval(eviden
 <style scoped>
 .flow-page { min-width: 0; }
 .flow-page.is-fullscreen { position: fixed; z-index: 1800; inset: 0; display: flex; flex-direction: column; padding: 16px 20px 12px; overflow: hidden; background: var(--el-bg-color-page, #f5f7fb); }
-.is-fullscreen .page-header { flex-shrink: 0; margin-bottom: 10px; }
+.is-fullscreen .page-header { flex-shrink: 0; margin-bottom: 10px; gap: 12px; }
+.page-heading { flex: 1; min-width: 0; }
 .is-fullscreen .page-header .page-title { font-size: 20px; }
 .is-fullscreen .page-desc { margin: 3px 0 0; }
 .is-fullscreen .flow-toolbar { flex-shrink: 0; margin-bottom: 8px; }
@@ -1129,8 +1132,7 @@ onBeforeUnmount(() => { loadSequence += 1; if(evidenceTimer)clearInterval(eviden
 .canvas-column { display: flex; flex-direction: column; min-width: 0; min-height: 0; height: min(68vh, 760px); }
 .is-fullscreen .canvas-column { height: 100%; }
 .canvas-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px 16px; flex-wrap: wrap; flex-shrink: 0; padding: 10px 12px; margin-bottom: 10px; border: 1px solid var(--el-border-color-lighter); border-radius: 8px; background: var(--el-bg-color); }
-.canvas-summary,.canvas-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
-.canvas-summary span { color: var(--el-text-color-secondary); font-size: 12px; }
+.canvas-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
 .canvas-actions .el-button { margin-left: 0; }
 .canvas-footnote { flex-shrink: 0; padding: 8px 4px 0; font-size: 11px; line-height: 1.5; color: var(--el-text-color-secondary); }
 .inspector-resizer { width: 8px; cursor: col-resize; touch-action: none; display: flex; justify-content: center; }
