@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
 import { DeviceBridgeStore } from "../messaging/device-bridge.js";
 import { devicePositionId } from "../../shared/device-factories.js";
+import { deviceReplyProvider } from "../dify/dify-reply.js";
 
 const NODE_TYPES = new Set(["text", "image", "video", "followup", "branch", "end"]);
 const EDGE_TRIGGERS = new Set(["default", "any_reply", "timeout", "keyword", "giveup"]);
@@ -279,6 +280,7 @@ export async function registerAgentFlowRoutes(app: FastifyInstance, db: Database
   app.get<{ Querystring: { device_code?: string } }>("/api/v1/agent/flow", async (request, reply) => {
     const code = str(request.query.device_code).trim();
     if (!deviceAllowed(request, code)) return reply.code(403).send({ detail: "Device token or scope invalid" });
+    if (deviceReplyProvider(db, code) === "dify") return { ok: true, provider: "dify", version: 0, nodes: [], edges: [], status: "disabled" };
     const positionId = devicePositionId(db, code);
     const result = readFlow(db, positionId);
     // 停用只阻止新会话；在途会话使用本地持久化快照。
