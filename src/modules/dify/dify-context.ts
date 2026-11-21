@@ -22,7 +22,7 @@ export function difyContext(db:DatabaseSync,id:number){
     wage_text:first(salary.raw,sections.salary_detail,sections.salary_ask),
     hours_text:first(hours.raw,sections.work_hours,sections.shift_info),
     welfare_text:[first(sections.meal_dorm),first(city.social_insurances,sections.social_insurance)].filter(Boolean).join('；'),
-    place:first(interview.location,interview.raw_address,city.interview_site_name),
+    place:first(city.work_location,sections.work_location),
     interview_address:first(interview.location,interview.raw_address,city.interview_site_name),
     interview_time:first(interview.time,interview.raw_time),
     job_content:first(sections.work_content),
@@ -41,8 +41,22 @@ export function difyContext(db:DatabaseSync,id:number){
   const materials=Object.fromEntries(Object.entries(sections).filter(([,v])=>text(v)));
   const mapped:Record<string,string>={salary_detail:'wage_text',salary_ask:'wage_text',work_hours:'hours_text',shift_info:'hours_text',meal_dorm:'welfare_text',social_insurance:'welfare_text',work_content:'job_content',interview_notice:'interview_notice',checkin_guide:'interview_guide'};
   for(const[key,fact]of Object.entries(mapped))if(key in materials&&facts[fact])materials[key]=facts[fact];
-  const knowledge=positionKnowledge(db,id,facts);
-  return {...facts,city_materials:materials,knowledge,sources:{city_id:row.city_id,position_id:id,fields:sources,knowledge_scope:'global_and_current_position'}};
+  const verticalId=Number(city.knowledge_vertical_id)||null;
+  const knowledge=positionKnowledge(db,id,facts,verticalId);
+  return {...facts,city_materials:materials,knowledge,sources:{city_id:row.city_id,position_id:id,fields:sources,knowledge_scope:'global_and_current_position',knowledge_vertical_id:verticalId}};
+}
+
+/** Catch an explicit address/guide floor disagreement without guessing missing details. */
+export function difyContextConflict(context:NonNullable<ReturnType<typeof difyContext>>){
+  const number=(value:string)=>{
+    if(/^\d+$/.test(value))return Number(value);
+    const cn:Record<string,number>={'零':0,'一':1,'二':2,'两':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9};
+    let result=0,digit=0;for(const char of value){if(char==='十'||char==='百'){result+=(digit||1)*(char==='十'?10:100);digit=0;}else digit=cn[char]??0;}return result+digit;
+  };
+  const floors=(value:string)=>[...value.matchAll(/([0-9零一二两三四五六七八九十百]+)\s*(?:楼|层)/g)].map(m=>number(m[1]));
+  const fields=context as Record<string,unknown>;
+  const address=floors(String(fields.interview_address||'')),guide=floors(String(fields.interview_guide||''));
+  return address.length&&guide.length&&address.at(-1)!==guide.at(-1)?'面试地址与面试指引的楼层不一致，请在城市资料中一并核对':'';
 }
 
 /** Keep complete relevant entries within the published Chatflow's 20k input limit. */

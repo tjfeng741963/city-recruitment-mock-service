@@ -123,6 +123,8 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 
 每轮输入限制在 Dify 的 20000 字符以内：关键工资/时间/地点完整保留，原文段落和知识按本轮问题相关性选取完整条目，`retrieval.omitted` 显示未进入本轮的条目数；关键字段本身过长时返回 `dify_context_too_large`，不截断事实。保存资料不等于所有条目每轮都进入模型。生成前后仍对完整城市/知识上下文核验，变化时暂停旧回复。
 
+城市资料接口还接受 `knowledge_vertical_id:number|null`：显式绑定一个启用的知识品类，或留空。仅模式二读取该品类的通用/品类问答模板，并用当前城市与岗位事实渲染；仍读取无品类通用问答和当前岗位问答。不猜测品类、不混用历史城市/岗位编号、不改变模式一。取数依据 `sources.knowledge_vertical_id` 返回选择结果。面试地址与指引出现明确楼层冲突时返回 `dify_context_conflict`，暂停生成；`place` 保持工作地点，独立于 `interview_address`。
+
 | 方法 | 路径 | 鉴权 | 说明 |
 |---|---|---|---|
 | PUT | `/api/v1/dify/cities/:id/materials` | 城市访问权限 | 合并保存城市完整资料：`salary/work_hours/requirements/interview/prompt_sections/prompt_section_labels/social_insurances`；保留未提交字段和原嵌套键，写入城市历史 |

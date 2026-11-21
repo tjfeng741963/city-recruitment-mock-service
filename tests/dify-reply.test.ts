@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildServer } from "../src/server.js";
 import type { FastifyInstance } from "fastify";
 import { DeviceBridgeStore } from "../src/modules/messaging/device-bridge.js";
-import { difyContext, difyInput } from '../src/modules/dify/dify-context.js';
+import { difyContext, difyContextConflict, difyInput } from '../src/modules/dify/dify-context.js';
 
 describe("Dify second reply route", () => {
   let app: FastifyInstance;
@@ -186,5 +186,51 @@ describe("Dify second reply route", () => {
     expect(JSON.stringify(selected).length).toBeLessThan(20000);
     expect(selected.knowledge.some(k=>k.answer==='行李暂存于蓝色接待区')).toBe(true);
     expect(selected.retrieval.omitted).toBeGreaterThan(0);
+  });
+  it('uses an explicitly selected city knowledge category without changing mode one',async()=>{
+    const vertical=app.db.prepare("SELECT id FROM vertical WHERE code='subway'").get() as {id:number};
+    const other=app.db.prepare("SELECT id FROM vertical WHERE code='factory'").get() as {id:number};
+    const city=app.db.prepare("INSERT INTO cities(city_name,province,data_json) VALUES ('品类验收城','测试省',?) RETURNING id").get(JSON.stringify({knowledge_vertical_id:vertical.id,salary:{raw:'5000-8000元'},work_hours:{raw:'每天8小时'}})) as {id:number};
+    app.db.prepare('UPDATE service_positions SET city_id=? WHERE id=?').run(city.id,position);
+    const add=app.db.prepare("INSERT INTO kb_faq(tenant_id,vertical_id,scope_level,question,answer,status) VALUES (1,?,'global',?,?,'enabled')");
+    add.run(vertical.id,'专用品类薪资','{wage}');add.run(other.id,'别的品类描述','别的工厂模板');
+    const context=difyContext(app.db,position)!;
+    expect(context.knowledge.some(k=>k.question==='专用品类薪资'&&k.answer==='5000-8000元')).toBe(true);
+    expect((await app.inject({url:`/api/v1/cities/${city.id}`,headers:admin})).json().knowledge_vertical_id).toBe(vertical.id);
+    const view=(await app.inject({url:`/api/v1/cities/${city.id}`,headers:admin})).json();
+    expect((await app.inject({method:'PUT',url:`/api/v1/cities/${city.id}`,headers:admin,payload:view})).statusCode).toBe(200);
+    expect(difyContext(app.db,position)!.sources.knowledge_vertical_id).toBe(vertical.id);
+    expect(JSON.stringify(context.knowledge)).not.toContain('别的工厂模板');
+    const {positionKnowledge}=await import('../src/modules/agent/position-knowledge.js');
+    expect(positionKnowledge(app.db,position,{wage_text:'22元/小时'}).some(k=>k.question==='专用品类薪资')).toBe(false);
+    const r=await app.inject({method:'PUT',url:`/api/v1/dify/cities/${city.id}/materials`,headers:admin,payload:{knowledge_vertical_id:null}});
+    expect(r.statusCode).toBe(200);expect(difyContext(app.db,position)!.knowledge.some(k=>k.question==='专用品类薪资')).toBe(false);
+  });
+  it('rejects unknown knowledge categories instead of silently accepting them',async()=>{
+    const city=app.db.prepare("INSERT INTO cities(city_name,province,data_json) VALUES ('配置校验城','测试省','{}') RETURNING id").get() as {id:number};
+    const r=await app.inject({method:'PUT',url:`/api/v1/dify/cities/${city.id}/materials`,headers:admin,payload:{knowledge_vertical_id:999999}});
+    expect(r.statusCode).toBe(422);
+  });
+  it('holds an interview guide that contradicts the saved address floor',async()=>{
+    const city=app.db.prepare("INSERT INTO cities(city_name,province,data_json) VALUES ('冲突测试城','测试省',?) RETURNING id").get(JSON.stringify({interview:{location:'青竹路18号三楼招聘接待处',interview_guide:'西门进入到二楼蓝色接待台'}})) as {id:number};
+    app.db.prepare('UPDATE service_positions SET city_id=? WHERE id=?').run(city.id,position);
+    await select();const network=vi.fn();vi.stubGlobal('fetch',network);
+    expect((await chat('S:floor','到了怎么进去？')).json()).toMatchObject({ok:false,code:'dify_context_conflict'});
+    expect(network).not.toHaveBeenCalled();
+  });
+  it('keeps work location distinct from the city interview location',()=>{
+    const city=app.db.prepare("INSERT INTO cities(city_name,province,data_json) VALUES ('地点测试城','测试省',?) RETURNING id").get(JSON.stringify({interview:{location:'总部面试中心'}})) as {id:number};
+    app.db.prepare('UPDATE service_positions SET city_id=?,data_json=? WHERE id=?').run(city.id,JSON.stringify({place:'全市地铁站安排',interview_address:'岗位面试地址'}),position);
+    expect(difyContext(app.db,position)).toMatchObject({place:'全市地铁站安排',interview_address:'总部面试中心'});
+  });
+  it('checks both endpoints when the model formats a salary range with a long dash',async()=>{
+    await select();app.db.prepare('UPDATE service_positions SET data_json=? WHERE id=?').run(JSON.stringify({wage_text:'5000–8000元'}),position);
+    vi.stubGlobal('fetch',vi.fn().mockResolvedValue(new Response(JSON.stringify({answer:'4000–8000元',conversation_id:'dash-mismatch'}),{status:200})));
+    expect((await chat()).json()).toMatchObject({ok:false,code:'dify_fact_mismatch'});
+  });
+  it('normalizes Chinese floors and compares destinations rather than shared entrances',()=>{
+    const context=difyContext(app.db,position)!;
+    expect(difyContextConflict({...context,interview_address:'接待处11楼',interview_guide:'乘电梯到十一楼接待处'} as typeof context)).toBe('');
+    expect(difyContextConflict({...context,interview_address:'一楼进门上三楼面试',interview_guide:'一楼入口上二楼面试'} as typeof context)).not.toBe('');
   });
 });
