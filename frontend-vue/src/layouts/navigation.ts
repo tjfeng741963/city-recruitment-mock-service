@@ -13,8 +13,7 @@ export function navigationForRole(role: string): NavigationGroup[] {
       ...(role === 'recruiter' ? [{ path: '/recruiter-featured', label: '岗位推荐' }] : []),
     ] },
     { key: 'knowledge', label: 'AI 接待', items: [
-      { path: '/recruitment-flow', label: '话术流程' }, { path: '/knowledge', label: '问答知识库' },
-      { path: '/media', label: '图片与视频' },
+      { path: '/recruitment-flow', label: '话术流程' },
     ] },
     ...(role === 'admin' ? [{ key: 'system', label: '账号与设置', items: [
       { path: '/recruiters', label: '招聘人员' }, { path: '/users', label: '账号权限' },

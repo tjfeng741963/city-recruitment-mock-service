@@ -66,11 +66,7 @@
         <el-table-column label="岗位名称" width="175">
           <template #default="{ row }">
             <div class="position-name">{{ row.position_name }}</div>
-            <div class="agent-line" title="点击配置 Agent 人设与开场" @click="openAgent(row)">
-              <el-tag size="small" type="primary" effect="dark">A</el-tag>
-              <span>接待话术</span>
-              <el-tag size="small" type="info" effect="plain">{{ row.opening_count }} 条</el-tag>
-            </div>
+
           </template>
         </el-table-column>
         <el-table-column label="工厂" width="120">
@@ -115,11 +111,11 @@
             <span class="muted">{{ formatDateTime(row.updated_at) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="370">
+        <el-table-column label="操作" width="280">
           <template #default="{ row }">
             <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
             <el-button link type="primary" @click="openCopy(row)">复制</el-button>
-            <el-button v-for="link in aiLinks" :key="link.path" link type="primary" @click="router.push(positionLink(link.path,row.id))">{{ link.label }}</el-button>
+            <el-button link type="primary" @click="router.push(positionLink('/recruitment-flow', row.id))">岗位配置</el-button>
             <el-dropdown trigger="click" @command="(cmd: string) => onCommand(cmd, row)">
               <el-button link type="primary">更多</el-button>
               <template #dropdown>
@@ -165,11 +161,6 @@
       @changed="load"
     />
 
-  <PositionAgentDrawer
-    v-model="agentVisible"
-    :position="agentPosition"
-    @changed="load"
-  />
   </section>
 </template>
 
@@ -186,10 +177,8 @@ import PositionFormDrawer from '../components/basic/PositionFormDrawer.vue'
 import PositionImportDialog from '../components/basic/PositionImportDialog.vue'
 import PositionFactoryBindingDialog from '../components/basic/PositionFactoryBindingDialog.vue'
 import PositionHolidaysDialog from '../components/basic/PositionHolidaysDialog.vue'
-import PositionAgentDrawer from '../components/basic/PositionAgentDrawer.vue'
 
 const router = useRouter()
-const aiLinks = [{path:'/recruitment-flow',label:'话术流程'},{path:'/knowledge',label:'问答'},{path:'/media',label:'图片视频'}]
 interface PositionRow extends ServicePosition {
   opening_count: number
   saving?: boolean
@@ -331,17 +320,6 @@ async function onCommand(command: string, row: PositionRow): Promise<void> {
   activePositionName.value = row.position_name
   if (command === 'binding') bindingVisible.value = true
   if (command === 'holidays') holidaysVisible.value = true
-  if (command === 'agent') agentVisible.value = true
-}
-
-const agentVisible = ref(false)
-const agentPosition = ref<PositionRow | null>(null)
-
-function openAgent(row: PositionRow): void {
-  activePositionId.value = row.id
-  activePositionName.value = row.position_name
-  agentPosition.value = row
-  agentVisible.value = true
 }
 
 async function removePosition(row: PositionRow): Promise<void> {
@@ -410,15 +388,6 @@ onMounted(load)
   font-weight: 600;
   color: var(--bd-text-primary);
   line-height: 1.4;
-}
-
-.agent-line {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 6px;
-  font-size: 12px;
-  color: var(--bd-text-tertiary);
 }
 
 .star {

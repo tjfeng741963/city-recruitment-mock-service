@@ -6,16 +6,8 @@
         <p class="page-desc">查看和配置各岗位当前保存的招聘对话流程</p>
       </div>
       <div class="header-actions">
-        <el-button :icon="FullScreen" @click="fullscreen = !fullscreen">{{ fullscreen ? '退出全屏' : '全屏画布' }}</el-button>
-        <el-button :icon="Refresh" :disabled="!positionId || saving || migrating" :loading="loading" @click="reloadFlow">刷新</el-button>
-        <el-button
-          v-if="flow && flow.version === 0 && flow.nodes.length === 0"
-          :icon="Upload"
-          :disabled="!openingsAvailable"
-          :loading="migrating"
-          @click="migrateOpening"
-        >从开场生成草稿</el-button>
-        <el-button type="primary" :icon="Check" :disabled="!isDirty || !flow || loading || migrating" :loading="saving" @click="saveFlow">保存流程</el-button>
+        <el-button v-if="viewMode === 'edit' && canvasExpanded" type="primary" :icon="Check"
+          :disabled="!isDirty || !flow || loading || migrating" :loading="saving" @click="saveFlow">保存流程</el-button>
       </div>
     </div>
 
@@ -41,28 +33,28 @@
       </el-tag>
       <span v-if="flow" class="flow-version">版本 v{{ flow.version }} · {{ flow.nodes.length }} 节点 · {{ flow.edges.length }} 连接</span>
       <span v-if="isDirty" class="dirty-hint">未保存</span>
-      <el-button :disabled="!positionId" @click="router.push({path:'/knowledge',query:{position_id:String(positionId)}})">本岗位问答</el-button>
-      <el-button :disabled="!positionId" @click="router.push({path:'/media',query:{position_id:String(positionId)}})">本岗位图片视频</el-button>
       <span class="toolbar-spacer" />
-      <el-radio-group v-model="viewMode" size="small" aria-label="流程视图" @change="changeViewMode">
-        <el-radio-button value="runtime">实际执行路径</el-radio-button>
-        <el-radio-button value="edit">编辑流程</el-radio-button>
-      </el-radio-group>
-      <el-switch
-        v-if="viewMode === 'edit' && flow && flow.nodes.length"
-        :model-value="flow.status === 'enabled'"
-        active-text="新会话启用"
-        inactive-text="停用"
-        @change="(enabled: boolean) => changeFlowStatus(enabled)"
-      />
+      <el-button :icon="Refresh" :disabled="!positionId || saving || migrating" :loading="loading" @click="reloadFlow">刷新</el-button>
+      <el-dropdown trigger="click" :disabled="positionsLoading || loading || saving || migrating" @command="openConfiguration">
+        <el-button type="primary" :disabled="positionsLoading || loading || saving || migrating">
+          岗位配置<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+        </el-button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item command="flow" :disabled="!savedFlow">编辑流程</el-dropdown-item>
+            <el-dropdown-item command="opening" :disabled="!savedFlow">编辑开场</el-dropdown-item>
+            <el-dropdown-item command="persona" :disabled="!savedFlow">编辑人设</el-dropdown-item>
+            <el-dropdown-item command="knowledge" divided>{{ positionId ? '岗位问答' : '问答知识库' }}</el-dropdown-item>
+            <el-dropdown-item command="media">图片与视频</el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
     </div>
 
-    <PositionQa :position-id="positionId" />
     <div v-if="savedFlow && !loading" class="runtime-status-bar">
       <span><strong>绑定设备</strong>：{{ boundDevices.length ? boundDevices.map(device => device.device_code).join('、') : devicesAvailable ? '未绑定设备，当前无人执行该岗位' : '设备列表读取失败，绑定状态未知' }}</span>
       <span>{{ savedFlow.status === 'enabled' ? '系统 Agent 的新客户使用已保存节点，在途会话保留原快照' : '节点图停用，系统 Agent 的新客户走旧开场' }}</span>
       <span class="field-note">系统 Agent 保存路径：{{ savedFlow.status === 'enabled' ? '节点流程' : '旧开场' }}；保存版本 {{ savedFlow.status === 'enabled' ? `v${savedFlow.version}` : openingVersion ? openingVersion.slice(0, 10) : '未知' }}</span>
-      <el-button v-if="savedFlow.status !== 'enabled'" link type="primary" @click="openOpeningEditor">编辑当前开场</el-button>
       <el-button link type="primary" @click="runtimeDetails = !runtimeDetails">{{ runtimeDetails ? '收起运行说明' : '查看运行说明与状态' }}</el-button>
     </div>
 
@@ -83,6 +75,7 @@
     </div>
 
     <div v-if="runtimeDetails && savedFlow" class="runtime-details">
+      <PositionQa :position-id="positionId" />
       <p>这里显示按服务器配置推导的路径。没有运行客户端、企微未登录或没有客户触发时，不会自动发送。网页点击节点只查看配置。</p>
       <p v-if="isDirty">编辑器有未保存修改；实际执行路径仍使用上次保存的 v{{ savedFlow.version }}。</p>
       <p v-if="contentMatches">节点内容与旧开场逐条一致；等待方式仍以节点连接为准，内容一致不代表发送节奏一致。</p>
@@ -118,242 +111,266 @@
     </div>
     <el-empty v-else-if="!positions.length" description="暂无可配置的招聘岗位" />
     <template v-else-if="flow">
-      <div v-if="viewMode === 'edit' && !flow.nodes.length" class="empty-flow">
-        <el-empty description="该岗位还没有流程图">
-          <div class="empty-actions">
-            <el-button type="primary" :icon="Plus" @click="createDraft">新建停用草稿</el-button>
-            <el-button :icon="Upload" :disabled="!openingsAvailable" :loading="migrating" @click="migrateOpening">
-              从开场生成停用草稿
-            </el-button>
-          </div>
-        </el-empty>
+      <div class="canvas-bar">
+        <div class="canvas-summary">
+          <strong>{{ viewMode === 'runtime' ? '实际执行路径' : '流程编辑' }}</strong>
+          <span v-if="!canvasExpanded">画布已收起</span>
+        </div>
+        <div class="canvas-actions">
+          <el-switch
+            v-if="canvasExpanded && viewMode === 'edit' && flow.nodes.length"
+            :model-value="flow.status === 'enabled'"
+            active-text="新会话启用"
+            inactive-text="停用"
+            @change="(enabled: boolean) => changeFlowStatus(enabled)"
+          />
+          <el-button v-if="canvasExpanded && viewMode === 'edit'" :disabled="saving || migrating" @click="showRuntime">查看执行路径</el-button>
+          <el-button v-if="canvasExpanded" :icon="FullScreen" @click="fullscreen = !fullscreen">
+            {{ fullscreen ? '退出全屏' : '全屏画布' }}
+          </el-button>
+          <el-button aria-controls="flow-canvas-panel" :aria-expanded="canvasExpanded" @click="toggleCanvas">
+            {{ canvasExpanded ? '收起画布' : '展开画布' }}
+          </el-button>
+        </div>
       </div>
 
-      <template v-else>
-        <div v-if="viewMode === 'edit'" class="graph-actions">
-          <el-dropdown @command="addMessageNode">
-            <el-button :icon="Plus">添加消息节点<el-icon class="el-icon--right"><ArrowDown /></el-icon></el-button>
-            <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item command="text">文本</el-dropdown-item>
-                <el-dropdown-item command="image">图片</el-dropdown-item>
-                <el-dropdown-item command="video">视频</el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
-          <el-button :icon="Share" :disabled="!selectedNode || !canAddBranch" @click="addBranch">添加分支</el-button>
-          <el-button :icon="Clock" :disabled="!selectedNode || !selectedNode.await_reply" @click="addFollowup">添加超时复聊</el-button>
-          <el-button :icon="CircleClose" :disabled="!canAddEnd" @click="addEnd">添加结束</el-button>
-          <el-button :icon="Connection" :disabled="!canAddEdge" @click="addKeywordEdge">添加关键词连接</el-button>
-          <el-button :icon="Delete" :disabled="!selectedNode || selectedNode.node_key === flow.entry_key" @click="removeSelectedNode">删除节点</el-button>
-          <span class="graph-action-note">拖动节点调整布局；点击节点或连线编辑属性</span>
+      <div v-if="canvasExpanded" id="flow-canvas-panel" class="canvas-panel">
+        <div v-if="viewMode === 'edit' && !flow.nodes.length" class="empty-flow">
+          <el-empty description="该岗位还没有流程图">
+            <div class="empty-actions">
+              <el-button type="primary" :icon="Plus" @click="createDraft">新建停用草稿</el-button>
+              <el-button :icon="Upload" :disabled="!openingsAvailable" :loading="migrating" @click="migrateOpening">
+                从开场生成停用草稿
+              </el-button>
+            </div>
+          </el-empty>
         </div>
 
-        <div class="flow-workspace">
-          <div class="canvas-column">
-          <AgentFlowCanvas
-            ref="canvas"
-            :flow="displayFlow"
-            :readonly="viewMode === 'runtime'"
-            :selected-node-key="displayNodeKey"
-            :selected-edge-index="displayEdgeIndex"
-            @select-node="selectDisplayNode"
-            @select-edge="selectDisplayEdge"
-            @move-node="moveNode"
-          />
-
-          <div class="canvas-footnote">{{ viewMode === 'runtime' ? '只读运行路径：开始与 AI 为说明阶段，不会存入节点配置。点节点在右侧查看完整消息和执行条件。' : '编辑中的节点图；拖动与参数修改保存后才影响新会话。' }}</div>
+        <template v-else>
+          <div v-if="viewMode === 'edit'" class="graph-actions">
+            <el-dropdown @command="addMessageNode">
+              <el-button :icon="Plus">添加消息节点<el-icon class="el-icon--right"><ArrowDown /></el-icon></el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="text">文本</el-dropdown-item>
+                  <el-dropdown-item command="image">图片</el-dropdown-item>
+                  <el-dropdown-item command="video">视频</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+            <el-button :icon="Share" :disabled="!selectedNode || !canAddBranch" @click="addBranch">添加分支</el-button>
+            <el-button :icon="Clock" :disabled="!selectedNode || !selectedNode.await_reply" @click="addFollowup">添加超时复聊</el-button>
+            <el-button :icon="CircleClose" :disabled="!canAddEnd" @click="addEnd">添加结束</el-button>
+            <el-button :icon="Connection" :disabled="!canAddEdge" @click="addKeywordEdge">添加关键词连接</el-button>
+            <el-button :icon="Delete" :disabled="!selectedNode || selectedNode.node_key === flow.entry_key" @click="removeSelectedNode">删除节点</el-button>
+            <span class="graph-action-note">拖动节点调整布局；点击节点或连线编辑属性</span>
           </div>
 
-          <div class="inspector-resizer" role="separator" aria-label="调整右侧编辑栏宽度" aria-orientation="vertical"
-            tabindex="0" :aria-valuenow="inspectorWidth" :aria-valuemin="300" :aria-valuemax="520"
-            @pointerdown="beginInspectorResize" @pointermove="moveInspectorResize" @pointerup="endInspectorResize" @pointercancel="endInspectorResize"
-            @keydown.left.prevent="inspectorWidth = Math.min(520, inspectorWidth + 20)"
-            @keydown.right.prevent="inspectorWidth = Math.max(300, inspectorWidth - 20)" />
+          <div class="flow-workspace">
+            <div class="canvas-column">
+            <AgentFlowCanvas
+              ref="canvas"
+              :flow="displayFlow"
+              :readonly="viewMode === 'runtime'"
+              :selected-node-key="displayNodeKey"
+              :selected-edge-index="displayEdgeIndex"
+              @select-node="selectDisplayNode"
+              @select-edge="selectDisplayEdge"
+              @move-node="moveNode"
+            />
 
-          <aside class="inspector" aria-label="流程属性">
-            <FlowRuntimeInspector v-if="viewMode === 'runtime'" :graph="displayFlow" :node="runtimeNode" :edge="runtimeEdge"
-              :legacy="savedFlow?.status !== 'enabled'" :editable="Boolean(runtimeNode && flow.nodes.some(node => node.node_key === runtimeNode!.node_key)) && savedFlow?.status === 'enabled'"
-              @select-node="selectDisplayNode" @edit-node="editRuntimeNode" @edit-opening="openOpeningEditor"
-              @manage-media="manageMedia" @edit-persona="openPersonaEditor" @manage-knowledge="manageKnowledge" />
-            <template v-else-if="selectedNode">
-              <div class="inspector-heading">
-                <div>
-                  <div class="inspector-eyebrow">节点属性</div>
-                  <h3>{{ nodeTypeLabel(selectedNode.node_type) }}</h3>
+            <div class="canvas-footnote">{{ viewMode === 'runtime' ? '只读运行路径：开始与 AI 为说明阶段，不会存入节点配置。点节点在右侧查看完整消息和执行条件。' : '编辑中的节点图；拖动与参数修改保存后才影响新会话。' }}</div>
+            </div>
+
+            <div class="inspector-resizer" role="separator" aria-label="调整右侧编辑栏宽度" aria-orientation="vertical"
+              tabindex="0" :aria-valuenow="inspectorWidth" :aria-valuemin="300" :aria-valuemax="520"
+              @pointerdown="beginInspectorResize" @pointermove="moveInspectorResize" @pointerup="endInspectorResize" @pointercancel="endInspectorResize"
+              @keydown.left.prevent="inspectorWidth = Math.min(520, inspectorWidth + 20)"
+              @keydown.right.prevent="inspectorWidth = Math.max(300, inspectorWidth - 20)" />
+
+            <aside class="inspector" aria-label="流程属性">
+              <FlowRuntimeInspector v-if="viewMode === 'runtime'" :graph="displayFlow" :node="runtimeNode" :edge="runtimeEdge"
+                :legacy="savedFlow?.status !== 'enabled'"
+                @select-node="selectDisplayNode" />
+              <template v-else-if="selectedNode">
+                <div class="inspector-heading">
+                  <div>
+                    <div class="inspector-eyebrow">节点属性</div>
+                    <h3>{{ nodeTypeLabel(selectedNode.node_type) }}</h3>
+                  </div>
+                  <el-tag v-if="selectedNode.node_key === flow.entry_key" type="warning" effect="plain">入口</el-tag>
                 </div>
-                <el-tag v-if="selectedNode.node_key === flow.entry_key" type="warning" effect="plain">入口</el-tag>
-              </div>
 
-              <el-collapse class="node-execution-notes">
-                <el-collapse-item title="这个节点实际如何发送" name="execution">
-                  <p v-for="line in selectedNodeExplanation" :key="line" class="field-note">{{ line }}</p>
-                </el-collapse-item>
-              </el-collapse>
+                <el-collapse class="node-execution-notes">
+                  <el-collapse-item title="这个节点实际如何发送" name="execution">
+                    <p v-for="line in selectedNodeExplanation" :key="line" class="field-note">{{ line }}</p>
+                  </el-collapse-item>
+                </el-collapse>
 
-              <el-form label-position="top" size="small" class="inspector-form">
-                <el-form-item label="节点名称">
-                  <el-input v-model="selectedNode.title" maxlength="200" show-word-limit />
-                </el-form-item>
-                <el-form-item label="状态">
-                  <el-switch
-                    :model-value="selectedNode.status !== 'disabled'"
-                    active-text="启用"
-                    inactive-text="停用"
-                    @change="(value: boolean) => setNodeEnabled(selectedNode!, value)"
-                  />
-                  <div v-if="selectedNode.status === 'disabled'" class="field-note">
-                    新会话会跳过此节点内容，并沿主兜底连接继续；在途会话继续使用原流程快照。
-                  </div>
-                </el-form-item>
-                <el-form-item v-if="selectedNode.node_key !== flow.entry_key" label="流程入口">
-                  <el-button link type="primary" @click="setEntry(selectedNode!.node_key)">设为入口节点</el-button>
-                </el-form-item>
-
-                <template v-if="hasParts(selectedNode)">
-                  <div class="inspector-subhead">
-                    <span>发送内容</span>
-                    <el-button link type="primary" :disabled="isFollowup(selectedNode) || selectedNode.parts!.length >= 6" @click="appendPart(selectedNode!)">
-                      添加一条
-                    </el-button>
-                  </div>
-                  <div v-for="(part, index) in selectedNode.parts" :key="`${selectedNode.node_key}-${index}`" class="part-editor">
-                    <div class="part-heading">
-                      <el-select
-                        :model-value="part.kind"
-                        :disabled="isFollowup(selectedNode)"
-                        class="part-kind"
-                        @change="(kind: string) => setPartKind(part, kind)"
-                      >
-                        <el-option label="文本" value="text" />
-                        <el-option label="图片" value="image" />
-                        <el-option label="视频" value="video" />
-                      </el-select>
-                      <el-button
-                        v-if="!isFollowup(selectedNode)"
-                        link
-                        type="danger"
-                        :disabled="selectedNode.parts!.length <= 1"
-                        title="删除内容"
-                        :icon="Delete"
-                        @click="removePart(selectedNode!, index)"
-                      />
-                    </div>
-                    <el-input
-                      v-if="part.kind === 'text'"
-                      v-model="part.body"
-                      type="textarea"
-                      :rows="3"
-                      maxlength="2000"
-                      show-word-limit
-                      placeholder="输入此节点发送给客户的内容"
+                <el-form label-position="top" size="small" class="inspector-form">
+                  <el-form-item label="节点名称">
+                    <el-input v-model="selectedNode.title" maxlength="200" show-word-limit />
+                  </el-form-item>
+                  <el-form-item label="状态">
+                    <el-switch
+                      :model-value="selectedNode.status !== 'disabled'"
+                      active-text="启用"
+                      inactive-text="停用"
+                      @change="(value: boolean) => setNodeEnabled(selectedNode!, value)"
                     />
-                    <el-select
-                      v-else
-                      v-model="part.media_name"
-                      filterable
-                      clearable
-                      class="full-width"
-                      :placeholder="part.kind === 'image' ? '选择岗位图片素材' : '选择岗位视频素材'"
-                    >
+                    <div v-if="selectedNode.status === 'disabled'" class="field-note">
+                      新会话会跳过此节点内容，并沿主兜底连接继续；在途会话继续使用原流程快照。
+                    </div>
+                  </el-form-item>
+                  <el-form-item v-if="selectedNode.node_key !== flow.entry_key" label="流程入口">
+                    <el-button link type="primary" @click="setEntry(selectedNode!.node_key)">设为入口节点</el-button>
+                  </el-form-item>
+
+                  <template v-if="hasParts(selectedNode)">
+                    <div class="inspector-subhead">
+                      <span>发送内容</span>
+                      <el-button link type="primary" :disabled="isFollowup(selectedNode) || selectedNode.parts!.length >= 6" @click="appendPart(selectedNode!)">
+                        添加一条
+                      </el-button>
+                    </div>
+                    <div v-for="(part, index) in selectedNode.parts" :key="`${selectedNode.node_key}-${index}`" class="part-editor">
+                      <div class="part-heading">
+                        <el-select
+                          :model-value="part.kind"
+                          :disabled="isFollowup(selectedNode)"
+                          class="part-kind"
+                          @change="(kind: string) => setPartKind(part, kind)"
+                        >
+                          <el-option label="文本" value="text" />
+                          <el-option label="图片" value="image" />
+                          <el-option label="视频" value="video" />
+                        </el-select>
+                        <el-button
+                          v-if="!isFollowup(selectedNode)"
+                          link
+                          type="danger"
+                          :disabled="selectedNode.parts!.length <= 1"
+                          title="删除内容"
+                          :icon="Delete"
+                          @click="removePart(selectedNode!, index)"
+                        />
+                      </div>
+                      <el-input
+                        v-if="part.kind === 'text'"
+                        v-model="part.body"
+                        type="textarea"
+                        :rows="3"
+                        maxlength="2000"
+                        show-word-limit
+                        placeholder="输入此节点发送给客户的内容"
+                      />
+                      <el-select
+                        v-else
+                        v-model="part.media_name"
+                        filterable
+                        clearable
+                        class="full-width"
+                        :placeholder="part.kind === 'image' ? '选择岗位图片素材' : '选择岗位视频素材'"
+                      >
+                        <el-option
+                          v-for="media in availableMedia(part.kind)"
+                          :key="media.name"
+                          :label="media.name"
+                          :value="media.name"
+                        />
+                      </el-select>
+                      <FlowMediaPreview v-if="part.kind !== 'text' && part.media_name" :name="part.media_name" :kind="part.kind" />
+                      <el-form-item label="发送后间隔（秒）" class="compact-item">
+                        <el-input-number
+                          :model-value="millisecondsToSeconds(part.delay_ms)"
+                          :min="0"
+                          :max="60"
+                          controls-position="right"
+                          @update:model-value="(value: number | undefined) => setPartDelay(part, value)"
+                        />
+                        <div class="field-note">本条完成后的实际等待；最后一条也用于进入下一节点前等待。</div>
+                      </el-form-item>
+                    </div>
+                  </template>
+
+                  <el-form-item v-if="canWait(selectedNode)" label="等待客户回复">
+                    <el-switch
+                      :model-value="Boolean(selectedNode.await_reply)"
+                      active-text="等待"
+                      inactive-text="继续"
+                      @change="(value: boolean) => setAwaitReply(selectedNode!, value)"
+                    />
+                  </el-form-item>
+                  <el-form-item v-if="canWait(selectedNode) && selectedNode.await_reply" label="等待时间（分钟）">
+                    <el-input-number v-model="selectedNode.wait_minutes" :min="1" :max="10080" controls-position="right" />
+                  </el-form-item>
+                  <el-form-item v-if="isFollowup(selectedNode)" label="复聊次数">
+                    <el-input-number :model-value="1" disabled controls-position="right" />
+                  </el-form-item>
+                </el-form>
+              </template>
+
+              <template v-else-if="selectedEdge">
+                <div class="inspector-heading">
+                  <div>
+                    <div class="inspector-eyebrow">连接属性</div>
+                    <h3>流程转移</h3>
+                  </div>
+                  <el-button
+                    link
+                    type="danger"
+                    :disabled="isRequiredEdge(selectedEdge)"
+                    title="删除可选连接"
+                    :icon="Delete"
+                    @click="removeSelectedEdge"
+                  />
+                </div>
+                <el-form label-position="top" size="small" class="inspector-form">
+                  <el-form-item label="从节点">
+                    <el-input :model-value="nodeTitle(selectedEdge.from_key)" disabled />
+                  </el-form-item>
+                  <el-form-item label="触发条件">
+                      <el-select
+                        :model-value="selectedEdge.trigger"
+                        :disabled="isRequiredEdge(selectedEdge)"
+                        class="full-width"
+                      >
+                      <el-option v-if="isRequiredEdge(selectedEdge)" :label="triggerDescription(selectedEdge)" :value="selectedEdge.trigger" />
+                      <el-option v-else label="匹配关键词" value="keyword" />
+                      <el-option v-if="selectedEdge.trigger === 'giveup'" label="旧版放弃条件（当前客户端不执行）" value="giveup" disabled />
+                    </el-select>
+                  </el-form-item>
+                  <el-form-item v-if="selectedEdge.trigger === 'keyword'" label="关键词">
+                    <el-input v-model="selectedEdge.condition_value" maxlength="500" placeholder="客户消息包含此词时走此分支" />
+                  </el-form-item>
+                  <el-form-item label="目标节点">
+                    <el-select v-model="selectedEdge.to_key" class="full-width" clearable placeholder="结束此分支">
                       <el-option
-                        v-for="media in availableMedia(part.kind)"
-                        :key="media.name"
-                        :label="media.name"
-                        :value="media.name"
+                        v-for="node in flow.nodes.filter((item) => item.node_key !== selectedEdge!.from_key && (selectedEdge!.trigger !== 'timeout' || item.node_type === 'followup'))"
+                        :key="node.node_key"
+                        :label="`${node.title || node.node_key}${node.status === 'disabled' ? '（停用，运行时跳过）' : ''}`"
+                        :value="node.node_key"
                       />
                     </el-select>
-                    <FlowMediaPreview v-if="part.kind !== 'text' && part.media_name" :name="part.media_name" :kind="part.kind" />
-                    <el-form-item label="发送后间隔（秒）" class="compact-item">
-                      <el-input-number
-                        :model-value="millisecondsToSeconds(part.delay_ms)"
-                        :min="0"
-                        :max="60"
-                        controls-position="right"
-                        @update:model-value="(value: number | undefined) => setPartDelay(part, value)"
-                      />
-                      <div class="field-note">本条完成后的实际等待；最后一条也用于进入下一节点前等待。</div>
-                    </el-form-item>
-                  </div>
-                </template>
-
-                <el-form-item v-if="canWait(selectedNode)" label="等待客户回复">
-                  <el-switch
-                    :model-value="Boolean(selectedNode.await_reply)"
-                    active-text="等待"
-                    inactive-text="继续"
-                    @change="(value: boolean) => setAwaitReply(selectedNode!, value)"
+                  </el-form-item>
+                  <el-form-item label="优先级">
+                    <el-input-number v-model="selectedEdge.priority" :min="-10000" :max="10000" controls-position="right" />
+                  </el-form-item>
+                  <el-alert
+                    v-if="selectedEdge.trigger === 'giveup'"
+                    type="warning"
+                    :closable="false"
+                    title="当前客户端运行器没有处理此条件的分支逻辑。"
                   />
-                </el-form-item>
-                <el-form-item v-if="canWait(selectedNode) && selectedNode.await_reply" label="等待时间（分钟）">
-                  <el-input-number v-model="selectedNode.wait_minutes" :min="1" :max="10080" controls-position="right" />
-                </el-form-item>
-                <el-form-item v-if="isFollowup(selectedNode)" label="复聊次数">
-                  <el-input-number :model-value="1" disabled controls-position="right" />
-                </el-form-item>
-              </el-form>
-            </template>
+                  <div v-if="isRequiredEdge(selectedEdge)" class="field-note">这是运行流程必需的兜底连接，不能删除。</div>
+                </el-form>
+              </template>
 
-            <template v-else-if="selectedEdge">
-              <div class="inspector-heading">
-                <div>
-                  <div class="inspector-eyebrow">连接属性</div>
-                  <h3>流程转移</h3>
-                </div>
-                <el-button
-                  link
-                  type="danger"
-                  :disabled="isRequiredEdge(selectedEdge)"
-                  title="删除可选连接"
-                  :icon="Delete"
-                  @click="removeSelectedEdge"
-                />
-              </div>
-              <el-form label-position="top" size="small" class="inspector-form">
-                <el-form-item label="从节点">
-                  <el-input :model-value="nodeTitle(selectedEdge.from_key)" disabled />
-                </el-form-item>
-                <el-form-item label="触发条件">
-                    <el-select
-                      :model-value="selectedEdge.trigger"
-                      :disabled="isRequiredEdge(selectedEdge)"
-                      class="full-width"
-                    >
-                    <el-option v-if="isRequiredEdge(selectedEdge)" :label="triggerDescription(selectedEdge)" :value="selectedEdge.trigger" />
-                    <el-option v-else label="匹配关键词" value="keyword" />
-                    <el-option v-if="selectedEdge.trigger === 'giveup'" label="旧版放弃条件（当前客户端不执行）" value="giveup" disabled />
-                  </el-select>
-                </el-form-item>
-                <el-form-item v-if="selectedEdge.trigger === 'keyword'" label="关键词">
-                  <el-input v-model="selectedEdge.condition_value" maxlength="500" placeholder="客户消息包含此词时走此分支" />
-                </el-form-item>
-                <el-form-item label="目标节点">
-                  <el-select v-model="selectedEdge.to_key" class="full-width" clearable placeholder="结束此分支">
-                    <el-option
-                      v-for="node in flow.nodes.filter((item) => item.node_key !== selectedEdge!.from_key && (selectedEdge!.trigger !== 'timeout' || item.node_type === 'followup'))"
-                      :key="node.node_key"
-                      :label="`${node.title || node.node_key}${node.status === 'disabled' ? '（停用，运行时跳过）' : ''}`"
-                      :value="node.node_key"
-                    />
-                  </el-select>
-                </el-form-item>
-                <el-form-item label="优先级">
-                  <el-input-number v-model="selectedEdge.priority" :min="-10000" :max="10000" controls-position="right" />
-                </el-form-item>
-                <el-alert
-                  v-if="selectedEdge.trigger === 'giveup'"
-                  type="warning"
-                  :closable="false"
-                  title="当前客户端运行器没有处理此条件的分支逻辑。"
-                />
-                <div v-if="isRequiredEdge(selectedEdge)" class="field-note">这是运行流程必需的兜底连接，不能删除。</div>
-              </el-form>
-            </template>
-
-            <el-empty v-else :image-size="72" description="选择节点或连接编辑参数" />
-          </aside>
-        </div>
-      </template>
+              <el-empty v-else :image-size="72" description="选择节点或连接编辑参数" />
+            </aside>
+          </div>
+        </template>
+      </div>
     </template>
     <PositionAgentDrawer v-model="agentDrawerVisible" :position="currentPosition" :initial-tab="agentDrawerTab" @changed="refreshOpeningContext" />
   </section>
@@ -395,6 +412,7 @@ import {
 
 import { readPositionContext, savePositionContext } from '../utils/position-context'
 import { useAuthStore } from '../stores/auth'
+import { positionLink } from '../layouts/navigation'
 const auth = useAuthStore()
 const userKey = () => auth.user?.id ?? auth.user?.username ?? ''
 const route = useRoute()
@@ -414,7 +432,8 @@ const selectedEdgeIndex = ref<number | null>(null)
 const canvas = ref<InstanceType<typeof AgentFlowCanvas> | null>(null)
 const baseline = ref('')
 const openingsAvailable = ref(false)
-const fullscreen = ref(true)
+const fullscreen = ref(false)
+const canvasExpanded = ref(false)
 const inspectorWidth = ref(360)
 const viewMode = ref<'runtime' | 'edit'>('runtime')
 const runtimeDetails = ref(false)
@@ -424,7 +443,7 @@ const openingVersion = ref<string | null>(null)
 const clientSync = ref<Record<string, ConfigSyncEvidence | null>>({})
 const evidenceNow = ref(Date.now())
 const agentDrawerVisible = ref(false)
-const agentDrawerTab = ref<'persona' | 'opening' | 'flow'>('opening')
+const agentDrawerTab = ref<'persona' | 'opening'>('opening')
 const currentPosition = computed(() => positions.value.find(item => item.id === positionId.value) || null)
 let evidenceTimer: ReturnType<typeof setInterval> | undefined
 const aiFacts = ref<Record<string, string>>({})
@@ -580,10 +599,29 @@ function syncView(code: string) {
   }, evidenceNow.value)
 }
 
-function openOpeningEditor(): void { agentDrawerTab.value = 'opening'; agentDrawerVisible.value = true }
-function openPersonaEditor(): void { agentDrawerTab.value = 'persona'; agentDrawerVisible.value = true }
-function manageMedia(): void { void router.push({path:'/media',query:{position_id:String(positionId.value)}}) }
-function manageKnowledge(): void { void router.push({path:'/knowledge',query:{position_id:String(positionId.value)}}) }
+function openConfiguration(command: 'flow' | 'opening' | 'persona' | 'media' | 'knowledge'): void {
+  if (command === 'flow') {
+    viewMode.value = 'edit'
+    canvasExpanded.value = true
+    changeViewMode()
+  } else if (command === 'opening' || command === 'persona') {
+    agentDrawerTab.value = command
+    agentDrawerVisible.value = true
+  } else {
+    void router.push(positionLink(command === 'media' ? '/media' : '/knowledge', positionId.value))
+  }
+}
+
+function toggleCanvas(): void {
+  canvasExpanded.value = !canvasExpanded.value
+  if (!canvasExpanded.value) fullscreen.value = false
+}
+
+function showRuntime(): void {
+  viewMode.value = 'runtime'
+  changeViewMode()
+}
+
 async function refreshOpeningContext(): Promise<void> {
   const id=positionId.value,sequence=loadSequence
   try {
@@ -591,6 +629,7 @@ async function refreshOpeningContext(): Promise<void> {
     if(sequence!==loadSequence || id!==positionId.value)return
     legacyOpenings.value = activeOpenings((persona.data.openings||[]) as unknown as LegacyOpening[])
     openingVersion.value = persona.data.opening_version || null
+    openingsAvailable.value = legacyOpenings.value.length > 0
     aiFacts.value = (context.data.facts||{}) as Record<string,string>
     void loadClientSync(id,sequence)
   } catch {
@@ -631,7 +670,6 @@ function selectDisplayEdge(index: number): void {
 }
 
 function changeViewMode(): void { nextTick(() => canvas.value?.fitToCanvas()) }
-function editRuntimeNode(key: string): void { viewMode.value = 'edit'; selectNode(key); changeViewMode() }
 
 function beginInspectorResize(event: PointerEvent): void {
   if (event.button !== 0) return
@@ -667,6 +705,10 @@ async function changePosition(rawId: string | number): Promise<void> {
       return
     }
   }
+  fullscreen.value = false
+  canvasExpanded.value = false
+  viewMode.value = 'runtime'
+  runtimeDetails.value = false
   positionId.value = nextId
   savePositionContext(userKey(), nextId)
   await router.replace({ query: { ...route.query, position_id: String(nextId) } })
@@ -690,6 +732,10 @@ watch(() => route.query.position_id, async (rawId) => {
       return
     }
   }
+  fullscreen.value = false
+  canvasExpanded.value = false
+  viewMode.value = 'runtime'
+  runtimeDetails.value = false
   positionId.value = nextId
   savePositionContext(userKey(), nextId)
   await loadFlow(nextId)
@@ -1083,6 +1129,10 @@ onBeforeUnmount(() => { loadSequence += 1; if(evidenceTimer)clearInterval(eviden
 .node-execution-notes p { margin: 8px 0; }
 .canvas-column { display: flex; flex-direction: column; min-width: 0; min-height: 0; height: min(68vh, 760px); }
 .is-fullscreen .canvas-column { height: 100%; }
+.canvas-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px 16px; flex-wrap: wrap; flex-shrink: 0; padding: 10px 12px; margin-bottom: 10px; border: 1px solid var(--el-border-color-lighter); border-radius: 8px; background: var(--el-bg-color); }
+.canvas-summary,.canvas-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.canvas-summary span { color: var(--el-text-color-secondary); font-size: 12px; }
+.canvas-actions .el-button { margin-left: 0; }
 .canvas-footnote { flex-shrink: 0; padding: 8px 4px 0; font-size: 11px; line-height: 1.5; color: var(--el-text-color-secondary); }
 .inspector-resizer { width: 8px; cursor: col-resize; touch-action: none; display: flex; justify-content: center; }
 .inspector-resizer::after { content: ''; width: 2px; height: 48px; margin-top: 40px; border-radius: 2px; background: var(--el-border-color); }
@@ -1101,6 +1151,8 @@ onBeforeUnmount(() => { loadSequence += 1; if(evidenceTimer)clearInterval(eviden
 .graph-actions { margin-bottom: 12px; }
 .graph-action-note { margin-left: auto; }
 .flow-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 8px var(--inspector-width, 360px); align-items: stretch; gap: 4px; min-width: 0; min-height: 0; }
+.canvas-panel { min-width: 0; }
+.is-fullscreen .canvas-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .is-fullscreen .flow-workspace { flex: 1; overflow: hidden; }
 .inspector { min-width: 0; max-height: min(68vh, 760px); padding: 14px; overflow: auto; border: 1px solid var(--bd-border, #e8ecf3); border-radius: 6px; background: var(--el-bg-color, #fff); }
 .is-fullscreen .inspector { max-height: none; height: 100%; box-sizing: border-box; }
@@ -1118,6 +1170,7 @@ onBeforeUnmount(() => { loadSequence += 1; if(evidenceTimer)clearInterval(eviden
 @media (max-width: 850px) {
   .flow-workspace { grid-template-columns: minmax(0, 1fr); }
   .flow-page.is-fullscreen { padding: 10px; overflow-y: auto; }
+  .is-fullscreen .canvas-panel { flex: none; }
   .is-fullscreen .flow-workspace { flex: none; overflow: visible; }
   .canvas-column,.is-fullscreen .canvas-column { height: 60vh; min-height: 350px; }
   .inspector-resizer { display: none; }

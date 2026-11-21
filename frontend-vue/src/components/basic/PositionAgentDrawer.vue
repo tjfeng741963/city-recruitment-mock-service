@@ -127,43 +127,14 @@
         </div>
       </el-tab-pane>
 
-      <el-tab-pane label="流程图" name="flow">
-        <el-alert
-          class="persona-note"
-          type="info"
-          show-icon
-          :closable="false"
-          title="按岗位查看真实招聘流程"
-          description="流程图页面统一管理节点顺序、客户回复条件和后续分支。"
-        />
-        <div v-if="flowLoading" class="opening-empty">流程加载中…</div>
-        <div v-else class="flow-summary">
-          <template v-if="flow">
-            <div class="flow-toolbar">
-              <el-tag :type="flow.status === 'enabled' ? 'success' : 'info'">
-                {{ flow.status === 'enabled' ? '新会话已启用' : '已停用' }}
-              </el-tag>
-              <span class="opening-hint">版本 v{{ flow.version }} · {{ flow.nodes.length }} 个节点</span>
-            </div>
-            <div class="opening-empty">
-              {{ flow.nodes.length ? '节点和连接请在统一流程图页面中查看与编辑。' : '该岗位还没有流程图，可在流程图页面新建停用草稿或从开场迁移。' }}
-            </div>
-          </template>
-          <div v-else class="opening-empty">尚未读取到该岗位的流程状态。</div>
-          <div class="flow-actions">
-            <el-button type="primary" :disabled="!position" @click="openFlowEditor">打开流程图</el-button>
-          </div>
-        </div>
-      </el-tab-pane>
     </el-tabs>
   </el-drawer>
 </template>
 
 <script setup lang="ts">
 import { computed, nextTick, ref } from 'vue'
-import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { agentApi, type AgentFlow } from '../../api/agent'
+import { agentApi } from '../../api/agent'
 import { mediaApi } from '../../api/core'
 import type { ServicePosition } from '../../api/types'
 import { drawerTabForLoad, type AgentDrawerTab } from '../agent/flow-edit-entry'
@@ -203,7 +174,6 @@ const MAX_BYTES = 20 * 1024 * 1024
 
 const props = withDefaults(defineProps<{ modelValue: boolean; position: ServicePosition | null; initialTab?: AgentDrawerTab }>(), { initialTab: 'persona' })
 const emit = defineEmits<{ (e: 'update:modelValue', value: boolean): void; (e: 'changed'): void }>()
-const router = useRouter()
 
 const tab = ref<AgentDrawerTab>('persona')
 const loading = ref(false)
@@ -217,8 +187,6 @@ const uploading = ref(false)
 const draft = ref<OpeningDraft | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
 const editorRef = ref<HTMLElement | null>(null)
-const flow = ref<AgentFlow | null>(null)
-const flowLoading = ref(false)
 
 const personaDirty = computed(() => persona.value !== savedPersona.value)
 const delaySeconds = computed({
@@ -240,23 +208,16 @@ async function load(opening = false): Promise<void> {
   if (!props.position) return
   loading.value = true
   draft.value = null
-  flowLoading.value = true
   tab.value = drawerTabForLoad(tab.value, props.initialTab, opening)
   try {
-    const [personaResult, flowResult] = await Promise.all([
-      agentApi.personaGet(props.position.id),
-      agentApi.flowGet(props.position.id),
-    ])
-    const { data } = personaResult
+    const { data } = await agentApi.personaGet(props.position.id)
     persona.value = String(data.persona?.content || '')
     savedPersona.value = persona.value
     openings.value = (Array.isArray(data.openings) ? data.openings : []) as unknown as PersonaOpening[]
-    flow.value = flowResult.data
   } catch (error: any) {
     ElMessage.error(error?.response?.data?.detail || 'Agent 配置加载失败')
   } finally {
     loading.value = false
-    flowLoading.value = false
   }
 }
 
@@ -264,12 +225,6 @@ function revealEditor(): void {
   void nextTick(() => {
     editorRef.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
   })
-}
-
-function openFlowEditor(): void {
-  if (!props.position) return
-  emit('update:modelValue', false)
-  void router.push({ name: 'recruitment-flow', query: { position_id: String(props.position.id) } })
 }
 
 async function loadMedia(): Promise<void> {
@@ -482,12 +437,6 @@ async function move(index: number, offset: number): Promise<void> {
   color: #0842a0 !important;
 }
 
-.flow-add-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
-}
 
 .edit-head {
   display: flex;
@@ -496,9 +445,6 @@ async function move(index: number, offset: number): Promise<void> {
   margin-bottom: 8px;
 }
 
-.flow-end {
-  color: var(--bd-text-secondary, #5f6b7a);
-}
 
 .opening-card.is-editing {
   border-color: var(--bd-primary, #0b57d0);
@@ -600,43 +546,11 @@ async function move(index: number, offset: number): Promise<void> {
   gap: 8px;
 }
 
-.flow-actions {
-  display: flex;
-  justify-content: center;
-  gap: 8px;
-  margin-top: 14px;
-}
 
-.flow-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 12px;
-}
 
-.flow-status {
-  width: 190px;
-  margin-left: auto;
-}
 
-.flow-card {
-  border: 1px solid var(--bd-border, #e8ecf3);
-  border-radius: 10px;
-  padding: 10px 12px;
-  margin-bottom: 8px;
-}
 
-.flow-body {
-  margin-top: 8px;
-}
 
-.flow-options {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 8px;
-}
 
 .hidden-input {
   display: none;
