@@ -28,8 +28,8 @@
         </template>
       </el-menu>
 
-      <button class="sidebar-footer" type="button" @click="toggleCollapsed">
-        <el-icon><Fold /></el-icon>
+      <button class="sidebar-footer" type="button" :aria-label="collapsed ? '展开侧栏' : '收起侧栏'" :aria-expanded="!collapsed" @click="toggleCollapsed">
+        <el-icon><Expand v-if="collapsed" /><Fold v-else /></el-icon>
         <span v-if="!collapsed">收起侧栏</span>
       </button>
     </aside>
