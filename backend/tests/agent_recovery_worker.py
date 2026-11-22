@@ -18,7 +18,9 @@ def run(folder: Path, phase: str):
     store = MagicMock()
     store.sessions.return_value = [{"name": "Recovery fixture", "id": "S:recovery"}]
     store.self_id.return_value = "fixture-owner"
-    store.messages.side_effect = [[], [{"id": 102, "sender_id": "fixture-owner", "text": "synthetic recovery reply"}]]
+    store._conn.return_value.execute.return_value.fetchall.side_effect = [
+        [], [(102, "synthetic recovery reply")],
+    ]
 
     def sender(*args, **kwargs):
         if phase != "pump":

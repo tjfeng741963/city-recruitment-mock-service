@@ -38,6 +38,7 @@ def load_autopilot():
         side_effect=lambda text: (text or "", [])
     )
     stubs["wecom_io_core.send"].paste_media = MagicMock(return_value=(True, "stub"))
+    stubs["wecom_io_core.store"]._pb_text.side_effect = lambda content: content
     with (
         patch.dict(sys.modules, stubs),
         patch.object(sys, "path", list(sys.path)),
@@ -52,6 +53,18 @@ def load_autopilot():
         # controls the read-only probe explicitly; never query its real session.
         module.desktop_send_ready = MagicMock(return_value=(True, ''))
         return module
+
+
+def stub_text_readback(agent, monkeypatch):
+    """Give orchestration tests deterministic outgoing rows for simulated sends."""
+    def snapshot(store, cid):
+        return {
+            str(index): call.args[2]
+            for index, call in enumerate(agent.core_send.send.call_args_list, start=1)
+            if call.kwargs.get("expect_id") == cid
+        }
+
+    monkeypatch.setattr(agent, "_outbound_snapshot", snapshot)
 
 
 def load_reply_store(path: Path):

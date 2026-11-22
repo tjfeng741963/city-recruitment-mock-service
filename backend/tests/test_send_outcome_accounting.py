@@ -16,12 +16,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from tests import agent_loader
-from tests.agent_loader import load_autopilot
+from tests.agent_loader import load_autopilot, stub_text_readback
 
 
 @pytest.fixture
 def agent(tmp_path, monkeypatch):
     module = load_autopilot()
+    stub_text_readback(module, monkeypatch)
     spec = importlib.util.spec_from_file_location(
         "isolated_reply_store",
         Path(module.__file__).with_name("reply_store.py"),
@@ -62,8 +63,12 @@ def test_send_failure_consumes_cooldown_and_counts_backoff(agent):
     assert _status_of(agent.rlog) == "failed"
 
 
-def test_readback_failure_is_unknown_not_sent(agent):
-    agent.core_send.send.return_value = {"ok": True, "detail": "已发送但回读失败：No item with that key"}
+@pytest.mark.parametrize("detail", [
+    "已发送但回读失败：No item with that key",
+    "已发送，但库里还没读到（WAL 可能有延迟），请人工看一眼",
+])
+def test_readback_failure_is_unknown_not_sent(agent, detail):
+    agent.core_send.send.return_value = {"ok": True, "conversation_id": "", "detail": detail}
     stats = agent.drain(MagicMock(), CFG)
     assert stats["unknown"] == 1 and stats["sent"] == 0
     assert _status_of(agent.rlog) == "unknown"
@@ -76,7 +81,9 @@ def test_success_resets_backoff_counter(agent):
     agent.core_send.send.return_value = {"ok": False, "detail": "失败一"}
     agent.drain(MagicMock(), CFG)
     assert agent._consecutive_send_failures == 1
-    agent.core_send.send.return_value = {"ok": True, "detail": "sent"}
+    agent.core_send.send.side_effect = lambda *args, **kwargs: {
+        "ok": True, "conversation_id": kwargs["expect_id"], "detail": "sent",
+    }
     agent.rlog.record_incoming({
         "id": 11, "conv_id": "S:customer2", "conv_name": "Customer",
         "text": "hi", "type": 2, "time": 200,
@@ -93,6 +100,46 @@ def test_brain_failure_still_blocks_input(agent):
     stats = agent.drain(MagicMock(), CFG)
     assert stats["blocked"] == 1
     agent.core_send.send.assert_not_called()
+
+
+def test_process_exit_during_send_leaves_a_durable_unknown(agent):
+    def exit_during_send(*args, **kwargs):
+        assert _status_of(agent.rlog) == "unknown"
+        raise SystemExit(1)
+
+    agent.core_send.send.side_effect = exit_during_send
+    with pytest.raises(SystemExit):
+        agent.drain(MagicMock(), CFG)
+    agent.rlog.init()
+    assert agent.rlog.pending(include_failed=True) == []
+    agent.drain(MagicMock(), CFG)
+    agent.core_send.send.assert_called_once()
+
+
+def test_send_events_link_foreground_samples_without_message_content(agent, monkeypatch, tmp_path):
+    monkeypatch.setattr(agent, "LOG_DIR", tmp_path)
+    monkeypatch.setattr(agent, "LOG_PATH", tmp_path / "run.log")
+    monkeypatch.setattr(agent, "_foreground_sample", lambda: {"foreground_pid": 42, "window_class": "ConsoleWindowClass"})
+
+    def send(*args, log, **kwargs):
+        log("开始发送 -> 「测试昵称」：hidden-test-body")
+        log("步骤0 前台就位、窗口可见")
+        log("步骤3 输入框校验通过（hidden-test-hint）")
+        log("步骤4 已回车发送")
+        return {"ok": True, "conversation_id": "", "detail": "库里还没读到"}
+
+    agent.core_send.send.side_effect = send
+    agent.drain(MagicMock(), CFG)
+    lines = (tmp_path / "run.log").read_text(encoding="utf-8")
+    events = [line for line in lines.splitlines() if " wecom_send " in line]
+    fields = [dict(field.split("=", 1) for field in line.split(" wecom_send ", 1)[1].split()) for line in events]
+    assert [event["phase"] for event in fields] == ["start", "core_0", "core_3", "core_4", "result"]
+    assert len({event["attempt_id"] for event in fields}) == 1
+    assert all(event["route"] == "auto" and event["foreground_pid"] == "42" for event in fields)
+    assert all(event["trace_id"] and event["part"] == "1" for event in fields)
+    assert fields[-1]["outcome"] == "unknown"
+    assert fields[-1]["reason_code"] == "target_conversation_missing"
+    assert "hidden-test-body" not in lines and "hidden-test-hint" not in lines
 
 
 def test_retry_held_requeues_unknown_records(tmp_path):

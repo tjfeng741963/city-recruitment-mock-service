@@ -269,6 +269,33 @@ def pending(include_failed: bool = True, limit: int = 200) -> list[dict]:
         con.close()
 
 
+def begin_reply_attempt(message_id: str, conv_id: str, scene: str, reply_text: str = "") -> bool:
+    """Commit an uncertain outcome before desktop input so a restart cannot replay it."""
+    con = _conn()
+    try:
+        result = con.execute(
+            "UPDATE reply_log SET status='unknown', error=?, scene=?, reply_text=?, "
+            "last_step='sending', replied_at=? WHERE conv_id=? AND message_id=? "
+            "AND status IN ('pending','failed')",
+            ("发送被中断时请核对企微实际落点", scene, reply_text, time.time(), str(conv_id), str(message_id)),
+        )
+        con.commit()
+        return result.rowcount == 1
+    finally:
+        con.close()
+
+
+def has_unconfirmed_opening(conv_id: str) -> bool:
+    con = _conn()
+    try:
+        return con.execute(
+            "SELECT 1 FROM reply_log WHERE conv_id=? AND scene='开场' AND status='unknown' LIMIT 1",
+            (str(conv_id),),
+        ).fetchone() is not None
+    finally:
+        con.close()
+
+
 def mark_sent(message_id: str, conv_id: str, scene: str, reply_text: str, duration_ms: int = 0) -> None:
     con = _conn()
     try:

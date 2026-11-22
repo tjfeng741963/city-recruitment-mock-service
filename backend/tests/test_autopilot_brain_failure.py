@@ -6,12 +6,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tests.agent_loader import load_autopilot
+from tests.agent_loader import load_autopilot, stub_text_readback
 
 
 @pytest.fixture
 def agent(tmp_path, monkeypatch):
     module = load_autopilot()
+    stub_text_readback(module, monkeypatch)
     spec = importlib.util.spec_from_file_location("isolated_reply_store", Path(module.__file__).with_name("reply_store.py"))
     records = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(records)
@@ -24,7 +25,7 @@ def agent(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "_is_first_contact", lambda cid, seen: False)
     module._brain.chat.return_value = {"ok": True, "reply": "hi", "parts": ["hi"], "medias": [], "scene": "Agent", "detail": "ok"}
     module._last_reply_at = 0
-    module.core_send.send.return_value = {"ok": True, "detail": "sent"}
+    module.core_send.send.return_value = {"ok": True, "conversation_id": "S:customer", "detail": "sent"}
     return module
 
 
@@ -131,3 +132,18 @@ def test_uncertain_landing_stops_parts_media_and_batch_without_requeue(agent, ou
     assert rows["S:next"]["status"] == "pending"
     agent.rlog.init()
     assert [r["conv_id"] for r in agent.rlog.pending()] == ["S:next"]
+
+
+def test_confirmed_first_part_is_not_replayed_when_second_part_fails(agent, monkeypatch):
+    monkeypatch.setattr(agent.time, "sleep", lambda seconds: None)
+    agent._brain.chat.return_value = {"ok": True, "parts": ["first", "second"], "medias": []}
+    agent.core_send.send.side_effect = [
+        {"ok": True, "conversation_id": "S:customer", "detail": "ok"},
+        {"ok": False, "conversation_id": "", "detail": "抢不到前台"},
+    ]
+
+    assert agent.drain(MagicMock(), CFG)["unknown"] == 1
+    assert agent.rlog.recent()[0]["status"] == "unknown"
+    agent.rlog.init()
+    agent.drain(MagicMock(), CFG)
+    assert [call.args[2] for call in agent.core_send.send.call_args_list] == ["first", "second"]
