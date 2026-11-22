@@ -2240,8 +2240,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                     rlog.mark_sent(fake_id, cid, "开场", str(item["content"]))
                                     opening_trace = _brain.log_receipt(cid, seq, kind, "sent")
                                     _brain.log_delivery(opening_trace, "sent", session_key=cid,
-                                                        message_id=str(result.get("message_id") or ""),
-                                                        detail=str(result.get("detail") or ""))
+                                                        detail=detail)
                                     sent_items += 1
                                     log(f"    [开场 {seq}/{len(ores['items'])}] 已发送", scope="send")
                                     # This is the configured orchestration gap,
