@@ -39,6 +39,36 @@ describe("core CRUD modules", () => {
     expect(positions.json().items[0]).not.toHaveProperty("featured");
   });
 
+  it("edits city basics without overwriting newer recruitment defaults or legacy data", async () => {
+    const headers = { authorization: `Bearer ${token}` };
+    const city = await app.inject({
+      method: "POST", url: "/api/v1/cities", headers,
+      payload: { city_name: "基础信息验收城", province: "原省份", salary: { raw: "22元/小时" }, legacy_metadata: { keep: true } },
+    });
+    expect(city.statusCode).toBe(200);
+    const cityId = city.json().id;
+    const defaultUpdate = await app.inject({
+      method: "PUT", url: `/api/v1/dify/cities/${cityId}/materials`, headers,
+      payload: { salary: { raw: "24元/小时" }, interview_site_name: "统一面试点", available_lines: ["1号线"] },
+    });
+    expect(defaultUpdate.statusCode).toBe(200);
+    const edit = await app.inject({
+      method: "PATCH", url: `/api/v1/cities/${cityId}`, headers,
+      payload: { city_name: "基础信息验收城", province: "新省份", districts: [" 甲区 ", "甲区"] },
+    });
+    expect(edit.statusCode).toBe(200);
+    expect(edit.json()).toMatchObject({
+      province: "新省份", districts: ["甲区"], salary: { raw: "24元/小时" },
+      interview_site_name: "统一面试点", available_lines: ["1号线"],
+    });
+    const saved = app.db.prepare("SELECT data_json FROM cities WHERE id=?").get(cityId) as { data_json: string };
+    expect(JSON.parse(saved.data_json)).toMatchObject({ legacy_metadata: { keep: true } });
+    const invalid = await app.inject({
+      method: "PATCH", url: `/api/v1/cities/${cityId}`, headers, payload: { salary: { raw: "" } },
+    });
+    expect(invalid.statusCode).toBe(422);
+  });
+
   it("creates a position bound to a factory and returns factory_id", async () => {
     const city = await app.inject({ method: "POST", url: "/api/v1/cities", headers: { authorization: `Bearer ${token}` }, payload: { city_name: "测试城市乙", province: "广东" } });
     const cityId = city.json().id;

@@ -94,6 +94,8 @@ export const citiesApi = {
     http.get<PageResult<City>>('/api/v1/cities', { params }),
   get: (id: number | string) => http.get<City>(`/api/v1/cities/${id}`),
   create: (payload: CityPayload) => http.post<City>('/api/v1/cities', payload),
+  updateBasics: (id: number | string, payload: { city_name: string; province: string; districts: string[] }) =>
+    http.patch<City>(`/api/v1/cities/${id}`, payload),
   update: (id: number | string, payload: Partial<CityPayload>) =>
     http.put<City>(`/api/v1/cities/${id}`, payload),
   remove: (id: number | string) => http.delete<OkResult>(`/api/v1/cities/${id}`),

@@ -23,6 +23,8 @@
 
 城市列表与详情的 `recruitment_status` 由系统根据设备与岗位绑定计算。存在已启用设备绑定本城的已启用岗位时返回 `active`，其余返回 `inactive`。列表状态筛选与详情使用同一结果。设备在线情况看微信账号页，岗位启用情况看岗位详情。
 
+城市基础资料使用 `PATCH /api/v1/cities/:id` 保存，可提交 `city_name`、`province` 和 `districts`。省略的字段保留，保存时记录城市历史。城市默认资料继续使用下文的资料接口维护。
+
 | 方法 | 路径 | 鉴权 | 说明 |
 |---|---|---|---|
 | POST | `/api/v1/auth/login` | 无 | 账号密码换 token，body `{username,password}` |
@@ -147,7 +149,7 @@ Dify 的 `city_materials` 也包含岗位表单的同名段落，适用于招聘
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |---|---|---|---|
-| PUT | `/api/v1/dify/cities/:id/materials` | 城市访问权限 | 合并保存城市完整资料：`salary/work_hours/requirements/interview/prompt_sections/prompt_section_labels/social_insurances`；保留未提交字段和原嵌套键，写入城市历史 |
+| PUT | `/api/v1/dify/cities/:id/materials` | 城市访问权限 | 合并保存城市默认资料。支持 `salary`、`work_hours`、`requirements`、`interview`、`prompt_sections`、`prompt_section_labels`、`social_insurances`、`interview_site_name` 和 `available_lines`，保留未提交字段和原嵌套键，写入城市历史 |
 | POST | `/api/v1/dify/preview` | admin | `{position_id,text,dry:true}` 查看实际城市/岗位回退来源与适用知识；非 dry 需独立 `session_key:dify-preview:...`，生成模拟回答，不发送消息、不切换设备 |
 
 首页 `/api/v1/agent/status/dashboard` 的 `errors.failed_today/ai_abnormal/dify_health/degraded` 读取北京时间当天真实 Dify 调用记录，按设备权限过滤；`queue.pending` 读取实际待发/已领取桥接命令。普通发送失败不计为 Dify 调用失败。

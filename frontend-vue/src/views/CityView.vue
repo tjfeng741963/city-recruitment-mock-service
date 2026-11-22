@@ -90,7 +90,6 @@
                 <el-dropdown-menu>
                   <el-dropdown-item command="factories">厂区（{{ row.factory_count }}）</el-dropdown-item>
                   <el-dropdown-item command="history">历史记录</el-dropdown-item>
-                  <el-dropdown-item command="copy">复制城市</el-dropdown-item>
                   <el-dropdown-item command="delete" divided>删除城市</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
@@ -159,7 +158,7 @@ const pageSize = ref(20)
 const formVisible = ref(false)
 const factoryVisible = ref(false)
 const historyVisible = ref(false)
-const formMode = ref<'create' | 'edit' | 'copy'>('create')
+const formMode = ref<'create' | 'edit'>('create')
 const activeCityId = ref<number | null>(null)
 const activeCityName = ref('')
 
@@ -227,12 +226,6 @@ function openEdit(row: CityRow): void {
   formVisible.value = true
 }
 
-function openCopy(row: CityRow): void {
-  formMode.value = 'copy'
-  activeCityId.value = row.id
-  formVisible.value = true
-}
-
 function openFactories(row: CityRow): void {
   activeCityId.value = row.id
   activeCityName.value = row.city_name
@@ -248,7 +241,6 @@ function openHistory(row: CityRow): void {
 async function onCommand(command: string, row: CityRow): Promise<void> {
   if (command === 'factories') openFactories(row)
   if (command === 'history') openHistory(row)
-  if (command === 'copy') openCopy(row)
   if (command === 'delete') await removeCity(row)
 }
 
