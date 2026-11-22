@@ -41,13 +41,6 @@
           </el-select>
         </el-form-item>
 
-        <details v-if="mode === 'edit' && cityId" :key="defaultSectionKey" class="city-defaults">
-          <summary>城市默认资料</summary>
-          <p class="hint">同城共用的资料在这里维护。Dify 优先读取已有城市值。具体岗位的工资、班次和面试点请在招聘岗位填写。</p>
-          <el-button :disabled="loading || !loaded" :data-city-default-materials="cityId">
-            编辑城市默认资料
-          </el-button>
-        </details>
       </el-form>
     </div>
 
@@ -81,7 +74,6 @@ const formRef = ref<FormInstance>()
 const loading = ref(false)
 const saving = ref(false)
 const loaded = ref(false)
-const defaultSectionKey = ref(0)
 const receptionStatus = ref('inactive')
 let loadSequence = 0
 const form = reactive({ city_name: '', province: '', districts: [] as string[] })
@@ -96,7 +88,6 @@ const statusTagType = computed(() => receptionStatus.value === 'active' ? 'succe
 
 async function reset(): Promise<void> {
   const sequence = ++loadSequence
-  defaultSectionKey.value += 1
   formRef.value?.clearValidate()
   Object.assign(form, { city_name: '', province: '', districts: [] })
   receptionStatus.value = 'inactive'
@@ -149,10 +140,6 @@ async function submit(): Promise<void> {
 </script>
 
 <style scoped>
-.city-defaults { margin-top: 18px; border-top: 1px solid var(--el-border-color-light); }
-.city-defaults summary { padding: 14px 0; font-weight: 600; cursor: pointer; }
-.city-defaults .hint { margin: 0 0 10px; line-height: 1.6; }
-
 .drawer-body {
   padding-bottom: 8px;
 }
