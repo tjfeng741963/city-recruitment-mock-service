@@ -4,6 +4,7 @@ import type { FastifyInstance } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
 import { canAccessDevice, getUserScope } from "../../auth/user-scopes.js";
 import { DeviceBridgeStore } from "./device-bridge.js";
+import { queuePendingDifyGroupNotifications } from "../dify/dify-group-notification.js";
 import { MessageEventService } from "./message-events.js";
 import { createMessageChannelProvider } from "./message-channel-provider.js";
 import { NOOP_NOTIFIER, type StreamNotifier } from "./stream-events.js";
@@ -250,6 +251,8 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
         return { device: store.status(code) };
       }
       if (action === "claim") {
+        const device = store.status(code);
+        if (device?.state === "online") queuePendingDifyGroupNotifications(db, code, device.account_id);
         const command = store.claim(code);
         if (command) notifier.commandUpdated(code, command);
         return { command };

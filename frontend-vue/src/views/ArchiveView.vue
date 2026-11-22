@@ -184,17 +184,18 @@ const manualForm = reactive({
 const STATUS_TEXT: Record<string, string> = {
   sent: '已推送群聊',
   queued: '待设备发送',
+  claimed: '设备发送中',
   failed: '推送失败',
+  unknown: '发送结果待核对',
   no_group: '未绑群聊',
+  group_unavailable: '未确认目标群',
   incomplete: '信息未齐',
   pending: '待推送',
 }
 
 function statusKey(status?: string): string {
   const key = String(status || 'pending').replace(/-/g, '_')
-  return ['sent', 'queued', 'failed', 'no_group', 'incomplete', 'pending'].includes(key)
-    ? key
-    : 'pending'
+  return Object.hasOwn(STATUS_TEXT, key) ? key : 'pending'
 }
 
 function statusText(status?: string): string {

@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { parseDeviceData, parseFactoryIds } from "../../shared/device-factories.js";
 import { difyContext, difyContextConflict } from "./dify-context.js";
+import { queueDifyGroupNotification } from "./dify-group-notification.js";
 import { interviewDate, interviewSchedule, validateInterview } from "./dify-interview.js";
 
 type Job = { id:number; title:string; city:string; district:string; factory:string; districts:string[] };
@@ -129,8 +130,13 @@ export function recruitmentTurn(db:DatabaseSync, input:{
     const list = options.map(job => `${job.id}．${[job.city,job.district,job.title,job.factory].filter(Boolean).join(" · ")}`);
     return respond(`当前可选岗位\n${list.join("\n")}\n回复「选择岗位 编号」即可继续咨询或报名。`);
   }
-  if(saved && (bookingStatus||confirm||starts||sendsFields||phoneOnly)) return respond(
-    `已登记${saved.position_name || ""}面试，${saved.interview_date} ${saved.interview_time}，${saved.interview_point}，${saved.interview_address}。`);
+  if (saved && (bookingStatus || confirm || starts || sendsFields || phoneOnly)) {
+    const savedJob = jobs.find(job => job.id === saved.position_id);
+    if (confirm && input.canWrite && input.account && savedJob) {
+      queueDifyGroupNotification(db, input.device, archiveKey, savedJob);
+    }
+    return respond(`已登记${saved.position_name || ""}面试，${saved.interview_date} ${saved.interview_time}，${saved.interview_point}，${saved.interview_address}。`);
+  }
   if(saved&&cancel)return respond("面试已登记，请联系招聘员取消。");
   if (!current) return respond("当前岗位不可用或城市和厂区归属不一致，请联系招聘员核对，可回复「推荐岗位」查看其他岗位。");
   if (!scheduleRequest && !confirm && !cancel && !starts && !sendsFields && !phoneOnly && !bookingStatus) return {positionId:current.id};
@@ -194,6 +200,7 @@ export function recruitmentTurn(db:DatabaseSync, input:{
       .run(archiveKey,current.id,draft.name,draft.phone,current.city,valid.date,valid.time,
         input.device,conversation[0].id,input.session,input.account,valid.point.name,valid.point.address);
     save(current.id,{});
+    queueDifyGroupNotification(db, input.device, archiveKey, current);
     db.exec("COMMIT");
   } catch(error) {
     db.exec("ROLLBACK");
