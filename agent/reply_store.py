@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 import uuid
@@ -134,6 +135,7 @@ _RECOVERY_HAS_NEWER_MESSAGE = """EXISTS (
 _SKIP_SUPERSEDED_RECOVERY = f"""UPDATE reply_log AS selected
     SET status='skipped',last_step='skipped',error='恢复排队后收到更新的消息',replied_at=?
     WHERE last_step='recovery-queued' AND {_RECOVERY_HAS_NEWER_MESSAGE}"""
+_LEGACY_PARTIAL = re.compile(r"^(?:已确认 [1-9]\d* 段文本，|开场第 \d+ 项未完成，已有 [1-9]\d* 项执行成功：)")
 
 
 def _conn() -> sqlite3.Connection:
@@ -480,7 +482,9 @@ def queue_reply_recovery(conv_id: str, message_id: str, *, reason: str,
             return "already_queued"
         if row["last_step"] == "sending":
             return "in_progress"
-        if row["last_step"] == "partial":
+        if row["last_step"] == "partial" or (
+            row["status"] == "unknown" and _LEGACY_PARTIAL.match(row["error"] or "")
+        ):
             return "partial"
         eligible = (row["status"] in ("held", "unknown") if not legacy_sent
                     else row["status"] == "sent" and row["last_step"] != "sent-confirmed")

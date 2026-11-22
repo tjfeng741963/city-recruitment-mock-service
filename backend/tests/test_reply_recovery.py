@@ -126,6 +126,14 @@ def test_known_partial_requires_manual_completion(ledger):
     assert ledger.pending() == []
 
 
+@pytest.mark.parametrize("error", ["已确认 1 段文本，其余未完成：回读失败",
+                                  "开场第 2 项未完成，已有 1 项执行成功：回读失败"])
+def test_previous_partial_accounting_remains_protected(ledger, error):
+    incoming(ledger, 10)
+    ledger.mark_unknown("10", "S:customer", error)
+    assert approve(ledger) == "partial"
+
+
 def test_command_queues_only_after_explicit_confirmation_and_drain_replies_once(ledger, tmp_path, monkeypatch):
     agent = load_autopilot()
     stub_text_readback(agent, monkeypatch)
