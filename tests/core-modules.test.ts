@@ -92,4 +92,38 @@ describe("core CRUD modules", () => {
     expect(position.statusCode).toBe(200);
     expect(position.json().is_featured).toBe(true);
   });
+
+  it("calculates city reception independently of an enabled position and ignores stale saved city status", async () => {
+    const headers = { authorization: `Bearer ${token}` };
+    const city = await app.inject({
+      method: "POST", url: "/api/v1/cities", headers, payload: { city_name: "接待状态验收城", recruitment_status: "active" },
+    });
+    expect(city.statusCode).toBe(200);
+    const cityId = city.json().id;
+    const position = await app.inject({
+      method: "POST", url: "/api/v1/service-positions", headers,
+      payload: { position_name: "接待状态验收岗位", city_id: cityId, is_active: true },
+    });
+    expect(position.statusCode).toBe(200);
+    const positionId = position.json().id;
+    const cityDetail = () => app.inject({ url: `/api/v1/cities/${cityId}`, headers });
+    const cityList = (status: string) => app.inject({ url: `/api/v1/cities?status=${status}&page_size=100`, headers });
+
+    expect(position.json().is_active).toBe(true);
+    expect((await cityDetail()).json().recruitment_status).toBe("inactive");
+    expect((await cityList("inactive")).json().items).toContainEqual(
+      expect.objectContaining({ id: cityId, recruitment_status: "inactive" }),
+    );
+
+    const device = await app.inject({
+      method: "POST", url: "/api/v1/agent/devices", headers,
+      payload: { device_code: "city-reception-test", device_name: "状态验收设备", position_id: positionId },
+    });
+    expect(device.statusCode).toBe(200);
+    app.db.prepare("UPDATE cities SET data_json=json_set(data_json,'$.recruitment_status','inactive') WHERE id=?").run(cityId);
+    expect((await cityDetail()).json().recruitment_status).toBe("active");
+    expect((await cityList("active")).json().items).toContainEqual(
+      expect.objectContaining({ id: cityId, recruitment_status: "active" }),
+    );
+  });
 });

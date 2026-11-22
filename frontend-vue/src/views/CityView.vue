@@ -27,11 +27,11 @@
       </div>
       <div class="stat-card stat-active">
         <div class="stat-value">{{ activeCount }}</div>
-        <div class="stat-label">招聘中</div>
+        <div class="stat-label">已配置接待</div>
       </div>
       <div class="stat-card stat-inactive">
         <div class="stat-value">{{ inactiveCount }}</div>
-        <div class="stat-label">已停止</div>
+        <div class="stat-label">未配置接待</div>
       </div>
     </div>
 
@@ -43,10 +43,10 @@
         clearable
         :prefix-icon="Search"
       />
-      <el-select v-model="statusFilter" class="status-select" placeholder="状态筛选" clearable>
-        <el-option label="全部状态" value="" />
-        <el-option label="招聘中" value="active" />
-        <el-option label="已停止" value="inactive" />
+      <el-select v-model="statusFilter" class="status-select" placeholder="接待配置" clearable>
+        <el-option label="全部接待状态" value="" />
+        <el-option label="已配置接待" value="active" />
+        <el-option label="未配置接待" value="inactive" />
       </el-select>
     </div>
 
@@ -63,11 +63,15 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="110">
+        <el-table-column label="接待配置" min-width="125">
           <template #default="{ row }">
-            <el-tag :type="row.recruitment_status === 'active' ? 'success' : 'info'" effect="light">
-              {{ row.recruitment_status === 'active' ? '招聘中' : '已停止' }}
-            </el-tag>
+            <el-tooltip :content="row.recruitment_status === 'active'
+              ? '有已启用的设备绑定本城的已启用岗位。在线情况可到微信账号查看。'
+              : '暂无已启用的设备绑定本城的已启用岗位。可从查看岗位核对岗位状态。'">
+              <el-tag :type="row.recruitment_status === 'active' ? 'success' : 'info'" effect="light">
+                {{ row.recruitment_status === 'active' ? '已配置接待' : '未配置接待' }}
+              </el-tag>
+            </el-tooltip>
           </template>
         </el-table-column>
         <el-table-column prop="province" label="省份" min-width="110" />

@@ -88,6 +88,8 @@ function project(source: Row, keys: readonly string[]) {
 export function serializeCity(row: Row): Row {
   const source = merged(row);
   const result = project(source, ["id", ...CITY_FIELDS, "created_at", "updated_at"]);
+  // The core routes recompute this column from the current device and position bindings.
+  if (typeof row.recruitment_status === "string") result.recruitment_status = row.recruitment_status;
   for (const [key, fallback] of Object.entries(CITY_DEFAULTS)) {
     if (result[key] === undefined || result[key] === null) result[key] = structuredClone(fallback);
   }
