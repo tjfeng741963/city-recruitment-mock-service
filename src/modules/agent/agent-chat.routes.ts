@@ -6,12 +6,13 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
 import { authorizeProfileRequest } from "./profile.routes.js";
 import { isValidDeviceToken } from "./position-scripts.routes.js";
-import { firstFlowSegment } from "./agent-flow.routes.js";
+import { firstFlowSegment, readFlow } from "./agent-flow.routes.js";
 import { complete, llmConfig, parseJsonObject } from "./agent-llm.js";
 import { deviceReplyProvider, generateDifyReply, hasDifyDeviceToken, ownsReplyDevice } from "../dify/dify-reply.js";
 import { difyGroupNotificationState } from "../dify/dify-group-notification.js";
 import { normalizeInterviewPoints, normalizePositionFacts } from "../../shared/position-facts.js";
 import { positionKnowledge } from './position-knowledge.js';
+import { listExecutionTraces, newExecutionTraceId, writeExecutionTrace } from "./execution-trace.js";
 import {
   buildOrchestration,
   guessCustomerName,
@@ -165,6 +166,28 @@ function buildFacts(db: DatabaseSync, row: PositionRow | undefined): Record<stri
   );
 }
 
+/**
+ * 与 facts 同一套字段的来源说明。这里不猜测 Dify 的内部覆盖规则；
+ * Agent 当前只显示岗位 JSON、城市和厂区这几类招聘系统实际能证明的来源。
+ */
+function buildFactSources(row: PositionRow | undefined, facts: Record<string, string>): Record<string, Record<string, unknown>> {
+  if (!row) return {};
+  const data = safeJson(row.data_json);
+  const source: Record<string, Record<string, unknown>> = {};
+  for (const key of Object.keys(facts)) {
+    if (String(data[key] ?? "").trim()) {
+      source[key] = { kind: "position", label: "岗位资料", position_id: Number(row.id) };
+    } else if (key === "city" && row.city_name) {
+      source[key] = { kind: "city", label: "城市资料", city: String(row.city_name) };
+    } else if (key === "factory_name" && row.factory_name) {
+      source[key] = { kind: "factory", label: "厂区资料", factory: String(row.factory_name) };
+    } else {
+      source[key] = { kind: "derived", label: "系统整理" };
+    }
+  }
+  return source;
+}
+
 function openingOf(db: DatabaseSync, positionId: number) {
   return db
     .prepare(
@@ -245,6 +268,8 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       const row = positionRow(db, positionId);
       if (!row) return reply.code(404).send({ detail: "position not found" });
       const facts = buildFacts(db, row);
+      const factSources = buildFactSources(row, facts);
+      const flow = readFlow(db, positionId);
       const persona = personaOf(db, positionId);
       const opening = openingOf(db, positionId).map((item) => ({
         id: Number(item.id),
@@ -265,6 +290,12 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         persona,
         facts,
         knowledge: positionKnowledge(db, positionId, facts),
+         fact_sources: factSources,
+         flow: {
+           status: flow.status,
+           version: flow.version,
+           entry_key: flow.entry_key,
+         },
         opening,
         scripts: parseScripts(persona).map((script) => ({
           id: script.id,
@@ -275,6 +306,27 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       };
     },
   );
+
+  // ── 执行证据：试答/正式会话都从这里回查 ─────────────────────────
+  app.get<{
+    Querystring: {
+      trace_id?: string;
+      session_key?: string;
+      device_code?: string;
+      position_id?: string;
+      limit?: string;
+    };
+  }>("/api/v1/agent/execution-traces", async (request, reply) => {
+    if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
+    const items = listExecutionTraces(db, {
+      traceId: text(request.query.trace_id).trim(),
+      sessionKey: text(request.query.session_key).trim(),
+      deviceCode: text(request.query.device_code).trim(),
+      positionId: int(request.query.position_id),
+      limit: int(request.query.limit) || 50,
+    });
+    return { items, total: items.length };
+  });
 
   // ── 客户端：开场清单 + 人设 ────────────────────────────────────
   // 鉴权与媒体下载同一套：X-Profile-Token（服务间）或设备 Bearer token。
@@ -338,7 +390,19 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         status,
         text(body.error).slice(0, 500),
       );
-      return { ok: true };
+      const traceId = writeExecutionTrace(db, {
+        sessionKey,
+        deviceCode: text(body.device_code).trim(),
+        positionId: int(body.position_id),
+        engine: "agent",
+        stage: `固定开场第 ${int(body.seq)} 条`,
+        nodeKey: text(body.node_key).trim(),
+        requestText: "",
+        status: status === "sent" ? "succeeded" : status === "failed" ? "failed" : "received",
+        errorMessage: text(body.error).slice(0, 1000),
+        reply: { kind: text(body.kind), seq: int(body.seq), status },
+      });
+      return { ok: true, trace_id: traceId };
     },
   );
 
@@ -672,6 +736,8 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
 
     const persona = personaOf(db, positionId);
     const facts = buildFacts(db, row);
+    const factSources = buildFactSources(row, facts);
+    const flow = readFlow(db, positionId);
     // 今天的日期给模型：interview.date 的「明天/后天」由它换算成具体几月几号
     const nowLabel = todayLabel();
     const opening: OpeningItem[] = openingOf(db, positionId).map((item) => ({
@@ -683,14 +749,41 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
     // （DeepSeek 无状态多轮拼接；上下文归服务端持有）
     const knowledge = positionKnowledge(db, positionId, facts);
     const { messages, scripts } = buildOrchestration({ persona, facts, opening, now: nowLabel, history, input, sentSummary, knowledge });
+    const traceId = newExecutionTraceId();
+    const traceBase = {
+      traceId, sessionKey, deviceCode, positionId, engine: "agent" as const,
+      flowVersion: Number(flow.version || 0), flowStatus: String(flow.status || ""),
+      stage: flow.status === "enabled" ? "等待客户端上报实际节点" : "旧开场/人设对话",
+      requestText: input, facts, factSources,
+      scripts: scripts.map((script) => ({ id: script.id, title: script.title })),
+    };
+    const evidence = {
+      trace_id: traceId, engine: "agent", position_id: positionId, session_key: sessionKey || null,
+      flow: { status: flow.status, version: flow.version, entry_key: flow.entry_key, stage: traceBase.stage },
+      facts, fact_sources: factSources,
+      scripts: scripts.map((script) => ({ id: script.id, title: script.title })),
+    };
+    const saveTrace = (status: "received" | "dry_run" | "succeeded" | "failed", extra: Record<string, unknown> = {}) =>
+      writeExecutionTrace(db, {
+        ...traceBase, status,
+        errorCode: typeof extra.code === "string" ? extra.code : "",
+        errorMessage: typeof extra.error === "string" ? extra.error : "",
+        model: typeof extra.model === "string" ? extra.model : "",
+        usage: extra.usage && typeof extra.usage === "object" ? extra.usage as Record<string, unknown> : {},
+        latencyMs: Number(extra.latency_ms || 0),
+        reply: extra.reply && typeof extra.reply === "object" ? extra.reply as Record<string, unknown> : {},
+      });
 
     // dry：只回拼好的 prompt，不调模型、不写会话。调试台用它确认
     // 「人设 + 事实 + 话术库 + 开场 + 历史」有没有喂对。
     if (body.dry === true) {
+      saveTrace("dry_run");
       return {
         ok: true,
         dry: true,
         knowledge,
+        trace_id: traceId,
+        evidence,
         session_key: sessionKey || null,
         messages,
         facts,
@@ -708,8 +801,17 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       try {
         parsed = parseJsonObject(result.content);
       } catch (error) {
+        saveTrace("failed", {
+          code: "bad_json",
+          error: (error as Error).message,
+          model: result.model,
+          usage: result.usage,
+          latency_ms: result.latency_ms,
+        });
         return {
           ok: false,
+          trace_id: traceId,
+          evidence,
           error: (error as Error).message,
           code: "bad_json",
           raw: result.content,
@@ -722,8 +824,16 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       try {
         replyPayload = normalizeReply(parsed);
       } catch (error) {
+        saveTrace("failed", {
+          code: "invalid_reply",
+          error: (error as Error).message,
+          model: result.model,
+          latency_ms: result.latency_ms,
+        });
         return {
           ok: false,
+          trace_id: traceId,
+          evidence,
           error: (error as Error).message,
           raw: result.content,
           model: result.model,
@@ -894,8 +1004,16 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         }
       }
 
+      saveTrace("succeeded", {
+        model: result.model,
+        usage: result.usage,
+        latency_ms: result.latency_ms,
+        reply: replyPayload,
+      });
       return {
         ok: true,
+        trace_id: traceId,
+        evidence,
         session_key: sessionKey || null,
         reply: replyPayload,
         archive: archive,
@@ -908,8 +1026,11 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       };
     } catch (error) {
       const failure = error as Error & { code?: string };
+      saveTrace("failed", { code: failure.code || "agent_error", error: failure.message });
       return {
         ok: false,
+        trace_id: traceId,
+        evidence,
         error: failure.message,
         code: failure.code || "",
         messages,

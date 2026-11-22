@@ -378,6 +378,16 @@
       try {
         const result = await api("POST", "/api/v1/agent/chat", payload);
         setRaw(dry.checked ? "拼好的 messages（dry，未调模型）" : "接口返回", result);
+        const evidence = result.evidence;
+        if (evidence) {
+          const facts = evidence.facts || {};
+          const sources = evidence.fact_sources || {};
+          const factSummary = Object.entries(facts).slice(0, 4).map(([key, value]) => {
+            const source = sources[key]?.label ? `（${sources[key].label}）` : "";
+            return `${key}=${value}${source}`;
+          }).join("；");
+          bubble("agent", `执行证据：${evidence.engine || "agent"} · ${evidence.flow?.stage || "阶段待上报"}\n${factSummary || "本轮没有可展示的岗位事实"}\ntrace_id：${result.trace_id || evidence.trace_id || "-"}`, "执行追踪");
+        }
 
         if (result.dry) {
           bubble("agent", "dry 模式：没有调用模型，右侧原始 JSON 里是这一轮会发出去的 messages。");

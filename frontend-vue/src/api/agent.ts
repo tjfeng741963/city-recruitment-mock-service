@@ -296,7 +296,36 @@ export interface FlowStateSummary {
   node_key: string
   phase: string
   count: number
+}
+
+export interface AgentExecutionTrace {
+  trace_id: string
+  session_key: string
+  device_code: string
+  customer_id: number
+  position_id: number
+  engine: string
+  flow_version: number
+  flow_status: string
+  stage: string
+  node_key: string
+  request_text: string
+  facts: Record<string, unknown>
+  fact_sources: Record<string, Record<string, unknown>>
+  scripts: Array<Record<string, unknown>>
+  status: string
+  error_code: string
+  error_message: string
+  model: string
+  usage: Record<string, unknown>
+  latency_ms: number
+  reply: Record<string, unknown>
+  created_at: string
   updated_at: string
+  delivery_status: string
+  delivery_message_id: string
+  delivery_detail: string
+  delivery_at: string
 }
 
 export const agentApi = {
@@ -345,6 +374,8 @@ export const agentApi = {
       reply?: { messages: Array<{content: string}> }
       latency_ms?: number
     }>('/api/v1/dify/preview', payload, { timeout: 40000, signal }),
+  executionTraces: (params: PageQuery = {}) =>
+    http.get<{ items: AgentExecutionTrace[]; total: number }>('/api/v1/agent/execution-traces', { params }),
   context: (params: PageQuery = {}) =>
     http.get<Record<string, unknown>>('/api/v1/agent/context', { params }),
   reminderTasks: (params: PageQuery = {}) =>

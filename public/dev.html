@@ -257,6 +257,10 @@
         <h3>模型</h3>
         <div id="ctx-llm" class="empty"></div>
       </div>
+      <div class="sec">
+        <h3>最近执行证据</h3>
+        <div id="ctx-traces" class="empty">选择岗位后加载。</div>
+      </div>
     </div>
     <div class="agent-right">
       <div class="thread" id="thread"></div>
@@ -678,7 +682,12 @@
       $("ctx-facts").append(el("div", "empty", "这个岗位 data_json 是空的，模型拿不到工价。"));
     } else {
       var dl = el("dl", "kv");
-      facts.forEach(function (pair) { dl.append(el("dt", null, pair[0]), el("dd", null, pair[1])); });
+      var sources = context.fact_sources || {};
+      facts.forEach(function (pair) {
+        var source = sources[pair[0]] || {};
+        var sourceLabel = source.label ? " · " + source.label : "";
+        dl.append(el("dt", null, pair[0]), el("dd", null, String(pair[1]) + sourceLabel));
+      });
       $("ctx-facts").append(dl);
     }
 
@@ -716,6 +725,32 @@
     if (!positionId) return;
     var context = await api("GET", "/api/v1/agent/context?position_id=" + positionId);
     renderContext(context);
+    loadTraces(positionId).catch(function (error) {
+      $("ctx-traces").textContent = "执行证据读取失败：" + error.message;
+    });
+  }
+
+  async function loadTraces(positionId) {
+    var box = $("ctx-traces");
+    box.textContent = "加载中…";
+    var result = await api("GET", "/api/v1/agent/execution-traces?position_id=" + encodeURIComponent(positionId) + "&limit=8");
+    box.innerHTML = "";
+    var items = Array.isArray(result.items) ? result.items : [];
+    if (!items.length) {
+      box.textContent = "还没有试答或正式执行记录。";
+      return;
+    }
+    var list = el("div", "seq");
+    items.forEach(function (item) {
+      var facts = Object.entries(item.facts || {}).slice(0, 2).map(function (pair) { return pair[0] + "=" + pair[1]; }).join("；");
+      var row = el("div", "seq-item");
+      var no = el("div", "seq-no", item.status === "succeeded" ? "✓" : item.status === "failed" ? "!" : "·");
+      var body = el("div", "seq-body");
+      body.textContent = (item.status || "-") + " · " + (item.stage || "阶段待上报") + "\n" + (facts || "没有岗位事实") + "\n" + (item.trace_id || "");
+      row.append(no, body);
+      list.append(row);
+    });
+    box.append(list);
   }
 
   function bubble(role, text, note) {
@@ -755,6 +790,14 @@
       });
       $("raw").hidden = false;
       $("raw").textContent = JSON.stringify(result, null, 2);
+      if (result.evidence) {
+        var evidence = result.evidence;
+        var traceFacts = Object.entries(evidence.facts || {}).slice(0, 4).map(function (pair) {
+          var source = (evidence.fact_sources || {})[pair[0]] || {};
+          return pair[0] + "=" + pair[1] + (source.label ? "（" + source.label + "）" : "");
+        }).join("；");
+        bubble("agent", "执行证据：" + (evidence.engine || "agent") + " · " + ((evidence.flow || {}).stage || "阶段待上报") + "\n" + (traceFacts || "本轮没有岗位事实") + "\ntrace_id：" + (result.trace_id || evidence.trace_id || "-"), "执行追踪");
+      }
 
       if (result.dry) {
         bubble("agent", "dry 模式：没调模型，下面是这一轮会发出去的 messages。");
