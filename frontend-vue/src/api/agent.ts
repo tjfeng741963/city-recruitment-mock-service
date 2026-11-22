@@ -54,6 +54,7 @@ export interface DeviceGroup {
 
 export interface LoginQrResult {
   available: boolean
+  login_status?: "logged_in" | "waiting_for_scan" | "waiting_for_qr" | "qr_expired" | "disconnected" | "device_disabled" | "authorization_failed"
   image?: string
   width?: number
   height?: number
@@ -81,8 +82,8 @@ export const devicesApi = {
   remove: (id: number | string) => http.delete<OkResult>(`/api/v1/agent/devices/${id}`),
   groups: (code: string) =>
     http.get<{ items: DeviceGroup[] }>(`/api/v1/agent/devices/${encodeURIComponent(code)}/groups`),
-  loginQr: (code: string) =>
-    http.get<LoginQrResult>(`/api/v1/agent/devices/${encodeURIComponent(code)}/login-qr`),
+  loginQr: (code: string, signal?: AbortSignal) =>
+    http.get<LoginQrResult>(`/api/v1/agent/devices/${encodeURIComponent(code)}/login-qr`, { signal, timeout: 5000 }),
   verifyCodeGet: (code: string) =>
     http.get<VerifyCodeResult>(`/api/v1/agent/devices/${encodeURIComponent(code)}/verify-code`),
   verifyCodePost: (code: string, payload: Record<string, unknown>) =>

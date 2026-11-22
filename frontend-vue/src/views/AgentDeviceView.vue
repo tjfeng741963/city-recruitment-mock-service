@@ -87,7 +87,7 @@
             <el-button v-else-if="!isOnline(row)" link type="primary" size="small" @click="openQr(row)">
               扫码登录
             </el-button>
-            <span v-else class="online-mark">客户端已连接</span>
+            <el-button v-else link type="success" size="small" class="online-mark" @click="openQr(row)" title="查看企微登录状态">客户端已连接</el-button>
           </template>
         </el-table-column>
 
@@ -253,21 +253,18 @@
       @closed="closeQr"
     >
       <div class="qr-body">
-        <div v-if="qrLoading" class="qr-placeholder">正在读取二维码…</div>
-        <img v-else-if="qrResult?.available && qrResult.image" class="qr-image" :src="qrResult.image" alt="登录二维码" />
-        <div v-else class="qr-placeholder">
-          <el-empty description="暂无可用二维码" :image-size="80" />
-          <p v-if="qrDevice && isOnline(qrDevice)" class="dialog-hint">设备在线，没有待扫的二维码。</p>
-          <p v-else class="dialog-hint">请确认设备端已启动扫码登录流程，页面每 3 秒自动刷新。</p>
+        <div class="qr-status" role="status" aria-live="polite">
+          <el-alert :title="qrFeedback.title" :description="qrFeedback.detail"
+            :type="qrFeedback.type" show-icon :closable="false" />
         </div>
-        <p v-if="qrError" class="qr-error">{{ qrError }}</p>
-        <p v-if="qrResult?.captured_at" class="dialog-hint">
-          二维码更新时间：{{ formatDateTime(qrResult.captured_at) }}
-        </p>
-        <div class="qr-refresh-row">
-          <el-button :loading="qrLoading" @click="fetchQr" size="small">刷新二维码</el-button>
+        <template v-if="showQrImage">
+          <img class="qr-image" :src="qrResult?.image" alt="企微登录二维码" />
+          <p v-if="qrResult?.captured_at" class="dialog-hint">二维码更新时间：{{ formatDateTime(qrResult.captured_at) }}</p>
+        </template>
+        <div v-if="qrFeedback.key !== 'disabled'" class="qr-refresh-row">
+          <el-button :loading="qrLoading" @click="fetchQr()" size="small">刷新状态</el-button>
         </div>
-        <div class="verify-row">
+        <div v-if="canSubmitVerifyCode" class="verify-row">
           <el-input
             v-model="verifyCode"
             placeholder="企微短信验证码（4-8 位数字）"
@@ -278,7 +275,11 @@
             提交验证码
           </el-button>
         </div>
-        <p class="dialog-hint">扫码后如企微要求短信验证码，在此提交，设备端会取走并自动输入。</p>
+        <p v-if="canSubmitVerifyCode" class="dialog-hint">仅当企微明确要求短信验证码时提交。</p>
+        <p v-if="qrFeedback.key !== 'disabled'" class="dialog-hint">
+          如果 Win 弹出带倒计时的「设备环境异常」安全验证，请在 Windows 上打开企微验证窗口，
+          用手机企业微信扫窗口内的码，并按屏幕提示完成。超时退出后，请在 Win 重新登录，再完成验证。
+        </p>
       </div>
       <template #footer>
       </template>
@@ -316,7 +317,7 @@ import { deviceWorkflowEntry, isWebTestDevice, deviceOnline } from '../component
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh, Search } from '@element-plus/icons-vue'
-import { devicesApi, type AgentDeviceItem, type DeviceGroup } from '../api/agent'
+import { devicesApi, type AgentDeviceItem, type DeviceGroup, type LoginQrResult } from '../api/agent'
 import { positionsApi } from '../api/core'
 import type { Factory, ServicePosition } from '../api/types'
 import { formatDateTime } from '../utils/format'
@@ -566,36 +567,84 @@ function openWorkflow(row: AgentDeviceItem): void {
 /* ---------- 扫码登录 ---------- */
 const qrVisible = ref(false)
 const qrLoading = ref(false)
-const qrResult = ref<{ available: boolean; image?: string; captured_at?: string } | null>(null)
+const qrResult = ref<LoginQrResult | null>(null)
 const qrError = ref('')
 const qrDevice = ref<AgentDeviceItem | null>(null)
 const verifyCode = ref('')
 const verifySubmitting = ref(false)
+const verifySubmitted = ref(false)
+const loginWasConfirmed = ref(false)
+let qrRequest: AbortController | undefined
 let qrTimer: ReturnType<typeof setInterval> | null = null
 
+const qrFeedback = computed(() => {
+  const feedback = (key: string, title: string, detail: string, type: 'success' | 'warning' | 'info' | 'error' = 'info') =>
+    ({ key, title, detail, type })
+  if (qrError.value) return feedback('error', '登录状态读取失败', qrError.value, 'error')
+  if (!qrResult.value) return feedback('loading', '正在确认登录状态', '等待 Windows 客户端上报。')
+  switch (qrResult.value.login_status) {
+    case 'logged_in':
+      return feedback('success', '企微登录成功', 'Windows 客户端已确认登录。自动回复状态可在微信账号列表查看。', 'success')
+    case 'authorization_failed':
+      return feedback('failed', '设备鉴权失败', '请在 Windows 检查设备配对，再刷新状态。', 'error')
+    case 'device_disabled':
+      return feedback('disabled', '登录失败 · 设备已停用', '启用该设备后可以重新扫码。', 'error')
+    case 'disconnected':
+      return feedback('disconnected', loginWasConfirmed.value ? '登录连接已中断' : '登录暂未确认',
+        '未收到新的 Windows 心跳。请查看 Win 上的企微窗口。', 'warning')
+    case 'qr_expired':
+      return feedback('expired', '二维码截图已过期', '等待 Windows 客户端上传新的截图。', 'warning')
+    case 'waiting_for_scan':
+      return feedback('scan', loginWasConfirmed.value ? '企微已掉登录，等待重新扫码' : '等待扫码登录', verifySubmitted.value ? '验证码已提交，正在等待企微确认。' : '请使用手机企业微信扫描二维码。')
+    default:
+      if (qrResult.value.available && qrResult.value.image) return feedback('scan', '等待扫码登录', '请使用手机企业微信扫描二维码。')
+      return feedback('waiting', loginWasConfirmed.value ? '企微需要重新确认登录' : '等待 Windows 上传二维码',
+        verifySubmitted.value ? '验证码已提交，正在等待企微确认。' : '请确认 Win 上已打开企微登录窗口。', loginWasConfirmed.value ? 'warning' : 'info')
+  }
+})
+
+const showQrImage = computed(() => qrFeedback.value.key === 'scan' && !!qrResult.value?.image)
+const canSubmitVerifyCode = computed(() => ['scan', 'waiting', 'expired'].includes(qrFeedback.value.key))
+
 function openQr(row: AgentDeviceItem): void {
+  closeQrTimer()
   qrDevice.value = row
   qrResult.value = null
   qrError.value = ''
   verifyCode.value = ''
+  verifySubmitted.value = false
+  loginWasConfirmed.value = false
   qrVisible.value = true
   void fetchQr()
-  closeQrTimer()
   qrTimer = setInterval(() => void fetchQr(true), 3000)
 }
 
 async function fetchQr(silent = false): Promise<void> {
   const code = qrDevice.value?.device_code
-  if (!code || !qrVisible.value) return
+  if (!code || !qrVisible.value || qrRequest) return
+  const request = new AbortController()
+  qrRequest = request
   if (!silent) qrLoading.value = true
-  qrError.value = ''
   try {
-    const { data } = await devicesApi.loginQr(code)
+    const { data } = await devicesApi.loginQr(code, request.signal)
+    if (request.signal.aborted || !qrVisible.value || qrDevice.value?.device_code !== code) return
+    qrError.value = ''
     qrResult.value = data
+    if (data.login_status === 'logged_in') {
+      verifyCode.value = ''
+      verifySubmitted.value = false
+      if (!loginWasConfirmed.value) void load(true)
+      loginWasConfirmed.value = true
+    }
   } catch (err: any) {
-    qrError.value = err?.response?.data?.detail || '二维码读取失败'
+    if (!request.signal.aborted) {
+      qrError.value = err?.response?.data?.detail || '暂时无法确认，请稍后重试。'
+    }
   } finally {
-    if (!silent) qrLoading.value = false
+    if (qrRequest === request) {
+      qrRequest = undefined
+      qrLoading.value = false
+    }
   }
 }
 
@@ -609,6 +658,9 @@ onUnmounted(() => {
 })
 
 function closeQrTimer(): void {
+  qrRequest?.abort()
+  qrRequest = undefined
+  qrLoading.value = false
   if (qrTimer) {
     clearInterval(qrTimer)
     qrTimer = null
@@ -624,7 +676,7 @@ function closeQr(): void {
 async function submitVerifyCode(): Promise<void> {
   const code = qrDevice.value?.device_code
   const value = verifyCode.value.trim()
-  if (!code) return
+  if (!code || !canSubmitVerifyCode.value) return
   if (!/^\d{4,8}$/.test(value)) {
     ElMessage.warning('验证码必须是 4-8 位数字')
     return
@@ -632,8 +684,11 @@ async function submitVerifyCode(): Promise<void> {
   verifySubmitting.value = true
   try {
     await devicesApi.verifyCodePost(code, { code: value })
-    ElMessage.success('验证码已提交，等待设备取走')
-    verifyCode.value = ''
+    if (qrVisible.value && qrDevice.value?.device_code === code && qrFeedback.value.key !== 'success') {
+      verifySubmitted.value = true
+      ElMessage.info('验证码已提交，等待企微确认')
+      verifyCode.value = ''
+    }
   } catch (err: any) {
     ElMessage.error(err?.response?.data?.detail || '验证码提交失败')
   } finally {
@@ -773,23 +828,7 @@ onUnmounted(() => { clearInterval(devicePoll); latestDeviceRequest += 1 })
   background: #fff;
 }
 
-.qr-placeholder {
-  width: 100%;
-  min-height: 160px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  border: 1px dashed var(--bd-border);
-  border-radius: 8px;
-  color: var(--bd-text-tertiary);
-}
 
-.qr-error {
-  color: var(--bd-danger);
-  font-size: 12px;
-  margin: 0;
-}
 
 .verify-row {
   display: flex;

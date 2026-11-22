@@ -50,6 +50,8 @@ curl -X POST http://127.0.0.1:8080/api/v1/auth/login \
 
 支持新版运行状态的设备会附带 windows_runtime，包含 connected、wecom_available、reply_ready、reason、sync、backlog。桥接心跳可上报 runtime，服务器只保存状态枚举与计数。超过 60 秒未刷新则标记离线并停止领取网页发送指令。旧客户端继续使用原心跳契约。
 
+GET /api/v1/agent/devices/:code/login-qr 保留原 available 与可用图片字段。另返回 login_status，区分 logged_in、waiting_for_scan、waiting_for_qr、qr_expired、disconnected、device_disabled 和 authorization_failed。新鲜企微登录心跳可确认登录完成，超过两分钟的二维码截图不再返回。限时安全验证由操作者在 Win 的官方企业微信窗口完成。
+
 账号页“工作流配置”统一进入话术流程画布。系统 Agent 按绑定的岗位打开流程，Dify 用 `/recruitment-flow?test_engine=dify&device_code=...` 打开接待测试，并选中有权访问的账号。旧 `/dify-connection` 返回 302，保留设备码和岗位参数。账号回复来源仍由专用接口读取和显式保存，模拟回复通过隔离预览接口调用。
 
 ## 设备人工发送队列的只读检查

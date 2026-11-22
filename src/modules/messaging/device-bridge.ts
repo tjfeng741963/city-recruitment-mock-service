@@ -215,9 +215,9 @@ export class DeviceBridgeStore {
   }
 
   /** 读最新二维码；没有返回 null（网页据此显示「正在等设备上传」）。 */
-  loginQr(code: string): { image_b64: string; width: number; height: number; captured_at: string } | null {
-    const row = this.db.prepare("SELECT image_b64,width,height,captured_at FROM device_login_qr WHERE device_code=?")
-      .get(code) as { image_b64: string; width: number; height: number; captured_at: string } | undefined;
+  loginQr(code: string): { image_b64: string; width: number; height: number; captured_at: string; updated_at: string } | null {
+    const row = this.db.prepare("SELECT image_b64,width,height,captured_at,updated_at FROM device_login_qr WHERE device_code=?")
+      .get(code) as { image_b64: string; width: number; height: number; captured_at: string; updated_at: string } | undefined;
     return row ?? null;
   }
 
