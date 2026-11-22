@@ -101,6 +101,38 @@ describe("Dify second reply route", () => {
       rmSync(dir,{recursive:true,force:true});
     }
   });
+  it("uses the city in a natural Dify question and keeps each conversation on its own job", async () => {
+    const cityJob = (city: string, wage: number, job?:number) => {
+      const c = (app.db.prepare("SELECT id FROM cities WHERE city_name=?").get(city)
+        ?? app.db.prepare("INSERT INTO cities(city_name) VALUES (?) RETURNING id").get(city)) as {id:number};
+      const f = app.db.prepare("INSERT INTO factories(city_id,factory_name,status) VALUES (?,?,'enabled') RETURNING id").get(c.id,city+'地铁') as {id:number};
+      const data = JSON.stringify({wage_text:`${wage}元/班`});
+      if (job) app.db.prepare("UPDATE service_positions SET city_id=?,factory_id=?,position_name=?,data_json=? WHERE id=?").run(c.id,f.id,city+'地铁安检员',data,job);
+      else job = (app.db.prepare("INSERT INTO service_positions(city_id,factory_id,position_name,status,data_json) VALUES (?,?,?,'enabled',?) RETURNING id").get(c.id,f.id,city+'地铁安检员',data) as {id:number}).id;
+      return {factory:f.id,job};
+    };
+    const guangzhou = cityJob("广州",120,position);
+    const nanchang = cityJob("南昌",80);
+    cityJob("杭州",100);
+    app.db.prepare("UPDATE agent_devices SET data_json=json_set(data_json,'$.factory_ids',json(?))").run(JSON.stringify([guangzhou.factory,nanchang.factory]));
+    await select();
+    const model = vi.fn(async (_url: string, request: RequestInit) => {
+      const facts = JSON.parse(JSON.parse(String(request.body)).inputs.position_data);
+      return new Response(JSON.stringify({conversation_id:facts.city,answer:`这块我不能编，请联系招聘员确认。###${facts.city}地铁安检${facts.wage_text}。`}),{status:200});
+    });
+    vi.stubGlobal("fetch",model);
+    const say = async (session:string, question:string) => (await chat(session,question)).json().reply.messages.map((message:{content:string})=>message.content).join("\n");
+    expect(await say("S:nc","我要找南昌的工作")).toContain("南昌地铁安检员");
+    expect(await say("S:nc","多少钱？")).toBe("南昌地铁安检80元/班。");
+    expect(await say("S:gz","广州地铁安检多少钱？")).toBe("广州地铁安检120元/班。");
+    expect(await say("S:nc","再说下工资")).toBe("南昌地铁安检80元/班。");
+    expect(await say("S:gz","南昌地铁安检多少钱？")).toBe("南昌地铁安检80元/班。");
+    expect(await say("S:gz","杭州有哪些岗位？")).toContain("杭州暂时没有可以推荐的岗位");
+    expect(await say("S:gz","广州和南昌哪个工资高？")).toMatch(/你想先了解.*的岗位/);
+    expect(await say("S:gz","发一下面试地址")).toBe("面试地址暂未公布。");
+    expect(await say("S:nc","我要报名")).toContain("暂未开放预约");
+    expect(model).toHaveBeenCalledTimes(4);
+  });
   it("recommends a scoped job, keeps that choice, and records an explicitly confirmed interview once", async () => {
     const city = app.db.prepare("INSERT INTO cities(city_name,province,data_json) VALUES ('验收市','验收省',?) RETURNING id")
       .get(JSON.stringify({ districts: ["青竹区"] })) as { id: number };

@@ -68,7 +68,7 @@ export function configuredMaterialReply(db:DatabaseSync,positionId:number,query:
   if (topic==="interview" && !point && points.length>1) {
     return [text("这个岗位有多个面试点，请从岗位面试安排中选一个。可以回复「查看面试安排」。")];
   }
-  if (topic==="interview" && !point?.address) return [text("当前岗位暂无已确认的面试地址，请联系招聘员核实。")];
+  if (topic==="interview" && !point?.address) return [text("面试地址暂未公布。")];
 
   const kinds:MediaKind[]=[];
   if (topic==="interview" && points.length===1 && (requestsMap || /照片|图片|实拍|图/.test(question))) kinds.push("image");
@@ -86,7 +86,7 @@ export function configuredMaterialReply(db:DatabaseSync,positionId:number,query:
   if (topic==="interview" && point) {
     const name=cleanText(point.name);
     const address=cleanText(point.address);
-    if(!address)return [text("当前岗位暂无已确认的面试地址，请联系招聘员核实。")];
+    if(!address)return [text("面试地址暂未公布。")];
     const source=name && name!==address ? `${name}\n${address}` : address;
     const map=new URL("https://uri.amap.com/search");
     map.searchParams.set("keyword",address.split(/[。\r\n]/,1)[0].trim() || address);
@@ -96,5 +96,5 @@ export function configuredMaterialReply(db:DatabaseSync,positionId:number,query:
   }
   const label=topic==="work"?"工作":topic==="dorm"?"宿舍":"食堂";
   return messages.length ? [text(`这是当前岗位可提供的${label}参考素材。`),...messages]
-    : [text(`当前岗位暂无这类${label}素材，请由招聘员确认。`)];
+    : [text(`这边暂无${label}相关的${kinds.length === 2 ? "照片和视频" : kinds[0] === "video" ? "视频" : "照片"}。`)];
 }

@@ -164,7 +164,7 @@ Dify 的 `city_materials` 也包含岗位表单的同名段落，适用于招聘
 | GET | `/api/v1/agent/devices/:code/reply-provider` | admin | 返回 `{provider:agent/dify,configured:boolean}`，不返回密钥 |
 | PUT | `/api/v1/agent/devices/:code/reply-provider` | admin | body `{provider:agent/dify,fresh_client_state_confirmed:true}`；兼容旧客户端的手动方式。客户端报告支持新切换后必须走 reply-mode |
 
-设备选 Dify 后，`GET /agent/opening` 返回空清单与 `provider:dify`，`POST /agent/chat` 使用绑定岗位资料调用 Dify，返回兼容的 `reply.messages`。设备令牌必须匹配 body.device_code；Dify 模式 session_key 必填。`dry:true` 返回中性岗位输入且不调用模型。Dify 会话以设备、当前登录账号、联系人、岗位和应用配置隔离。失败返回 `ok:false,provider:dify,code,error`，不退回 Agent；金额不在当前事实中则暂停。内置人设与开场不参与 Dify 生成。
+设备选 Dify 后，`GET /agent/opening` 返回空清单与 `provider:dify`。`POST /agent/chat` 默认使用绑定岗位。求职者明确提到的城市在设备绑定范围内且只有一个可匹配岗位时，该会话切换到对应岗位，直接咨询使用该岗位资料。多个匹配岗位由求职者选择，超出绑定范围时说明该城市暂无可推荐岗位。返回兼容的 `reply.messages`。设备令牌必须匹配 `body.device_code`，Dify 模式要求 `session_key`。`dry:true` 返回中性岗位输入且不调用模型。Dify 会话以设备、当前登录账号、联系人、岗位和应用配置隔离。失败返回 `ok:false,provider:dify,code,error`，金额不在当前事实中时暂停发送。
 
 模式二收到明确的图片、视频或面试导航请求时，服务端直接读取现有素材库与所选岗位面试点。回复按现有客户端协议返回文字和 `{type:"image"|"video",name,content}`，其中 `content` 用于网页试答展示素材名称。客户端下载沿用 `GET /api/v1/agent/media/:name`，模式二使用含文件哈希的名称，避免同名素材更新后复用旧文件。发送前查找启用且文件存在的岗位素材。地铁品类使用已有的通用工作图、工作视频和宿舍图。面试图仅用于绑定了该素材且只有一个面试点的岗位。导航以该面试点的地址生成高德地图搜索链接。多个面试点且提问没有指定其一时先要求选择。地图搜索结果需以随消息附上的详细地址核对。
 

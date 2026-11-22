@@ -11,6 +11,7 @@
       <el-option label="系统 Agent" value="agent" />
       <el-option label="Dify 工作流" value="dify" />
     </el-select>
+    <span class="mode-scope">{{ scopeHint(status?.effective ?? currentProvider) }}</span>
 
     <div class="mode-feedback" aria-live="polite">
       <template v-if="pending && status">
@@ -69,6 +70,12 @@ const explanation = computed(() => {
 })
 
 function label(mode: ReplyProvider) { return mode === 'dify' ? 'Dify' : '系统 Agent' }
+
+function scopeHint(mode?: ReplyProvider) {
+  if (mode === 'agent') return 'Agent 使用一个绑定岗位。'
+  if (mode === 'dify') return 'Dify 可接待多个已绑定城市。'
+  return 'Agent 接待单岗，Dify 支持多城市。'
+}
 
 function apply(next: ReplyModeStatus) {
   const previous = status.value
@@ -134,8 +141,9 @@ async function switchMode(target: unknown) {
   confirming.value = true
   try {
     await ElMessageBox.confirm(
-      (current.client_connected ? 'Win 完成当前任务后将切换至 ' : 'Win 重连后将切换至 ')
-        + label(target) + '。发送结果不明的记录会保留待核对。',
+      `机器码 ${props.deviceCode}。${scopeHint(target)}${target === 'dify' ? '在接待设置中多选「绑定工厂」可配置接待范围。' : '将使用接待设置中的「绑定岗位」。'}`
+        + (current.client_connected ? 'Win 完成当前任务后执行切换。' : 'Win 重连后执行切换。')
+        + '发送结果不明的记录会保留待核对。',
       '切换回复来源',
       { confirmButtonText: '确认切换', cancelButtonText: '取消', type: 'warning' },
     )
@@ -167,6 +175,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .mode-control { display: grid; gap: 5px; min-width: 0; padding-block: 3px; }
 .mode-feedback { display: grid; gap: 2px; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.mode-scope { color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.45; }
 .mode-feedback:empty { display: none; }
 .mode-feedback > .el-button { justify-self: start; margin-left: 0; }
 .mode-pending { color: var(--el-color-warning-dark-2); }
