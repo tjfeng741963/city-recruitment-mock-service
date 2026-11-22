@@ -9,7 +9,7 @@
     skipped  不该发（系统会话 / 搜索不到会话名）
     held     知识库失败/非文本，待人工检查后显式重新入队
     unknown  回车已按但回读解密库确认不了落点：结果不明。不自动重发
-             （重发可能重复打扰客户），由 --retry-held 人工重新入队
+             （重发可能重复打扰客户），由 --retry-message 在核对后逐条重新入队
 
 所有查询都以 message_id 做幂等键，重复扫描不会重复回复。
 """
@@ -94,8 +94,46 @@ CREATE TABLE IF NOT EXISTS welcome_deliveries (
     error TEXT NOT NULL DEFAULT '',
     updated_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS reply_recoveries (
+    id INTEGER PRIMARY KEY,
+    conv_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    operator TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    previous_status TEXT NOT NULL,
+    previous_error TEXT,
+    requested_at REAL NOT NULL,
+    outcome TEXT NOT NULL DEFAULT 'queued',
+    outcome_error TEXT,
+    finished_at REAL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_active_reply_recovery
+    ON reply_recoveries(conv_id,message_id) WHERE finished_at IS NULL;
 """
 )
+
+_RECOVERY_TRIGGER = """
+CREATE TRIGGER IF NOT EXISTS record_reply_recovery_result
+AFTER UPDATE OF status, last_step ON reply_log
+WHEN NEW.last_step <> 'recovery-queued'
+BEGIN
+    UPDATE reply_recoveries
+    SET outcome=CASE WHEN NEW.last_step='recovery-failed' THEN 'failed' ELSE NEW.status END,
+        outcome_error=NEW.error,
+        finished_at=CASE WHEN NEW.last_step='sending' THEN NULL
+                         ELSE MAX(requested_at,(julianday('now')-2440587.5)*86400.0) END
+    WHERE conv_id=NEW.conv_id AND message_id=NEW.message_id AND finished_at IS NULL;
+END;
+"""
+
+_RECOVERY_HAS_NEWER_MESSAGE = """EXISTS (
+    SELECT 1 FROM reply_log AS newer
+    WHERE newer.conv_id=selected.conv_id AND TRIM(COALESCE(newer.in_text,''))<>''
+      AND (COALESCE(newer.msg_time,0),newer.id)>(COALESCE(selected.msg_time,0),selected.id)
+)"""
+_SKIP_SUPERSEDED_RECOVERY = f"""UPDATE reply_log AS selected
+    SET status='skipped',last_step='skipped',error='恢复排队后收到更新的消息',replied_at=?
+    WHERE last_step='recovery-queued' AND {_RECOVERY_HAS_NEWER_MESSAGE}"""
 
 
 def _conn() -> sqlite3.Connection:
@@ -170,6 +208,7 @@ def init() -> None:
                 con.execute(f"ALTER TABLE reply_log ADD COLUMN {name} {ddl}")
         con.commit()
         _migrate_reply_log_key(con)
+        con.execute(_RECOVERY_TRIGGER)
         con.commit()
     finally:
         con.close()
@@ -274,11 +313,15 @@ def begin_reply_attempt(message_id: str, conv_id: str, scene: str, reply_text: s
     con = _conn()
     try:
         result = con.execute(
-            "UPDATE reply_log SET status='unknown', error=?, scene=?, reply_text=?, "
-            "last_step='sending', replied_at=? WHERE conv_id=? AND message_id=? "
-            "AND status IN ('pending','failed')",
+            f"""UPDATE reply_log AS selected SET status='unknown', error=?, scene=?, reply_text=?,
+                last_step='sending', replied_at=? WHERE conv_id=? AND message_id=?
+                AND status IN ('pending','failed')
+                AND (last_step<>'recovery-queued' OR NOT {_RECOVERY_HAS_NEWER_MESSAGE})""",
             ("发送被中断时请核对企微实际落点", scene, reply_text, time.time(), str(conv_id), str(message_id)),
         )
+        if result.rowcount == 0:
+            con.execute(_SKIP_SUPERSEDED_RECOVERY + " AND selected.conv_id=? AND selected.message_id=?",
+                        (time.time(), str(conv_id), str(message_id)))
         con.commit()
         return result.rowcount == 1
     finally:
@@ -296,14 +339,16 @@ def has_unconfirmed_opening(conv_id: str) -> bool:
         con.close()
 
 
-def mark_sent(message_id: str, conv_id: str, scene: str, reply_text: str, duration_ms: int = 0) -> None:
+def mark_sent(message_id: str, conv_id: str, scene: str, reply_text: str,
+              duration_ms: int = 0, *, verified: bool = False) -> None:
     con = _conn()
     try:
         con.execute(
             "UPDATE reply_log SET status='sent', scene=?, reply_text=?, error=NULL, "
-            "last_step='sent', attempts=COALESCE(attempts,0)+1, duration_ms=?, "
+            "last_step=?, attempts=COALESCE(attempts,0)+1, duration_ms=?, "
             "replied_at=? WHERE conv_id=? AND message_id=?",
-            (scene, reply_text, max(0, int(duration_ms)), time.time(), str(conv_id), str(message_id)),
+            (scene, reply_text, "sent-confirmed" if verified else "sent",
+             max(0, int(duration_ms)), time.time(), str(conv_id), str(message_id)),
 
         )
         con.commit()
@@ -315,9 +360,16 @@ def mark_failed(message_id: str, conv_id: str, error: str, scene: str = "", repl
     con = _conn()
     try:
         con.execute(
-            "UPDATE reply_log SET status='failed', error=?, scene=?, reply_text=?, "
-            "last_step='failed', attempts=COALESCE(attempts,0)+1, "
-            "replied_at=? WHERE conv_id=? AND message_id=?",
+            """UPDATE reply_log SET (status,last_step)=(
+                   SELECT CASE WHEN is_recovery THEN 'held' ELSE 'failed' END,
+                          CASE WHEN is_recovery THEN 'recovery-failed' ELSE 'failed' END
+                   FROM (SELECT EXISTS (
+                       SELECT 1 FROM reply_recoveries AS recovery
+                       WHERE recovery.conv_id=reply_log.conv_id AND recovery.message_id=reply_log.message_id
+                         AND recovery.finished_at IS NULL
+                   ) AS is_recovery)
+               ), error=?, scene=?, reply_text=?, attempts=COALESCE(attempts,0)+1, replied_at=?
+               WHERE conv_id=? AND message_id=?""",
             (str(error)[:500], scene, reply_text, time.time(), str(conv_id), str(message_id)),
 
         )
@@ -326,7 +378,8 @@ def mark_failed(message_id: str, conv_id: str, error: str, scene: str = "", repl
         con.close()
 
 
-def mark_unknown(message_id: str, conv_id: str, error: str, scene: str = "", reply_text: str = "") -> None:
+def mark_unknown(message_id: str, conv_id: str, error: str, scene: str = "",
+                 reply_text: str = "", *, partial: bool = False) -> None:
     """回车已按但回读确认不了：结果不明。
 
     不能记 sent（可能静默丢失），也不能记 failed（下一轮自动补发会把
@@ -336,9 +389,10 @@ def mark_unknown(message_id: str, conv_id: str, error: str, scene: str = "", rep
     try:
         con.execute(
             "UPDATE reply_log SET status='unknown', error=?, scene=?, reply_text=?, "
-            "last_step='unknown', attempts=COALESCE(attempts,0)+1, "
+            "last_step=?, attempts=COALESCE(attempts,0)+1, "
             "replied_at=? WHERE conv_id=? AND message_id=?",
-            (str(error)[:500], scene, reply_text, time.time(), str(conv_id), str(message_id)),
+            (str(error)[:500], scene, reply_text, "partial" if partial else "unknown",
+             time.time(), str(conv_id), str(message_id)),
 
         )
         con.commit()
@@ -381,7 +435,8 @@ def hold_before(cutoff: float) -> int:
         result = con.execute(
             """UPDATE reply_log SET status='held',last_step='held',
                error='消息已超过自动恢复时限，请人工核对'
-               WHERE status IN ('pending','failed') AND msg_time>0 AND msg_time<?""",
+               WHERE status IN ('pending','failed') AND last_step<>'recovery-queued'
+                 AND msg_time>0 AND msg_time<?""",
             (cutoff,),
         )
         con.commit()
@@ -393,15 +448,95 @@ def hold_before(cutoff: float) -> int:
 def retry_held() -> int:
     con = _conn()
     try:
-        # held（知识库失败）与 unknown（回读未确认）都不参与自动补发，
-        # 都靠这条命令显式重新入队；人工决定重发前先核对企微里有没有发出去。
         cur = con.execute(
-            "UPDATE reply_log SET status='pending', error=NULL, replied_at=NULL, "
-            "last_step='requeued' WHERE status IN ('held','unknown') AND conv_id NOT IN (SELECT conv_id FROM welcome_deliveries WHERE state NOT IN ('sent','cancelled'))"
-
+            """UPDATE reply_log SET status='pending', error=NULL, replied_at=NULL, last_step='requeued'
+               WHERE status='held' AND last_step='held' AND error LIKE 'Agent 暂停，待人工处理：%'
+                 AND NOT EXISTS (SELECT 1 FROM reply_recoveries AS recovery
+                    WHERE recovery.conv_id=reply_log.conv_id AND recovery.message_id=reply_log.message_id)
+                 AND conv_id NOT IN (SELECT conv_id FROM welcome_deliveries WHERE state NOT IN ('sent','cancelled'))"""
         )
         con.commit()
         return cur.rowcount
+    finally:
+        con.close()
+
+
+def queue_reply_recovery(conv_id: str, message_id: str, *, reason: str,
+                         operator: str, legacy_sent: bool = False) -> str:
+    """Queue one operator-reviewed message and save its prior state in the same transaction."""
+    reason = reason.strip()
+    if not conv_id.strip() or not message_id.strip() or not reason or not operator.strip():
+        raise ValueError("恢复需要会话编号、消息编号、核对说明和操作者")
+    con = _conn()
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        row = con.execute(
+            "SELECT id,status,last_step,error,msg_time,in_text FROM reply_log WHERE conv_id=? AND message_id=?",
+            (conv_id, message_id),
+        ).fetchone()
+        if row is None:
+            return "not_found"
+        if row["last_step"] == "recovery-queued":
+            return "already_queued"
+        if row["last_step"] == "sending":
+            return "in_progress"
+        if row["last_step"] == "partial":
+            return "partial"
+        eligible = (row["status"] in ("held", "unknown") if not legacy_sent
+                    else row["status"] == "sent" and row["last_step"] != "sent-confirmed")
+        if not eligible or not (row["in_text"] or "").strip():
+            return "not_eligible"
+        if con.execute(
+            """SELECT 1 FROM reply_log WHERE conv_id=? AND TRIM(COALESCE(in_text,''))<>''
+               AND (COALESCE(msg_time,0),id)>(?,?) LIMIT 1""",
+            (conv_id, row["msg_time"] or 0, row["id"]),
+        ).fetchone():
+            return "superseded"
+        if con.execute(
+            "SELECT 1 FROM welcome_deliveries WHERE conv_id=? AND state NOT IN ('sent','cancelled')",
+            (conv_id,),
+        ).fetchone():
+            return "welcome_pending"
+        con.execute(
+            """INSERT INTO reply_recoveries
+               (conv_id,message_id,operator,reason,previous_status,previous_error,requested_at)
+               VALUES (?,?,?,?,?,?,?)""",
+            (conv_id, message_id, operator, reason, row["status"], row["error"], time.time()),
+        )
+        con.execute(
+            "UPDATE reply_log SET status='pending',error=NULL,last_step='recovery-queued' WHERE id=?",
+            (row["id"],),
+        )
+        con.commit()
+        return "queued"
+    finally:
+        con.close()
+
+
+def recover_interrupted_replies() -> None:
+    """Called under the sender's single-instance lock before processing new input."""
+    con = _conn()
+    try:
+        con.execute("UPDATE reply_log SET last_step='unknown' WHERE status='unknown' AND last_step='sending'")
+        con.commit()
+    finally:
+        con.close()
+
+
+def skip_superseded_reply_recoveries() -> int:
+    con = _conn()
+    try:
+        result = con.execute(_SKIP_SUPERSEDED_RECOVERY, (time.time(),))
+        con.commit()
+        return result.rowcount
+    finally:
+        con.close()
+
+
+def recent_reply_recoveries(limit: int = 20) -> list[dict]:
+    con = _conn()
+    try:
+        return [dict(row) for row in con.execute("SELECT * FROM reply_recoveries ORDER BY id DESC LIMIT ?", (limit,))]
     finally:
         con.close()
 

@@ -4,7 +4,7 @@
 1. 失败"零成本"立即重试下一个会话 → 3 秒连发 3 个客户 → 触发风控掉登录。
    修复：冷却在按键前更新，成败都消耗；连续失败退避最多 4 倍。
 2. "已发送但回读失败"被记成 sent：可能静默丢失。修复：新增 unknown 态，
-   不参与自动补发，--retry-held 人工重新入队。
+   不参与自动补发，人工核对后逐条重新入队。
 """
 
 from __future__ import annotations
@@ -142,7 +142,7 @@ def test_send_events_link_foreground_samples_without_message_content(agent, monk
     assert "hidden-test-body" not in lines and "hidden-test-hint" not in lines
 
 
-def test_retry_held_requeues_unknown_records(tmp_path):
+def test_approved_recovery_requeues_only_selected_unknown_record(tmp_path):
     spec = importlib.util.spec_from_file_location(
         "isolated_reply_store2",
         agent_loader.AGENT_DIR / "reply_store.py",
@@ -157,6 +157,6 @@ def test_retry_held_requeues_unknown_records(tmp_path):
     })
     records.mark_unknown("10", "S:customer", "已发送但回读失败", scene="kb", reply_text="hi")
     assert records.pending(include_failed=True) == []
-    assert records.retry_held() == 1
+    assert records.queue_reply_recovery("S:customer", "10", reason="checked", operator="test") == "queued"
     rows = records.pending(include_failed=True)
     assert len(rows) == 1 and rows[0]["status"] == "pending"

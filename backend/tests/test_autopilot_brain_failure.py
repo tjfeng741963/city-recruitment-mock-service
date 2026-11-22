@@ -102,7 +102,7 @@ def test_agent_mode_without_initialized_brain_uses_configured_reply(agent):
 
 
 def test_retry_held_cli_requeues_and_exits_without_initializing_store(agent, tmp_path, monkeypatch):
-    agent.rlog.mark_held("10", "S:customer", "timeout")
+    agent.rlog.mark_held("10", "S:customer", "Agent 暂停，待人工处理：timeout")
     monkeypatch.setattr(agent, "ROOT", tmp_path)
     monkeypatch.setattr(agent.sys, "argv", ["autopilot.py", "--retry-held"])
     assert agent.main() == 0
@@ -144,6 +144,7 @@ def test_confirmed_first_part_is_not_replayed_when_second_part_fails(agent, monk
 
     assert agent.drain(MagicMock(), CFG)["unknown"] == 1
     assert agent.rlog.recent()[0]["status"] == "unknown"
+    assert agent.rlog.queue_reply_recovery("S:customer", "10", reason="checked", operator="test") == "partial"
     agent.rlog.init()
     agent.drain(MagicMock(), CFG)
     assert [call.args[2] for call in agent.core_send.send.call_args_list] == ["first", "second"]

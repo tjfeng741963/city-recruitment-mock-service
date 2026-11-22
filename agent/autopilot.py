@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import getpass
 import json
 import math
 import os
@@ -1985,8 +1986,13 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             )
         return stats
 
-    if not dry and cfg.get("_reply_mode_enabled"):
-        stats["blocked"] += _hold_expired_replies()
+    if not dry:
+        stats["skipped"] += rlog.skip_superseded_reply_recoveries()
+        if cfg.get("_reply_mode_enabled"):
+            expired = _hold_expired_replies()
+            stats["blocked"] += expired
+            if expired:
+                log("reply_recovery_age_hold", level="warning", scope="send", count=expired)
     items = rlog.pending(include_failed=True)
     # 每个会话选一条作为回复目标：优先「有文本」的最新一条。
     # 企业微信在加好友、撤回、系统提示时会插入 type=1011 之类的空文本记录，
@@ -2022,6 +2028,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         cid = it["conv_id"]
         name = it["conv_name"] or ""
         trace = it.get("trace_id") or ""
+        recovering = it.get("last_step") == "recovery-queued"
         preview = (it["in_text"] or "").strip()[:20].replace("\n", " ") or f"[type={it['in_type']}]"
         agent_medias: list[tuple[str, str]] = []
 
@@ -2068,6 +2075,10 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         hint = _inbound_hint(it)
         flow_state = _flow_store() if not dry else None
         flow_row = flow_state.get(cid) if flow_state is not None else None
+        if recovering and flow_row is not None and flow_row.get("phase") not in ("expired", "followup_sent", "replied"):
+            rlog.mark_held(mid, cid, "此会话有未完成的节点流程，请核对节点后人工处理")
+            stats["blocked"] += 1
+            continue
         try:
             flow = _flow_for_row(flow_row, _load_flow())
         except FlowConfigUnavailable as exc:
@@ -2102,7 +2113,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             stats["skipped"] += 1
             continue
         # Old contacts stay in free conversation after the upgrade.
-        first_contact = _is_first_contact(cid, greeted) if flow_row is None and not dry else False
+        first_contact = _is_first_contact(cid, greeted) if flow_row is None and not dry and not recovering else False
         if flow is not None and not dry and flow_state is not None and (
             (flow_row is None and first_contact) or
             (flow_row is not None and flow_row.get("phase") in ("idle", "running", "awaiting", "followup_due", "held"))
@@ -2179,7 +2190,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 # 加好友会插入 type=1011 的空文本记录，首句常常没有文本；
                 # 所以"是否首次"用会话维度判断（与旧 greet 同一思路）。
                 # 每条都上报回执。文本未确认时停止开场和本轮发送。
-                if not dry and _is_first_contact(cid, greeted):
+                if not dry and not recovering and _is_first_contact(cid, greeted):
                     ores = deepcopy(_brain.opening())
                     if ores.get("blocked"):
                         raise RuntimeError("设备开场鉴权失效，暂停自动发送")
@@ -2224,7 +2235,8 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                     _last_error = detail[:200]
                                     if status == "unknown" or sent_items:
                                         reason = f"开场第 {seq} 项未完成，已有 {sent_items} 项执行成功：{detail}"
-                                        rlog.mark_unknown(mid, cid, reason, "开场", str(item["content"]))
+                                        rlog.mark_unknown(mid, cid, reason, "开场", str(item["content"]),
+                                                          partial=bool(sent_items))
                                         stats["unknown"] += 1
                                         log("wecom_send_hold", level="warning", scope="send", route="opening",
                                             message_id=mid, trace_id=trace, part=seq, completed_items=sent_items)
@@ -2313,7 +2325,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             except Exception as exc:  # noqa: BLE001
                 if opening_claimed:
                     _last_error = f"开场发送流程异常（{type(exc).__name__}），请核对实际落点"
-                    rlog.mark_unknown(mid, cid, _last_error, "开场")
+                    rlog.mark_unknown(mid, cid, _last_error, "开场", partial=bool(sent_items))
                     _consecutive_send_failures += 1
                     stats["unknown"] += 1
                     log(_last_error, level="warning", scope="send", message_id=mid, trace_id=trace)
@@ -2421,10 +2433,10 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             if status == "unknown" or (status == "failed" and confirmed_parts):
                 # 回车已按但回读解密库确认不了落点：结果不明。不能记 sent
                 #（可能静默丢失），也不能记 failed（下轮自动补发可能重复发送）。
-                # 记 unknown 不参与自动补发，--retry-held 由人工核对后重新入队。
+                # 记 unknown 不参与自动补发，核对后只能逐条恢复。
                 if confirmed_parts:
                     detail = f"已确认 {confirmed_parts} 段文本，其余未完成：{detail}"
-                rlog.mark_unknown(mid, cid, detail, scene, text)
+                rlog.mark_unknown(mid, cid, detail, scene, text, partial=bool(confirmed_parts))
                 _last_error = detail[:200]
                 _consecutive_send_failures += 1
                 stats["unknown"] += 1
@@ -2432,7 +2444,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     message_id=mid, trace_id=trace, duration_ms=duration_ms, confirmed_parts=confirmed_parts)
                 break
             elif status == "sent":
-                rlog.mark_sent(mid, cid, scene, text, duration_ms=duration_ms)
+                rlog.mark_sent(mid, cid, scene, text, duration_ms=duration_ms, verified=True)
                 text_recorded = True
                 _consecutive_send_failures = 0
                 _last_error = ""
@@ -2473,7 +2485,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         except Exception as exc:  # noqa: BLE001
             _last_error = f"发送流程异常（{type(exc).__name__}），请核对实际落点"
             if not text_recorded:
-                rlog.mark_unknown(mid, cid, _last_error, scene, text)
+                rlog.mark_unknown(mid, cid, _last_error, scene, text, partial=bool(confirmed_parts))
                 stats["unknown"] += 1
             _consecutive_send_failures += 1
             log("    发送流程异常", level="error", scope="send", exception_type=type(exc).__name__,
@@ -2766,6 +2778,11 @@ def print_history(limit: int = 20) -> None:
         print("人工回执（执行结果 / 上报状态）：")
         for item in manual:
             print(f"  {item['command_id']} {item['status']} / {item['receipt_state']} {item['error']}")
+    recoveries = rlog.recent_reply_recoveries(limit)
+    if recoveries:
+        print("逐条恢复记录")
+        for item in recoveries:
+            print(f"  {item['conv_id']} / {item['message_id']}  {item['previous_status']} → {item['outcome']}")
     rows = rlog.recent(limit)
     if not rows:
         print("还没有记录")
@@ -2777,7 +2794,8 @@ def print_history(limit: int = 20) -> None:
         # UnicodeEncodeError 中断整条命令（历史列表尤其容易踩到）。
         err = f"  [!] {r['error'][:40]}" if r["error"] and r["status"] != "sent" else ""
         print(f"{r['status']:<9}{t:<18}{(r['conv_name'] or '')[:16]:<18}"
-              f"{(r['in_text'] or '')[:20]!r:<24}{r['reply_text'] or '-'}{err}")
+              f"{(r['in_text'] or '')[:20]!r:<24}{r['reply_text'] or '-'}{err}"
+              f"  [{r['conv_id']} / {r['message_id']}]")
     print("\n统计:", rlog.stats())
 
 
@@ -3010,12 +3028,44 @@ def main() -> int:
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--watch", action="store_true")
     ap.add_argument("--dry", action="store_true", help="只登记不发送")
-    ap.add_argument("--list", action="store_true", help="打印回复历史")
+    ap.add_argument("--list", nargs="?", const=20, type=int, metavar="LIMIT", help="打印回复历史（默认 20 条）")
     ap.add_argument("--reset", action="store_true", help="把待发/失败的条目全部作废")
-    ap.add_argument("--retry-held", action="store_true", help="把 held/unknown 记录重新入队后退出，不发送")
+    ap.add_argument("--retry-held", action="store_true", help="重新排队生成回复前就暂停的 Agent 记录")
+    ap.add_argument("--retry-message", nargs=2, metavar=("CONV_ID", "MESSAGE_ID"), help="登记单条消息恢复")
+    ap.add_argument("--verified-unsent", action="store_true", help="已核对企微记录，确认可恢复该条")
+    ap.add_argument("--legacy-sent", action="store_true", help="账本旧版已发记录经人工确认有误")
+    ap.add_argument("--reason", help="单条恢复的核对说明")
     ap.add_argument("--flush-receipts", action="store_true", help="仅补传人工回执后退出，不操作企微")
     ap.add_argument("--device-code", default=argparse.SUPPRESS, help="设备编号，覆盖 config.json（心跳路径参数）")
     args = ap.parse_args()
+    if args.list is not None and args.list < 1:
+        ap.error("--list 条数必须大于零")
+    if args.retry_message:
+        if not args.verified_unsent or not (args.reason or "").strip():
+            ap.error("--retry-message 需要 --verified-unsent 和 --reason")
+        if any((args.list, args.reset, args.retry_held, args.flush_receipts, args.once, args.watch, args.dry)):
+            ap.error("--retry-message 必须单独执行")
+        conv_id, message_id = (value.strip() for value in args.retry_message)
+        if not conv_id or not message_id:
+            ap.error("会话编号和消息编号不能为空")
+        rlog.init()
+        result = rlog.queue_reply_recovery(conv_id, message_id, reason=args.reason,
+                                           operator=getpass.getuser(), legacy_sent=args.legacy_sent)
+        messages = {
+            "queued": "消息已重新排队，等待客户端处理",
+            "already_queued": "这条消息已在恢复队列",
+            "in_progress": "这条消息还在发送中或等待客户端确认上次中断",
+            "partial": "已有部分内容发出，请人工补齐缺失部分",
+            "not_found": "本机账本中找不到这条消息",
+            "not_eligible": "这条消息的状态不符合所选恢复方式，请核对企微出站和账本",
+            "superseded": "该会话已有更新的客户消息",
+            "welcome_pending": "该会话的首句发送仍待核对",
+        }
+        log(messages[result], scope="send", event="reply_recovery_request", outcome=result,
+            conv_id=conv_id, message_id=message_id)
+        return 0 if result in ("queued", "already_queued") else 1
+    if args.verified_unsent or args.legacy_sent or args.reason is not None:
+        ap.error("--verified-unsent、--legacy-sent 和 --reason 仅用于 --retry-message")
 
     # 单实例：只要这次运行会碰企微（发消息 / 抢前台），就必须过同一把锁。
     # 这些命令不发送、不按键鼠，允许并行：
@@ -3037,6 +3087,8 @@ def main() -> int:
     cfg = ensure_registration(cfg, ROOT / "config.json")
 
     rlog.init()
+    if not local_only and not cfg["dry_run"]:
+        rlog.recover_interrupted_replies()
     # 媒体目录每次启动确保存在（G2：C:\agent\media，不存在即创建）
     try:
         core_send.ensure_media_dir()
@@ -3060,11 +3112,11 @@ def main() -> int:
     cfg["_reply_mode_enabled"] = bool(_brain is not None and hasattr(_brain, "sync_reply_mode"))
 
     if args.retry_held:
-        log(f"held/unknown 记录重新入队：{rlog.retry_held()} 条；本次未发送")
+        log(f"生成前暂停的 Agent 记录重新入队 {rlog.retry_held()} 条")
         return 0
 
     if args.list:
-        print_history()
+        print_history(args.list)
         return 0
 
     write_client_state("starting", detail="正在检查企业微信登录状态")
