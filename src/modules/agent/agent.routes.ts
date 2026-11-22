@@ -277,10 +277,33 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     if (!canAccessDevice(getUserScope(db, request.auth!), code)) {
       return reply.code(403).send({ detail: "Device scope required" });
     }
-    const row = bridgeStore.loginQr(code);
-    if (!row) return { available: false };
+    reply.header("Cache-Control", "no-store");
+    const now = Date.now();
+    const enabled = bridgeStore.enabled(code);
+    const bridge = bridgeStore.status(code);
+    const runtime = bridgeStore.runtimeHealth(code);
+    const frame = bridgeStore.loginQr(code);
+    const frameAt = frame ? Date.parse(frame.updated_at.replace(" ", "T") + "Z") : 0;
+    const heartbeatFresh = Boolean(bridge?.heartbeat_at && now - bridge.heartbeat_at <= 60_000);
+    const frameFresh = frame && Number.isFinite(frameAt) && now - frameAt < 120_000;
+    if (!enabled) return { available: false, login_status: "device_disabled" };
+    if (runtime?.connected && runtime.reason === "authorization") {
+      return { available: false, login_status: "authorization_failed" };
+    }
+    if (!frameFresh && bridge && heartbeatFresh && bridge.state === "online" && bridge.account_id &&
+        (!runtime || runtime.wecom_available)) {
+      return { available: false, login_status: "logged_in" };
+    }
+    if (!frameFresh) {
+      const login_status = heartbeatFresh
+        ? bridge?.state === "scanning" && frame ? "qr_expired" : "waiting_for_qr"
+        : bridge?.heartbeat_at ? "disconnected" : frame ? "qr_expired" : "waiting_for_qr";
+      return { available: false, login_status };
+    }
+    const row = frame;
     return {
       available: true,
+      login_status: "waiting_for_scan",
       // 直接给 data URL，前端 <img src> 拿来即用，不用再拼前缀
       image: row.image_b64.startsWith("data:") ? row.image_b64 : `data:image/png;base64,${row.image_b64}`,
       width: row.width,

@@ -61,7 +61,7 @@ describe("device login QR relay", () => {
   it("returns unavailable before the device uploads anything", async () => {
     const res = await read();
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ available: false });
+    expect(res.json()).toEqual({ available: false, login_status: "waiting_for_qr" });
   });
 
   it("stores the image and serves it back as a data URL", async () => {
@@ -113,7 +113,7 @@ describe("device login QR relay", () => {
     const huge = await upload({ image_b64: "A".repeat(2_000_001), width: 1, height: 1 });
     expect([413, 422]).toContain(huge.statusCode);
     // 无论哪一道挡的，都不能真的写进库
-    expect((await read()).json()).toEqual({ available: false });
+    expect((await read()).json()).toEqual({ available: false, login_status: "waiting_for_qr" });
   });
 
   it("clears the stored frame when the device reports recovery", async () => {
@@ -126,9 +126,39 @@ describe("device login QR relay", () => {
       headers: device,
     });
     expect(del.statusCode).toBe(200);
-    expect((await read()).json()).toEqual({ available: false });
+    expect((await read()).json()).toEqual({ available: false, login_status: "waiting_for_qr" });
   });
 
+  it("confirms login after the device clears the frame and reports a fresh heartbeat", async () => {
+    await upload({ image_b64: TINY_PNG, width: 1, height: 1 });
+    const heartbeat = await app.inject({
+      method: "POST", url: "/api/v1/bridge/devices/" + CODE + "/heartbeat",
+      headers: device, payload: { state: "online", account_id: "fixture" },
+    });
+    expect(heartbeat.statusCode).toBe(200);
+    expect((await read()).json()).toMatchObject({ available: true, login_status: "waiting_for_scan" });
+    const clear = await app.inject({ method: "DELETE", url: "/api/v1/bridge/devices/" + CODE + "/login-qr", headers: device });
+    expect(clear.statusCode).toBe(200);
+    expect((await read()).json()).toEqual({ available: false, login_status: "logged_in" });
+  });
+
+  it("does not claim success from an expired heartbeat or return an expired frame", async () => {
+    await upload({ image_b64: TINY_PNG, width: 1, height: 1 });
+    app.db.prepare("UPDATE bridge_devices SET state='online',heartbeat_at=? WHERE device_code=?").run(Date.now() - 61000, CODE);
+    app.db.prepare("UPDATE device_login_qr SET updated_at='2020-01-01 00:00:00' WHERE device_code=?").run(CODE);
+    expect((await read()).json()).toEqual({ available: false, login_status: "disconnected" });
+  });
+
+  it("distinguishes waiting for a QR from a stale one while Win still needs login", async () => {
+    await app.inject({
+      method: "POST", url: "/api/v1/bridge/devices/" + CODE + "/heartbeat",
+      headers: device, payload: { state: "scanning" },
+    });
+    expect((await read()).json()).toEqual({ available: false, login_status: "waiting_for_qr" });
+    await upload({ image_b64: TINY_PNG, width: 1, height: 1 });
+    app.db.prepare("UPDATE device_login_qr SET updated_at='2020-01-01 00:00:00' WHERE device_code=?").run(CODE);
+    expect((await read()).json()).toEqual({ available: false, login_status: "qr_expired" });
+  });
   it("requires user authentication to read", async () => {
     await upload({ image_b64: TINY_PNG, width: 1, height: 1, captured_at: "2026-11-15T10:00:00+08:00" });
     // 带 header 鉴权的路由由 preHandler 统一拦：没有 token 回 403（不是 401）,
