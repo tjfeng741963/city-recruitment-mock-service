@@ -296,6 +296,7 @@ export interface FlowStateSummary {
   node_key: string
   phase: string
   count: number
+  updated_at: string
 }
 
 export interface AgentExecutionTrace {
