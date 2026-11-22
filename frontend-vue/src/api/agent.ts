@@ -27,6 +27,7 @@ export interface AgentDeviceFactory {
 }
 
 export interface AgentDeviceItem extends AgentDevice {
+  is_enabled?: boolean
   windows_runtime?: { connected: boolean; wecom_available: boolean; reply_ready: boolean; reason: string;
     sync: 'unknown' | 'current' | 'catching_up' | 'error'; backlog: number }
   bridge_state?: 'online' | 'offline' | 'scanning'

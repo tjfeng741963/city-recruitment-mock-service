@@ -165,15 +165,28 @@
       </div>
     </div>
 
+    <el-alert v-if="receptionError" type="error" :closable="false" show-icon class="load-error">
+      <template #title>{{ receptionError }}</template>
+      <el-button v-if="receptionCityId" link type="primary" @click="returnToReception()">返回城市设置</el-button>
+    </el-alert>
+
     <!-- 新增 / 编辑 -->
     <el-dialog
       v-model="formVisible"
       :title="editingId ? '接待设置' : '连接新账号'"
       width="640px"
       :close-on-click-modal="false"
-      @closed="resetForm"
+      :close-on-press-escape="!saving"
+      :show-close="!saving"
+      @closed="closeDeviceForm"
     >
-      <el-alert title="先选择接待岗位，再配置对应工作流。保存配置不等于客户端已连接或消息已送达。" type="info" :closable="false" class="load-error" />
+      <el-alert v-if="receptionPosition" title="第 3 步 · 确认接待设置" type="info" :closable="false" class="load-error">
+        <div>将「{{ positionLabel(receptionPosition) }}」绑定为此账号的接待岗位。保存后返回城市查看绑定状态。</div>
+        <div v-if="receptionPreviousPositionId && receptionPreviousPositionId !== receptionPosition.id">
+          原绑定为「{{ positionName(receptionPreviousPositionId) }}」，保存后将替换为所选岗位。
+        </div>
+      </el-alert>
+      <el-alert v-else title="先选择接待岗位，再配置对应工作流。客户端连接状态和消息收发可在各自页面核对。" type="info" :closable="false" class="load-error" />
       <el-form label-width="110px">
         <el-form-item label="客户端标识" required>
           <div class="code-row">
@@ -220,17 +233,21 @@
             v-model="form.position_id"
             filterable
             clearable
+            :disabled="Boolean(receptionPosition)"
             placeholder="请选择设备实际使用的岗位"
             style="width: 100%"
           >
             <el-option
-              v-for="position in positionOptionsForForm"
+              v-for="position in receptionPosition ? [receptionPosition] : positionOptionsForForm"
               :key="position.id"
               :label="positionLabel(position)"
               :value="position.id"
             />
           </el-select>
-          <div class="form-hint">工厂改变后必须同步选择岗位；留空时系统会自动选该工厂的第一个启用岗位。</div>
+          <div v-if="receptionFactoryConflict" class="form-hint" role="alert">
+            此岗位所属工厂不在当前绑定范围内。请在上方加入该工厂，或返回上一步换一个账号。
+          </div>
+          <div v-else-if="!receptionPosition" class="form-hint">工厂改变后必须同步选择岗位；留空时系统会自动选该工厂的第一个启用岗位。</div>
         </el-form-item>
         <el-form-item label="报名通知群">
           <el-input
@@ -240,8 +257,10 @@
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="formVisible = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="saveDevice">保存</el-button>
+        <el-button :disabled="saving" @click="formVisible = false">{{ receptionPosition ? '返回上一步' : '取消' }}</el-button>
+        <el-button type="primary" :loading="saving" :disabled="receptionFactoryConflict" @click="saveDevice">
+          {{ receptionPosition ? '保存并返回城市' : '保存' }}
+        </el-button>
       </template>
     </el-dialog>
 
@@ -310,7 +329,7 @@
 </template>
 
 <script setup lang="ts">
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import ReplyModeSwitch from '../components/agent/ReplyModeSwitch.vue'
 import { deviceWorkflowEntry, isWebTestDevice, deviceOnline } from '../components/agent/device-workflow-entry'
@@ -321,6 +340,10 @@ import { devicesApi, type AgentDeviceItem, type DeviceGroup, type LoginQrResult 
 import { positionsApi } from '../api/core'
 import type { Factory, ServicePosition } from '../api/types'
 import { formatDateTime } from '../utils/format'
+import {
+  cityReceptionAccounts, cityReceptionPositions, cityReceptionReturnLink, positionMatchesFactories,
+  readCityReceptionContext, readCityReceptionId,
+} from '../components/basic/city-reception'
 
 const auth = useAuthStore()
 const canSwitchMode = computed(() => auth.user?.role === 'admin')
@@ -334,6 +357,12 @@ const loading = ref(false)
 const error = ref('')
 const keyword = ref('')
 const router = useRouter()
+const route = useRoute()
+const receptionContext = readCityReceptionContext(route.query)
+const receptionCityId = readCityReceptionId(route.query.reception_city)
+const receptionPosition = ref<ServicePosition | null>(null)
+const receptionPreviousPositionId = ref<number | null>(null)
+const receptionError = ref('')
 const providerFilter = ref('')
 const kindFilter = ref('')
 const onlineFilter = ref('')
@@ -424,9 +453,7 @@ async function loadPositions(): Promise<void> {
 }
 
 const positionOptionsForForm = computed(() => {
-  if (!form.factory_ids.length) return positionOptions.value
-  const selected = new Set(form.factory_ids)
-  return positionOptions.value.filter((position) => position.factory_id == null || selected.has(Number(position.factory_id)))
+  return positionOptions.value.filter(position => positionMatchesFactories(position, form.factory_ids))
 })
 
 function positionLabel(position: ServicePosition): string {
@@ -465,6 +492,9 @@ function generateDeviceCode(): string {
   return `AG-${out}`
 }
 const form = reactive<DeviceForm>(emptyForm())
+const receptionFactoryConflict = computed(() => Boolean(
+  receptionPosition.value && !positionMatchesFactories(receptionPosition.value, form.factory_ids),
+))
 
 function emptyForm(): DeviceForm {
   return {
@@ -480,6 +510,16 @@ function emptyForm(): DeviceForm {
 function resetForm(): void {
   Object.assign(form, emptyForm())
   editingId.value = null
+}
+
+function returnToReception(resume = true): void {
+  if (!receptionCityId) return
+  void router.replace(cityReceptionReturnLink(receptionCityId, resume ? receptionContext?.positionId : undefined))
+}
+
+function closeDeviceForm(): void {
+  if (receptionPosition.value) returnToReception()
+  else resetForm()
 }
 
 function openCreate(): void {
@@ -500,7 +540,48 @@ function openEdit(row: AgentDeviceItem): void {
   formVisible.value = true
 }
 
+async function openCityReception(): Promise<void> {
+  if (!receptionContext) {
+    if (route.query.reception_city !== undefined) receptionError.value = '接待设置链接缺少城市、岗位或账号，请从城市重新进入。'
+    return
+  }
+  const { cityId, positionId, accountId } = receptionContext
+  if (error.value) {
+    receptionError.value = '账号加载失败，请返回城市后重试。'
+    return
+  }
+  try {
+    const { data } = await positionsApi.get(positionId)
+    if (formVisible.value) return
+    if (!cityReceptionPositions([data], cityId).length) {
+      receptionError.value = '所选岗位已停用或不在这个城市，请返回城市重新选择。'
+      return
+    }
+    if (accountId === 'new') {
+      if (!canSwitchMode.value) {
+        receptionError.value = '请联系管理员连接新的接待账号。'
+        return
+      }
+      openCreate()
+      form.device_code = generateDeviceCode()
+    } else {
+      const account = cityReceptionAccounts(devices.value).find(device => device.id === accountId)
+      if (!account) {
+        receptionError.value = '所选账号已不可用，请返回城市重新选择。'
+        return
+      }
+      receptionPreviousPositionId.value = account.position_id ? Number(account.position_id) : null
+      openEdit(account)
+    }
+    receptionPosition.value = data
+    form.position_id = data.id
+  } catch {
+    receptionError.value = '无法读取所选岗位，请返回城市重新选择。'
+  }
+}
+
 async function saveDevice(): Promise<void> {
+  if (saving.value || receptionFactoryConflict.value) return
   if (!form.device_code.trim()) {
     ElMessage.warning('请输入客户端标识')
     return
@@ -518,10 +599,14 @@ async function saveDevice(): Promise<void> {
   try {
     if (editingId.value) {
       await devicesApi.update(editingId.value, payload)
-      ElMessage.success('接待设置已保存；客户端连接后读取，发送结果请在对话管理核对')
+      ElMessage.success('接待设置已保存。实际收发请在对话管理核对。')
     } else {
       await devicesApi.create(payload)
       ElMessage.success('账号配置已创建，还需连接云电脑客户端并登录企业微信')
+    }
+    if (receptionPosition.value) {
+      returnToReception(false)
+      return
     }
     formVisible.value = false
     await load()
@@ -720,9 +805,8 @@ async function openGroups(row: AgentDeviceItem): Promise<void> {
 }
 
 onMounted(() => {
-  void load()
-  void loadFactories()
-  void loadPositions()
+  const initialLoad = Promise.all([load(), loadFactories(), loadPositions()])
+  if (route.query.reception_city !== undefined) void initialLoad.then(openCityReception)
   devicePoll = setInterval(() => { if (!loading.value) void load(true) }, 15000)
 })
 onUnmounted(() => { clearInterval(devicePoll); latestDeviceRequest += 1 })

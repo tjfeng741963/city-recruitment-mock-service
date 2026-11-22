@@ -148,7 +148,7 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
               last_heartbeat_at: bridge.heartbeat_at > 0 ? new Date(bridge.heartbeat_at).toISOString() : null,
             });
           }
-          return { ...serialized, factory_ids: factoryIds, factories: loadFactories(db, factoryIds) };
+          return { ...serialized, is_enabled: row.status === "enabled", factory_ids: factoryIds, factories: loadFactories(db, factoryIds) };
         })
         // 过滤参数用显式断言：展开后的对象类型不带索引签名，
         // 直接取 device_code 会报 TS2339（与运行时无关，纯粹是类型推断的坑）。

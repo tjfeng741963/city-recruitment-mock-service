@@ -118,7 +118,7 @@ export function serializeServicePosition(row: Row): Row {
     else if (key in POSITION_DEFAULTS) result[key] = structuredClone(POSITION_DEFAULTS[key]);
     else result[key] = value ?? "";
   }
-  result.is_active = Boolean(result.is_active);
+  result.is_active = typeof row.status === "string" ? row.status === "enabled" : Boolean(result.is_active);
   result.is_featured = Boolean(result.is_featured);
   result.sort_order = Number(result.sort_order) || 0;
   result.interview_days = Array.isArray(result.interview_days) ? result.interview_days : [];
