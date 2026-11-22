@@ -19,10 +19,10 @@
           </el-form-item>
         </div>
 
-        <el-form-item label="招聘状态">
+        <el-form-item v-if="mode === 'edit'" label="接待配置">
           <div class="status-line">
             <el-tag :type="statusTagType" effect="light">{{ statusText }}</el-tag>
-            <span class="hint">由设备绑定自动判定：设备绑定岗位的城市=招聘中，其余=已停止</span>
+            <span class="hint">有已启用的设备绑定本城的已启用岗位时，显示「已配置接待」。设备在线情况可到微信账号查看。</span>
           </div>
         </el-form-item>
 
@@ -216,7 +216,7 @@ const title = computed(() => {
   return '编辑城市'
 })
 
-const statusText = computed(() => (form.recruitment_status === 'active' ? '招聘中' : '已停止'))
+const statusText = computed(() => (form.recruitment_status === 'active' ? '已配置接待' : '未配置接待'))
 const statusTagType = computed(() => (form.recruitment_status === 'active' ? 'success' : 'info'))
 
 function readObject(value: unknown): Record<string, unknown> {
