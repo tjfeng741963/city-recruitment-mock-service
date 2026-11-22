@@ -99,7 +99,7 @@ export function validateInterview(db: DatabaseSync, positionId: number, schedule
   date: string, slot: string, pointName: string, now = new Date()) {
   const point = schedule.points.find(item => item.name === pointName);
   // Multiple named locations without addresses/hours need staff confirmation.
-  if (!schedule.days.length || !schedule.slots.length || !point?.address) return { error: "该岗位的面试安排需要招聘员确认，请先联系招聘员。" };
+  if (!schedule.days.length || !schedule.slots.length || !point?.address) return { error: "这个面试点暂未开放预约。" };
   const validDate = interviewDate(date, now);
   const validTime = time(slot);
   if (!validDate || !validTime || Date.parse(`${validDate}T${validTime}:00+08:00`) <= now.getTime()) return { error: "请选择未来的面试日期和时间。" };

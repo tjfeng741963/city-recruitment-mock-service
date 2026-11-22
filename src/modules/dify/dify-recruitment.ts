@@ -8,6 +8,7 @@ type Job = { id:number; title:string; city:string; district:string; factory:stri
 type Draft = { name?:string; phone?:string; date?:string; time?:string; point?:string; reviewed?:string };
 type State = { position_id:number|null; draft_json:string; updated_at:string };
 type Booking = { position_id:number; position_name:string|null; interview_date:string; interview_time:string; interview_point:string; interview_address:string };
+const cityLabel = (name: string) => name.trim().replace(/市$/, "");
 
 function jobsForDevice(db:DatabaseSync, device:string, initial:number, preview:boolean) {
   const config = db.prepare("SELECT data_json FROM agent_devices WHERE json_extract(data_json,'$.device_code')=?").get(device) as
@@ -89,15 +90,14 @@ export function recruitmentTurn(db:DatabaseSync, input:{
     FROM agent_archive a LEFT JOIN service_positions p ON p.id=a.position_id WHERE a.session_key=?`).get(archiveKey) as Booking | undefined;
   const saved = input.preview ? undefined : booking();
   const jobs = jobsForDevice(db,input.device,input.initial,input.preview);
-  const chosen = state?.position_id || input.initial;
-  const current = jobs.find(job => job.id === chosen);
+  let current = jobs.find(job => job.id === (saved?.position_id ?? state?.position_id))
+    ?? jobs.find(job => job.id === input.initial);
   const respond = (message:string) => ({ message, positionId:current?.id ?? input.initial });
   const query = input.query.normalize("NFKC").trim().replace(/[。！？!?]+$/, "");
   const isChoose = /^(?:选择岗位|换岗|选岗位)(?:\s+|\s*[:：]\s*)(.+)$/.exec(query)
     ?? /^(?:选择岗位|换岗|选岗位)(\d+)$/.exec(query);
   const named = jobs.filter(job => query === job.title || query === `我选${job.title}` || query === `我要选${job.title}`);
   const wantsList = /有什么岗位|有哪些岗位|推荐.{0,8}(?:岗位|工作)|附近.{0,12}(?:岗位|工作)|^换岗$|换个岗位|看其他岗位/.test(query);
-  const includesRegion = jobs.some(job => [job.city,job.district,...job.districts].some(name => name && query.includes(name)));
   const locationMessage = /^(?:我)?(?:现在)?(?:在|住在).{1,24}(?:区|市|县|镇|街道)$/.test(query);
   const scheduleRequest = /^(?:查看面试安排|可预约时间|面试有哪些时间|可选面试点)$/.test(query);
   const confirm = /^(?:确认报名|确认登记|同意并确认报名)$/.test(query);
@@ -105,14 +105,17 @@ export function recruitmentTurn(db:DatabaseSync, input:{
   const bookingStatus = /报名(?:成功|好了|结果|状态|了吗)|(?:有|是否)登记|我的面试安排/.test(query);
   const starts = /^(?:我想|我要|帮我|可以)?(?:报名|登记面试|预约面试)(?:$|\s|[：:，,])/.test(query);
   const sendsFields = /(?:姓名|名字|电话|手机号|日期|时间|面试点)\s*[:：]/.test(query);
-  const fresh = state?.position_id===chosen && Date.now()-Date.parse(state.updated_at.replace(" ","T")+"Z") < 86400000;
-  const draft = fresh ? parseDeviceData(state.draft_json) as Draft : {};
   const phoneOnly = /^1[3-9]\d{9}$/.test(query);
   const save = (id:number, data:Draft) => {
     db.prepare(`INSERT INTO dify_recruitment_state(identity,position_id,draft_json) VALUES (?,?,?)
       ON CONFLICT(identity) DO UPDATE SET position_id=excluded.position_id,draft_json=excluded.draft_json,updated_at=CURRENT_TIMESTAMP`)
       .run(input.identity,id,JSON.stringify(data));
   };
+  const listJobs = (options: Job[]) => {
+    const list = options.slice(0, 8).map(job => `${job.id}．${[job.city,job.district,job.title,job.factory].filter(Boolean).join(" · ")}`);
+    return respond(`你可以看看这几个岗位\n${list.join("\n")}\n想了解哪一个？回复「选择岗位」加上编号就行。`);
+  };
+  const selectedJobReply = (job:Job) => ({message:`已选择${job.title}。想先看看工资、班次，还是面试安排？`,positionId:job.id});
 
   if (isChoose || named.length) {
     const requested = isChoose?.[1].trim();
@@ -120,15 +123,34 @@ export function recruitmentTurn(db:DatabaseSync, input:{
       ? jobs.filter(job => String(job.id) === requested || job.title === requested)
       : named;
     if (matches.length !== 1) return respond("请选择本设备可选范围内的唯一岗位，可回复「选择岗位 编号」。");
-    if (saved && saved.position_id !== matches[0].id) return respond("原面试已登记，如需换岗或改约，请联系招聘员处理。");
-    save(matches[0].id,{});
-    return {message:`已选择${matches[0].title}。可以继续问工资或工时，回复「查看面试安排」或「报名」可进入面试登记。`,positionId:matches[0].id};
+    if (saved && saved.position_id !== matches[0].id) return respond("原来的面试还保留着。你想换哪个岗位，可以直接告诉我。");
+    if (matches[0].id !== state?.position_id) save(matches[0].id,{});
+    return selectedJobReply(matches[0]);
   }
-  if (wantsList || locationMessage || (!state && includesRegion && /找工作|想找|求职/.test(query))) {
+  if (!sendsFields && !bookingStatus && !confirm && !cancel) {
+    const cityRows = db.prepare("SELECT city_name FROM cities WHERE tenant_id=1").all() as {city_name:string}[];
+    const cityNames = [...new Set(cityRows.map(row => cityLabel(row.city_name)).filter(name => name.length >= 2 && query.includes(name)))];
+    if (cityNames.length > 1) return respond(`你想先了解${cityNames.join("还是")}的岗位？`);
+    const [requestedCity] = cityNames;
+    if (requestedCity) {
+      const cityJobs = jobs.filter(job => cityLabel(job.city) === requestedCity);
+      if (!cityJobs.length) return respond(`${requestedCity}暂时没有可以推荐的岗位。想看看其他城市的话，可以说「推荐岗位」。`);
+      const namedJobs = cityJobs.filter(job => query.includes(job.title));
+      const options = namedJobs.length ? namedJobs : matchingJobs(cityJobs, query);
+      if (wantsList || options.length !== 1) return listJobs(options);
+      const [job] = options;
+      if (saved && saved.position_id !== job.id) return respond("原来的面试还保留着。你想换哪个岗位，可以直接告诉我。");
+      if (job.id !== state?.position_id) save(job.id,{});
+      current = job;
+      if (locationMessage || /^(?:我)?(?:要|想|想要)?找.{1,30}(?:的工作|的岗位|安检员|安保|安检)$/.test(query) || query === requestedCity || query === `${requestedCity}市`) {
+        return selectedJobReply(job);
+      }
+    }
+  }
+  if (wantsList || locationMessage) {
     const options = matchingJobs(jobs,query);
-    if (!options.length) return respond("当前设备未配置可推荐的岗位，请联系招聘员。");
-    const list = options.map(job => `${job.id}．${[job.city,job.district,job.title,job.factory].filter(Boolean).join(" · ")}`);
-    return respond(`当前可选岗位\n${list.join("\n")}\n回复「选择岗位 编号」即可继续咨询或报名。`);
+    if (!options.length) return respond("这边暂时没有可以推荐的岗位。");
+    return listJobs(options);
   }
   if (saved && (bookingStatus || confirm || starts || sendsFields || phoneOnly)) {
     const savedJob = jobs.find(job => job.id === saved.position_id);
@@ -137,29 +159,30 @@ export function recruitmentTurn(db:DatabaseSync, input:{
     }
     return respond(`已登记${saved.position_name || ""}面试，${saved.interview_date} ${saved.interview_time}，${saved.interview_point}，${saved.interview_address}。`);
   }
-  if(saved&&cancel)return respond("面试已登记，请联系招聘员取消。");
-  if (!current) return respond("当前岗位不可用或城市和厂区归属不一致，请联系招聘员核对，可回复「推荐岗位」查看其他岗位。");
+  if(saved&&cancel)return respond("你的面试已登记。你想改约还是取消？可以在这里留言。");
+  if (!current) return respond("这个岗位暂时无法预约。想看看其他岗位吗？可以说「推荐岗位」。");
   if (!scheduleRequest && !confirm && !cancel && !starts && !sendsFields && !phoneOnly && !bookingStatus) return {positionId:current.id};
   if (bookingStatus) return respond("当前会话还没有已确认的面试登记。回复「报名」可以开始。");
 
   const context = difyContext(db,current.id);
-  if (!context || difyContextConflict(context)) return respond("该岗位的面试资料需要招聘员核对。");
+  if (!context || difyContextConflict(context)) return respond("这个岗位的面试安排暂未公布。");
   const schedule = interviewSchedule(db,current.id,context as Record<string,unknown>);
   const availability = [
     current.title,
-    schedule.dayLabels.length ? `面试星期 ${schedule.dayLabels.join("、")}` : "面试星期待招聘员确认",
-    schedule.timeText ? `面试时间 ${schedule.timeText}` : "面试时间待招聘员确认",
-    schedule.points.length ? `面试点 ${schedule.points.map(point=>point.address && point.address!==point.name ? `${point.name}（${point.address}）` : point.name).join("、")}` : "面试点待招聘员确认",
-  ].join("\n");
+    schedule.timeText || (schedule.dayLabels.length ? `面试日 ${schedule.dayLabels.join("、")}` : ""),
+    schedule.points.length ? `面试地点 ${schedule.points.map(point=>point.address && point.address!==point.name ? `${point.name}（${point.address}）` : point.name).join("、")}` : "",
+  ].filter(Boolean).join("\n");
   if (scheduleRequest) return respond(availability);
   if (cancel) {
     save(current.id,{});
     return respond("已清除本次待确认的报名资料。");
   }
   if (!input.preview && !input.canWrite) return respond("请在当前企微会话中完成报名确认。");
+  const fresh = state?.position_id===current.id && Date.now()-Date.parse(state.updated_at.replace(" ","T")+"Z") < 86400000;
+  const draft = fresh ? parseDeviceData(state.draft_json) as Draft : {};
   if (!schedule.days.length || !schedule.slots.length || !schedule.points.some(point=>point.address)) {
     if (draft.reviewed) save(current.id,{...draft,reviewed:undefined});
-    return respond(`${availability}\n当前资料不足以自动登记，请联系招聘员确认。`);
+    return respond(`${availability}\n这个岗位暂未开放预约。`);
   }
   if (sendsFields) Object.assign(draft,parseDraft(query,draft));
   if(sendsFields || phoneOnly)delete draft.reviewed;
@@ -189,7 +212,7 @@ export function recruitmentTurn(db:DatabaseSync, input:{
     .all(input.device,input.session) as {id:number}[];
   const members = /^S:([^_]+)_([^_]+)$/.exec(input.session);
   if (!input.account || !members || !members.slice(1).includes(input.account) || members[1]===members[2] || conversation.length !== 1) {
-    return respond("当前企微单聊尚未同步到招聘后台，请稍后回复「确认报名」重试或联系招聘员。");
+    return respond("这次报名还没提交成功，稍等一下再回复「确认报名」。");
   }
   db.exec("BEGIN IMMEDIATE");
   try {

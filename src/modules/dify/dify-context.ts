@@ -98,6 +98,7 @@ export function difyContextConflict(context:NonNullable<ReturnType<typeof difyCo
 export function difyInput(context:NonNullable<ReturnType<typeof difyContext>>,query:string){
   const {city_materials,knowledge,...core}=context;
   const result={...core,sources:{...core.sources,sections:{} as Record<string,string>},city_materials:{} as Record<string,unknown>,knowledge:[] as typeof knowledge,
+    reply_style:'用简短、自然的招聘接待话术，先回答当前问题。使用已确认的事实。缺项用「这项暂未公布」简短回应，避免解释模型限制或让对方另找招聘员。',
     retrieval:{omitted:0,limit:20000}};
   const tokens=[...new Set((query.toLowerCase().match(/[a-z0-9]+|[\u4e00-\u9fff]{1,2}/g)||[]))];
   const rank=(s:string)=>tokens.reduce((n,t)=>n+(s.toLowerCase().includes(t)?t.length:0),0);

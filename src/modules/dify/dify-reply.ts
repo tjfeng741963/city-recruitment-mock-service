@@ -10,6 +10,14 @@ import { canAccessCity, getUserScope } from "../../auth/user-scopes.js";
 import { beginReplyMode, replyModePending, replyModeRow, replyModeView } from "./reply-mode-transition.js";
 import { recruitmentPositionAvailable, recruitmentTurn, selectedRecruitmentPosition } from "./dify-recruitment.js";
 
+const candidateFacingExclusions = [
+  /(?:不能|无法|不会|不方便|不得|不敢)(?:帮你|替你|给你|随便|胡乱|乱|瞎|凭空)?(?:编|猜|捏造)/,
+  /(?:资料|系统).{0,12}(?:没有提供|未提供|没有写|没写)/,
+  /(?:联系|咨询|问|找|交给|转给|转接|需要|请由|让|待|等).{0,5}(?:招聘员|招聘人员|工作人员|人工客服|人事)/,
+  /(?:招聘员|招聘人员|工作人员|人工客服|人事)(?:协助|介入|确认|核实|处理|接手|回复|答复)/,
+  /协助你表达面试意向|不作录用决定/,
+];
+
 const object = (raw: string): Record<string, unknown> => {
   try { const data = JSON.parse(raw); return data && typeof data === "object" && !Array.isArray(data) ? data : {}; }
   catch { return {}; }
@@ -258,7 +266,7 @@ export async function generateDifyReply(db: DatabaseSync, input:{deviceCode:stri
         if(action.message)return {ok:true,provider:"dify",model:"Dify 招聘流程",session_key:input.sessionKey,
           reply:{messages:[{type:"text",content:action.message.replace(/[【】]/g,c=>c==="【"?"〔":"〕").slice(0,4000)}]},latency_ms:0};
       }catch{
-        return failure("dify_registration_error","招聘系统暂未保存本轮操作，请稍后重试或联系招聘员。");
+        return failure("dify_registration_error","这次报名还没提交成功，请稍后再试。");
       }
     }
     const facts=difyContext(db,positionId);
@@ -300,8 +308,13 @@ export async function generateDifyReply(db: DatabaseSync, input:{deviceCode:stri
       if(blocked())throw new Error("human_takeover");
       if(!recruitmentPositionAvailable(db,input.deviceCode,input.positionId,positionId,input.preview===true))throw new Error("dify_position_changed");
       if (JSON.stringify(difyContext(db,positionId)) !== JSON.stringify(facts)) throw new Error("dify_position_changed");
-      const messages=answer.split("###").map(s=>s.trim()).filter(Boolean).map(content=>({type:"text",content}));
-      if(!messages.length)throw new Error("dify_invalid_reply");
+      const messages = answer.split("###").flatMap(part => {
+        const clauses = part.match(/[^，；。！？!?\n]+[，；。！？!?\n]*/g) || [];
+        const content = clauses.filter(clause => !candidateFacingExclusions.some(rule => rule.test(clause)))
+          .join("").trim().replace(/[，；]+$/, "。");
+        return content ? [{type:"text",content}] : [];
+      });
+      if (!messages.length) messages.push({ type:"text", content:"这项暂时没有已公布的信息。" });
       return {ok:true,provider:"dify",model:"Dify Chatflow",session_key:input.sessionKey,reply:{messages},latency_ms:Date.now()-started};
     } catch(e) {
       const code=e instanceof Error?e.message:"";
