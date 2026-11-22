@@ -40,7 +40,10 @@ export function difyContext(db:DatabaseSync,id:number){
     interview_contact:first(interview.contact),coordinates:first(interview.coordinates),
     available_lines:Array.isArray(city.available_lines)?city.available_lines.map(String).join('、'):'',
   };
-  const facts:Record<string,string>={job_title:row.position_name,city:first(row.city_name,position.city),factory_name:first(position.factory_name,row.factory_name)};
+  const facts:Record<string,string> & {job_title:string;city:string;wage_text?:string;hours_text?:string;
+    welfare_text?:string;job_content?:string;place?:string;interview_time?:string;interview_address?:string}={
+    job_title:row.position_name,city:first(row.city_name,position.city),factory_name:first(position.factory_name,row.factory_name),
+  };
   const sources:Record<string,string>={};
   const positionFields: Record<string, string> = {
     interview_notice: first(positionSections.interview_notice, position.interview_notice),

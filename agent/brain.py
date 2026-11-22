@@ -438,20 +438,23 @@ class Brain:
             log(f"    [流程状态] 上报失败：{exc}")
             return False
 
-    def chat(self, text: str, session_key: str, *, sent_summary: list[str] | None = None) -> dict[str, Any]:
-        """一轮对话。返回 {ok, parts, medias, scene, detail}。
+    def chat(self, text: str, session_key: str, *, sent_summary: list[str] | None = None,
+             turn_id: str = "") -> dict[str, Any]:
+        """一轮对话，按服务端能力返回旧回复或有序发送计划。
 
         会话记忆在服务端（agent_session 表）：客户端只报 session_key + 这句话，
-        不传历史。parts 是纯文本列表（逐条发送）；medias 是 [(kind, name)]
-        媒体占位，当前阶段不真实发送，调用方只记录。
+        不传历史。旧回复继续使用 parts 与 medias。
         """
         payload: dict[str, Any] = {
             "device_code": self.device_code,
             "session_key": (session_key or "").strip()[:120],
             "text": (text or "")[:2000],
+            "ordered_reply": True,
         }
         if sent_summary is not None:
             payload["sent_summary"] = [str(item)[:500] for item in sent_summary[:50]]
+        if turn_id:
+            payload["turn_id"] = turn_id
         try:
             data = self._post("/api/v1/agent/chat", payload)
         except httpx.TimeoutException:
@@ -469,6 +472,23 @@ class Brain:
             }
 
         reply = data.get("reply") or {}
+        if data.get("provider") == "dify" and "delays_before_ms" in reply:
+            messages = reply.get("messages")
+            delays = reply["delays_before_ms"]
+            plan = []
+            valid = isinstance(messages, list) and isinstance(delays, list) and bool(messages) and len(messages) == len(delays)
+            if valid:
+                for item, delay in zip(messages, delays):
+                    kind = item.get("type") if isinstance(item, dict) else None
+                    key = "content" if kind == "text" else "name"
+                    if (kind not in ("text", "image", "video") or not isinstance(item.get(key), str)
+                            or not item[key].strip() or type(delay) is not int or not 0 <= delay <= 30_000):
+                        break
+                    plan.append({"type": kind, key: item[key].strip(), "delay_ms": delay})
+            if not valid or len(plan) != len(messages) or plan[0]["type"] != "text" or plan[0]["delay_ms"] != 0:
+                return {"ok": False, "detail": "Dify 发送计划格式无效"}
+            return {"ok": True, "trace_id": str(data.get("trace_id") or ""), "reply": plan[0]["content"],
+                    "plan": plan, "scene": "Dify", "detail": str(data.get("model") or "Dify")}
         parts: list[str] = []
         medias: list[tuple[str, str]] = []
         for item in reply.get("messages") or []:
