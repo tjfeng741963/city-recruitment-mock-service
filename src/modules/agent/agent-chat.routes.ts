@@ -9,6 +9,7 @@ import { isValidDeviceToken } from "./position-scripts.routes.js";
 import { firstFlowSegment } from "./agent-flow.routes.js";
 import { complete, llmConfig, parseJsonObject } from "./agent-llm.js";
 import { deviceReplyProvider, generateDifyReply, hasDifyDeviceToken, ownsReplyDevice } from "../dify/dify-reply.js";
+import { difyGroupNotificationState } from "../dify/dify-group-notification.js";
 import { normalizeInterviewPoints, normalizePositionFacts } from "../../shared/position-facts.js";
 import { positionKnowledge } from './position-knowledge.js';
 import {
@@ -409,7 +410,11 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       // 与推送判定保持一致：电话 + 面试时间齐全即算「可推送」，姓名缺失不再阻断。
       const complete = Boolean(row.phone && (row.interview_date || row.interview_time));
       let notifyStatus = !complete ? "incomplete" : !groupChat ? "no-group" : "pending";
-      if (complete && groupChat) {
+      if (sessionKey.startsWith("dify:")) {
+        const notice = difyGroupNotificationState(db, deviceCode, sessionKey, groupChat);
+        notifyStatus = notice.status;
+        groupChat = notice.target;
+      } else if (complete && groupChat) {
         const stampCandidates = [
           `group-notify:${sessionKey}:${String(row.updated_at ?? "")}`,
           `group-notify:${sessionKey}:${new Date(String(row.updated_at ?? "")).toISOString()}`,
@@ -423,7 +428,6 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         }
         if (notifyStatus === "pending" && Number(row.group_notified ?? 0)) notifyStatus = "sent";
       }
-      if (sessionKey.startsWith("dify:")) notifyStatus = "archive-only";
       items.push({
         session_key: sessionKey,
         customer_nickname: shared?.nickname || String(row.customer_nickname ?? ""),

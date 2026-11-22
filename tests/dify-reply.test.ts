@@ -132,16 +132,68 @@ describe("Dify second reply route", () => {
     app.db.prepare("UPDATE service_positions SET data_json=json_set(data_json,'$.interview_points[0].address','青竹路20号') WHERE id=?").run(second.id);
     expect((await chat(session,"确认报名")).json().reply.messages[0].content).toContain("请核对报名资料");
     expect(app.db.prepare("SELECT count(*) n FROM agent_archive").get()).toMatchObject({n:0});
+    app.db.prepare("UPDATE agent_devices SET data_json=json_set(data_json,'$.group_chat','验收对接群') WHERE json_extract(data_json,'$.device_code')=?").run(code);
+    const bridge = new DeviceBridgeStore(app.db);
+    bridge.contact(code,"R:100","验收对接群");
+    const archiveList = async () => (await app.inject({url:"/api/v1/agent/archive/list",headers:admin})).json().items;
+    expect((await chat(session,"确认报名")).json().reply.messages[0].content).toContain("已登记");
+    expect((await archiveList())[0].notify_status).toBe("group-unavailable");
+    expect(app.db.prepare("SELECT count(*) n FROM bridge_commands").get()).toMatchObject({n:0});
+    bridge.saveGroups(code,[{conv_id:"R:100", name:"验收对接群"},{conv_id:"R:101", name:"验收对接群"}]);
+    await chat(session,"确认报名");
+    expect(app.db.prepare("SELECT count(*) n FROM bridge_commands").get()).toMatchObject({n:0});
+    bridge.saveGroups(code,[{conv_id:"R:100", name:"验收对接群"},{conv_id:"R:101", name:"其他群"}]);
+    const poll = async () => (await app.inject({method:"POST",url:`/api/v1/bridge/devices/${code}/claim`,headers:device})).json().command;
+    const command = await poll();
+    expect(command).toBeTruthy();
     for (const _ of [1,2]) expect((await chat(session,"确认报名")).json().reply.messages[0].content).toContain("已登记");
     const candidates = (await app.inject({url:"/api/v1/agent/candidates?status=invited",headers:admin})).json();
     expect(candidates.items.filter((item:{device_code:string})=>item.device_code===code)).toEqual([
       expect.objectContaining({name:"小陈",device_code:code,position_id:second.id,interview_date:date,interview_time:"15:00",interview_point:"东门接待处",interview_confirmed:true,has_conversation:true}),
     ]);
-    expect(app.db.prepare("SELECT count(*) n FROM bridge_commands").get()).toMatchObject({n:0});
+    expect(app.db.prepare("SELECT count(*) n FROM bridge_commands").get()).toMatchObject({n:1});
+    const [,month,day] = date.split("-").map(Number);
+    expect(command).toMatchObject({contact_id:"R:100", nickname:"验收对接群", content:`验${month}/${day} 小陈 13800000000 验收厂 青竹区分拣岗 15:00 青竹路20号`});
+    expect((await archiveList())[0].notify_status).toBe("claimed");
+    const receipt = (message_id:string) => app.inject({method:"POST",url:`/api/v1/bridge/devices/${code}/receipts`,
+      headers:device,payload:{command_id:command.id,lease_token:command.lease_token,status:"succeeded",message_id}});
+    expect((await receipt("R:101:55")).statusCode).toBe(422);
+    expect((await receipt("R:100:55")).statusCode).toBe(200);
+    expect((await archiveList())[0].notify_status).toBe("sent");
     const previews = ["报名",draft,"确认报名"];
     for (const text of previews) await app.inject({method:"POST",url:"/api/v1/dify/preview",headers:admin,
       payload:{position_id:second.id,session_key:"dify-preview:registration",text}});
     expect(app.db.prepare("SELECT count(*) n FROM agent_archive").get()).toMatchObject({n:1});
+    expect(app.db.prepare("SELECT count(*) n FROM bridge_commands").get()).toMatchObject({n:1});
+
+    bridge.saveGroups(code,[]);
+    bridge.inboundEvent(code,"R:100:44","R:100","验收群消息");
+    const secondSession="S:test-account_second-registration";
+    bridge.contact(code,secondSession,"第二个验收联系人");
+    await chat(secondSession,`选择岗位 ${second.id}`);
+    await chat(secondSession,draft.replace("小陈","小李"));
+    expect((await chat(secondSession,"确认报名")).json().reply.messages[0].content).toContain("已登记");
+    const next = bridge.claim(code)!;
+    expect(next).toMatchObject({contact_id:"R:100",nickname:"验收对接群"});
+    expect(next.content).toContain("小李");
+    app.db.prepare("UPDATE bridge_commands SET lease_until=0 WHERE id=?").run(next.id);
+    expect((await archiveList()).find((item:{name:string})=>item.name==="小李").notify_status).toBe("unknown");
+    bridge.receipt(code,next.id,next.lease_token,"unknown");
+    expect((await archiveList()).find((item:{name:string})=>item.name==="小李").notify_status).toBe("unknown");
+    await chat(secondSession,"确认报名");
+    expect(app.db.prepare("SELECT count(*) n FROM bridge_commands").get()).toMatchObject({n:2});
+
+    const thirdSession="S:test-account_third-registration";
+    bridge.contact(code,thirdSession,"第三个验收联系人");
+    await chat(thirdSession,`选择岗位 ${second.id}`);
+    await chat(thirdSession,draft.replace("小陈","小吴"));
+    expect((await chat(thirdSession,"确认报名")).json().reply.messages[0].content).toContain("已登记");
+    expect((await archiveList()).find((item:{name:string})=>item.name==="小吴").notify_status).toBe("queued");
+    bridge.saveGroups(code,[{conv_id:"R:100", name:"旧对接群"},{conv_id:"R:101", name:"验收对接群"}]);
+    expect(bridge.claim(code)).toBeNull();
+    expect((await archiveList()).find((item:{name:string})=>item.name==="小吴").notify_status).toBe("failed");
+    app.db.prepare("UPDATE agent_devices SET data_json=json_set(data_json,'$.group_chat','现在绑定的群') WHERE json_extract(data_json,'$.device_code')=?").run(code);
+    expect((await archiveList()).find((item:{name:string})=>item.name==="小陈").group_chat).toBe("验收对接群");
   });
   it("saves provider separately without exposing keys, rejects device writes",async()=>{
     expect([401,403]).toContain((await app.inject({method:"PUT",url:`/api/v1/agent/devices/${code}/reply-provider`,headers:device,payload:{provider:"dify"}})).statusCode);

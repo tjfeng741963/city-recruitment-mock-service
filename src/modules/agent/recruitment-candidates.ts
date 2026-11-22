@@ -28,7 +28,8 @@ export function recruitmentCandidates(db: DatabaseSync): Row[] {
     if (archive.has_conversation) byCustomer.set(identity(archive.device_code, archive.customer_id), row);
   }
   const conversations = db.prepare(`SELECT * FROM agent_conversations
-    WHERE COALESCE(external_conversation_id,'') NOT LIKE 'group:%' ORDER BY updated_at DESC,id DESC`).all() as Row[];
+    WHERE COALESCE(external_conversation_id,'') NOT LIKE 'group:%'
+      AND COALESCE(external_conversation_id,'') NOT LIKE 'R:%' ORDER BY updated_at DESC,id DESC`).all() as Row[];
   for (const conversation of conversations) {
     const key = identity(conversation.device_code, conversation.customer_id);
     if (byCustomer.has(key)) continue;

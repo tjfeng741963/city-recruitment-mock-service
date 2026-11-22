@@ -178,11 +178,12 @@
 
   // ── 页面内容 ─────────────────────────────────────────────────
   const STATUS_TEXT = {
-    sent: "已推送群聊", queued: "待设备发送", failed: "推送失败",
-    no_group: "未绑群聊", incomplete: "信息未齐", pending: "待推送",
+    sent: "已推送群聊", queued: "待设备发送", claimed: "设备发送中", failed: "推送失败",
+    unknown: "发送结果待核对", "no-group": "未绑群聊", "group-unavailable": "未确认目标群",
+    incomplete: "信息未齐", pending: "待推送",
   };
   const PILL_CLASS = (status) =>
-    ["sent", "queued", "failed", "no-group", "incomplete", "pending"].includes(status) ? status : "pending";
+    Object.hasOwn(STATUS_TEXT, status) ? status : "pending";
 
   async function paintPage() {
     if (!pageEl) return;

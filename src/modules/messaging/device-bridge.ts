@@ -1,6 +1,7 @@
 import { replyModePending } from "../dify/reply-mode-transition.js";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
+import { DIFY_GROUP_NOTIFICATION_PREFIX, deviceInviteGroupBinding, ensureGroupConversation, resolveDeviceInviteGroup } from "../../shared/invite-group.js";
 import type { MessageChannelProvider, OutboundMessageInput, OutboundMessageResult } from "./message-channel-provider.js";
 import { NOOP_NOTIFIER, type StreamNotifier } from "./stream-events.js";
 
@@ -281,13 +282,13 @@ export class DeviceBridgeStore {
       return { customer_id: customerId, source_event_id: sourceEventId, created: Number(inserted.changes) === 1 };
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
-  enqueue(input: OutboundMessageInput): BridgeCommand {
+  enqueue(input: OutboundMessageInput, { queueWhileOffline = false } = {}): BridgeCommand {
     const old = this.db.prepare("SELECT * FROM bridge_commands WHERE device_code=? AND idempotency_key=?").get(input.deviceCode, input.idempotencyKey) as unknown as BridgeCommand | undefined;
     if (old) {
       if (old.customer_id !== input.customerId || old.content !== input.content) throw new BridgeError("Bridge idempotency conflict");
       return old;
     }
-    if (!this.enabled(input.deviceCode) || this.status(input.deviceCode)?.state !== "online") throw new BridgeError("Message device is offline");
+    if (!this.enabled(input.deviceCode) || (!queueWhileOffline && this.status(input.deviceCode)?.state !== "online")) throw new BridgeError("Message device is offline");
     const mapping = this.db.prepare("SELECT contact_id FROM bridge_contacts WHERE device_code=? AND customer_id=?").get(input.deviceCode, input.customerId) as { contact_id: string } | undefined;
     if (!mapping) throw new BridgeError("Contact mapping required");
     const id = randomUUID();
@@ -325,10 +326,24 @@ export class DeviceBridgeStore {
 
   claim(code: string): (BridgeCommand & { nickname: string }) | null {
     this.expireClaims(code);
-    if (replyModePending(this.db, code) || this.status(code)?.state !== "online") return null;
+    const device = this.status(code);
+    if (!this.enabled(code) || replyModePending(this.db, code) || device?.state !== "online") return null;
     const health = this.runtimeHealth(code);
     if (health && !health.reply_ready && health.reason !== "auto_send_failed") return null;
-    const next = this.db.prepare("SELECT id FROM bridge_commands WHERE device_code=? AND status='queued' ORDER BY created_at,rowid LIMIT 1").get(code) as { id: string } | undefined;
+    const pending = this.db.prepare("SELECT * FROM bridge_commands WHERE device_code=? AND status='queued' ORDER BY created_at,rowid LIMIT 1");
+    let next = pending.get(code) as unknown as BridgeCommand | undefined;
+    while (next?.idempotency_key.startsWith(DIFY_GROUP_NOTIFICATION_PREFIX)) {
+      const archiveKey = next.idempotency_key.slice(DIFY_GROUP_NOTIFICATION_PREFIX.length);
+      const archive = this.db.prepare(`SELECT dify_account_id FROM agent_archive WHERE session_key=?
+        AND dify_device_code=? AND interview_confirmed=1`).get(archiveKey, code) as { dify_account_id: string } | undefined;
+      const group = resolveDeviceInviteGroup(this.db, code, deviceInviteGroupBinding(this.db, code));
+      if (archive?.dify_account_id === device.account_id && group?.conv_id === next.contact_id) {
+        ensureGroupConversation(this.db, code, group.conv_id, group.name);
+        break;
+      }
+      this.db.prepare("UPDATE bridge_commands SET status='failed' WHERE id=? AND status='queued'").run(next.id);
+      next = pending.get(code) as unknown as BridgeCommand | undefined;
+    }
     if (!next) return null;
     const claimed = this.db.prepare("UPDATE bridge_commands SET status='claimed',lease_token=?,lease_until=? WHERE id=? AND status='queued'")
       .run(randomBytes(24).toString("hex"), this.now() + 60_000, next.id);
@@ -346,6 +361,12 @@ export class DeviceBridgeStore {
     const command = this.command(id);
     if (!command || command.device_code !== code || !lease || command.lease_token !== lease) throw new BridgeError("Invalid command receipt", 403);
     if (status === "succeeded" && !messageId.trim()) throw new BridgeError("Successful receipt requires message_id", 422);
+    if (status === "succeeded" && !simulated && command.idempotency_key.startsWith(DIFY_GROUP_NOTIFICATION_PREFIX)) {
+      const prefix = command.contact_id + ":";
+      if (!messageId.startsWith(prefix) || !messageId.slice(prefix.length).trim()) {
+        throw new BridgeError("Receipt does not match the target group", 422);
+      }
+    }
     if (["succeeded", "failed"].includes(command.status)) {
       if (command.status !== status || command.message_id !== messageId || Boolean(command.simulated) !== simulated) throw new BridgeError("Conflicting receipt");
       return;
