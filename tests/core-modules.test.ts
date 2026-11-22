@@ -39,6 +39,22 @@ describe("core CRUD modules", () => {
     expect(positions.json().items[0]).not.toHaveProperty("featured");
   });
 
+  it("distinguishes an offline enabled account from a disabled account and respects legacy position status", async () => {
+    const headers = { authorization: `Bearer ${token}` };
+    const account = app.db.prepare("INSERT INTO agent_devices(device_name,status,data_json) VALUES (?,?,?)");
+    account.run("离线启用账号", "enabled", JSON.stringify({ device_code: "city-reception-enabled" }));
+    account.run("停用账号", "disabled", JSON.stringify({ device_code: "city-reception-disabled" }));
+    const deviceList = await app.inject({ url: "/api/v1/agent/devices", headers });
+    expect(deviceList.json().items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ device_code: "city-reception-enabled", online: false, is_enabled: true }),
+      expect.objectContaining({ device_code: "city-reception-disabled", online: false, is_enabled: false }),
+    ]));
+    const legacy = app.db.prepare("INSERT INTO service_positions(position_name,city_id,status,data_json) VALUES (?,1,'disabled','{}')")
+      .run("旧停用岗位");
+    const position = await app.inject({ url: `/api/v1/service-positions/${legacy.lastInsertRowid}`, headers });
+    expect(position.json()).toMatchObject({ is_active: false });
+  });
+
   it("edits city basics without overwriting newer recruitment defaults or legacy data", async () => {
     const headers = { authorization: `Bearer ${token}` };
     const city = await app.inject({

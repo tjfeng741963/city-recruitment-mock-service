@@ -51,7 +51,8 @@
     </div>
 
     <div class="table-wrapper">
-      <el-table v-loading="loading" :data="pagedCities" row-key="id">
+      <el-table v-loading="loading" :data="pagedCities" row-key="id" highlight-current-row
+        :current-row-key="returnCityId ?? undefined">
         <template #empty>
           <el-empty description="暂无城市数据，点击右上角「添加城市」开始配置" />
         </template>
@@ -63,15 +64,18 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="接待配置" min-width="125">
+        <el-table-column label="接待配置" min-width="155">
           <template #default="{ row }">
             <el-tooltip :content="row.recruitment_status === 'active'
-              ? '有已启用的设备绑定本城的已启用岗位。在线情况可到微信账号查看。'
-              : '暂无已启用的设备绑定本城的已启用岗位。可从查看岗位核对岗位状态。'">
+              ? '有已启用的账号绑定本城的已启用岗位。'
+              : '还没有已启用的账号绑定本城的已启用岗位。'">
               <el-tag :type="row.recruitment_status === 'active' ? 'success' : 'info'" effect="light">
                 {{ row.recruitment_status === 'active' ? '已配置接待' : '未配置接待' }}
               </el-tag>
             </el-tooltip>
+            <div v-if="row.recruitment_status !== 'active'" class="reception-action">
+              <el-button link type="primary" @click="openReception(row)">设置招聘接待</el-button>
+            </div>
           </template>
         </el-table-column>
         <el-table-column prop="province" label="省份" min-width="110" />
@@ -109,6 +113,63 @@
       </div>
     </div>
 
+    <el-dialog
+      v-model="receptionVisible"
+      :title="`${receptionCity?.city_name || ''} · 设置招聘接待`"
+      width="min(calc(100vw - 32px), 520px)"
+      :close-on-click-modal="false"
+      @closed="closeReception"
+    >
+      <div v-loading="receptionLoading" class="reception-content">
+        <h3 v-if="receptionStep === 'position'">第 1 步 · 选择接待岗位</h3>
+        <h3 v-else>第 2 步 · 选择接待账号</h3>
+        <el-alert v-if="receptionError" :title="receptionError" :closable="false" type="error" show-icon />
+        <template v-else-if="receptionStep === 'position'">
+          <p v-if="!receptionLoading && !receptionPositions.length">
+            这座城市还没有启用的岗位。先到招聘岗位添加或启用岗位，再回来设置接待。
+          </p>
+          <el-form v-else label-position="top">
+            <el-form-item label="接待岗位">
+              <el-select v-model="receptionPositionId" placeholder="选择本城市的启用岗位" filterable>
+                <el-option v-for="position in receptionPositions" :key="position.id"
+                  :value="position.id" :label="position.position_name" />
+              </el-select>
+            </el-form-item>
+          </el-form>
+        </template>
+        <template v-else>
+          <p>接待岗位：<strong>{{ receptionPosition?.position_name }}</strong></p>
+          <el-form label-position="top">
+            <el-form-item label="接待账号">
+              <el-select v-model="receptionAccountId" placeholder="选择负责这个岗位的账号" filterable>
+                <el-option v-for="account in receptionAccounts" :key="account.id" :value="account.id"
+                  :label="receptionAccountLabel(account)" />
+                <el-option v-if="auth.user?.role === 'admin'" value="new" label="连接新账号" />
+              </el-select>
+            </el-form-item>
+          </el-form>
+          <p v-if="!receptionLoading && !receptionAccounts.length && auth.user?.role !== 'admin'">
+            当前没有可设置的接待账号，请联系管理员连接账号。
+          </p>
+          <p v-else-if="receptionAccountId === 'new'">保存绑定后，还需要连接客户端并登录企业微信。</p>
+          <p v-else-if="chosenAccount?.position_id && Number(chosenAccount.position_id) !== receptionPositionId">
+            该账号已绑定其他岗位。保存接待设置后，所选岗位将替换原绑定。
+          </p>
+        </template>
+      </div>
+      <template #footer>
+        <el-button v-if="receptionStep === 'position'" @click="receptionVisible = false">取消</el-button>
+        <el-button v-else :disabled="receptionLoading" @click="receptionStep = 'position'">上一步</el-button>
+        <el-button v-if="receptionError" type="primary" @click="retryReception">重试</el-button>
+        <el-button v-else-if="receptionStep === 'position' && !receptionLoading && !receptionPositions.length"
+          type="primary" @click="receptionCity && router.push(cityPositionsLink(receptionCity.id))">查看岗位</el-button>
+        <el-button v-else-if="receptionStep === 'position'" type="primary"
+          :disabled="!receptionPositionId" :loading="receptionLoading" @click="chooseReceptionAccount">下一步</el-button>
+        <el-button v-else type="primary" :disabled="!receptionAccountId" :loading="receptionLoading"
+          @click="continueReception">下一步</el-button>
+      </template>
+    </el-dialog>
+
     <CityFormDrawer
       v-model="formVisible"
       :mode="formMode"
@@ -131,14 +192,21 @@
 </template>
 
 <script setup lang="ts">
-import {  computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh, Search, ArrowDown } from '@element-plus/icons-vue'
-import { citiesApi, factoriesApi, apiErrorMessage } from '../api/core'
+import { citiesApi, factoriesApi, positionsApi, apiErrorMessage } from '../api/core'
 import type { City, Factory } from '../api/core'
+import { devicesApi, type AgentDeviceItem } from '../api/agent'
+import type { ServicePosition } from '../api/types'
 import { formatDateTime, toArray } from '../utils/format'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
+import { useAuthStore } from '../stores/auth'
 import { cityPositionsLink } from '../layouts/navigation'
+import { deviceOnline } from '../components/agent/device-workflow-entry'
+import {
+  cityReceptionAccountLink, cityReceptionAccounts, cityReceptionPositions, cityReceptionReturnLink, readCityReceptionId,
+} from '../components/basic/city-reception'
 import CityFormDrawer from '../components/basic/CityFormDrawer.vue'
 import CityFactoryDrawer from '../components/basic/CityFactoryDrawer.vue'
 import CityHistoryDrawer from '../components/basic/CityHistoryDrawer.vue'
@@ -148,6 +216,10 @@ interface CityRow extends City {
 }
 
 const router = useRouter()
+const route = useRoute()
+const auth = useAuthStore()
+const returnCityId = readCityReceptionId(route.query.reception_city)
+const returnPositionId = readCityReceptionId(route.query.position_id)
 const cities = ref<CityRow[]>([])
 const loading = ref(false)
 const keyword = ref('')
@@ -161,6 +233,18 @@ const historyVisible = ref(false)
 const formMode = ref<'create' | 'edit'>('create')
 const activeCityId = ref<number | null>(null)
 const activeCityName = ref('')
+const receptionVisible = ref(false)
+const receptionLoading = ref(false)
+const receptionError = ref('')
+const receptionCity = ref<CityRow | null>(null)
+const receptionStep = ref<'position' | 'account'>('position')
+const receptionPositions = ref<ServicePosition[]>([])
+const receptionPositionId = ref<number | null>(null)
+const receptionAccounts = ref<AgentDeviceItem[]>([])
+const receptionAccountId = ref<number | 'new' | null>(null)
+const receptionPosition = computed(() => receptionPositions.value.find(position => position.id === receptionPositionId.value))
+const chosenAccount = computed(() => receptionAccounts.value.find(account => account.id === receptionAccountId.value))
+let receptionRequest = 0
 
 const activeCount = computed(() => cities.value.filter((city) => city.recruitment_status === 'active').length)
 const inactiveCount = computed(() => cities.value.filter((city) => city.recruitment_status !== 'active').length)
@@ -181,7 +265,7 @@ const pagedCities = computed(() => {
 
 
 // 筛选变化时回到第 1 页，避免停在空页
-watch([[keyword], [statusFilter]], () => {
+watch([keyword, statusFilter], () => {
   page.value = 1
 })
 
@@ -211,6 +295,76 @@ async function load(): Promise<void> {
     ElMessage.error(apiErrorMessage(error, '城市列表加载失败'))
   } finally {
     loading.value = false
+  }
+}
+
+async function openReception(city: CityRow, resumePositionId: number | null = null): Promise<void> {
+  const request = ++receptionRequest
+  receptionCity.value = city
+  receptionStep.value = 'position'
+  receptionPositions.value = []
+  receptionPositionId.value = null
+  receptionAccounts.value = []
+  receptionAccountId.value = null
+  receptionError.value = ''
+  receptionLoading.value = true
+  receptionVisible.value = true
+  try {
+    const { data } = await positionsApi.list({ page: 1, page_size: 1000, city_name: city.city_name })
+    if (request !== receptionRequest) return
+    receptionPositions.value = cityReceptionPositions(data.items || [], city.id)
+  } catch (error) {
+    if (request === receptionRequest) receptionError.value = apiErrorMessage(error, '岗位加载失败')
+  } finally {
+    if (request === receptionRequest) receptionLoading.value = false
+  }
+  if (request === receptionRequest && receptionVisible.value &&
+    receptionPositions.value.some(position => position.id === resumePositionId)) {
+    receptionPositionId.value = resumePositionId
+    await chooseReceptionAccount()
+  }
+}
+
+async function chooseReceptionAccount(): Promise<void> {
+  if (!receptionPosition.value) return
+  const request = ++receptionRequest
+  receptionStep.value = 'account'
+  receptionError.value = ''
+  receptionLoading.value = true
+  try {
+    const { data } = await devicesApi.list()
+    if (request === receptionRequest) receptionAccounts.value = cityReceptionAccounts(data.items || [])
+  } catch (error) {
+    if (request === receptionRequest) receptionError.value = apiErrorMessage(error, '账号加载失败')
+  } finally {
+    if (request === receptionRequest) receptionLoading.value = false
+  }
+}
+
+function receptionAccountLabel(account: AgentDeviceItem): string {
+  const name = account.name || account.device_name || account.device_code
+  const code = name === account.device_code ? '' : ` · ${account.device_code}`
+  const current = receptionPositions.value.find(position => position.id === Number(account.position_id))
+  const binding = current?.position_name || (account.position_id ? '其他岗位' : '未绑定岗位')
+  return `${name}${code} · ${deviceOnline(account) ? '在线' : '离线'} · ${binding}`
+}
+
+function retryReception(): void {
+  if (receptionStep.value === 'account') void chooseReceptionAccount()
+  else if (receptionCity.value) void openReception(receptionCity.value)
+}
+
+function continueReception(): void {
+  if (!receptionCity.value || !receptionPosition.value || !receptionAccountId.value) return
+  const link = cityReceptionAccountLink(
+    receptionCity.value.id, receptionPosition.value.id, receptionAccountId.value,
+  )
+  void (returnPositionId ? router.replace(link) : router.push(link))
+}
+
+function closeReception(): void {
+  if (returnCityId && returnPositionId && route.name === 'cities') {
+    void router.replace(cityReceptionReturnLink(returnCityId))
   }
 }
 
@@ -263,7 +417,15 @@ async function removeCity(row: CityRow): Promise<void> {
   }
 }
 
-onMounted(load)
+onMounted(async () => {
+  await load()
+  if (!returnCityId) return
+  const index = cities.value.findIndex(city => city.id === returnCityId)
+  if (index < 0) return
+  page.value = Math.floor(index / pageSize.value) + 1
+  const city = cities.value[index]
+  if (returnPositionId && city) await openReception(city, returnPositionId)
+})
 </script>
 
 <style scoped>
@@ -282,5 +444,22 @@ onMounted(load)
 
 .status-select {
   width: 150px;
+}
+
+.reception-action {
+  margin-top: 4px;
+}
+
+.reception-content {
+  min-height: 108px;
+}
+
+.reception-content h3 {
+  margin: 0 0 12px;
+  font-size: 15px;
+}
+
+.reception-content .el-select {
+  width: 100%;
 }
 </style>

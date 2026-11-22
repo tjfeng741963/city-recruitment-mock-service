@@ -30,6 +30,8 @@
 | POST | `/api/v1/auth/login` | 无 | 账号密码换 token，body `{username,password}` |
 | GET | `/api/v1/service-positions?page=1&page_size=1000` | 用户 | 岗位列表，前端用它拿岗位 id 与名称 |
 
+岗位列表和详情的 `is_active` 反映已保存的岗位启用状态，旧数据同样适用。
+
 岗位创建 `POST /api/v1/service-positions` 会将所属城市的工资、工时、招聘要求、社保及面试时间/地址复制到空白岗位字段；只在创建时执行，修改城市不会覆盖已有岗位。岗位更新 `PUT /api/v1/service-positions/:id` 将表单资料映射为当前 Agent 事实，`is_active` 同步 SQL 状态；停用后停止下发开场并拒绝真实回复。
 
 登录示例：
@@ -50,7 +52,7 @@ curl -X POST http://127.0.0.1:8080/api/v1/auth/login \
 
 ## 微信账号列表的回复来源
 
-`GET /api/v1/agent/devices` 沿用登录鉴权及用户设备范围过滤，`items[]` 新增安全字段 `reply_provider: "agent" | "dify"`。只有配置值为 dify 时返回 dify，其余与实际运行默认一致返回 agent；不返回 Dify 密钥或连接凭据。页面用该字段展示回复来源并选择入口，不通过 GET 改变来源。已配对设备额外返回 bridge_state（online、offline 或 scanning）和 last_heartbeat_at（UTC ISO 8601 或 null）。只有启用设备在 60 秒内上报 online 时，online 和 status 才为 true。
+`GET /api/v1/agent/devices` 沿用登录鉴权及用户设备范围过滤，`items[]` 新增安全字段 `reply_provider: "agent" | "dify"`。只有配置值为 dify 时返回 dify，其余与实际运行默认一致返回 agent；不返回 Dify 密钥或连接凭据。页面用该字段展示回复来源并选择入口，不通过 GET 改变来源。已配对设备额外返回 bridge_state（online、offline 或 scanning）和 last_heartbeat_at（UTC ISO 8601 或 null）。只有启用设备在 60 秒内上报 online 时，online 和 status 才为 true。`is_enabled` 为账号的后台启用状态，供城市接待设置筛选账号。已启用的离线账号也可绑定岗位。
 
 支持新版运行状态的设备会附带 windows_runtime，包含 connected、wecom_available、reply_ready、reason、sync、backlog。桥接心跳可上报 runtime，服务器只保存状态枚举与计数。超过 60 秒未刷新则标记离线并停止领取网页发送指令。旧客户端继续使用原心跳契约。
 
