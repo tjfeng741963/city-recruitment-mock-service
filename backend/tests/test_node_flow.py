@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tests.agent_loader import load_autopilot, load_reply_store
+from tests.agent_loader import load_autopilot, load_reply_store, stub_text_readback
 
 
 FLOW = {
@@ -31,6 +31,7 @@ CFG = {"cooldown": 0, "device_code": "pc", "dry_run": False}
 @pytest.fixture
 def agent(tmp_path, monkeypatch):
     module = load_autopilot()
+    stub_text_readback(module, monkeypatch)
     module._brain = MagicMock()
     module._brain.flow.return_value = json.loads(json.dumps(FLOW))
     module._brain.chat.return_value = {"ok": True, "reply": "这是答疑", "parts": ["这是答疑"], "medias": []}
@@ -124,6 +125,27 @@ def test_legacy_first_contact_does_not_call_chat_after_opening(agent):
     incoming(agent, 2, "工资多少")
     agent.drain(MagicMock(), CFG)
     agent._brain.chat.assert_called_once()
+
+
+def test_unconfirmed_legacy_opening_holds_even_when_another_message_arrives(agent):
+    agent._brain.flow.return_value = {"nodes": [], "version": 0}
+    agent._brain.opening.return_value = {"ok": True, "items": [
+        {"seq": 1, "kind": "text", "content": "欢迎", "delay_ms": 0},
+        {"seq": 2, "kind": "image", "media_name": "sample.png", "delay_ms": 0},
+    ]}
+    agent.core_send.send.return_value = {"ok": True, "conversation_id": "", "detail": "库里还没读到"}
+    incoming(agent)
+    assert agent.drain(MagicMock(), CFG)["unknown"] == 1
+    agent._brain.log_receipt.assert_called_once()
+    assert agent._brain.log_receipt.call_args.args[3] == "failed"
+
+    agent.rlog.init()
+    incoming(agent, 2, "又发了一条")
+    assert agent.drain(MagicMock(), CFG)["blocked"] == 1
+    assert {row["message_id"]: row["status"] for row in agent.rlog.recent()} == {"1": "unknown", "2": "held"}
+    agent.core_send.send.assert_called_once()
+    agent.core_send.paste_media.assert_not_called()
+    agent._brain.chat.assert_not_called()
 
 
 def test_revoked_legacy_opening_holds_without_falling_back_to_ai(agent):

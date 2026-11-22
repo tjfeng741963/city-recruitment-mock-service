@@ -61,7 +61,7 @@ def test_result_committed_before_http_and_retries_after_restart_without_sending(
     bridge.receipt = verify_durable
     store = _mock_store()
     store.self_id.return_value = "owner"
-    store.messages.side_effect = [[], [{"id": 102, "sender_id": "owner", "text": COMMAND["content"]}]]
+    store._conn.return_value.execute.return_value.fetchall.side_effect = [[], [(102, COMMAND["content"])]]
     assert agent.pump_commands(store, _cfg(), bridge=bridge)["sent"] == 1
     agent.core_send.send.assert_called_once()
     replay = restart(agent)
@@ -78,7 +78,7 @@ def test_unverified_send_stays_unknown_after_receipt_recovery_and_new_lease(agen
     bridge = ReceiptBridge(dict(COMMAND), TimeoutError("response lost"))
     store = _mock_store()
     store.self_id.return_value = "owner"
-    store.messages.return_value = []
+    store._conn.return_value.execute.return_value.fetchall.return_value = []
     assert agent.pump_commands(store, _cfg(), bridge=bridge) == {"claimed": 1, "sent": 0, "failed": 1}
     assert pending(agent, bridge)[0]["status"] == "unknown"
     assert pending(agent, bridge)[0]["message_id"] == ""

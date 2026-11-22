@@ -130,21 +130,66 @@ def test_only_unique_new_outbound_in_expected_conversation_succeeds(database, tm
 def test_unreadable_snapshot_cannot_report_success(database, tmp_path, unreadable, monkeypatch):
     agent = load_autopilot()
     agent.rlog = load_reply_store(tmp_path / "reply_log.db")
-    reader = database.store.messages
+    reader = database.store._conn
     if unreadable == "before":
-        monkeypatch.setattr(database.store, "messages", MagicMock(side_effect=OSError("unreadable")))
+        monkeypatch.setattr(database.store, "_conn", lambda name: None)
     elif unreadable == "self-id":
         monkeypatch.setattr(database.store, "self_id", lambda: "")
 
     def sender(*args, **kwargs):
         database.insert(102)
         if unreadable == "before":
-            monkeypatch.setattr(database.store, "messages", reader)
+            monkeypatch.setattr(database.store, "_conn", reader)
         elif unreadable == "after":
-            monkeypatch.setattr(database.store, "messages", MagicMock(side_effect=OSError("unreadable")))
+            monkeypatch.setattr(database.store, "_conn", MagicMock(side_effect=sqlite3.OperationalError("unreadable")))
         return {"ok": True, "conversation_id": COMMAND["contact_id"], "detail": "ok"}
 
     agent.core_send.send.side_effect = sender
     bridge = FakeBridge(dict(COMMAND))
     assert agent.pump_commands(database.store, _cfg(), bridge=bridge)["sent"] == 0
     assert bridge.receipts[-1][2:] == ("unknown", "")
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_manual_attachment_waits_for_target_message_readback(database, tmp_path, confirmed):
+    agent = load_autopilot()
+    agent.rlog = load_reply_store(tmp_path / "reply_log.db")
+    agent.core_send.split_media_marks.return_value = (COMMAND["content"], [("image", "sample.png")])
+
+    def paste_media(*args, **kwargs):
+        # An early paste must not be able to manufacture the text evidence.
+        if not confirmed:
+            database.insert(102)
+        return True, "pressed Enter"
+
+    def send(*args, **kwargs):
+        if confirmed:
+            database.insert(102)
+        return {"ok": True, "conversation_id": "", "detail": "no core readback"}
+
+    agent.core_send.send.side_effect = send
+    agent.core_send.paste_media.side_effect = paste_media
+    bridge = FakeBridge(dict(COMMAND))
+    assert agent.pump_commands(database.store, _cfg(), bridge=bridge)["sent"] == int(confirmed)
+    assert agent.core_send.paste_media.call_count == int(confirmed)
+
+
+@pytest.mark.parametrize("route", ["auto", "opening", "node"])
+@pytest.mark.parametrize("new_rows", [0, 1, 2])
+def test_automatic_sends_also_require_unique_new_target_row(database, route, new_rows):
+    database.insert(101)
+    agent = load_autopilot()
+
+    def send(*args, **kwargs):
+        for offset in range(new_rows):
+            database.insert(102 + offset)
+        return {"ok": True, "conversation_id": COMMAND["contact_id"], "detail": "core matched"}
+
+    agent.core_send.send.side_effect = send
+    status, _, message_id = agent._send_text(
+        database.store, COMMAND["nickname"], COMMAND["contact_id"], COMMAND["content"],
+        route=route, log_fn=MagicMock(),
+    )
+
+    assert status == ("sent" if new_rows == 1 else "unknown")
+    assert bool(message_id) is (new_rows == 1)

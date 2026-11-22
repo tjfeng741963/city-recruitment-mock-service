@@ -96,10 +96,9 @@ def test_manual_receipt_correlates_only_one_new_confirmed_database_message(new_i
     autopilot = _load_autopilot()
     store = _mock_store()
     store.self_id.return_value = "owner"
-    old = {"id": 101, "sender_id": "owner", "text": COMMAND["content"]}
-    store.messages.side_effect = [[old], [old, *[
-        {"id": mid, "sender_id": "owner", "text": COMMAND["content"]} for mid in new_ids
-    ], {"id": 104, "sender_id": "customer", "text": COMMAND["content"]}]]
+    old = (101, COMMAND["content"])
+    query = store._conn.return_value.execute
+    query.return_value.fetchall.side_effect = [[old], [old, *((mid, COMMAND["content"]) for mid in new_ids)]]
     autopilot.core_send.send.return_value = {
         "ok": True, "conversation_id": COMMAND["contact_id"] if confirmed else "", "detail": "ok",
     }
@@ -108,6 +107,7 @@ def test_manual_receipt_correlates_only_one_new_confirmed_database_message(new_i
         "claimed": 1, "sent": int(status == "succeeded"), "failed": int(status == "unknown"),
     }
     assert bridge.receipts[-1][2:] == (status, expected)
+    assert all(call.args[1] == (COMMAND["contact_id"], "owner") for call in query.call_args_list)
     store.refresh.assert_not_called()
 
 
@@ -127,7 +127,7 @@ def test_claim_sends_with_keyboard_and_reports_success(monkeypatch, capsys):
     bridge = FakeBridge(command=dict(COMMAND))
     store = _mock_store()
     store.self_id.return_value = "owner"
-    store.messages.side_effect = [[], [{"id": 102, "sender_id": "owner", "text": COMMAND["content"]}]]
+    store._conn.return_value.execute.return_value.fetchall.side_effect = [[], [(102, COMMAND["content"])]]
 
     stats = autopilot.pump_commands(store, _cfg(cooldown=0.0), bridge=bridge, wecom_state="online")
 
