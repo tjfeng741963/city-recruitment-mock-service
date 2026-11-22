@@ -129,6 +129,8 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 | GET | `/api/v1/agent/candidates/:key/messages?before_id=` | admin | 只读查看登记对应的真实对话，按精确 session_key 关联设备及客户；每页最多 200 条，不清未读、不发送 |
 | POST | `/api/v1/agent/chat` | admin/设备令牌 | 一轮对话，body `{position_id,session_key,text,dry,sent_summary?}`；岗位停用时真实回复返回 409，dry QA 可继续使用 |
 | GET | `/api/v1/agent/execution-traces?trace_id=&session_key=&device_code=&position_id=&limit=` | admin | 查询试答或正式会话的岗位、资料来源、流程版本和结果证据 |
+| POST | `/api/v1/agent/execution-traces` | admin/设备令牌 | 为客户端直接执行的流程节点创建执行记录，返回 `trace_id` |
+| POST | `/api/v1/agent/execution-traces/:trace_id/delivery` | admin/设备令牌 | 客户端回传真实发送结果：`{status,message_id,detail,device_code,session_key,node_key}` |
 | GET | `/api/v1/agent-flow?position_id=:id` | admin | 读取岗位节点流程、节点、边和画布视口 |
 | PUT | `/api/v1/agent-flow` | admin | 事务保存整张流程图并递增 version |
 | POST | `/api/v1/agent-flow/migrate` | admin | 从旧 `position_opening` 生成停用的初始流程 |

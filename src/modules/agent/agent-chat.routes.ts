@@ -13,6 +13,7 @@ import { difyGroupNotificationState } from "../dify/dify-group-notification.js";
 import { normalizeInterviewPoints, normalizePositionFacts } from "../../shared/position-facts.js";
 import { positionKnowledge } from './position-knowledge.js';
 import { listExecutionTraces, newExecutionTraceId, writeExecutionTrace } from "./execution-trace.js";
+import { updateExecutionTraceDelivery } from "./execution-trace.js";
 import {
   buildOrchestration,
   guessCustomerName,
@@ -326,6 +327,54 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       limit: int(request.query.limit) || 50,
     });
     return { items, total: items.length };
+  });
+
+  app.post<{ Params: { trace_id: string }; Body: Record<string, unknown> }>(
+    "/api/v1/agent/execution-traces/:trace_id/delivery",
+    async (request, reply) => {
+      if (!isAdmin(request) && !isValidDeviceToken(db, request)) return reply.code(403).send(ADMIN_REQUIRED);
+      const traceId = text(request.params.trace_id).trim().slice(0, 120);
+      const status = text(request.body?.status).trim();
+      if (!traceId || !["sent", "failed", "unknown", "skipped"].includes(status)) {
+        return reply.code(422).send({ detail: "trace_id and status(sent/failed/unknown/skipped) are required" });
+      }
+      const updated = updateExecutionTraceDelivery(db, traceId, {
+        status: status as "sent" | "failed" | "unknown" | "skipped",
+        messageId: text(request.body?.message_id),
+        detail: text(request.body?.detail || request.body?.error),
+        deviceCode: text(request.body?.device_code),
+        sessionKey: text(request.body?.session_key),
+        nodeKey: text(request.body?.node_key),
+      });
+      if (!updated) return reply.code(404).send({ detail: "Execution trace not found" });
+      return { ok: true, trace_id: traceId, delivery_status: status };
+    },
+  );
+
+  app.post<{ Body: Record<string, unknown> }>("/api/v1/agent/execution-traces", async (request, reply) => {
+    if (!isAdmin(request) && !isValidDeviceToken(db, request)) return reply.code(403).send(ADMIN_REQUIRED);
+    const positionId = int(request.body?.position_id);
+    const requestText = text(request.body?.request_text || request.body?.text);
+    if (positionId <= 0 || !requestText.trim()) return reply.code(422).send({ detail: "position_id and request_text are required" });
+    const row = positionRow(db, positionId);
+    if (!row) return reply.code(404).send({ detail: "position not found" });
+    const facts = buildFacts(db, row);
+    const traceId = writeExecutionTrace(db, {
+      traceId: text(request.body?.trace_id).trim() || undefined,
+      sessionKey: text(request.body?.session_key),
+      deviceCode: text(request.body?.device_code),
+      positionId,
+      engine: text(request.body?.engine) === "dify" ? "dify" : "agent",
+      flowVersion: int(request.body?.flow_version),
+      flowStatus: text(request.body?.flow_status),
+      stage: text(request.body?.stage),
+      nodeKey: text(request.body?.node_key),
+      requestText,
+      facts,
+      factSources: buildFactSources(row, facts),
+      status: "received",
+    });
+    return { ok: true, trace_id: traceId };
   });
 
   // ── 客户端：开场清单 + 人设 ────────────────────────────────────

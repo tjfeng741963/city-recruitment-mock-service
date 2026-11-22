@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 
 export type ExecutionTraceStatus = "received" | "dry_run" | "succeeded" | "failed";
+export type ExecutionDeliveryStatus = "sent" | "failed" | "unknown" | "skipped";
 
 export interface ExecutionTraceInput {
   traceId?: string;
@@ -102,6 +103,38 @@ export function listExecutionTraces(
   return rows.map(serializeExecutionTrace);
 }
 
+export function updateExecutionTraceDelivery(
+  db: DatabaseSync,
+  traceId: string,
+  input: {
+    status: ExecutionDeliveryStatus;
+    messageId?: string;
+    detail?: string;
+    deviceCode?: string;
+    sessionKey?: string;
+    nodeKey?: string;
+  },
+): boolean {
+  const result = db.prepare(
+    `UPDATE agent_execution_trace
+        SET delivery_status=?, delivery_message_id=?, delivery_detail=?, delivery_at=CURRENT_TIMESTAMP,
+            device_code=CASE WHEN ?<>'' THEN ? ELSE device_code END,
+            session_key=CASE WHEN ?<>'' THEN ? ELSE session_key END,
+            node_key=CASE WHEN ?<>'' THEN ? ELSE node_key END,
+            updated_at=CURRENT_TIMESTAMP
+      WHERE trace_id=?`,
+  ).run(
+    input.status,
+    String(input.messageId || "").slice(0, 200),
+    String(input.detail || "").slice(0, 1000),
+    String(input.deviceCode || "").slice(0, 120), String(input.deviceCode || "").slice(0, 120),
+    String(input.sessionKey || "").slice(0, 120), String(input.sessionKey || "").slice(0, 120),
+    String(input.nodeKey || "").slice(0, 120), String(input.nodeKey || "").slice(0, 120),
+    traceId,
+  );
+  return Number(result.changes) > 0;
+}
+
 function parseJson(value: unknown, fallback: unknown): unknown {
   if (typeof value !== "string") return value ?? fallback;
   try { return JSON.parse(value); } catch { return fallback; }
@@ -132,5 +165,9 @@ function serializeExecutionTrace(row: Record<string, unknown>): Record<string, u
     reply: parseJson(row.reply_json, {}),
     created_at: String(row.created_at || ""),
     updated_at: String(row.updated_at || ""),
+    delivery_status: String(row.delivery_status || ""),
+    delivery_message_id: String(row.delivery_message_id || ""),
+    delivery_detail: String(row.delivery_detail || ""),
+    delivery_at: String(row.delivery_at || ""),
   };
 }

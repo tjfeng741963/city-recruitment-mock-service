@@ -333,10 +333,10 @@ class Brain:
         kind: str,
         status: str,
         error: str = "",
-    ) -> None:
+    ) -> str:
         """开场逐条回执。失败也上报（status=failed），运营在库里能查到。"""
         try:
-            self._post(
+            data = self._post(
                 "/api/v1/agent/opening/log",
                 {
                     "session_key": session_key,
@@ -347,8 +347,69 @@ class Brain:
                     "error": error,
                 },
             )
+            return str(data.get("trace_id") or "")
         except Exception as exc:  # noqa: BLE001  回执是尽力而为，不能打断发送
             log(f"    [回执] 上报失败：{exc}")
+            return ""
+
+    def log_delivery(
+        self,
+        trace_id: str,
+        status: str,
+        *,
+        session_key: str = "",
+        node_key: str = "",
+        message_id: str = "",
+        detail: str = "",
+    ) -> None:
+        """把真实企微发送/回读结果关联到一次 Agent 执行记录。"""
+        trace_id = str(trace_id or "").strip()
+        if not trace_id:
+            return
+        try:
+            self._post(
+                f"/api/v1/agent/execution-traces/{trace_id}/delivery",
+                {
+                    "status": str(status or "unknown"),
+                    "message_id": str(message_id or "")[:200],
+                    "detail": str(detail or "")[:1000],
+                    "device_code": self.device_code,
+                    "session_key": str(session_key or "")[:120],
+                    "node_key": str(node_key or "")[:120],
+                },
+            )
+        except Exception as exc:  # noqa: BLE001  证据上报失败不能阻断键鼠发送
+            log(f"    [执行证据] 发送结果上报失败：{exc}")
+
+    def start_trace(
+        self,
+        *,
+        position_id: int,
+        session_key: str,
+        request_text: str,
+        flow_version: int = 0,
+        stage: str = "",
+        node_key: str = "",
+    ) -> str:
+        """为客户端直接执行的节点创建一条可回查的执行记录。"""
+        try:
+            data = self._post(
+                "/api/v1/agent/execution-traces",
+                {
+                    "position_id": int(position_id),
+                    "device_code": self.device_code,
+                    "session_key": str(session_key or "")[:120],
+                    "request_text": str(request_text or "")[:2000],
+                    "engine": "agent",
+                    "flow_version": int(flow_version or 0),
+                    "stage": str(stage or "")[:200],
+                    "node_key": str(node_key or "")[:120],
+                },
+            )
+            return str(data.get("trace_id") or "")
+        except Exception as exc:  # noqa: BLE001
+            log(f"    [执行证据] 创建流程记录失败：{exc}")
+            return ""
 
     # ── 对话 ──────────────────────────────────────────────
 
@@ -425,6 +486,7 @@ class Brain:
         detail_bits = [f"{data.get('model')} {data.get('latency_ms')}ms"]
         return {
             "ok": True,
+            "trace_id": str(data.get("trace_id") or ""),
             "reply": parts[0] if parts else "",
             "parts": parts,
             "medias": medias,

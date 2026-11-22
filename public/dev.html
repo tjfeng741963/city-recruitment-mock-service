@@ -746,7 +746,8 @@
       var row = el("div", "seq-item");
       var no = el("div", "seq-no", item.status === "succeeded" ? "✓" : item.status === "failed" ? "!" : "·");
       var body = el("div", "seq-body");
-      body.textContent = (item.status || "-") + " · " + (item.stage || "阶段待上报") + "\n" + (facts || "没有岗位事实") + "\n" + (item.trace_id || "");
+      var delivery = item.delivery_status ? "\n发送：" + item.delivery_status + (item.delivery_detail ? " · " + item.delivery_detail : "") : "\n发送：尚未回执";
+      body.textContent = (item.status || "-") + " · " + (item.stage || "阶段待上报") + "\n" + (facts || "没有岗位事实") + delivery + "\n" + (item.trace_id || "");
       row.append(no, body);
       list.append(row);
     });

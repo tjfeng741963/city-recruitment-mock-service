@@ -108,4 +108,40 @@ describe("agent execution evidence", () => {
     });
     expect(response.statusCode).toBe(403);
   });
+
+  it("links a client flow node to its real delivery result", async () => {
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/agent/execution-traces",
+      headers: admin,
+      payload: {
+        position_id: positionId,
+        session_key: "S:flow-trace",
+        request_text: "流程节点执行",
+        flow_version: 4,
+        stage: "Agent 流程节点：招聘介绍",
+        node_key: "intro",
+      },
+    });
+    expect(created.statusCode).toBe(200);
+    const traceId = created.json().trace_id;
+    const delivered = await app.inject({
+      method: "POST",
+      url: `/api/v1/agent/execution-traces/${encodeURIComponent(traceId)}/delivery`,
+      headers: admin,
+      payload: { status: "sent", message_id: "S:flow-trace:100", detail: "企微会话回读成功" },
+    });
+    expect(delivered.statusCode).toBe(200);
+    const listed = await app.inject({
+      method: "GET",
+      url: `/api/v1/agent/execution-traces?trace_id=${encodeURIComponent(traceId)}`,
+      headers: admin,
+    });
+    expect(listed.json().items[0]).toMatchObject({
+      flow_version: 4,
+      node_key: "intro",
+      delivery_status: "sent",
+      delivery_message_id: "S:flow-trace:100",
+    });
+  });
 });

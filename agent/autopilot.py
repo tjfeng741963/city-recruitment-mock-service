@@ -1601,6 +1601,16 @@ def _run_flow(store: Store, cfg: dict, cid: str, name: str, flow: dict, *, node_
     if current is None:
         state.set_phase(cid, "held", error="流程节点不存在，待人工核对")
         return "held"
+    flow_trace_id = ""
+    if _brain is not None and not cfg.get("dry_run"):
+        flow_trace_id = _brain.start_trace(
+            position_id=int(flow.get("position_id") or 0),
+            session_key=cid,
+            request_text=hint or "流程节点执行",
+            flow_version=int(flow.get("version") or 0),
+            stage=f"Agent 流程节点：{str(current.get('title') or node_key)}",
+            node_key=node_key,
+        )
     state.set_phase(cid, "running")
     verified_target = False
     visited = set()
@@ -1655,6 +1665,9 @@ def _run_flow(store: Store, cfg: dict, cid: str, name: str, flow: dict, *, node_
             except Exception as exc:  # a crash after Enter has an unknown result
                 status, detail = "unknown", f"{type(exc).__name__}: {exc}"
             state.mark_outbox(cid, key, idx, status, detail if status != "sent" else "")
+            if _brain is not None and flow_trace_id:
+                _brain.log_delivery(flow_trace_id, status if status in ("sent", "failed", "unknown") else "unknown",
+                                    session_key=cid, node_key=key, detail=detail)
             if status != "sent":
                 state.set_phase(cid, "held", error=detail)
                 _last_error = detail[:200]
@@ -2179,6 +2192,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 if flow_row.get("phase") == "followup_sent":
                     flow_state.set_phase(cid, "replied")
 
+        agent_trace_id = ""
         if _brain is not None:
             hint = _inbound_hint(it)
             agent_medias: list[tuple[str, str]] = []
@@ -2224,13 +2238,17 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                 )
                                 if status == "sent":
                                     rlog.mark_sent(fake_id, cid, "开场", str(item["content"]))
-                                    _brain.log_receipt(cid, seq, kind, "sent")
+                                    opening_trace = _brain.log_receipt(cid, seq, kind, "sent")
+                                    _brain.log_delivery(opening_trace, "sent", session_key=cid,
+                                                        message_id=str(result.get("message_id") or ""),
+                                                        detail=str(result.get("detail") or ""))
                                     sent_items += 1
                                     log(f"    [开场 {seq}/{len(ores['items'])}] 已发送", scope="send")
                                     # This is the configured orchestration gap,
                                     # separate from the sender's guarded input timing.
                                     time.sleep(max(0.0, float(item.get("delay_ms", 2000)) / 1000.0))
                                 else:
+
                                     _consecutive_send_failures += 1
                                     _last_error = detail[:200]
                                     if status == "unknown" or sent_items:
@@ -2269,18 +2287,22 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                 )
                                 if ok_m:
                                     rlog.mark_sent(fake_id, cid, f"开场-{kind}", f"{kind}:{item['media_name']}")
-                                    _brain.log_receipt(cid, seq, kind, "sent")
+                                    opening_trace = _brain.log_receipt(cid, seq, kind, "sent")
+                                    _brain.log_delivery(opening_trace, "sent", session_key=cid,
+                                                        detail=f"{kind}:{item['media_name']}")
                                     sent_items += 1
                                     log(f"    [开场 {seq}] {kind}:{item['media_name']} 已发送", scope="send")
                                     time.sleep(max(0.0, float(item.get("delay_ms", 2000)) / 1000.0))
                                 else:
                                     rlog.mark_failed(fake_id, cid, f"{kind} 发送失败：{detail_m}", "开场-媒体")
-                                    _brain.log_receipt(cid, seq, kind, "failed", detail_m)
+                                    opening_trace = _brain.log_receipt(cid, seq, kind, "failed", detail_m)
+                                    _brain.log_delivery(opening_trace, "failed", session_key=cid, detail=detail_m)
                                     log(f"    [开场 {seq}] {kind}:{item['media_name']} 发送失败：{detail_m}", level="warning")
                             else:
                                 # 空内容/未知类型：跳过并上报
                                 rlog.mark_skipped(fake_id, cid, f"开场项类型 {kind} 无内容")
-                                _brain.log_receipt(cid, seq, kind, "skipped", "无内容")
+                                opening_trace = _brain.log_receipt(cid, seq, kind, "skipped", "无内容")
+                                _brain.log_delivery(opening_trace, "skipped", session_key=cid, detail="无内容")
                         greeted.add(cid)
                         _save_greeted(greeted)
                         log(f"[开场] {name} 播完 {sent_items}/{len(ores['items'])} 条文本，之后进入 Agent 对话")
@@ -2295,6 +2317,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     # 会话记忆在服务端：只报 session_key（会话 id）+ 这句话。
                     # 服务端自己持有全量上下文（含开场序列），客户端不传历史。
                     res = _brain.chat(hint, cid, sent_summary=_flow_summary(cid) if flow is not None else None)
+                    agent_trace_id = str(res.get("trace_id") or "")
                     agent_medias = res.get("medias") or []
                 if res.get("code") == "reply_mode_pending":
                     stats["blocked"] += 1
@@ -2375,6 +2398,8 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         # 按键之前先确认剪贴板可写，避免 Ctrl+F 打开搜索框后才卡住
         if not compat.wait_clipboard_writable(timeout=15):
             rlog.mark_failed(mid, cid, "剪贴板被占用超过 15 秒", scene, text)
+            if _brain is not None:
+                _brain.log_delivery(agent_trace_id, "failed", session_key=cid, detail="剪贴板被占用超过 15 秒")
             _last_error = "剪贴板被占用超过 15 秒"
             stats["failed"] += 1
             log("    跳过：剪贴板被占用（向日葵同步？）", level="warning",
@@ -2437,7 +2462,10 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 if confirmed_parts:
                     detail = f"已确认 {confirmed_parts} 段文本，其余未完成：{detail}"
                 rlog.mark_unknown(mid, cid, detail, scene, text, partial=bool(confirmed_parts))
+                if _brain is not None:
+                    _brain.log_delivery(agent_trace_id, "unknown", session_key=cid, detail=detail)
                 _last_error = detail[:200]
+
                 _consecutive_send_failures += 1
                 stats["unknown"] += 1
                 log("wecom_send_hold", level="warning", scope="send", route="auto",
@@ -2445,7 +2473,10 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 break
             elif status == "sent":
                 rlog.mark_sent(mid, cid, scene, text, duration_ms=duration_ms, verified=True)
+                if _brain is not None:
+                    _brain.log_delivery(agent_trace_id, "sent", session_key=cid, detail=detail)
                 text_recorded = True
+
                 _consecutive_send_failures = 0
                 _last_error = ""
                 stats["sent"] += 1
@@ -2477,7 +2508,10 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                         level=level, scope="media", message_id=mid, trace_id=trace)
             else:
                 rlog.mark_failed(mid, cid, detail, scene, text)
+                if _brain is not None:
+                    _brain.log_delivery(agent_trace_id, "failed", session_key=cid, detail=detail)
                 _last_error = detail[:200]
+
                 _consecutive_send_failures += 1
                 stats["failed"] += 1
                 log(f"    发送失败：{detail}", level="warning", scope="send",
@@ -2486,7 +2520,10 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             _last_error = f"发送流程异常（{type(exc).__name__}），请核对实际落点"
             if not text_recorded:
                 rlog.mark_unknown(mid, cid, _last_error, scene, text, partial=bool(confirmed_parts))
+                if _brain is not None:
+                    _brain.log_delivery(agent_trace_id, "unknown", session_key=cid, detail=_last_error)
                 stats["unknown"] += 1
+
             _consecutive_send_failures += 1
             log("    发送流程异常", level="error", scope="send", exception_type=type(exc).__name__,
                 message_id=mid, trace_id=trace)
