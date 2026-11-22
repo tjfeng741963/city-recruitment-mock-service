@@ -28,6 +28,8 @@
    const storedDays=Array.isArray(interview.days)?interview.days.map(day=>String(day).replace(/^星期/,'周').replace(/[天七]$/,'日')):[];
    for(const day of weekdayNames){const label=node('label',day),checkbox=node('input');checkbox.type='checkbox';checkbox.value=day;checkbox.checked=storedDays.includes(day);label.style.display='inline-block';label.style.marginRight='12px';label.prepend(checkbox);weekdays.append(label);inputs.days.push(checkbox);}
    form.append(weekdays);
+   inputs.interviewSiteName = field(form, '面试点名称', base.interview_site_name);
+   inputs.availableLines = field(form, '共用线路（每行一条）', Array.isArray(base.available_lines) ? base.available_lines.join('\n') : '');
    for(const [key,label,value]of [['salary','薪资原文（例如：综合月薪5000–8000元）',salary.raw||sections.salary_detail||sections.salary_ask],['hours','工作时间',hours.raw||sections.work_hours||sections.shift_info],['insurance','社保说明',base.social_insurances||sections.social_insurance],['time','面试时间',interview.time||interview.raw_time],['address','面试地点',interview.location||interview.raw_address],['coordinates','面试坐标',interview.coordinates],['contact','联系人',interview.contact],['notice','面试通知模板',interview.interview_notice||sections.interview_notice],['guide','面试指引',interview.interview_guide||sections.checkin_guide]])inputs[key]=field(form,label,value);
    const details=node('details'),summary=node('summary','完整话术原文 / 旧版本自定义内容');details.open=true;details.append(summary);form.append(details);
    const names={...labels,...rec(base.prompt_section_labels)};inputs.sections={};
@@ -48,11 +50,9 @@
    const body={knowledge_vertical_id:inputs.category.value?Number(inputs.category.value):null,salary:{...rec(advanced.salary),raw:inputs.salary.value},work_hours:{...rec(advanced.hours),raw:inputs.hours.value},social_insurances:inputs.insurance.value,interview:{...rec(advanced.interview),time:inputs.time.value,raw_time:inputs.time.value,location:inputs.address.value,raw_address:inputs.address.value,coordinates:inputs.coordinates.value,contact:inputs.contact.value,interview_notice:inputs.notice.value,interview_guide:inputs.guide.value},requirements:rec(advanced.requirements),prompt_sections:sections,prompt_section_labels:{...labels,...rec(base.prompt_section_labels)}};
    if(!categoriesLoaded||Number(body.knowledge_vertical_id)===Number(base.knowledge_vertical_id)&&!categories.some(x=>Number(x.id)===Number(body.knowledge_vertical_id)))delete body.knowledge_vertical_id;
    body.interview.days=inputs.days.filter(day=>day.checked).map(day=>day.value);
+   body.interview_site_name = inputs.interviewSiteName.value;
+   body.available_lines = inputs.availableLines.value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
    await api('/api/v1/dify/cities/'+base.id+'/materials','PUT',body);state.textContent='已保存「'+base.city_name+'」，模式二下一轮使用最新城市资料。原城市列表可刷新查看。';
-   // Close the stale Vue drawer so its pre-save snapshot cannot overwrite this edit.
-   const stale=[...document.querySelectorAll('.el-drawer')].find(x=>x!==dialog&&x.getAttribute('aria-hidden')!=='true');
-   const cancel=stale&&[...stale.querySelectorAll('button')].find(b=>b.textContent.trim()==='取消');
-   if(cancel)cancel.click();
   }catch(e){state.textContent='保存失败：'+e.message;}finally{save.disabled=false;select.disabled=false;}};
  }
  document.addEventListener('click', event => {

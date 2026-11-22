@@ -7,12 +7,16 @@ describe('restored original city and knowledge entries',()=>{
   const script=readFileSync('public/theme/city-dify-sources.js','utf8');
   const extra=drawer.match(/<details[^>]*class="city-defaults"[^>]*>[\s\S]*?<\/details>/)?.[0] || '';
   expect(extra).toContain('城市默认资料');
-  expect(extra).toContain('薪资原文');
   expect(extra).toContain('data-city-default-materials');
+  expect(drawer).not.toContain('薪资原文');
+  expect(drawer).not.toContain('面试通知模板');
+  expect(readFileSync('frontend-vue/src/views/CityView.vue','utf8')).not.toContain('复制城市');
   expect(script).toContain('data-city-default-materials');
   expect(script).not.toContain('data-city-dify-editor');
   expect(script).toContain('base.prompt_sections');
   expect(script).toContain('base.prompt_section_labels');
+  expect(script).toContain('base.interview_site_name');
+  expect(script).toContain('base.available_lines');
   expect(script).toContain("'/api/v1/dify/cities/'");
   expect(readFileSync('public/index.html','utf8')).toContain('/theme/city-dify-sources.js');
  });

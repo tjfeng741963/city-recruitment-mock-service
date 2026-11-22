@@ -78,6 +78,47 @@ export async function registerCoreRoutes(app: FastifyInstance, db: DatabaseSync)
     const result = db.prepare("INSERT INTO cities(city_name,province,recruitment_status,data_json) VALUES (?,?,?,?)").run(String(request.body.city_name), String(request.body.province ?? ""), String(request.body.recruitment_status ?? "enabled"), JSON.stringify(request.body));
     return serializeCity(db.prepare("SELECT * FROM cities WHERE id=?").get(Number(result.lastInsertRowid)) as Record<string, unknown>);
   });
+  app.patch<{ Params: { id: string }; Body: Record<string, unknown> }>("/api/v1/cities/:id", async (request, reply) => {
+    const id = Number(request.params.id);
+    const before = db.prepare("SELECT * FROM cities WHERE id=?").get(id) as Record<string, unknown> | undefined;
+    if (!before || denyCityWrite(scopeFor(request.auth!), id, reply)) return reply.sent ? reply : reply.code(404).send({ detail: "城市不存在" });
+
+    const body = request.body;
+    if (!body || typeof body !== "object" || Array.isArray(body) ||
+        Object.keys(body).some(key => !["city_name", "province", "districts"].includes(key))) {
+      return reply.code(422).send({ detail: "这里只能保存城市名称、省份和区县" });
+    }
+    const { city_name, province, districts } = body;
+    if (("city_name" in body && (typeof city_name !== "string" || !city_name.trim() || city_name.trim().length > 30)) ||
+        ("province" in body && (typeof province !== "string" || province.trim().length > 30)) ||
+        ("districts" in body && (!Array.isArray(districts) || districts.some(value => typeof value !== "string")))) {
+      return reply.code(422).send({ detail: "请核对城市名称、省份和区县格式" });
+    }
+
+    const name = typeof city_name === "string" ? city_name.trim() : null;
+    const provinceName = typeof province === "string" ? province.trim() : null;
+    const patch: Record<string, unknown> = {};
+    if (name !== null) patch.city_name = name;
+    if (provinceName !== null) patch.province = provinceName;
+    if (Array.isArray(districts)) patch.districts = [...new Set(districts.map(value => value.trim()).filter(Boolean))];
+    if (!Object.keys(patch).length) return serializeCity(before);
+
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.prepare("INSERT INTO city_history(city_id,snapshot_json) VALUES (?,?)").run(id, JSON.stringify(before));
+      const updated = db.prepare(
+        "UPDATE cities SET city_name=COALESCE(?,city_name),province=COALESCE(?,province),data_json=json_patch(data_json,?),updated_at=CURRENT_TIMESTAMP WHERE id=? RETURNING *",
+      ).get(name, provinceName, JSON.stringify(patch), id) as Record<string, unknown>;
+      db.exec("COMMIT");
+      return serializeCity(updated);
+    } catch (error) {
+      db.exec("ROLLBACK");
+      if (error instanceof Error && error.message.includes("UNIQUE constraint")) {
+        return reply.code(409).send({ detail: "城市名称已存在" });
+      }
+      throw error;
+    }
+  });
   app.put<{ Params: { id: string }; Body: Record<string, unknown> }>("/api/v1/cities/:id", async (request, reply) => {
     const id = Number(request.params.id);
     const before = db.prepare("SELECT * FROM cities WHERE id=?").get(id);

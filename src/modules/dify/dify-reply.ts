@@ -57,6 +57,17 @@ export function registerReplyProviderRoutes(app: FastifyInstance, db: DatabaseSy
       next[key]={...(next[key]&&typeof next[key]==='object'?next[key] as Record<string,unknown>:{}),...body[key] as Record<string,unknown>};
     }
     if('social_insurances' in body){if(typeof body.social_insurances!=='string')return reply.code(422).send({detail:'social_insurances must be text'});next.social_insurances=body.social_insurances;}
+    if ("interview_site_name" in body) {
+      if (typeof body.interview_site_name !== "string") return reply.code(422).send({ detail: "面试点名称必须为文本" });
+      next.interview_site_name = body.interview_site_name.trim();
+    }
+    if ("available_lines" in body) {
+      const lines = body.available_lines;
+      if (!Array.isArray(lines) || lines.some(line => typeof line !== "string")) {
+        return reply.code(422).send({ detail: "线路必须为名称列表" });
+      }
+      next.available_lines = [...new Set(lines.map(line => line.trim()).filter(Boolean))];
+    }
     db.exec('BEGIN IMMEDIATE');
     try{db.prepare('INSERT INTO city_history(city_id,snapshot_json) VALUES (?,?)').run(id,JSON.stringify(row));db.prepare('UPDATE cities SET data_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(JSON.stringify(next),id);db.exec('COMMIT');}
     catch(e){db.exec('ROLLBACK');throw e;}
