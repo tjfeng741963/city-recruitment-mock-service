@@ -13,10 +13,11 @@ describe('city settings and recruitment entry points',()=>{
   expect(existsSync('public/theme/city-dify-sources.js')).toBe(false);
   expect(readFileSync('public/index.html','utf8')).not.toContain('/theme/city-dify-sources.js');
  });
- it('shows existing city overrides in the position form and sends knowledge tests to the canvas',()=>{
+ it('shows city defaults in the position form and sends knowledge tests to the canvas',()=>{
   const position=readFileSync('frontend-vue/src/components/basic/PositionFormDrawer.vue','utf8');
   const knowledge=readFileSync('frontend-vue/src/views/KnowledgeView.vue','utf8');
-  expect(position).toContain('Dify 当前城市取值');
+  expect(position).toContain('Dify 城市默认值');
+  expect(position).toContain('Dify · 岗位优先');
   expect(knowledge).toContain("receptionTestHref('dify', { positionId })");
   expect(knowledge).not.toContain('<PositionQa');
  });

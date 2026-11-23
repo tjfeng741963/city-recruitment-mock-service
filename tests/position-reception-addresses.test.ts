@@ -61,6 +61,8 @@ it('round trips two points and sends the same locations into Agent and Dify prev
   expect(JSON.parse(dify.json().inputs.position_data)).toMatchObject({ place: '上班西门', interview_address: '默认面试东门',
     interview_points: locations.interview_points });
   const schedule = interviewSchedule(server.db, id, { interview_time: '每天 10:00-11:00' });
+  const fixedTimes = interviewSchedule(server.db, id, { interview_time: '周一至周六 上午11点或者下午2点准时到' });
+  expect(fixedTimes.slots).toEqual([{start:'11:00',end:'11:00'},{start:'14:00',end:'14:00'}]);
   const now = new Date('2026-11-23T00:00:00+08:00');
   expect(validateInterview(server.db, id, schedule, '2026-11-25', '15:30', '北门', now)).toMatchObject({
     point: { address: '北路8号', checkin_guide: '在北门登记' },

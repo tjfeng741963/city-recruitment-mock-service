@@ -24,10 +24,17 @@ function time(value: string) {
 function windows(value: string):{start:string;end:string}[] {
   // Only expose unambiguous configured slots or a single ordinary time range.
   if (/周|星期|仅|除外|休息|另约|待定|具体|以通知|电话|后|前|工作日/.test(value)) return [];
-  const sections = value.split(/[，,；;、]/).map(section => section.trim()).filter(Boolean);
+  const sections = value.replace(/\s*准时到(?:场)?[。！!]?$/, '')
+    .split(/[，,；;、]|或者|或/).map(section => section.trim()).filter(Boolean);
   if (sections.length > 1) {
     const parsed = sections.map(windows);
     return parsed.every(section => section.length === 1) ? parsed.flat() : [];
+  }
+  const spoken = /^(上午|下午|晚上)\s*(\d{1,2})点(半)?$/.exec(sections[0] ?? '');
+  if (spoken && Number(spoken[2]) >= 1 && Number(spoken[2]) <= 12) {
+    const hour = Number(spoken[2]) % 12 + (spoken[1] === '上午' ? 0 : 12);
+    const slot = `${String(hour).padStart(2, '0')}:${spoken[3] ? '30' : '00'}`;
+    return [{ start:slot, end:slot }];
   }
   const matches = [...value.matchAll(/(?<!\d)\d{1,2}[:：]\d\d(?!\d)/g)].map(m => m[0]);
   if (matches.length === 1 && /^(?:(?:每天|每日)\s*)?(?:上午|下午|晚上)?\s*\d{1,2}[:：]\d\d\s*$/.test(value)) {
@@ -67,7 +74,7 @@ function parseSchedule(rawTime: string, explicitDays: number[], overrideDays = f
   };
 }
 
-export function interviewSchedule(db: DatabaseSync, positionId: number, facts: { interview_time?: unknown; interview_address?: unknown }) {
+export function interviewSchedule(db: DatabaseSync, positionId: number, facts: { interview_time?: unknown; interview_address?: unknown }, resolvedAddress = false) {
   const row = db.prepare(`SELECT p.data_json, c.data_json city_json, c.id city_id
     FROM service_positions p LEFT JOIN factories f ON f.id=p.factory_id
     LEFT JOIN cities c ON c.id=COALESCE(p.city_id,f.city_id) WHERE p.id=?`).get(positionId) as
@@ -75,10 +82,14 @@ export function interviewSchedule(db: DatabaseSync, positionId: number, facts: {
   const position = parseDeviceData(row?.data_json);
   const city = parseDeviceData(row?.city_json);
   const cityDays = weekdays(record(city.interview).days);
-  const defaults = parseSchedule(readText(facts.interview_time), cityDays.length ? cityDays : weekdays(position.interview_days));
+  const positionDays = weekdays(position.interview_days);
+  const interviewTime = readText(facts.interview_time);
+  const useSavedTimeDays = !positionDays.length && Boolean(interviewTime && interviewTime === readText(position.interview_time));
+  const defaults = parseSchedule(interviewTime, positionDays.length ? positionDays : cityDays, useSavedTimeDays);
   const points = normalizeInterviewPoints(position.interview_points);
   const cityInterview = record(city.interview);
-  const address = readText(cityInterview.location) || readText(cityInterview.raw_address) || readText(facts.interview_address) || readText(normalizePositionFacts(position).interview_address);
+  const address = readText(facts.interview_address) || (resolvedAddress ? ''
+    : readText(cityInterview.location) || readText(cityInterview.raw_address) || readText(normalizePositionFacts(position).interview_address));
   const uniquePoints = points.filter((point, index) => points.findIndex(p => p.name === point.name) === index);
   if (uniquePoints.length === 1 && !uniquePoints[0].address) uniquePoints[0].address = address;
   if (!uniquePoints.length && address) uniquePoints.push({ name: address, address });

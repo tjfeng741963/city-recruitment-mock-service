@@ -186,8 +186,11 @@ export function recruitmentTurn(db:DatabaseSync, input:{
       if (!cityJobs.length) return respond(`${requestedCity}暂时没有可以推荐的岗位。想看看其他城市的话，可以说「推荐岗位」。`);
       const namedJobs = cityJobs.filter(job => query.includes(job.title));
       const options = namedJobs.length ? namedJobs : matchingJobs(cityJobs, query);
-      if (wantsList || options.length !== 1) return listJobs(options);
-      const [job] = options;
+      const currentCityJob = !namedJobs.length && !locationMessage && /工资|薪资|工价|多少钱|班次|早班|晚班|工衣|工服|住宿|宿舍|体检|行李|面试|报名/.test(query)
+        ? options.find(job => job.id === current?.id)
+        : undefined;
+      if (wantsList || (!currentCityJob && options.length !== 1)) return listJobs(options);
+      const job = currentCityJob ?? options[0];
       if (saved && saved.position_id !== job.id) return respond("原来的面试还保留着。你想换哪个岗位，可以直接告诉我。");
       if (job.id !== state?.position_id) save(job.id,{});
       current = job;
@@ -244,7 +247,7 @@ export function recruitmentTurn(db:DatabaseSync, input:{
 
   const context = difyContext(db,current.id);
   if (!context || difyContextConflict(context)) return respond("这个岗位的面试安排暂未公布。");
-  const schedule = interviewSchedule(db,current.id,context as Record<string,unknown>);
+  const schedule = interviewSchedule(db,current.id,context,true);
   const defaultTime = schedule.timeText || (schedule.dayLabels.length ? `面试日 ${schedule.dayLabels.join("、")}` : "");
   const hasPointTimes = schedule.points.some(point => point.interview_time);
   const availability = [

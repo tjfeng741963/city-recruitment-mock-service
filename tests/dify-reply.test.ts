@@ -223,6 +223,18 @@ describe("Dify second reply route", () => {
     expect(await say("S:nc","我要报名")).toContain("暂未开放预约");
     expect(model).toHaveBeenCalledTimes(4);
   });
+  it("answers a question about the selected city without listing other jobs in that city", async () => {
+    const city = (app.db.prepare("SELECT id FROM cities WHERE city_name='深圳'").get()
+      ?? app.db.prepare("INSERT INTO cities(city_name) VALUES ('深圳') RETURNING id").get()) as {id:number};
+    app.db.prepare("UPDATE service_positions SET city_id=? WHERE id=?").run(city.id,position);
+    app.db.prepare("INSERT INTO service_positions(city_id,position_name,status) VALUES (?,'另一个深圳岗位','enabled')").run(city.id);
+    await select();
+    const fetchDify = vi.fn(async () => new Response(JSON.stringify({answer:'22元/小时',conversation_id:'selected-city'})));
+    vi.stubGlobal('fetch',fetchDify);
+    expect((await chat('S:selected-city','深圳这份工作工资多少？')).json()).toMatchObject({
+      ok:true,reply:{messages:[{type:'text',content:'22元/小时'}]}});
+    expect(fetchDify).toHaveBeenCalledOnce();
+  });
   it("recommends a scoped job, keeps that choice, and records an explicitly confirmed interview once", async () => {
     const city = app.db.prepare("INSERT INTO cities(city_name,province,data_json) VALUES ('验收市','验收省',?) RETURNING id")
       .get(JSON.stringify({ districts: ["青竹区"] })) as { id: number };
@@ -346,10 +358,12 @@ describe("Dify second reply route", () => {
     expect(JSON.parse(payload.inputs.position_data).wage_text).toBe("22元/小时");
     expect(payload.inputs.position_data).not.toMatch(/民族|18-40/);
     expect(payload).not.toHaveProperty("conversation_id");
+    await chat("S:test","工资是多少？");
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body).conversation_id).toBe("dify-conv-a");
     app.db.prepare("UPDATE service_positions SET data_json=? WHERE id=?").run(JSON.stringify({wage_text:"23元/小时"}),position);
     await chat("S:test","现在工资呢？");
-    const next=JSON.parse(fetchMock.mock.calls[1][1].body);expect(next.conversation_id).toBe("dify-conv-a");expect(next.inputs.position_data).toContain("23元/小时");
-    await chat("S:other");expect(JSON.parse(fetchMock.mock.calls[2][1].body)).not.toHaveProperty("conversation_id");
+    const next=JSON.parse(fetchMock.mock.calls[2][1].body);expect(next).not.toHaveProperty("conversation_id");expect(next.inputs.position_data).toContain("23元/小时");
+    await chat("S:other");expect(JSON.parse(fetchMock.mock.calls[3][1].body)).not.toHaveProperty("conversation_id");
   });
   it("keeps default Agent and blocks cross-device tokens",async()=>{
     const result=await chat();expect(result.json().provider).not.toBe("dify");
@@ -446,33 +460,53 @@ describe("Dify second reply route", () => {
     await chat('S:test','现在工资呢？');
     expect(JSON.parse(JSON.parse(network.mock.calls[1][1].body).inputs.position_data).wage_text).toBe('综合月薪6000-9000元');
   });
-  it("shares saved job sections with Dify and retains city precedence", async () => {
+  it("uses saved position answers before city defaults in preview and the existing customer conversation", async () => {
     const fields = {
       positions: '岗位工种说明', requirements: '岗位要求说明', factory_env: '岗位工厂环境',
       dorm_env: '岗位宿舍环境', work_env: '岗位工作环境', uniform: '岗位工衣说明',
       medical_fee: '岗位体检费用说明', interview_notice: '岗位面试通知',
       checkin_guide: '岗位面试指引', registration_form: '岗位报名说明',
+      salary_detail: '底薪24元/小时', salary_ask: '薪资按小时计算',
+      work_hours: '每天8小时', meal_dorm: '包午餐', social_insurance: '转正缴社保',
     };
     const city = app.db.prepare("INSERT INTO cities(city_name,province,data_json) VALUES ('表单核对城','测试省',?) RETURNING id")
-      .get(JSON.stringify({prompt_sections:{uniform:'城市工衣说明',factory_env:'   '},interview:{interview_notice:'城市面试通知'}})) as {id:number};
-    const saved = await app.inject({method:"PUT",url:`/api/v1/service-positions/${position}`, headers:admin,
-      payload:{city_id:city.id,base_sections:fields}});
+      .get(JSON.stringify({salary:{raw:'城市旧工价20元/小时'},work_hours:{raw:'每天9小时'},
+        prompt_sections:{uniform:'城市工衣说明', luggage_question:'城市行李说明', social_insurance:'城市旧社保'},
+        interview:{interview_notice:'城市面试通知',location:'城市面试点',time:'周一至周五 10:00',days:['周一']}})) as {id:number};
+    const save = (baseSections: Record<string,string>) => app.inject({method:"PUT",url:`/api/v1/service-positions/${position}`, headers:admin,
+      payload:{city_id:city.id,base_sections:baseSections,work_address:'岗位工作地点',interview_address:'岗位面试点',
+        interview_time:'周一至周五 14:00',interview_days:['周五'],interview_points:[{name:'接待点',address:''}]}});
+    const saved = await save(fields);
     expect(saved.statusCode).toBe(200);
     const preview = await app.inject({method:"POST",url:"/api/v1/dify/preview",headers:admin,
       payload:{position_id:position,text:"请介绍岗位、工衣和面试",dry:true}});
-    const expected = {...fields,uniform:'城市工衣说明',interview_notice:'城市面试通知'};
+    const expected = {...fields,luggage_question:'城市行李说明'};
     const input = JSON.parse(preview.json().inputs.position_data);
     expect(input.city_materials).toMatchObject(expected);
-    expect(input).toMatchObject({interview_notice:'城市面试通知',interview_guide:'岗位面试指引'});
-    expect(input.sources.sections).toEqual(Object.fromEntries(Object.keys(fields).map(key =>
-      [key,key==='uniform'||key==='interview_notice'?'city':'position_fallback'])));
+    expect(input).toMatchObject({wage_text:'底薪24元/小时',hours_text:'每天8小时',place:'岗位工作地点',
+      interview_address:'岗位面试点',interview_time:'周一至周五 14:00',interview_days:['周五'],
+      interview_points:[{name:'接待点',address:'岗位面试点'}],
+      interview_notice:'岗位面试通知',interview_guide:'岗位面试指引'});
+    expect(input.sources.sections).toMatchObject({uniform:'position',meal_dorm:'position',luggage_question:'city'});
     await select();
-    const fetchDify = vi.fn().mockResolvedValue(new Response(JSON.stringify({answer:'岗位工衣由现场发放',conversation_id:'shared-materials'}),{status:200}));
+    const fetchDify = vi.fn(async (_url:string, init:{body:string}) => {
+      const request = JSON.parse(init.body);
+      const input = JSON.parse(request.inputs.position_data);
+      return new Response(JSON.stringify({answer:input.city_materials.uniform,conversation_id:'shared-materials'}));
+    });
     vi.stubGlobal('fetch',fetchDify);
-    expect((await chat('S:materials','工衣和工作环境是什么样？')).json()).toMatchObject({ok:true});
+    expect((await chat('S:materials','工衣和工作环境是什么样？')).json()).toMatchObject({
+      ok:true,reply:{messages:[{type:'text',content:'岗位工衣说明'}]}});
     const outgoing = JSON.parse(JSON.parse(fetchDify.mock.calls[0][1].body).inputs.position_data);
     expect(outgoing.city_materials).toMatchObject(expected);
-    expect(JSON.stringify(outgoing)).not.toMatch(/岗位工衣说明|民族限制不得转交/);
+    expect(JSON.stringify(outgoing)).not.toMatch(/城市工衣说明|城市旧工价|城市旧社保|民族限制不得转交/);
+    expect((await save({...fields,uniform:'工衣免费提供'})).statusCode).toBe(200);
+    expect((await chat('S:materials','现在工衣怎么发？')).json()).toMatchObject({
+      ok:true,reply:{messages:[{type:'text',content:'工衣免费提供'}]}});
+    expect(JSON.parse(fetchDify.mock.calls[1][1].body)).not.toHaveProperty('conversation_id');
+    expect((await save({...fields,uniform:'  '})).statusCode).toBe(200);
+    expect((await chat('S:materials','工衣呢？')).json()).toMatchObject({
+      ok:true,reply:{messages:[{type:'text',content:'城市工衣说明'}]}});
   });
   it("exposes administrator city and knowledge preview without switching device or sending",async()=>{
     const dry=await app.inject({method:'POST',url:'/api/v1/dify/preview',headers:admin,payload:{position_id:position,text:'工资？',dry:true}});
@@ -543,15 +577,24 @@ describe("Dify second reply route", () => {
     expect((await chat('S:floor','到了怎么进去？')).json()).toMatchObject({ok:false,code:'dify_context_conflict'});
     expect(network).not.toHaveBeenCalled();
   });
-  it('keeps work location distinct from the city interview location',()=>{
+  it('keeps the saved interview address distinct from the work location',()=>{
     const city=app.db.prepare("INSERT INTO cities(city_name,province,data_json) VALUES ('地点测试城','测试省',?) RETURNING id").get(JSON.stringify({interview:{location:'总部面试中心'}})) as {id:number};
     app.db.prepare('UPDATE service_positions SET city_id=?,data_json=? WHERE id=?').run(city.id,JSON.stringify({place:'全市地铁站安排',interview_address:'岗位面试地址'}),position);
-    expect(difyContext(app.db,position)).toMatchObject({place:'全市地铁站安排',interview_address:'总部面试中心'});
+    expect(difyContext(app.db,position)).toMatchObject({place:'全市地铁站安排',interview_address:'岗位面试地址'});
   });
   it('checks both endpoints when the model formats a salary range with a long dash',async()=>{
     await select();app.db.prepare('UPDATE service_positions SET data_json=? WHERE id=?').run(JSON.stringify({wage_text:'5000–8000元'}),position);
     vi.stubGlobal('fetch',vi.fn().mockResolvedValue(new Response(JSON.stringify({answer:'4000–8000元',conversation_id:'dash-mismatch'}),{status:200})));
     expect((await chat()).json()).toMatchObject({ok:false,code:'dify_fact_mismatch'});
+  });
+  it('keeps a copied list of work lines and a sample location out of interview points', () => {
+    const city = app.db.prepare("INSERT INTO cities(city_name,data_json) VALUES ('地址验收城',?) RETURNING id")
+      .get(JSON.stringify({interview:{location:'地址验收城示例面试点'}})) as {id:number};
+    const work = '全线路就近安排，自选站点';
+    app.db.prepare('UPDATE service_positions SET city_id=?,data_json=? WHERE id=?')
+      .run(city.id,JSON.stringify({work_address:work,interview_address:work}),position);
+    expect(difyContext(app.db,position)).toMatchObject({place:work,interview_points:[]});
+    expect(difyContext(app.db,position)).not.toHaveProperty('interview_address');
   });
   it('normalizes Chinese floors and compares destinations rather than shared entrances',()=>{
     const context=difyContext(app.db,position)!;
