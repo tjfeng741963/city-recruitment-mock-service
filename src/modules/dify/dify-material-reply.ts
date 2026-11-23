@@ -4,8 +4,10 @@ import { difyMediaName, mediaAbsolutePath, type MediaKind } from "../../shared/m
 import type { difyContext } from "./dify-context.js";
 
 type Context = NonNullable<ReturnType<typeof difyContext>>;
-type Message = { type:"text"; content:string } | { type:MediaKind; name:string; content:string };
+export type DifyMessage = { type:"text"; content:string } | { type:MediaKind; name:string; content:string };
+type Message = DifyMessage;
 type Topic = "work" | "dorm" | "food" | "interview";
+type RequestedKind = MediaKind | "both";
 type Asset = { id:number; name:string; storage_path:string; sha256:string; kind:MediaKind; position_id:number };
 const sharedSubwayAssets = new Map<string,Topic>([
   ["工作内容(1).jpg","work"], ["安检.mp4","work"], ["安检工作","work"], ["地铁宿舍.jpg","dorm"],
@@ -44,17 +46,45 @@ function cleanText(value:string) {
   return value.replace(/【/g,"〔").replace(/】/g,"〕").replace(/https?:\/\/\S+/gi,"").trim().slice(0,500);
 }
 
-export function configuredMaterialReply(db:DatabaseSync,positionId:number,query:string,context:Context):Message[] | undefined {
+export function invitationMedia(db: DatabaseSync, context: Context, topic: Topic, kind: MediaKind): DifyMessage[] {
+  const asset = mediaFor(db, context.sources.position_id, topic, kind, context.sources.knowledge_vertical_id);
+  const name = asset && difyMediaName(asset);
+  return asset && name ? [{type:kind,name,content:`${kind === "image" ? "图片" : "视频"} · ${asset.name}`}] : [];
+}
+
+export function clearMaterialFollowup(db: DatabaseSync, identity: string) {
+  db.prepare("DELETE FROM dify_material_followup WHERE identity=?").run(identity);
+}
+
+export function configuredMaterialReply(db:DatabaseSync,positionId:number,query:string,context:Context,identity?:string):Message[] | undefined {
   const question=query.normalize("NFKC").trim();
-  if (/(?:不要|不用|不必|别).{0,12}(?:发|给)|取消发送/.test(question)) return;
-  const requestsMedia=/发|看|有没有|有无|给我|求|要一[张段]/.test(question)
-    && /照片|图片|实拍|图(?:片|吗|$)|视频/.test(question);
+  const now = Date.now();
+  const pending = identity ? db.prepare(`DELETE FROM dify_material_followup WHERE identity=?
+    RETURNING position_id,kind,expires_at`).get(identity) as {position_id:number;kind:RequestedKind;expires_at:number} | undefined : undefined;
+  const previousKind = pending?.position_id === positionId && pending.expires_at > now ? pending.kind : undefined;
+  const text=(content:string):Message => ({type:"text",content});
+  if (/(?:不要|不用|不必|别).{0,12}(?:发|给)|取消发送/.test(question)) return previousKind ? [text("好的。")] : undefined;
+  const asksForMedia = /发|看|有没有|有无|给我|求|要一[张段]|有.{0,16}(?:吗|么|\?)/.test(question);
+  const shortTopic = /^(?:我想看|想看|我要|要|看)?(?:工作(?:现场|环境)?|上班(?:环境)?|安检(?:工作)?|宿舍(?:环境)?|住宿|食堂|餐厅|面试(?:地点|现场)?|集合(?:地点)?)(?:的|吧|就行)?[。！？!?]*$/.test(question);
+  const wantsPhoto = /照片|图片|实拍|图(?:片|吗|$)/.test(question);
+  const wantsVideo = /视频/.test(question);
+  const kind = asksForMedia && (wantsPhoto || wantsVideo)
+    ? (wantsPhoto && wantsVideo ? "both" : wantsPhoto ? "image" : "video")
+    : shortTopic ? previousKind : undefined;
   const workAddress = /(?:工作|上班|住宿|宿舍|食堂)(?:地点|地址|定位|地图|导航)/.test(question) && !/面试/.test(question);
   const requestsMap = !workAddress && /发.{0,15}(?:定位|导航|地图|地址)|给.{0,10}(?:定位|导航|地图|地址)|(?:面试|集合).{0,8}(?:定位|地图|导航)(?:呢|吗|[？?]|$)|^(?:定位|发个定位|导航|地图)(?:呢|吗|[？?])?$/.test(question);
-  if (!requestsMedia && !requestsMap) return;
-  const text=(content:string):Message => ({type:"text",content});
+  if (!kind && !requestsMap) return;
   const topic=requestsMap ? "interview" : topicFor(question);
-  if (!topic) return [text("你想看工作、宿舍、食堂，还是面试地点的图片或视频？")];
+  if (!topic && kind) {
+    if (identity) {
+      db.prepare("DELETE FROM dify_material_followup WHERE expires_at<=?").run(now);
+      db.prepare("INSERT INTO dify_material_followup(identity,position_id,kind,expires_at) VALUES (?,?,?,?)")
+        .run(identity, positionId, kind, now + 5 * 60_000);
+    }
+    const label = kind === "both" ? "照片和视频" : kind === "video" ? "视频" : "照片";
+    return [text(`你想看工作现场、宿舍、食堂，还是面试地点的${label}？`)];
+  }
+  if (!topic) return;
 
   const facts=context as Record<string,unknown>;
   const city=String(facts.city || "");
@@ -71,9 +101,8 @@ export function configuredMaterialReply(db:DatabaseSync,positionId:number,query:
   if (topic==="interview" && !point?.address) return [text("面试地址暂未公布。")];
 
   const kinds:MediaKind[]=[];
-  if (topic==="interview" && points.length===1 && (requestsMap || /照片|图片|实拍|图/.test(question))) kinds.push("image");
-  if (topic!=="interview" && /照片|图片|实拍|图/.test(question)) kinds.push("image");
-  if (/视频/.test(question)) kinds.push("video");
+  if ((topic!=="interview" || points.length===1) && (requestsMap || kind==="image" || kind==="both")) kinds.push("image");
+  if (kind==="video" || kind==="both") kinds.push("video");
   const messages:Message[]=[];
   for (const kind of kinds) {
     // The media library currently binds a map image to a position, not to one of
@@ -95,6 +124,7 @@ export function configuredMaterialReply(db:DatabaseSync,positionId:number,query:
     return [text(requestsMap ? `${source}\n高德地图搜索：${map}` : source),...messages];
   }
   const label=topic==="work"?"工作":topic==="dorm"?"宿舍":"食堂";
-  return messages.length ? [text(`这是当前岗位可提供的${label}参考素材。`),...messages]
+  const sent = messages.length === 2 ? "照片和视频" : messages[0]?.type === "video" ? "视频" : "照片";
+  return messages.length ? [text(`给你发${label}${sent}，可以看看。`),...messages]
     : [text(`这边暂无${label}相关的${kinds.length === 2 ? "照片和视频" : kinds[0] === "video" ? "视频" : "照片"}。`)];
 }

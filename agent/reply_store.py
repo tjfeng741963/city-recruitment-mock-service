@@ -54,6 +54,7 @@ CREATE TABLE reply_log (
     trace_id    TEXT NOT NULL DEFAULT '',
     last_step   TEXT NOT NULL DEFAULT '',
     duration_ms INTEGER,
+    dify_turn   TEXT NOT NULL DEFAULT '',
     UNIQUE(conv_id, message_id)
 )
 """
@@ -149,6 +150,7 @@ _REPLY_MIGRATIONS = {
     "trace_id": "TEXT NOT NULL DEFAULT ''",
     "last_step": "TEXT NOT NULL DEFAULT ''",
     "duration_ms": "INTEGER",
+    "dify_turn": "TEXT NOT NULL DEFAULT ''",
 }
 @contextmanager
 def _welcome_conn():
@@ -414,6 +416,17 @@ def mark_skipped(message_id: str, conv_id: str, reason: str) -> None:
         con.commit()
     finally:
         con.close()
+
+
+def merge_dify_turn(conv_id: str, current_id: str, earlier_ids: list[str], turn: str) -> None:
+    """Keep the same incoming batch available for an explicit retry."""
+    with _welcome_conn() as con:
+        con.execute("UPDATE reply_log SET dify_turn=? WHERE conv_id=? AND message_id=?", (turn, conv_id, current_id))
+        con.executemany(
+            "UPDATE reply_log SET status='skipped',error=?,last_step='skipped',replied_at=? "
+            "WHERE conv_id=? AND message_id=? AND status IN ('pending','failed')",
+            [("已合入本轮 Dify 回复", time.time(), conv_id, mid) for mid in earlier_ids],
+        )
 
 
 def mark_held(message_id: str, conv_id: str, reason: str) -> None:

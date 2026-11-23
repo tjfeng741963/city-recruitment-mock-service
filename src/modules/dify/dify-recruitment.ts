@@ -3,12 +3,56 @@ import { parseDeviceData, parseFactoryIds } from "../../shared/device-factories.
 import { difyContext, difyContextConflict } from "./dify-context.js";
 import { queueDifyGroupNotification } from "./dify-group-notification.js";
 import { interviewDate, interviewSchedule, validateInterview } from "./dify-interview.js";
+import { invitationStage, setInvitationStage } from "./dify-invitation.js";
+import { invitationMedia, type DifyMessage } from "./dify-material-reply.js";
+import { queueInterviewReminder, stopInterviewReminder } from "./dify-interview-reminder.js";
 
 type Job = { id:number; title:string; city:string; district:string; factory:string; districts:string[] };
 type Draft = { name?:string; phone?:string; date?:string; time?:string; point?:string; reviewed?:string };
 type State = { position_id:number|null; draft_json:string; updated_at:string };
 type Booking = { position_id:number; position_name:string|null; interview_date:string; interview_time:string; interview_point:string; interview_address:string };
 const cityLabel = (name: string) => name.trim().replace(/市$/, "");
+const labelledField = /(?:姓名|名字|电话|手机号|日期|时间|面试点)\s*[:：]/;
+const phonePattern = /^1[3-9]\d{9}$/;
+
+function naturalContact(query: string, previous: Draft): Draft | undefined {
+  const pair = /^(?:我叫\s*)?([\p{Script=Han}·]{2,8})[\s，,、]*?(?:手机(?:号)?|电话)?[\s：:，,]*?(1[3-9]\d{9})$/u.exec(query)
+    ?? /^(1[3-9]\d{9})\s+(?:我叫\s*)?([\p{Script=Han}·]{2,8})$/u.exec(query);
+  if (pair) return phonePattern.test(pair[1]) ? {name:pair[2],phone:pair[1]} : {name:pair[1],phone:pair[2]};
+  if (previous.name) return;
+  const named = /^我叫\s*([\p{Script=Han}·]{2,8})$/u.exec(query);
+  if (named) return {name:named[1]};
+  if (!previous.date || !previous.time || /可以|没问题|好的|谢谢|不用|算了|再说|等等|不要|不去|没时间|面试|没空|晚点|改约|看看|考虑|明天|后天|收到|行吧|行的|明白|太远|哪[里儿]|如何|几点|便宜|工资|班次/.test(query)) return;
+  if (/^[\p{Script=Han}·]{2,4}$/u.test(query)) return {name:query};
+}
+
+function naturalAppointment(query: string, previousDate: string | undefined) {
+  const choice = query.replace(/^(?:(?:我)?(?:可以|想约|想|能不能|能|就|约|定|选|那就))\s*/, "")
+    .replace(/\s*(?:去|来)?(?:面试)?(?:行|可以|方便|吧|怎么样|吗)*[？?]?$/, "").trim();
+  const datePart = /^(?:今天|明天|后天|(?:本|下)?(?:周|星期)[日一二三四五六天]|\d{1,2}月\d{1,2}[日号]|\d{4}-\d\d-\d\d)/.exec(choice)?.[0];
+  if (!datePart && !previousDate) return;
+  const tail = choice.slice(datePart?.length ?? 0).replace(/^的/, "").trim();
+  const clock = /^(?:(上午|下午|晚上)\s*)?(\d{1,2}|[一二两三四五六七八九十]{1,3})(?:点(半)?|[:：](\d\d))$/.exec(tail);
+  if (!clock && (!datePart || !/^(?:上午|下午|晚上)?$/.test(tail))) return;
+  let date = datePart ? interviewDate(datePart) : previousDate || "";
+  const weekday = datePart && /^(本|下)?(?:周|星期)([日一二三四五六天])$/.exec(datePart);
+  if (weekday) {
+    const today = new Date().toLocaleDateString("sv-SE",{timeZone:"Asia/Shanghai"});
+    const stamp = Date.parse(`${today}T00:00:00Z`);
+    const day = "日一二三四五六".indexOf(weekday[2].replace("天","日"));
+    const mondayIndex = (new Date(stamp).getUTCDay()+6)%7;
+    const difference = (day+6)%7 - mondayIndex;
+    const offset = weekday[1] === "下" ? difference+7 : weekday[1] === "本" ? difference : (difference+7)%7;
+    date = interviewDate(new Date(stamp+offset*86_400_000).toISOString().slice(0,10));
+  }
+  if (!clock) return {date,time:""};
+  const digit = (value:string) => "零一二三四五六七八九".indexOf(value.replace("两","二"));
+  const [left,right] = clock[2].split("十");
+  let hour = /^\d/.test(clock[2]) ? Number(clock[2]) : right === undefined ? digit(left) : (left ? digit(left) : 1)*10+(right ? digit(right) : 0);
+  if ((clock[1] === "下午" || clock[1] === "晚上") && hour < 12) hour += 12;
+  const minute = clock[4] ?? (clock[3] ? "30" : "00");
+  return {date,time:hour >= 0 && hour < 24 && Number(minute)<60 ? `${String(hour).padStart(2,"0")}:${minute}` : ""};
+}
 
 function jobsForDevice(db:DatabaseSync, device:string, initial:number, preview:boolean) {
   const config = db.prepare("SELECT data_json FROM agent_devices WHERE json_extract(data_json,'$.device_code')=?").get(device) as
@@ -82,8 +126,8 @@ export function selectedRecruitmentPosition(db:DatabaseSync,identity:string,init
 
 export function recruitmentTurn(db:DatabaseSync, input:{
   identity:string; device:string; account:string; session:string; initial:number; query:string;
-  preview:boolean; canWrite:boolean;
-}):{positionId:number;message?:string} {
+  preview:boolean; canWrite:boolean; ordered?:boolean;
+}):{positionId:number;message?:string;selected?:boolean;followups?:DifyMessage[]} {
   const archiveKey = `dify:${input.identity}`;
   const state = db.prepare("SELECT position_id,draft_json,updated_at FROM dify_recruitment_state WHERE identity=?").get(input.identity) as State | undefined;
   const booking = () => db.prepare(`SELECT a.position_id,p.position_name,a.interview_date,a.interview_time,a.interview_point,a.interview_address
@@ -104,8 +148,13 @@ export function recruitmentTurn(db:DatabaseSync, input:{
   const cancel = /^(?:取消报名|撤销报名)$/.test(query);
   const bookingStatus = /报名(?:成功|好了|结果|状态|了吗)|(?:有|是否)登记|我的面试安排/.test(query);
   const starts = /^(?:我想|我要|帮我|可以)?(?:报名|登记面试|预约面试)(?:$|\s|[：:，,])/.test(query);
-  const sendsFields = /(?:姓名|名字|电话|手机号|日期|时间|面试点)\s*[:：]/.test(query);
-  const phoneOnly = /^1[3-9]\d{9}$/.test(query);
+  const sendsFields = labelledField.test(query);
+  const phoneOnly = phonePattern.test(query);
+  const reportsResidence = /^(?:我)?(?:现在|目前)?(?:在|住在).{2,24}$/.test(query)
+    && !/想|找|了解|工资|面试|岗位|[，,？?]/.test(query);
+  if (input.ordered && !saved && !state?.position_id && reportsResidence && new Set(jobs.map(job=>job.city)).size > 1) {
+    return respond("你想在现在这个城市找工作，还是想看看其他城市？可以直接告诉我想去哪座城市。");
+  }
   const save = (id:number, data:Draft) => {
     db.prepare(`INSERT INTO dify_recruitment_state(identity,position_id,draft_json) VALUES (?,?,?)
       ON CONFLICT(identity) DO UPDATE SET position_id=excluded.position_id,draft_json=excluded.draft_json,updated_at=CURRENT_TIMESTAMP`)
@@ -115,7 +164,7 @@ export function recruitmentTurn(db:DatabaseSync, input:{
     const list = options.slice(0, 8).map(job => `${job.id}．${[job.city,job.district,job.title,job.factory].filter(Boolean).join(" · ")}`);
     return respond(`你可以看看这几个岗位\n${list.join("\n")}\n想了解哪一个？回复「选择岗位」加上编号就行。`);
   };
-  const selectedJobReply = (job:Job) => ({message:`已选择${job.title}。想先看看工资、班次，还是面试安排？`,positionId:job.id});
+  const selectedJobReply = (job:Job) => ({message:`已选择${job.title}。想先看看工资、班次，还是面试安排？`,positionId:job.id,selected:true});
 
   if (isChoose || named.length) {
     const requested = isChoose?.[1].trim();
@@ -159,14 +208,44 @@ export function recruitmentTurn(db:DatabaseSync, input:{
     }
     return respond(`已登记${saved.position_name || ""}面试，${saved.interview_date} ${saved.interview_time}，${saved.interview_point}，${saved.interview_address}。`);
   }
-  if(saved&&cancel)return respond("你的面试已登记。你想改约还是取消？可以在这里留言。");
+  if (saved && (cancel || /^(?:我要|我想)?(?:改约|取消面试|不去面试了|不去了|我不去了)$/.test(query))) {
+    if (input.canWrite) stopInterviewReminder(db,archiveKey);
+    return respond("你的面试已登记。你想改约还是取消？可以在这里留言。");
+  }
+  if (saved && input.ordered && /^(?:我)?(?:已经)?到了(?:门口|楼下|面试点)?$/.test(query)) {
+    const context = difyContext(db,saved.position_id);
+    const guide = context && !difyContextConflict(context) && context.interview_points.length === 1
+      && context.interview_points[0].address === saved.interview_address && context.city_materials.checkin_guide;
+    if (input.canWrite) stopInterviewReminder(db,archiveKey);
+    return respond(guide || "收到，你已经到面试点了。稍等一下。");
+  }
   if (!current) return respond("这个岗位暂时无法预约。想看看其他岗位吗？可以说「推荐岗位」。");
-  if (!scheduleRequest && !confirm && !cancel && !starts && !sendsFields && !phoneOnly && !bookingStatus) return {positionId:current.id};
+  const stage = input.ordered && invitationStage(db,input.identity,current.id);
+  const offered = stage === "offered";
+  const fresh = state?.position_id===current.id && Date.now()-Date.parse(state.updated_at.replace(" ","T")+"Z") < 86400000;
+  const draft = fresh ? parseDeviceData(state.draft_json) as Draft : {};
+  const lines = query.split(/\n+/).map(line=>line.trim()).filter(Boolean);
+  const beginsAppointment = /^(?:可以(?:啊|的)?|行|好(?:的)?)$/;
+  const firstAppointmentLine = lines.length > 1 && beginsAppointment.test(lines[0]) ? 1 : 0;
+  const appointmentInput = !saved && (offered || stage === "invited" || stage === "waiting_confirmation")
+    ? naturalAppointment(lines[firstAppointmentLine] ?? "",draft.date) : undefined;
+  const contactQuery = appointmentInput ? lines.slice(firstAppointmentLine+1).join("\n") : query;
+  const contact = (offered || appointmentInput?.time) && !saved ? naturalContact(contactQuery,draft) : undefined;
+  const contactPhone = appointmentInput && phonePattern.test(contactQuery) ? contactQuery : "";
+  const natural = appointmentInput && (!contactQuery || contact || contactPhone) ? appointmentInput : undefined;
+  const point = offered && !sendsFields && !saved ? difyContext(db,current.id)?.interview_points
+    .find(point=>point.name === query && point.address)?.name : undefined;
+  const timeQuestion = input.ordered && (offered || saved) && /(?:提前|晚一点|迟到|还(?:能|可以)).{0,12}(?:过来|过去|到|面试)|(?:迟到|晚一点|提前).{0,7}(?:可以|行|吗|[？?])/.test(query);
+  if (!scheduleRequest && !confirm && !cancel && !starts && !sendsFields && !phoneOnly && !bookingStatus && !natural && !contact && !point && !timeQuestion) return {positionId:current.id};
   if (bookingStatus) return respond("当前会话还没有已确认的面试登记。回复「报名」可以开始。");
 
   const context = difyContext(db,current.id);
   if (!context || difyContextConflict(context)) return respond("这个岗位的面试安排暂未公布。");
   const schedule = interviewSchedule(db,current.id,context as Record<string,unknown>);
+  if (timeQuestion) {
+    const times = schedule.timeText ? `这个岗位的面试时段是${schedule.timeText}。` : "";
+    return respond(`${times}${saved ? `你原来约的是${saved.interview_date} ${saved.interview_time}。` : ""}你大概哪天几点能到？`);
+  }
   const availability = [
     current.title,
     schedule.timeText || (schedule.dayLabels.length ? `面试日 ${schedule.dayLabels.join("、")}` : ""),
@@ -178,8 +257,6 @@ export function recruitmentTurn(db:DatabaseSync, input:{
     return respond("已清除本次待确认的报名资料。");
   }
   if (!input.preview && !input.canWrite) return respond("请在当前企微会话中完成报名确认。");
-  const fresh = state?.position_id===current.id && Date.now()-Date.parse(state.updated_at.replace(" ","T")+"Z") < 86400000;
-  const draft = fresh ? parseDeviceData(state.draft_json) as Draft : {};
   if (!schedule.days.length || !schedule.slots.length || !schedule.points.some(point=>point.address)) {
     if (draft.reviewed) save(current.id,{...draft,reviewed:undefined});
     return respond(`${availability}\n这个岗位暂未开放预约。`);
@@ -187,12 +264,34 @@ export function recruitmentTurn(db:DatabaseSync, input:{
   if (sendsFields) Object.assign(draft,parseDraft(query,draft));
   if(sendsFields || phoneOnly)delete draft.reviewed;
   if(phoneOnly)draft.phone=query;
+  if (contactPhone) draft.phone = contactPhone;
+  if (natural) {
+    draft.date = natural.date;
+    draft.time = natural.time;
+    delete draft.reviewed;
+    if (!offered && natural.date) setInvitationStage(db,input.identity,current.id,"offered");
+  }
+  if (contact) {
+    Object.assign(draft,contact);
+    delete draft.reviewed;
+  }
+  if (point) {
+    draft.point = point;
+    delete draft.reviewed;
+  }
   if (!draft.point && schedule.points.length === 1) draft.point=schedule.points[0].name;
   save(current.id,draft);
-  if (!draft.name || !draft.phone || !draft.date || !draft.time || !draft.point) {
+  const valid = draft.date && draft.time && draft.point ? validateInterview(db,current.id,schedule,draft.date,draft.time,draft.point) : undefined;
+  if ((offered || natural) && valid && "error" in valid) return respond(`${valid.error}\n${availability}`);
+  if (!draft.name || !draft.phone || !valid) {
+    if (offered || natural) {
+      if (!draft.date || !draft.time) return respond(!draft.date ? `${availability}\n想约哪天几点？` : `你想约${draft.date}几点？${schedule.timeText ? `可面试时段是${schedule.timeText}。` : ""}`);
+      if (!draft.point) return respond(`你想去哪个面试点？\n${availability}`);
+      const missing = [!draft.name && "姓名",!draft.phone && "手机号"].filter(Boolean).join("和");
+      return respond(`可以把${missing}发我吗？我这边帮你登记面试。`);
+    }
     return respond(`${availability}\n请发「姓名：张三 电话：手机号 日期：YYYY-MM-DD 时间：HH:mm 面试点：名称」。用于安排本次面试，核对后回复「确认报名」。`);
   }
-  const valid = validateInterview(db,current.id,schedule,draft.date,draft.time,draft.point);
   if ("error" in valid) {
     save(current.id,{...draft,reviewed:undefined});
     return respond(`${valid.error}\n${availability}`);
@@ -224,10 +323,20 @@ export function recruitmentTurn(db:DatabaseSync, input:{
         input.device,conversation[0].id,input.session,input.account,valid.point.name,valid.point.address);
     save(current.id,{});
     queueDifyGroupNotification(db, input.device, archiveKey, current);
+    if (offered) queueInterviewReminder(db,{archiveKey,deviceCode:input.device,date:valid.date,time:valid.time,address:valid.point.address});
     db.exec("COMMIT");
   } catch(error) {
     db.exec("ROLLBACK");
     throw error;
   }
-  return respond(`已登记面试。\n${appointment}`);
+  if (!offered) return respond(`已登记面试。\n${appointment}`);
+  const address = valid.point.address;
+  const map = new URL("https://uri.amap.com/search");
+  map.searchParams.set("keyword",address.split(/[。\r\n]/,1)[0].trim() || address);
+  if (current.city) map.searchParams.set("city",current.city);
+  map.searchParams.set("callnative","0");
+  return {...respond(`面试已登记\n${current.title}\n时间 ${valid.date} ${valid.time}\n地点 ${valid.point.name}${address===valid.point.name ? "" : `（${address}）`}`),
+    followups:[{type:"text",content:`高德地图搜索：${map}`},
+      ...(schedule.points.length === 1 ? invitationMedia(db,context,"interview","image") : []),
+      {type:"text",content:"到了给我发个消息。"}]};
 }

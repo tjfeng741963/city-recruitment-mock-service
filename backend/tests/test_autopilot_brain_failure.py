@@ -32,6 +32,13 @@ def agent(tmp_path, monkeypatch):
 CFG = {"cooldown": 0, "reply_first": "1", "reply_next": "233", "brain": {"mode": "agent"}}
 
 
+def test_dify_passes_consecutive_messages_in_order_in_one_call(agent):
+    agent._brain.reply_provider = "dify"
+    agent.rlog.record_incoming({"id": 11, "conv_id": "S:customer", "conv_name": "Customer", "text": "only one shift?", "type": 2, "time": 101})
+    assert agent.drain(MagicMock(), CFG)["sent"] == 1
+    assert agent._brain.chat.call_args.args[0] == "salary?\nonly one shift?"
+
+
 @pytest.mark.parametrize("response", [
     {"ok": False, "detail": "HTTP 503"},
     {"ok": False, "detail": "timeout"},

@@ -719,7 +719,9 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       const admin = isAdmin(request);
       return generateDifyReply(db, { deviceCode, positionId: positionOfDevice(db, deviceCode),
         sessionKey: admin && body.dry !== true ? `admin:${request.auth?.id}:${text(body.session_key).trim().slice(0,100)}` : text(body.session_key).trim().slice(0,120),
-        text: input, dry: body.dry === true, canWriteRegistration: hasDifyDeviceToken(db,request,deviceCode) });
+        text: input, dry: body.dry === true, ordered: body.ordered_reply === true,
+        turnId: !admin && /^[A-Za-z0-9_-]{1,80}$/.test(text(body.turn_id)) ? text(body.turn_id) : undefined,
+        canWriteRegistration: hasDifyDeviceToken(db,request,deviceCode) });
     }
     const positionId = int(body.position_id) || (deviceCode ? positionOfDevice(db, deviceCode) : 0);
     if (body.preview === true) {

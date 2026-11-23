@@ -3,12 +3,13 @@ import { readFileSync } from "node:fs";
 import type { DatabaseSync } from "node:sqlite";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { difyContext, difyContextConflict, difyInput } from "./dify-context.js";
-import { configuredMaterialReply } from "./dify-material-reply.js";
+import { clearMaterialFollowup, configuredMaterialReply, type DifyMessage } from "./dify-material-reply.js";
 import { DeviceBridgeStore } from "../messaging/device-bridge.js";
 import { devicePositionId } from "../../shared/device-factories.js";
 import { canAccessCity, getUserScope } from "../../auth/user-scopes.js";
 import { beginReplyMode, replyModePending, replyModeRow, replyModeView } from "./reply-mode-transition.js";
 import { recruitmentPositionAvailable, recruitmentTurn, selectedRecruitmentPosition } from "./dify-recruitment.js";
+import { difySendDelays, invitationStage, invitationTurn, noteInvitationQuestion } from "./dify-invitation.js";
 
 const candidateFacingExclusions = [
   /(?:不能|无法|不会|不方便|不得|不敢)(?:帮你|替你|给你|随便|胡乱|乱|瞎|凭空)?(?:编|猜|捏造)/,
@@ -234,7 +235,7 @@ function validBase(base: string): boolean {
   } catch {return false;}
 }
 const queues=new Map<string,Promise<unknown>>();
-export async function generateDifyReply(db: DatabaseSync, input:{deviceCode:string;positionId:number;sessionKey:string;text:string;dry?:boolean;preview?:boolean;canWriteRegistration?:boolean}) {
+export async function generateDifyReply(db: DatabaseSync, input:{deviceCode:string;positionId:number;sessionKey:string;text:string;dry?:boolean;preview?:boolean;canWriteRegistration?:boolean;ordered?:boolean;turnId?:string}) {
   const account=db.prepare("SELECT account_id FROM bridge_devices WHERE device_code=?").get(input.deviceCode) as {account_id:string} | undefined;
   const cfg=config();
   const scope=digest(JSON.stringify([input.deviceCode,account?.account_id||"",input.sessionKey]));
@@ -242,6 +243,24 @@ export async function generateDifyReply(db: DatabaseSync, input:{deviceCode:stri
   const pending=previous.catch(()=>{}).then(()=>run());queues.set(scope,pending);
   try {return await pending;} finally {if(queues.get(scope)===pending)queues.delete(scope);}
   async function run() {
+    const ordered = input.preview === true || input.ordered === true;
+    let positionId=input.positionId;
+    const turnId = ordered && input.canWriteRegistration && !input.dry ? input.turnId : undefined;
+    const hashFacts = (id:number) => digest(JSON.stringify(difyContext(db,id)));
+    const makeResult = (messages: DifyMessage[], model: string, latency_ms: number) => ({
+      ok:true,provider:"dify",model,session_key:input.sessionKey,latency_ms,
+      reply:{messages,...(ordered ? {delays_before_ms:difySendDelays(messages)} : {})},
+    });
+    const result = (messages: DifyMessage[], model = "Dify 招聘流程", latency = 0) => {
+      const response = makeResult(messages,model,latency);
+      if (turnId) {
+        db.prepare(`INSERT INTO dify_turn_plan(identity,turn_id,query_hash,position_id,facts_hash,response_json,expires_at)
+          VALUES (?,?,?,?,?,?,?) ON CONFLICT(identity) DO UPDATE SET turn_id=excluded.turn_id,query_hash=excluded.query_hash,
+          position_id=excluded.position_id,facts_hash=excluded.facts_hash,response_json=excluded.response_json,expires_at=excluded.expires_at`)
+          .run(scope,turnId,digest(input.text),positionId,hashFacts(positionId),JSON.stringify(response),Date.now()+3_600_000);
+      }
+      return response;
+    };
     const blocked=()=>{
       if(input.preview)return false;
       if(replyModePending(db, input.deviceCode))return true;
@@ -253,7 +272,17 @@ export async function generateDifyReply(db: DatabaseSync, input:{deviceCode:stri
     };
     if(blocked()) return failure("human_takeover","设备停用、已切换账号或会话已接管");
     if(!input.dry&&!input.sessionKey)return failure("dify_session_required","Dify 模式需要 session_key");
-    let positionId=input.positionId;
+    if (turnId) {
+      const plan = db.prepare("SELECT * FROM dify_turn_plan WHERE identity=? AND turn_id=?").get(scope,turnId) as
+        {query_hash:string;position_id:number;facts_hash:string;response_json:string;expires_at:number} | undefined;
+      if (plan) {
+        if (plan.expires_at <= Date.now() || plan.query_hash !== digest(input.text)
+          || !recruitmentPositionAvailable(db,input.deviceCode,input.positionId,plan.position_id,false) || plan.facts_hash !== hashFacts(plan.position_id)) {
+          return failure("dify_stale_turn_plan","原发送计划已过期或资料已变更，请核对会话");
+        }
+        return JSON.parse(plan.response_json) as ReturnType<typeof makeResult>;
+      }
+    }
     if(input.dry&&input.sessionKey){
       positionId=selectedRecruitmentPosition(db,scope,input.positionId);
       if(!recruitmentPositionAvailable(db,input.deviceCode,input.positionId,positionId,input.preview===true))return failure("dify_position_unavailable","岗位不可用");
@@ -261,10 +290,19 @@ export async function generateDifyReply(db: DatabaseSync, input:{deviceCode:stri
     if(!input.dry){
       try{
         const action=recruitmentTurn(db,{identity:scope,device:input.deviceCode,account:account?.account_id||"",session:input.sessionKey,
-          initial:input.positionId,query:input.text,preview:input.preview===true,canWrite:input.canWriteRegistration===true});
+          initial:input.positionId,query:input.text,preview:input.preview===true,canWrite:input.canWriteRegistration===true,ordered});
         positionId=action.positionId;
-        if(action.message)return {ok:true,provider:"dify",model:"Dify 招聘流程",session_key:input.sessionKey,
-          reply:{messages:[{type:"text",content:action.message.replace(/[【】]/g,c=>c==="【"?"〔":"〕").slice(0,4000)}]},latency_ms:0};
+        if (ordered && (!action.message || action.selected)) {
+          const invitation = invitationTurn(db,{identity:scope,positionId,query:input.text,selected:action.selected});
+          if (invitation) {
+            clearMaterialFollowup(db,scope);
+            return result(invitation);
+          }
+        }
+        if(action.message){
+          clearMaterialFollowup(db,scope);
+          return result([{type:"text",content:action.message.replace(/[【】]/g,c=>c==="【"?"〔":"〕").slice(0,4000)}, ...(action.followups ?? [])]);
+        }
       }catch{
         return failure("dify_registration_error","这次报名还没提交成功，请稍后再试。");
       }
@@ -274,17 +312,18 @@ export async function generateDifyReply(db: DatabaseSync, input:{deviceCode:stri
     const conflict=difyContextConflict(facts);
     if(conflict)return failure('dify_context_conflict',conflict);
     if (!input.dry) {
-      const messages=configuredMaterialReply(db,positionId,input.text,facts);
+      const messages=configuredMaterialReply(db,positionId,input.text,facts,scope);
       if (messages) {
-        return {ok:true,provider:"dify",model:"Dify 招聘流程",session_key:input.sessionKey,
-          reply:{messages},latency_ms:0};
+        if (ordered) noteInvitationQuestion(db,scope,positionId,input.text);
+        return result(messages);
       }
     }
     const selected=difyInput(facts,input.text);
     if(!selected)return failure('dify_context_too_large','城市关键字段过长，请精简薪资、时间或面试地点；完整话术请放入原文段落或知识库');
     // Keep the published Dify conversation per application and selected position.
     const identity=digest(JSON.stringify([input.deviceCode,account?.account_id||"",input.sessionKey,positionId,cfg.base,digest(cfg.key)]));
-    const payload={inputs:{position_data:JSON.stringify(selected),current_time:new Date().toLocaleString("sv-SE",{timeZone:"Asia/Shanghai"})},query:input.text,response_mode:"blocking",user:`recruit-${identity}`};
+    const stage = ordered && invitationStage(db,scope,positionId);
+    const payload={inputs:{position_data:JSON.stringify({...selected,...(stage ? {invitation_stage:stage} : {})}),current_time:new Date().toLocaleString("sv-SE",{timeZone:"Asia/Shanghai"})},query:input.text,response_mode:"blocking",user:`recruit-${identity}`};
     if(input.dry)return {ok:true,provider:"dify",dry:true,position_id:positionId,inputs:payload.inputs};
     if(!input.sessionKey)return failure("dify_session_required","Dify 模式需要 session_key");
     if(!cfg.key||!validBase(cfg.base))return failure("dify_not_configured","Dify 服务端地址或应用密钥未配置");
@@ -308,14 +347,15 @@ export async function generateDifyReply(db: DatabaseSync, input:{deviceCode:stri
       if(blocked())throw new Error("human_takeover");
       if(!recruitmentPositionAvailable(db,input.deviceCode,input.positionId,positionId,input.preview===true))throw new Error("dify_position_changed");
       if (JSON.stringify(difyContext(db,positionId)) !== JSON.stringify(facts)) throw new Error("dify_position_changed");
-      const messages = answer.split("###").flatMap(part => {
+      const messages: DifyMessage[] = answer.split("###").flatMap(part => {
         const clauses = part.match(/[^，；。！？!?\n]+[，；。！？!?\n]*/g) || [];
         const content = clauses.filter(clause => !candidateFacingExclusions.some(rule => rule.test(clause)))
           .join("").trim().replace(/[，；]+$/, "。");
         return content ? [{type:"text",content}] : [];
       });
       if (!messages.length) messages.push({ type:"text", content:"这项暂时没有已公布的信息。" });
-      return {ok:true,provider:"dify",model:"Dify Chatflow",session_key:input.sessionKey,reply:{messages},latency_ms:Date.now()-started};
+      if (ordered) noteInvitationQuestion(db,scope,positionId,input.text);
+      return result(messages,"Dify Chatflow",Date.now()-started);
     } catch(e) {
       const code=e instanceof Error?e.message:"";
       errorCode=["dify_http_error","dify_invalid_response","dify_invalid_reply","dify_fact_mismatch","dify_position_changed","human_takeover"].includes(code)?code:"dify_unavailable";
