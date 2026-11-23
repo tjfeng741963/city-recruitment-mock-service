@@ -127,6 +127,21 @@ def test_legacy_first_contact_does_not_call_chat_after_opening(agent):
     agent._brain.chat.assert_called_once()
 
 
+def test_verified_legacy_opening_clears_the_previous_send_error(agent):
+    agent._brain.flow.return_value = {"nodes": [], "version": 0}
+    agent._brain.opening.return_value = {"ok": True, "items": [
+        {"seq": 1, "kind": "text", "content": "欢迎", "delay_ms": 0},
+    ]}
+    agent._consecutive_send_failures = 2
+    agent._last_error = "输入框校验失败"
+
+    start(agent)
+
+    agent._brain.log_receipt.assert_called_once_with("S:customer", 1, "text", "sent")
+    assert agent._consecutive_send_failures == 0
+    assert agent._last_error == ""
+
+
 def test_unconfirmed_legacy_opening_holds_even_when_another_message_arrives(agent):
     agent._brain.flow.return_value = {"nodes": [], "version": 0}
     agent._brain.opening.return_value = {"ok": True, "items": [

@@ -2301,6 +2301,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                     message_id=mid, trace_id=trace,
                                 )
                                 if status == "sent":
+                                    _last_error, _consecutive_send_failures = "", 0
                                     rlog.mark_sent(fake_id, cid, "开场", str(item["content"]))
                                     opening_trace = _brain.log_receipt(cid, seq, kind, "sent")
                                     _brain.log_delivery(opening_trace, "sent", session_key=cid,
