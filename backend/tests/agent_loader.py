@@ -24,7 +24,7 @@ def _load_module(name: str):
     return module
 
 
-def load_autopilot():
+def load_autopilot(*, mock_send_window=True):
     stubs = {
         name: MagicMock()
         for name in (
@@ -51,7 +51,8 @@ def load_autopilot():
         module = _load_module("autopilot")
         # Hosted Windows CI is not an interactive client desktop. Every test
         # controls the read-only probe explicitly; never query its real session.
-        module.desktop_send_ready = MagicMock(return_value=(True, ''))
+        if mock_send_window:
+            module.desktop_send_ready = MagicMock(return_value=(True, ""))
         return module
 
 

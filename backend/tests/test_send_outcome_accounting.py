@@ -102,6 +102,51 @@ def test_brain_failure_still_blocks_input(agent):
     agent.core_send.send.assert_not_called()
 
 
+@pytest.mark.parametrize("case,reason", [
+    ("ready", None),
+    ("hidden", "window_hidden"),
+    ("cloaked", "window_unavailable"),
+    ("disabled", "window_unavailable"),
+    ("foreign", "window_owner_unverified"),
+    ("missing", "window_missing"),
+    ("locked", "desktop_unavailable"),
+    ("probe_error", "window_probe_failed"),
+])
+def test_send_window_guard_checks_current_core_choice(monkeypatch, case, reason):
+    agent = load_autopilot(mock_send_window=False)
+    monkeypatch.setattr(agent, "log", MagicMock())
+    monkeypatch.setattr(agent, "_reply_desktop_active", lambda: case != "locked")
+    monkeypatch.setattr(agent, "_is_wecom_window_owner", lambda pid: pid == 9344 and case != "foreign")
+    if case == "hidden":
+        agent.win.find_window.return_value = {"hwnd": 20, "rect": (0, 0, 1180, 715), "visible": False}
+    elif case == "missing":
+        agent.win.find_window.return_value = None
+    else:
+        agent.win.find_window.return_value = {"hwnd": 20, "rect": (0, 0, 1412, 647), "visible": True}
+    agent.win.win32gui.IsWindow.return_value = True
+    agent.win.win32gui.IsWindowVisible.return_value = case != "hidden"
+    agent.win.win32gui.IsWindowEnabled.return_value = case != "disabled"
+    agent.win.win32gui.GetClassName.return_value = "WeWorkWindow"
+    agent.win.win32process.GetWindowThreadProcessId.return_value = (2, 9344)
+    dwm = MagicMock()
+
+    def attribute(_hwnd, _attribute, output, _size):
+        output._obj.value = int(case == "cloaked")
+        return int(case == "probe_error")
+
+    dwm.DwmGetWindowAttribute.side_effect = attribute
+    monkeypatch.setattr(agent.ctypes, "WinDLL", lambda _: dwm, raising=False)
+    outcome, _, _ = agent._send_text(MagicMock(), "Test", "S:test", "test", route="auto", log_fn=MagicMock())
+
+    if reason is None:
+        agent.core_send.send.assert_called_once()
+    else:
+        assert outcome == "blocked"
+        agent.core_send.send.assert_not_called()
+        record = next(call for call in agent.log.call_args_list if call.args == ("wecom_send_window_blocked",))
+        assert record.kwargs["reason_code"] == reason
+
+
 def test_process_exit_during_send_leaves_a_durable_unknown(agent):
     def exit_during_send(*args, **kwargs):
         assert _status_of(agent.rlog) == "unknown"

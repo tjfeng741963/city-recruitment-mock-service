@@ -127,6 +127,57 @@ def test_legacy_first_contact_does_not_call_chat_after_opening(agent):
     agent._brain.chat.assert_called_once()
 
 
+def test_verified_legacy_opening_clears_the_previous_send_error(agent):
+    agent._brain.flow.return_value = {"nodes": [], "version": 0}
+    agent._brain.opening.return_value = {"ok": True, "items": [
+        {"seq": 1, "kind": "text", "content": "欢迎", "delay_ms": 0},
+    ]}
+    agent._consecutive_send_failures = 2
+    agent._last_error = "输入框校验失败"
+
+    start(agent)
+
+    agent._brain.log_receipt.assert_called_once_with("S:customer", 1, "text", "sent")
+    assert agent._consecutive_send_failures == 0
+    assert agent._last_error == ""
+
+
+def test_hidden_window_keeps_opening_pending_until_the_window_recovers(agent):
+    agent._brain.flow.return_value = {"nodes": [], "version": 0}
+    agent._brain.opening.return_value = {"ok": True, "items": [
+        {"seq": 1, "kind": "text", "content": "欢迎", "delay_ms": 0},
+    ]}
+    agent.desktop_send_ready.return_value = (False, "企微窗口不可用")
+    incoming(agent)
+
+    assert agent.drain(MagicMock(), CFG)["blocked"] == 1
+    assert agent.rlog.recent()[0]["status"] == "pending"
+    agent.core_send.send.assert_not_called()
+
+    agent.desktop_send_ready.return_value = (True, "")
+    agent.drain(MagicMock(), CFG)
+    agent.core_send.send.assert_called_once()
+
+
+@pytest.mark.parametrize("kind", ["image", "video"])
+def test_window_change_between_opening_parts_preserves_partial_send(agent, kind):
+    agent._brain.flow.return_value = {"nodes": [], "version": 0}
+    agent._brain.opening.return_value = {"ok": True, "items": [
+        {"seq": 1, "kind": "text", "content": "欢迎", "delay_ms": 0},
+        {"seq": 2, "kind": kind, "media_name": "asset", "delay_ms": 0},
+        {"seq": 3, "kind": "text", "content": "请问想去哪个城市？", "delay_ms": 0},
+    ]}
+    agent.desktop_send_ready.side_effect = [(True, ""), (True, ""), (False, "企微窗口不可用")]
+
+    incoming(agent)
+    assert agent.drain(MagicMock(), CFG)["unknown"] == 1
+    rows = {row["message_id"]: row for row in agent.rlog.recent()}
+    assert rows["1"]["status"] == "unknown"
+    assert [call.args[3] for call in agent._brain.log_receipt.call_args_list] == ["sent", "failed"]
+    agent.core_send.send.assert_called_once()
+    agent.core_send.paste_media.assert_not_called()
+
+
 def test_unconfirmed_legacy_opening_holds_even_when_another_message_arrives(agent):
     agent._brain.flow.return_value = {"nodes": [], "version": 0}
     agent._brain.opening.return_value = {"ok": True, "items": [
@@ -388,6 +439,23 @@ def test_followup_once_has_durable_rate_limit_and_failure_stays_held(agent, monk
     now += 1801
     agent._flow_tick(MagicMock(), CFG, "online")
     assert state.get("S:customer")["phase"] == "expired"
+
+
+def test_due_followup_remains_unclaimed_while_window_is_blocked(agent, monkeypatch):
+    now = datetime(2026, 11, 19, 4, tzinfo=timezone.utc).timestamp()
+    monkeypatch.setattr(agent.time, "time", lambda: now)
+    start(agent)
+    state = agent._flow_state
+    state.set_phase("S:customer", "awaiting", await_since=now - 121)
+    agent.desktop_send_ready.return_value = (False, "企微窗口不可用")
+
+    agent._flow_tick(MagicMock(), CFG, "online")
+    assert state.get("S:customer")["phase"] == "awaiting"
+    agent.core_send.send.assert_called_once()
+
+    agent.desktop_send_ready.return_value = (True, "")
+    agent._flow_tick(MagicMock(), CFG, "online")
+    assert state.get("S:customer")["phase"] == "followup_sent"
 
 
 def test_followup_failure_never_marked_sent(agent, monkeypatch):
