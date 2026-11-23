@@ -1,5 +1,6 @@
 import { replyModePending } from "../dify/reply-mode-transition.js";
 import { archiveCandidates } from './archive-candidates.js';
+import { followupChatLines, followupModels, generateFollowupSummary } from "./archive-followup-summary.js";
 import { recruitmentCandidates, candidateConversation } from './recruitment-candidates.js';
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
@@ -561,6 +562,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         arrival_status: String(row.arrival_status ?? ""),
         notify_status: notifyStatus,
         updated_at: String(row.updated_at ?? ""),
+        has_conversation: shared?.has_conversation === true,
       });
     }
     return { items };
@@ -609,7 +611,6 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
     },
   );
 
-  // 面试到达状态：运营在面试登记面板把约定时间到了的客户标记「已到达/爽约」。
   app.get<{Params:{key:string};Querystring:{before_id?:string}}>("/api/v1/agent/candidates/:key/messages",async(request,reply)=>{
     if(request.auth?.role!=='admin') return reply.code(403).send({detail:'Admin access required'});
     const direct = candidateConversation(db,request.params.key);
@@ -625,6 +626,29 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
     const items=db.prepare(`SELECT id,direction,content,status,created_at FROM agent_messages
       WHERE device_code=? AND customer_id=? AND id<? ORDER BY id DESC LIMIT 201`).all(conversation.device_code,conversation.customer_id,before);
     return {conversation,items:items.slice(0,200).reverse(),has_more:items.length>200};
+  });
+
+  app.post<{ Params: { key: string } }>("/api/v1/agent/archive/:key/followup-summary", async (request, reply) => {
+    if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin access required" });
+    const [record] = archiveCandidates(db, request.params.key);
+    if (!record) return reply.code(404).send({ detail: "面试登记不存在" });
+    if (!record.has_conversation) {
+      return reply.code(409).send({ code: "no_conversation", detail: "暂无可分析的对话" });
+    }
+    const privateValues = [record.name, record.nickname, record.phone].map(value => value.trim()).filter(value => value.length >= 2);
+    const lines = followupChatLines(db, record.device_code, record.customer_id, privateValues);
+    if (!lines.some(line => line.direction === "inbound")) {
+      return reply.code(409).send({ code: "no_candidate_messages", detail: "还没有可分析的候选人文字消息" });
+    }
+    const config = llmConfig();
+    if (!config.apiKey || !followupModels.has(config.model)) {
+      return reply.code(503).send({ detail: "AI 摘要需要配置受支持的非思考模型，请联系管理员" });
+    }
+    try {
+      return await generateFollowupSummary(lines, privateValues);
+    } catch {
+      return reply.code(502).send({ detail: "AI 摘要生成失败，请重试" });
+    }
   });
 
   // 面试到达状态：运营在面试登记面板把约定时间到了的客户标记「已到达/爽约」。

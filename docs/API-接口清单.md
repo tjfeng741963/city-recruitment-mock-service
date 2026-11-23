@@ -125,9 +125,10 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 | GET | `/api/v1/agent/opening?device_code=:code` | 设备令牌或服务令牌 | 默认保持旧开场；显式加 `mode=flow` 只展开首个等待闸门前的流程消息；岗位停用时返回空清单和“岗位已停用” |
 | POST | `/api/v1/agent/opening/log` | 设备令牌或服务令牌 | 客户端逐条回执：`{session_key,device_code,position_id,seq,kind,status,error}`，返回 `trace_id` 供运营回查发送证据 |
 | GET | `/api/v1/agent/archive?session_key=:key` | admin | 查面试档案：姓名 / 电话 / 城市 / 面试日期与时段（模型 JSON 判断结果累积） |
-| GET | `/api/v1/agent/archive/list` | admin | 面试登记清单。Dify 的 `group_chat` 显示通知对应的目标。状态包括 `no-group`（未绑群）、`group-unavailable`（无法确认目标群）、`pending`、`queued`、`claimed`、`sent`、`failed`、`unknown`。核对目标群的真实设备成功回执后显示 `sent`。 |
+| GET | `/api/v1/agent/archive/list` | admin | 面试登记清单。`has_conversation` 表示精确关联到一条会话。Dify 的 `group_chat` 显示通知对应的目标。状态包括 `no-group`（未绑群）、`group-unavailable`（无法确认目标群）、`pending`、`queued`、`claimed`、`sent`、`failed`、`unknown`。核对目标群的真实设备成功回执后显示 `sent`。 |
 | POST | `/api/v1/agent/archive/manual` | admin | 手动新建约面试（没走 Agent 对话的客户），绑了群聊自动推送 |
 | PUT | `/api/v1/agent/archive/:key/arrival` | admin | 到达状态标记，body `{arrival_status: ""/arrived/noshow}` |
+| POST | `/api/v1/agent/archive/:key/followup-summary` | admin | 读取当前登记精确关联的近期对话，按需生成跟进摘要 `{intent,discussed,experience,next_question,quote}`。字段无依据时返回 null。无会话或候选人文字时返回 409。结果仅用于网页，生成操作不清未读、不改登记、不发消息。 |
 | GET | `/api/v1/agent/candidates?status=&recruiter_id=&event_date=&interview_date=&page=&page_size=` | admin | 候选人员管理：由面试登记聚合出候选行 + 分页统计 |
 | GET | `/api/v1/agent/candidates/:key/messages?before_id=` | admin | 只读查看登记对应的真实对话，按精确 session_key 关联设备及客户；每页最多 200 条，不清未读、不发送 |
 | POST | `/api/v1/agent/chat` | admin/设备令牌 | 一轮对话，body `{position_id,session_key,text,dry,sent_summary?}`；岗位停用时真实回复返回 409，dry QA 可继续使用 |
