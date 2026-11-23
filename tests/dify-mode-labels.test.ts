@@ -17,7 +17,7 @@ describe('reply sources in the canvas',()=>{
  it('explains both reception scopes in the existing machine switch confirmation',()=>{
   const control=readFileSync('frontend-vue/src/components/agent/ReplyModeSwitch.vue','utf8');
   expect(control).toContain('Agent 使用一个绑定岗位');
-  expect(control).toContain('Dify 可接待多个已绑定城市');
+  expect(control).toContain('Dify 可在配置范围内接待多个岗位');
   expect(control).toMatch(/ElMessageBox\.confirm\(\s*`机器码 \$\{props\.deviceCode\}。\$\{scopeHint\(target\)\}/);
  });
 });

@@ -9,7 +9,7 @@ import { MessageEventService } from "./message-events.js";
 import { createMessageChannelProvider } from "./message-channel-provider.js";
 import { NOOP_NOTIFIER, type StreamNotifier } from "./stream-events.js";
 import { recordInboundMessage } from "./inbound-store.js";
-import { loadFactories, readDeviceFactoryIds } from "../../shared/device-factories.js";
+import { loadFactories, receptionFactoryIds, resolveDevicePosition } from "../../shared/device-factories.js";
 import { latestPositionScriptStamp, loadPositionScripts } from "../../shared/media-assets.js";
 
 type DeviceRequest = { Params: { code: string }; Body: Record<string, unknown> };
@@ -164,14 +164,15 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
      * 下发 id 列表给 8090 做 `sp.factory_id IN (...)` 过滤，厂名给客户端展示。
      * 脏数据（非整数 / 重复 / 库里没有）在 readDeviceFactoryIds 里已经过滤干净。
      */
-    const boundFactoryIds = readDeviceFactoryIds(db, params.factory_ids);
+    const boundFactoryIds = receptionFactoryIds(db, params);
     const boundFactories = loadFactories(db, boundFactoryIds).map((factory) => ({ id: factory.id, name: factory.name }));
     /**
      * 岗位话术（契约 §5）：只下发本设备已绑定工厂的岗位话术；没绑厂 = 通用设备，
      * 下发全部 enabled 话术（否则新设备刚上线会一条话术都没有）。
      * 每条 media 已按 media_assets 补齐 sha256，查不到的资源被丢弃。
      */
-    const positionScripts = loadPositionScripts(db, boundFactoryIds);
+    const agentPosition = params.reply_provider === "dify" ? undefined : resolveDevicePosition(db, params, "agent");
+    const positionScripts = loadPositionScripts(db, boundFactoryIds, agentPosition);
     /**
      * employer_id 多厂口径：显式配了就以它为准；没配且绑了多个厂就回 0。
      *
@@ -211,6 +212,7 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
       // 没绑 = 两个都空，消费方按「不限」处理（与老字段 factory_name 空串同义）。
       factory_ids: boundFactoryIds,
       factories: boundFactories,
+      ...(agentPosition ? { position_id: agentPosition } : {}),
       city: typeof params.city === "string" ? params.city : "",
       // 知识库 v3：品类与招工方 id（docs/知识库方案-流程驱动-20261113.md §3.7）。
       // 绑了 id 就走 kb_faq 硬过滤（别家厂的问答不进候选集）；

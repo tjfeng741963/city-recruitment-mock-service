@@ -178,22 +178,24 @@ export function hydrateScripts(db: DatabaseSync, rows: ScriptRow[]): PositionScr
  * 用 JOIN 而不是 IN 子查询：话术指向已删除岗位时应该整条消失，
  * 否则客户端会拿到一个查不到岗位的话术。
  */
-export function loadPositionScripts(db: DatabaseSync, factoryIds: number[]): PositionScriptPayload[] {
+export function loadPositionScripts(db: DatabaseSync, factoryIds: number[], agentPosition?: number): PositionScriptPayload[] {
   // 通用条目（position_id=0）不属于任何岗位，INNER JOIN 会把它整个丢掉——
   // 但「加好友首句」这类还没选定岗位的时点全靠它（2026-11-14 实测：
   // 通用 greet 话术永远下发不了，greet 永远命中不了，退回老的发卡行为）。
   // 规则：通用条目始终下发；岗位话术按设备绑定工厂过滤，没绑厂下发全部。
   const placeholders = factoryIds.map(() => "?").join(",");
-  const scopeClause = factoryIds.length
-    ? `(ps.position_id = 0 OR sp.factory_id IN (${placeholders}))`
-    : "(ps.position_id = 0 OR sp.id IS NOT NULL)";
+  const scopeClause = agentPosition !== undefined
+    ? "(ps.position_id = 0 OR (ps.position_id = ? AND sp.status='enabled'))"
+    : factoryIds.length
+      ? `(ps.position_id = 0 OR sp.factory_id IN (${placeholders}))`
+      : "(ps.position_id = 0 OR sp.id IS NOT NULL)";
   const rows = db.prepare(
     `SELECT ps.id,ps.position_id,ps.stage,ps.title,ps.content,ps.media_json
        FROM position_scripts ps
        LEFT JOIN service_positions sp ON sp.id = ps.position_id
       WHERE ps.status='enabled' AND ${scopeClause}
       ORDER BY ps.position_id, ps.id`,
-  ).all(...factoryIds) as ScriptRow[];
+  ).all(...(agentPosition === undefined ? factoryIds : [agentPosition])) as ScriptRow[];
   return hydrateScripts(db, rows);
 }
 

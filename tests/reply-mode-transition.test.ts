@@ -15,11 +15,14 @@ it("persists an acknowledged two-way transition and rejects stale receipts", asy
   const login = await app.inject({ method: "POST", url: "/api/v1/auth/login", payload: { username: "local-admin", password: "local-demo-only" } });
   const admin = { authorization: "Bearer " + login.json().access_token };
   const code = "switch-fixture";
-  app.db.prepare("INSERT INTO agent_devices(device_name,status,data_json) VALUES (?,'enabled',?)").run(code, JSON.stringify({device_code:code, position_id:25}));
+  app.db.prepare("INSERT INTO agent_devices(device_name,status,data_json) VALUES (?,'enabled',?)")
+    .run(code, JSON.stringify({ device_code: code, position_id: 1, agent_position_id: 2, factory_ids: [1, 2] }));
   const store = new DeviceBridgeStore(app.db);
   const device = { authorization: "Bearer " + store.pair(code) };
   const control = (payload: Record<string, unknown>, headers = device) => app.inject({ method: "POST", url: "/api/v1/bridge/devices/" + code + "/reply-mode", headers, payload });
   const change = (payload: Record<string, unknown>) => app.inject({ method: "POST", url: "/api/v1/agent/devices/" + code + "/reply-mode", headers: admin, payload });
+  const account = async () => (await app.inject({ url: "/api/v1/agent/devices", headers: admin })).json().items
+    .find((item: { device_code: string }) => item.device_code === code);
   expect((await change({ provider: "dify" })).statusCode).toBe(409);
   expect((await control({ wecom_online: true })).statusCode).toBe(200);
   const first = (await change({ provider: "dify" })).json();
@@ -30,13 +33,18 @@ it("persists an acknowledged two-way transition and rejects stale receipts", asy
   const pendingChat = await app.inject({ method: "POST", url: "/api/v1/agent/chat", headers: device, payload: { device_code: code, text: "测试" } });
   expect(pendingChat.json()).toMatchObject({ ok: false, code: "reply_mode_pending" });
   expect((await control({ id: first.id, step: "prepared", wecom_online: true })).json()).toMatchObject({ phase: "applying", effective: "agent" });
+  expect(await account()).toMatchObject({ reply_provider: "agent", position_id: 2, factory_ids: [2] });
   expect((await control({ id: first.id, step: "applied", provider: "agent", wecom_online: true })).statusCode).toBe(409);
   expect((await control({ id: first.id, step: "applied", provider: "dify", wecom_online: true })).json()).toMatchObject({ phase: "completed", effective: "dify" });
+  expect(await account()).toMatchObject({ reply_provider: "dify", position_id: 1, factory_ids: [1, 2] });
   const second = (await change({ provider: "agent" })).json();
   expect(second).toMatchObject({ phase: "waiting", effective: "dify", target: "agent" });
   expect((await control({ id: first.id, step: "applied", provider: "dify", wecom_online: true })).statusCode).toBe(409);
   expect((await control({ id: second.id, step: "prepared", wecom_online: true })).json().phase).toBe("applying");
+  expect(await account()).toMatchObject({ reply_provider: "dify", position_id: 1, factory_ids: [1, 2] });
+  expect((await app.inject({ url: "/api/v1/agent/flow?device_code=" + code, headers: device })).json().position_id).toBe(2);
   expect((await control({ id: second.id, step: "applied", provider: "agent", wecom_online: true })).json()).toMatchObject({ phase: "completed", effective: "agent" });
+  expect(await account()).toMatchObject({ reply_provider: "agent", position_id: 2, factory_ids: [2] });
   expect((await control({ id: second.id, step: "applied", provider: "agent", wecom_online: true })).json().phase).toBe("completed");
   const third = (await change({ provider: "dify" })).json();
   expect((await control({ id: third.id, step: "prepared", wecom_online: true })).json().phase).toBe("applying");
