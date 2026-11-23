@@ -60,6 +60,10 @@ curl -X POST http://127.0.0.1:8080/api/v1/auth/login \
 
 GET /api/v1/agent/devices/:code/login-qr 保留原 available 与可用图片字段。另返回 login_status，区分 logged_in、waiting_for_scan、waiting_for_qr、qr_expired、disconnected、device_disabled 和 authorization_failed。新鲜企微登录心跳可确认登录完成，超过两分钟的二维码截图不再返回。限时安全验证由操作者在 Win 的官方企业微信窗口完成。
 
+网页通过 `POST /api/v1/agent/devices/:code/verify-code` 提交手机企微显示的验证码或按企微要求收到的短信验证码。沿用用户设备范围校验，设备必须启用。请求体为 `{code: string}`，接受 4–8 位数字并保留前导零。响应为 `{ok: true, verification_status: "pending"}`。验证码只保存在服务进程内存中，最长两分钟。
+
+`GET /api/v1/agent/devices/:code/verify-code` 仅接受该启用设备自己的桥接令牌。返回 `{available: true, code, at}` 后立即清除验证码，未提交、已领取或已过期时返回 `{available: false}`。响应禁止缓存。网页从 `login-qr` 读取本次提交的可选状态 `verification_status`，包括 `pending`（待领取）、`received`（服务端已下发）、`expired`（两分钟内未领取）与 `unconfirmed`（下发一分钟后仍未确认登录）。登录成功沿用企微登录心跳。
+
 POST /api/v1/agent/devices/:code/login-qr/refresh 让客户端刷新登录二维码。只在设备启用且桥接状态 online 时接受，写一条 `kind=refresh_login_qr` 的指令（无正文、不关联客户）；同一设备 60 秒内重复请求只入队一条，返回 `{queued, command_id, deduped}`。客户端领到后点击企微登录窗的「刷新」，等待约 4 秒再立即截取新码上传；超过 5 分钟未领取的指令作废。该指令不受「回复就绪」门槛限制——二维码过期时本来就无法回复。
 
 账号页“工作流配置”统一进入话术流程画布。系统 Agent 按绑定的岗位打开流程，Dify 用 `/recruitment-flow?test_engine=dify&device_code=...` 打开接待测试，并选中有权访问的账号。旧 `/dify-connection` 返回 302，保留设备码和岗位参数。账号回复来源仍由专用接口读取和显式保存，模拟回复通过隔离预览接口调用。

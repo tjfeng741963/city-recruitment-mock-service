@@ -11,7 +11,6 @@ import { BridgeError, DeviceBridgeStore } from "../messaging/device-bridge.js";
 import { NOOP_NOTIFIER, type StreamNotifier } from "../messaging/stream-events.js";
 import { readWeComConfig } from "../wecom/wecom-config.js";
 import { listReminderTasks } from "./followup.js";
-import { isValidDeviceToken } from "./position-scripts.routes.js";
 import { loadFactories, parseDeviceData, readDeviceFactoryIds, receptionFactoryIds, resolveDevicePosition } from "../../shared/device-factories.js";
 
 const ADMIN_REQUIRED = { detail: "Admin access required" } as const;
@@ -50,19 +49,27 @@ function normalizeDevicePosition(
   else delete data.position_id;
 }
 
-/**
- * 待输入的企微验证码（内存态，不必落库）。
- *
- * 首次登录企微可能在扫码后要求短信验证码：前端提交 → 设备轮询取走 →
- * 在 Console 会话里模拟键盘敲进登录窗。one-shot：设备 GET 一次即清除，
- * 超时/失败由用户重新提交（验证码本身只有几分钟时效，不需要复杂重试）。
- */
-const pendingVerifyCodes = new Map<string, { code: string; at: string }>();
+const VERIFY_CODE_TTL_MS = 120_000;
+const VERIFY_LOGIN_WAIT_MS = 60_000;
+type LoginVerification = {
+  code?: string;
+  submittedAt: number;
+  receivedAt?: number;
+  cleanup: ReturnType<typeof setTimeout>;
+};
 
-export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync, notifier: StreamNotifier = NOOP_NOTIFIER) {
+export function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync, notifier: StreamNotifier = NOOP_NOTIFIER) {
   const messageChannel = createMessageChannelProvider(undefined, db);
   const messageEvents = new MessageEventService(db, { webhookSecret: process.env.REA_WEBHOOK_SECRET ?? "local-webhook-secret" });
   const bridgeStore = new DeviceBridgeStore(db, Date.now, notifier);
+  const loginVerifications = new Map<string, LoginVerification>();
+  function clearLoginVerification(deviceCode: string): void {
+    clearTimeout(loginVerifications.get(deviceCode)?.cleanup);
+    loginVerifications.delete(deviceCode);
+  }
+  app.addHook("onClose", async () => {
+    for (const code of loginVerifications.keys()) clearLoginVerification(code);
+  });
   // 生产配置 REA_MESSAGE_CHANNEL_PROVIDER=bridge 时，人工回复不能再走
   // DeviceBridgeChannelProvider 的「入队后同步等 30 秒回执」——键鼠客户端不是
   // 常驻 claim 的，等待必然超时并回 502，消息看着像失败。改成入队即返回
@@ -341,19 +348,27 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     }
     if (!frameFresh && bridge && heartbeatFresh && bridge.state === "online" && bridge.account_id &&
         (!runtime || runtime.wecom_available)) {
+      clearLoginVerification(code);
       return { available: false, login_status: "logged_in", last_refresh: lastRefresh };
     }
+    const verification = loginVerifications.get(code);
+    const verificationStatus = verification?.receivedAt !== undefined
+      ? { verification_status: now - verification.receivedAt < VERIFY_LOGIN_WAIT_MS ? "received" : "unconfirmed" }
+      : verification
+        ? { verification_status: now - verification.submittedAt < VERIFY_CODE_TTL_MS ? "pending" : "expired" }
+        : {};
     if (!frameFresh) {
       const login_status = heartbeatFresh
         ? bridge?.state === "scanning" && frame ? "qr_expired" : "waiting_for_qr"
         : bridge?.heartbeat_at ? "disconnected" : frame ? "qr_expired" : "waiting_for_qr";
-      return { available: false, login_status, last_refresh: lastRefresh };
+      return { available: false, login_status, last_refresh: lastRefresh, ...verificationStatus };
     }
     const row = frame;
     return {
       available: true,
       login_status: "waiting_for_scan",
       last_refresh: lastRefresh,
+      ...verificationStatus,
       // 直接给 data URL，前端 <img src> 拿来即用，不用再拼前缀
       image: row.image_b64.startsWith("data:") ? row.image_b64 : `data:image/png;base64,${row.image_b64}`,
       width: row.width,
@@ -400,8 +415,7 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     },
   );
 
-  // ── 企微登录验证码通道（扫码后企微可能要求短信验证码）──────────────
-  // 前端提交（管理员），设备轮询取走（设备令牌，one-shot）。
+  // 网页提交，目标设备凭桥接令牌领取一次。验证码只在内存中短暂保留。
   app.post<{ Params: { code: string }; Body: Record<string, unknown> }>(
     "/api/v1/agent/devices/:code/verify-code",
     async (request, reply) => {
@@ -409,12 +423,22 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
       if (!canAccessDevice(getUserScope(db, request.auth!), code)) {
         return reply.code(403).send({ detail: "Device scope required" });
       }
+      if (!bridgeStore.enabled(code)) {
+        return reply.code(409).send({ detail: "设备不存在或已停用" });
+      }
       const verify = String((request.body ?? {}).code ?? "").trim();
       if (!/^\d{4,8}$/.test(verify)) {
         return reply.code(422).send({ detail: "验证码必须是 4-8 位数字" });
       }
-      pendingVerifyCodes.set(code, { code: verify, at: new Date().toISOString() });
-      return { ok: true };
+      clearLoginVerification(code);
+      const cleanup = setTimeout(() => {
+        const verification = loginVerifications.get(code);
+        if (!verification) return;
+        delete verification.code;
+        verification.cleanup = setTimeout(() => loginVerifications.delete(code), 300_000).unref();
+      }, VERIFY_CODE_TTL_MS).unref();
+      loginVerifications.set(code, { code: verify, submittedAt: Date.now(), cleanup });
+      return { ok: true, verification_status: "pending" };
     },
   );
 
@@ -422,13 +446,19 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     "/api/v1/agent/devices/:code/verify-code",
     async (request, reply) => {
       const code = String(request.params.code);
-      if (request.auth?.role !== "admin" && !isValidDeviceToken(db, request)) {
-        return reply.code(403).send(ADMIN_REQUIRED);
+      reply.header("Cache-Control", "no-store");
+      const token = (request.headers.authorization ?? "").replace(/^Bearer /, "").trim();
+      if (!token || !bridgeStore.authenticate(code, token) || !bridgeStore.enabled(code)) {
+        return reply.code(403).send({ detail: "Device token required" });
       }
-      const pending = pendingVerifyCodes.get(code);
-      if (!pending) return { available: false };
-      pendingVerifyCodes.delete(code);
-      return { available: true, code: pending.code, at: pending.at };
+      const verification = loginVerifications.get(code);
+      if (!verification?.code) return { available: false };
+      const verify = verification.code;
+      delete verification.code;
+      const now = Date.now();
+      if (now - verification.submittedAt >= VERIFY_CODE_TTL_MS) return { available: false };
+      verification.receivedAt = now;
+      return { available: true, code: verify, at: new Date(verification.submittedAt).toISOString() };
     },
   );
   // 本地新增，目标站契约里没有这条（7 轮 parity 快照均未抓到同类端点）——
@@ -596,5 +626,5 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     db.prepare("UPDATE agent_conversations SET unread=0,updated_at=CURRENT_TIMESTAMP WHERE device_code=(SELECT device_code FROM agent_devices WHERE id=?)").run(deviceId);
     return { success: true };
   });
-  // 之前恒返回空数组（还没接跟进逻辑）。现在返回真实待跟进候选：
+  return { clearLoginVerification };
 }

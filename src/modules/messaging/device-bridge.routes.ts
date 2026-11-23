@@ -7,7 +7,7 @@ import { DeviceBridgeStore } from "./device-bridge.js";
 import { queuePendingDifyGroupNotifications } from "../dify/dify-group-notification.js";
 import { MessageEventService } from "./message-events.js";
 import { createMessageChannelProvider } from "./message-channel-provider.js";
-import { NOOP_NOTIFIER, type StreamNotifier } from "./stream-events.js";
+import type { StreamNotifier } from "./stream-events.js";
 import { recordInboundMessage } from "./inbound-store.js";
 import { loadFactories, receptionFactoryIds, resolveDevicePosition } from "../../shared/device-factories.js";
 import { latestPositionScriptStamp, loadPositionScripts } from "../../shared/media-assets.js";
@@ -37,7 +37,12 @@ function matchesRegisterKey(supplied: string, expected: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSync, notifier: StreamNotifier = NOOP_NOTIFIER): DeviceBridgeStore {
+export function registerDeviceBridgeRoutes(
+  app: FastifyInstance,
+  db: DatabaseSync,
+  notifier: StreamNotifier,
+  clearLoginVerification: (code: string) => void,
+): DeviceBridgeStore {
   const store = new DeviceBridgeStore(db, Date.now, notifier);
   const events = new MessageEventService(db, { webhookSecret: process.env.REA_WEBHOOK_SECRET ?? "local-webhook-secret" });
   // Dify 用不上时宁可不回也不能把 Mock 文案发给真实客户（2026-11-16 整合）：
@@ -346,6 +351,7 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
       const token = (req.headers.authorization ?? "").replace(/^Bearer /, "");
       if (!store.authenticate(code, token)) return reply.code(401).send({ detail: "Invalid device token" });
       store.clearLoginQr(code);
+      clearLoginVerification(code);
       return { ok: true };
     },
   );

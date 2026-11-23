@@ -60,16 +60,12 @@ export interface LoginQrResult {
   width?: number
   height?: number
   captured_at?: string
+  verification_status?: LoginVerificationStatus
   /** 最近一条「刷新二维码」指令的结果；失败时带客户端上报的原因 */
   last_refresh?: { status: string; error?: string; at?: string } | null
 }
 
-export interface VerifyCodeResult {
-  available?: boolean
-  code?: string
-  at?: string
-  ok?: boolean
-}
+export type LoginVerificationStatus = 'pending' | 'received' | 'expired' | 'unconfirmed'
 
 export interface WorkflowResult {
   items: Array<Record<string, unknown>>
@@ -94,10 +90,8 @@ export const devicesApi = {
       {},
       { timeout: 8000 },
     ),
-  verifyCodeGet: (code: string) =>
-    http.get<VerifyCodeResult>(`/api/v1/agent/devices/${encodeURIComponent(code)}/verify-code`),
-  verifyCodePost: (code: string, payload: Record<string, unknown>) =>
-    http.post<VerifyCodeResult>(
+  verifyCodePost: (code: string, payload: { code: string }) =>
+    http.post<{ ok: boolean; verification_status: 'pending' }>(
       `/api/v1/agent/devices/${encodeURIComponent(code)}/verify-code`,
       payload,
     ),

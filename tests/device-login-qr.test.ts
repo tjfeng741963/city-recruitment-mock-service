@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildServer } from "../src/server.js";
 
@@ -166,5 +166,69 @@ describe("device login QR relay", () => {
     const anonymous = await app.inject({ method: "GET", url: `/api/v1/agent/devices/${CODE}/login-qr` });
     expect([401, 403]).toContain(anonymous.statusCode);
     expect(anonymous.json()).not.toHaveProperty("image");
+  });
+
+  const verificationUrl = `/api/v1/agent/devices/${CODE}/verify-code`;
+  const submitVerification = () =>
+    app.inject({ method: "POST", url: verificationUrl, headers: admin, payload: { code: "012345" } });
+
+  it("shows whether Windows has taken the verification code without exposing it to the web view", async () => {
+    const submitted = await submitVerification();
+    expect(submitted.statusCode).toBe(200);
+    expect(submitted.json()).toEqual({ ok: true, verification_status: "pending" });
+    expect((await read()).json()).toHaveProperty("verification_status", "pending");
+    expect((await read()).payload).not.toContain("012345");
+
+    const claim = await app.inject({ method: "GET", url: verificationUrl, headers: device });
+    expect(claim.json()).toMatchObject({ available: true, code: "012345" });
+    expect(claim.headers["cache-control"]).toBe("no-store");
+    expect((await read()).json()).toHaveProperty("verification_status", "received");
+    expect((await read()).payload).not.toContain("012345");
+    expect((await app.inject({ method: "GET", url: verificationUrl, headers: device })).json()).toEqual({ available: false });
+  });
+
+  it("only lets the addressed device pick up a verification code", async () => {
+    const other = "verification-other-device";
+    app.db.prepare("INSERT INTO agent_devices(device_name,data_json,status) VALUES (?, ?, 'enabled')")
+      .run(other, JSON.stringify({ device_code: other }));
+    const pair = await app.inject({ method: "POST", url: `/api/v1/bridge/devices/${other}/pair`, headers: admin });
+    expect(pair.statusCode).toBe(200);
+    await submitVerification();
+
+    for (const headers of [admin, { authorization: `Bearer ${pair.json().device_token}` }]) {
+      const denied = await app.inject({ method: "GET", url: verificationUrl, headers });
+      expect(denied.statusCode).toBe(403);
+      expect(denied.json()).not.toHaveProperty("code");
+    }
+    expect((await app.inject({ method: "GET", url: verificationUrl, headers: device })).json()).toHaveProperty("available", true);
+  });
+
+  it("discards unclaimed codes when Windows clears its login screenshot", async () => {
+    await submitVerification();
+    const clear = await app.inject({
+      method: "DELETE", url: `/api/v1/bridge/devices/${CODE}/login-qr`, headers: device,
+    });
+    expect(clear.statusCode).toBe(200);
+    expect((await app.inject({ method: "GET", url: verificationUrl, headers: device })).json()).toEqual({ available: false });
+    expect((await read()).json()).not.toHaveProperty("verification_status");
+  });
+
+  it("expires unclaimed verification codes and distinguishes an unconfirmed receipt", async () => {
+    const now = vi.spyOn(Date, "now");
+    try {
+      const start = Date.now();
+      now.mockReturnValue(start);
+      await submitVerification();
+      now.mockReturnValue(start + 120_001);
+      expect((await app.inject({ method: "GET", url: verificationUrl, headers: device })).json()).toEqual({ available: false });
+      expect((await read()).json()).toHaveProperty("verification_status", "expired");
+
+      await submitVerification();
+      await app.inject({ method: "GET", url: verificationUrl, headers: device });
+      now.mockReturnValue(start + 180_002);
+      expect((await read()).json()).toHaveProperty("verification_status", "unconfirmed");
+    } finally {
+      now.mockRestore();
+    }
   });
 });

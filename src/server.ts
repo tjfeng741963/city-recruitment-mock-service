@@ -184,8 +184,8 @@ export function buildServer() {
   // 关掉兼容层（REA_KB_COMPAT=off）就回落到旧表 knowledge_items。
   registerResourceRoutes(app, db);
   registerFileRoutes(app, db);
-  registerAgentRoutes(app, db, notifier);
-  const bridgeStore = registerDeviceBridgeRoutes(app, db, notifier);
+  const { clearLoginVerification } = registerAgentRoutes(app, db, notifier);
+  const bridgeStore = registerDeviceBridgeRoutes(app, db, notifier, clearLoginVerification);
   // 掉线清扫（契约：掉线提醒）：每 30s 把 60s 无心跳的“在线”设备翻成 offline，
   // 扫到几台推几台（reason='heartbeat_timeout'）。推送节流在 notifier 里做，
   // 重复扫描 rowcount=0 时 sweepStale 返回空列表，天然不重推。
