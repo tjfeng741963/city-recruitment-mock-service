@@ -2,7 +2,7 @@
   <div class="app-layout">
     <aside class="sidebar" :class="{ collapsed }">
       <div class="sidebar-logo">
-        <div class="logo-icon">C</div>
+        <YuanyiMark label="源绎" class="sidebar-brand" />
         <span v-if="!collapsed" class="logo-text">城市配置管理</span>
       </div>
 
@@ -37,9 +37,7 @@
     <div class="main-area">
       <header class="top-header">
         <div class="header-right">
-          <div class="header-brand">
-            <YuanyiMark label="源绎" />
-          </div>
+          <el-avatar :size="32" class="user-avatar">{{ initial }}</el-avatar>
           <span class="user-name">{{ auth.user?.username || 'local-admin' }}</span>
           <el-button link class="logout-btn" @click="handleLogout">退出</el-button>
         </div>
@@ -97,6 +95,7 @@ const onNarrowChange = (event: MediaQueryListEvent): void => {
   if (!localStorage.getItem(NAV_COLLAPSED_KEY)) collapsed.value = event.matches
 }
 
+const initial = computed(() => (auth.user?.username || 'L').slice(0, 1).toUpperCase())
 const navPath = computed(() => activeNavigationPath(route.path))
 const activeMenu = computed(() => menuTarget(navPath.value))
 
@@ -131,19 +130,15 @@ function handleLogout(): void {
 </script>
 
 <style scoped>
-.header-brand {
-  display: grid;
+.sidebar-logo .sidebar-brand {
+  box-sizing: border-box;
   width: 38px;
-  height: 32px;
+  height: 38px;
   flex: 0 0 38px;
-  place-items: center;
+  padding: 4px;
   border-radius: 10px;
   border: 1px solid #dce3ef;
   background: linear-gradient(140deg, #fdfdff, #edf2fd 60%, #eef7f1);
-}
-
-.header-brand .yuanyi-mark {
-  width: 28px;
 }
 
 .sidebar {
