@@ -80,6 +80,7 @@ GET /api/v1/agent/devices/:code/login-qr 保留原 available 与可用图片字�
 | POST | `/api/v1/agent-opening` | admin | 追加一条开场，自动排到末尾 |
 | PUT | `/api/v1/agent-opening/:id` | admin | 改一条，body 可含 `kind/content/media_name/delay_ms/status` |
 | DELETE | `/api/v1/agent-opening/:id` | admin | 删除一条 |
+| POST | `/api/v1/agent-opening/batch-delete` | admin | 一次删除本岗位选中的条目。提交 `position_id`、`ids` 及读取开场时返回的 `opening_revision`（请求参数名 `revision`）。列表变更时返回 409。 |
 | POST | `/api/v1/agent-opening/reorder` | admin | 重排，body `{position_id,ids:[...]}` |
 
 <!-- api-check:end -->

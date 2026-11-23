@@ -241,6 +241,56 @@ describe("agent persona & opening routes", () => {
       expect(ok.json().items.map((row: { id: number }) => row.id)).toEqual([second.id, mine.id]);
     });
 
+
+    it("批量删除只移除当前岗位选中的开场并保留其余顺序", async () => {
+      const first = (await addText("保留第一条")).json();
+      const second = (await addText("删除第二条")).json();
+      const third = (await addText("删除第三条")).json();
+      const last = (await addText("保留最后一条")).json();
+      const listUrl = `/api/v1/agent-persona?position_id=${positionId}`;
+      const before = (await app.inject({ url: listUrl, headers: admin })).json();
+      const result = await app.inject({
+        method: "POST",
+        url: "/api/v1/agent-opening/batch-delete",
+        headers: admin,
+        payload: { position_id: positionId, ids: [second.id, third.id], revision: before.opening_revision },
+      });
+      expect(result.statusCode).toBe(200);
+      expect(result.json().deleted_count).toBe(2);
+      expect(result.json().items.map((item: { id: number }) => item.id)).toEqual([first.id, last.id]);
+      const after = (await app.inject({ url: listUrl, headers: admin })).json();
+      expect(after.openings.map((item: { id: number }) => item.id)).toEqual([first.id, last.id]);
+      expect(after.opening_version).not.toBe(before.opening_version);
+      expect(after.opening_revision).not.toBe(before.opening_revision);
+    });
+
+    it("批量删除拒绝跨岗位、过期列表和非管理员请求", async () => {
+      const mine = (await addText("本岗位开场")).json();
+      const theirs = (await app.inject({
+        method: "POST",
+        url: "/api/v1/agent-opening",
+        headers: admin,
+        payload: { position_id: otherPositionId, kind: "text", content: "其他岗位开场" },
+      })).json();
+      const listUrl = `/api/v1/agent-persona?position_id=${positionId}`;
+      const before = (await app.inject({ url: listUrl, headers: admin })).json();
+      const remove = (ids: number[], headers = admin) => app.inject({
+        method: "POST",
+        url: "/api/v1/agent-opening/batch-delete",
+        headers,
+        payload: { position_id: positionId, ids, revision: before.opening_revision },
+      });
+
+      expect((await remove([mine.id], customer)).statusCode).toBe(403);
+      expect((await remove([])).statusCode).toBe(422);
+      expect((await remove([mine.id, mine.id])).statusCode).toBe(422);
+      expect((await remove([mine.id, theirs.id])).statusCode).toBe(422);
+      await addText("其它窗口新增的开场");
+      expect((await remove([mine.id])).statusCode).toBe(409);
+      const after = (await app.inject({ url: listUrl, headers: admin })).json();
+      expect(after.openings.map((item: { content: string }) => item.content)).toEqual(["本岗位开场", "其它窗口新增的开场"]);
+    });
+
     it("删除后再读取就少一条", async () => {
       const row = (await addText("待删")).json();
       const del = await app.inject({

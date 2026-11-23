@@ -332,7 +332,7 @@ export interface AgentExecutionTrace {
 export const agentApi = {
   persona: () => http.get<Record<string, unknown>>('/api/v1/agent-persona'),
   personaGet: (positionId: number | string) =>
-    http.get<{ persona?: { content?: string; status?: string }; openings?: Record<string, unknown>[]; opening_version?: string }>(
+    http.get<{ persona?: { content?: string; status?: string }; openings?: Record<string, unknown>[]; opening_version?: string; opening_revision?: string }>(
       '/api/v1/agent-persona',
       { params: { position_id: positionId } },
     ),
@@ -348,6 +348,10 @@ export const agentApi = {
     http.put<Record<string, unknown>>(`/api/v1/agent-opening/${id}`, payload),
   removeOpening: (id: number | string) =>
     http.delete<OkResult>(`/api/v1/agent-opening/${id}`),
+  removeOpenings: (payload: { position_id: number; ids: number[]; revision: string }) =>
+    http.post<{ deleted_count: number; items: Record<string, unknown>[]; opening_revision: string }>(
+      '/api/v1/agent-opening/batch-delete', payload,
+    ),
   reorderOpenings: (payload: Record<string, unknown>) =>
     http.post<OkResult>('/api/v1/agent-opening/reorder', payload),
   flowGet: (positionId: number | string) =>

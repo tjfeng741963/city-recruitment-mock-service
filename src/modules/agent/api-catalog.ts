@@ -184,6 +184,23 @@ export const API_CATALOG: CatalogGroup[] = [
         responseFields: [{ name: "ok", type: "boolean", desc: "true 表示删除成功；id 不存在返回 404" }],
       },
       {
+        key: "opening-batch-delete",
+        method: "POST",
+        url: "/api/v1/agent-opening/batch-delete",
+        purpose: "一次删除当前岗位选中的开场。列表变更时返回 409，请重读后重新选择。",
+        auth: "admin",
+        bodyFields: [
+          { name: "position_id", type: "number", required: true, desc: "岗位 id" },
+          { name: "ids", type: "number[]", required: true, desc: "所选开场条目 id" },
+          { name: "revision", type: "string", required: true, desc: "读取开场时返回的 opening_revision" },
+        ],
+        responseFields: [
+          { name: "deleted_count", type: "number", desc: "删除条数" },
+          { name: "items", type: "array", desc: "剩余开场条目" },
+          { name: "opening_revision", type: "string", desc: "更新后的列表版本" },
+        ],
+      },
+      {
         key: "opening-reorder",
         method: "POST",
         url: "/api/v1/agent-opening/reorder",

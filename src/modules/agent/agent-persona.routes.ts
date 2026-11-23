@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
 import { openingVersion } from "../../shared/opening-version.js";
@@ -108,6 +109,10 @@ function clampDelay(value: unknown): number {
   return Math.min(Math.max(raw, MIN_DELAY_MS), MAX_DELAY_MS);
 }
 
+function openingRevision(items: ReturnType<typeof serializeOpening>[]): string {
+  return createHash("sha256").update(JSON.stringify(items)).digest("hex");
+}
+
 export async function registerAgentPersonaRoutes(app: FastifyInstance, db: DatabaseSync) {
   const isAdmin = (request: FastifyRequest) => request.auth?.role === "admin";
 
@@ -183,6 +188,7 @@ export async function registerAgentPersonaRoutes(app: FastifyInstance, db: Datab
         openings,
         total: openings.length,
         opening_version: openingVersion(positionId, openings),
+        opening_revision: openingRevision(openings),
       };
     },
   );
@@ -319,6 +325,41 @@ export async function registerAgentPersonaRoutes(app: FastifyInstance, db: Datab
     const result = db.prepare("DELETE FROM position_opening WHERE id=?").run(id);
     if (Number(result.changes ?? 0) === 0) return reply.code(404).send({ detail: "Not found" });
     return { ok: true };
+  });
+
+
+  app.post<{ Body: Record<string, unknown> }>("/api/v1/agent-opening/batch-delete", async (request, reply) => {
+    if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
+    const { position_id: positionId, ids, revision } = request.body ?? {};
+    if (typeof positionId !== "number" || !Number.isSafeInteger(positionId) || positionId <= 0 ||
+        !Array.isArray(ids) || !ids.length || ids.length > MAX_OPENINGS ||
+        ids.some(id => !Number.isSafeInteger(id) || id <= 0) || new Set(ids).size !== ids.length ||
+        typeof revision !== "string" || !/^[a-f0-9]{64}$/.test(revision)) {
+      return reply.code(422).send({ detail: "请选择当前岗位的开场条目后重试" });
+    }
+
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const items = listOpenings(positionId);
+      const selected = new Set<number>(ids);
+      const remaining = items.filter(item => !selected.has(item.id));
+      if (openingRevision(items) !== revision) {
+        db.exec("ROLLBACK");
+        return reply.code(409).send({ detail: "开场列表已更新，请重新勾选" });
+      }
+      if (items.length - remaining.length !== ids.length) {
+        db.exec("ROLLBACK");
+        return reply.code(422).send({ detail: "所选条目不全属于当前岗位" });
+      }
+      db.prepare(
+        "DELETE FROM position_opening WHERE position_id=? AND id IN (SELECT value FROM json_each(?))",
+      ).run(positionId, JSON.stringify(ids));
+      db.exec("COMMIT");
+      return { deleted_count: ids.length, items: remaining, opening_revision: openingRevision(remaining) };
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
   });
 
   // ── 开场：重排 ────────────────────────────────────────────────
