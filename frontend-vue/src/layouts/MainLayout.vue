@@ -37,7 +37,9 @@
     <div class="main-area">
       <header class="top-header">
         <div class="header-right">
-          <el-avatar :size="32" class="user-avatar">{{ initial }}</el-avatar>
+          <div class="header-brand">
+            <YuanyiMark label="源绎" />
+          </div>
           <span class="user-name">{{ auth.user?.username || 'local-admin' }}</span>
           <el-button link class="logout-btn" @click="handleLogout">退出</el-button>
         </div>
@@ -54,6 +56,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import YuanyiMark from '../components/YuanyiMark.vue'
 import { useAuthStore } from '../stores/auth'
 import { navigationForRole, activeNavigationPath } from './navigation'
 import { readPositionContext } from '../utils/position-context'
@@ -94,8 +97,6 @@ const onNarrowChange = (event: MediaQueryListEvent): void => {
   if (!localStorage.getItem(NAV_COLLAPSED_KEY)) collapsed.value = event.matches
 }
 
-const initial = computed(() => (auth.user?.username || 'L').slice(0, 1).toUpperCase())
-
 const navPath = computed(() => activeNavigationPath(route.path))
 const activeMenu = computed(() => menuTarget(navPath.value))
 
@@ -130,6 +131,21 @@ function handleLogout(): void {
 </script>
 
 <style scoped>
+.header-brand {
+  display: grid;
+  width: 38px;
+  height: 32px;
+  flex: 0 0 38px;
+  place-items: center;
+  border-radius: 10px;
+  border: 1px solid #dce3ef;
+  background: linear-gradient(140deg, #fdfdff, #edf2fd 60%, #eef7f1);
+}
+
+.header-brand .yuanyi-mark {
+  width: 28px;
+}
+
 .sidebar {
   display: flex;
   flex-direction: column;
