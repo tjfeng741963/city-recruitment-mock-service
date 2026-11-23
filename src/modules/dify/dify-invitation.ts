@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { difyContext, difyContextConflict } from "./dify-context.js";
-import { interviewSchedule } from "./dify-interview.js";
+import { bookableInterviewPoints, describeInterviewPoint, interviewSchedule } from "./dify-interview.js";
 import { invitationMedia, type DifyMessage } from "./dify-material-reply.js";
 
 const text = (content: string): DifyMessage => ({type:"text",content:content.replace(/[【】]/g, c => c === "【" ? "〔" : "〕").slice(0,4000)});
@@ -32,8 +32,8 @@ export function invitationTurn(db: DatabaseSync, input: {
   const city = context.city.replace(/市$/, "");
   if (!["广州","南昌"].includes(city) || !/地铁|轨道|城际|安检|安保/.test(context.job_title)) return;
   const schedule = interviewSchedule(db,positionId,context);
-  const available = schedule.days.length && schedule.slots.length && schedule.points.some(point => point.address);
-  if (!context.wage_text || !context.hours_text || !available) return;
+  const available = bookableInterviewPoints(schedule);
+  if (!context.wage_text || !context.hours_text || !available.length) return;
   const stage = invitationStage(db,identity,positionId);
   const postpones = /不一定|还没确定|还不确定|(?:晚点|回头|确定后|确认后)(?:再|给你|联系)|如果.+(?:再来|再去|再联系|面试|过去)|等.+(?:再|才知道)/.test(query);
   if (stage && stage !== "declined" && postpones && !/[?？]|吗$/.test(query)) {
@@ -44,7 +44,13 @@ export function invitationTurn(db: DatabaseSync, input: {
   const accepts = stage === "invited" && /^(?:可以(?:接受)?|能接受|好(?:的|啊|呀|呀可以)?|行(?:的)?|没问题|有兴趣)(?:[，,\s]*(?:我)?(?:想|要|可以)(?:去|来)?面试)?$/.test(query);
   if ((stage === "invited" && accepts) || (stage !== "offered" && appointmentIntent)) {
     setInvitationStage(db,identity,positionId,"offered");
-    const addresses = schedule.points.filter(point => point.address).map(point => point.name === point.address
+    if (available.some(point => point.interview_time)) {
+      const points = available.map(point => describeInterviewPoint({
+        ...point, interview_time: point.interview_time || schedule.timeText,
+      }));
+      return [text(`可以预约的面试点\n${points.join("\n")}`), text("你想去哪个面试点，约哪天几点？")];
+    }
+    const addresses = available.map(point => point.name === point.address
       ? point.address : `${point.name}（${point.address}）`);
     const times = [schedule.dayLabels.join("、"),schedule.timeText].filter(Boolean).join("，");
     return [text(`面试地点在${addresses.join("、")}。`), text(`${times}可以面试，你哪天方便，想约几点？`)];

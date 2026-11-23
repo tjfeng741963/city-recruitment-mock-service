@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildServer } from '../src/server.js';
+import { interviewSchedule, validateInterview } from '../src/modules/dify/dify-interview.js';
 import { normalizePositionFacts, applyCityDefaultsToPosition, normalizeInterviewPoints } from '../src/shared/position-facts.js';
 import { serializeServicePosition } from '../src/shared/response-serializers.js';
 
@@ -44,7 +45,7 @@ it('round trips two points and sends the same locations into Agent and Dify prev
   expect(create.statusCode).toBe(200);
   const id = create.json().id;
   const locations = { work_address: '上班西门', interview_address: '默认面试东门',
-    interview_points: [{ name: '南门', address: '南路6号' }, { name: '北门', address: '北路8号' }] };
+    interview_points: [{ name: '南门', address: '南路6号' }, { name: '北门', address: '北路8号', interview_time: '周三至周三 15:00-16:00', checkin_guide: '在北门登记' }] };
   const update = await server.inject({ method: 'PUT', url: '/api/v1/service-positions/' + id, headers, payload: locations });
   expect(update.statusCode).toBe(200);
   const read = await server.inject({ url: '/api/v1/service-positions/' + id, headers });
@@ -53,10 +54,20 @@ it('round trips two points and sends the same locations into Agent and Dify prev
   const agent = await server.inject({ method: 'POST', url: '/api/v1/agent/chat', headers, payload: question });
   expect(agent.statusCode).toBe(200);
   expect(agent.json().facts).toMatchObject({ place: '上班西门', interview_address: '默认面试东门',
-    interview_points: '南门（南路6号）；北门（北路8号）' });
+    interview_points: '南门（南路6号）；北门（北路8号），面试时间：周三至周三 15:00-16:00，到场指引：在北门登记' });
   expect(agent.json().messages[0].content).toContain('北门（北路8号）');
   const dify = await server.inject({ method: 'POST', url: '/api/v1/dify/preview', headers, payload: question });
   expect(dify.statusCode).toBe(200);
   expect(JSON.parse(dify.json().inputs.position_data)).toMatchObject({ place: '上班西门', interview_address: '默认面试东门',
     interview_points: locations.interview_points });
+  const schedule = interviewSchedule(server.db, id, { interview_time: '每天 10:00-11:00' });
+  const now = new Date('2026-11-23T00:00:00+08:00');
+  expect(validateInterview(server.db, id, schedule, '2026-11-25', '15:30', '北门', now)).toMatchObject({
+    point: { address: '北路8号', checkin_guide: '在北门登记' },
+  });
+  expect(validateInterview(server.db, id, schedule, '2026-11-24', '15:30', '北门', now)).toHaveProperty('error');
+  expect(validateInterview(server.db, id, schedule, '2026-11-25', '10:30', '北门', now)).toHaveProperty('error');
+  expect(validateInterview(server.db, id, schedule, '2026-11-24', '10:30', '南门', now)).toMatchObject({
+    point: { address: '南路6号' },
+  });
 });

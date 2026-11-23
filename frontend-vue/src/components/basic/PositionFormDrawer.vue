@@ -130,7 +130,7 @@
           <el-tab-pane label="面试与门店" name="interview">
             <div class="line-legend">
               <el-tag effect="plain" type="primary">系统 Agent</el-tag><span>根据已填地址和面试点回答。</span>
-              <el-tag effect="plain" type="warning">Dify 工作流</el-tag><span>默认时间和地址优先取城市资料。具体预约使用所选面试点。</span>
+              <el-tag effect="plain" type="warning">Dify 工作流</el-tag><span>预约使用所选面试点的地址和专属时间。未填专属时间时，沿用现有默认日程。</span>
             </div>
             <div class="grid-2">
               <el-form-item label="面试时间">
@@ -171,19 +171,33 @@
             <section class="interview-points" aria-label="面试点">
               <div class="section-title point-heading">
                 <span>面试点</span>
-                <el-button type="primary" plain @click="form.interview_points.push({ name: '', address: '' })">新增面试点</el-button>
+                <el-button type="primary" plain @click="form.interview_points.push({ name: '', address: '', interview_time: '', checkin_guide: '' })">新增面试点</el-button>
               </div>
-              <div v-for="(point, index) in form.interview_points" :key="index" class="point-row">
-                <el-form-item label="面试点名称" :prop="'interview_points.' + index + '.name'"
-                  :rules="[{ required: true, whitespace: true, message: '请输入面试点名称', trigger: 'blur' }]">
-                  <el-input v-model="point.name" placeholder="如：东门接待处" />
+              <p class="tab-tip">不同线路去不同地点时，每条线路添加一个面试点，例如「地铁 1 号线面试点」。正式预约需要详细地址。</p>
+              <div v-for="(point, index) in form.interview_points" :key="index" class="point-card">
+                <div class="point-heading">
+                  <strong>{{ point.name.trim() || '新面试点' }}</strong>
+                  <el-button link type="danger" :aria-label="'移除面试点 ' + (index + 1)" @click="form.interview_points.splice(index, 1)">移除</el-button>
+                </div>
+                <div class="point-fields">
+                  <el-form-item label="面试点名称" :prop="'interview_points.' + index + '.name'"
+                    :rules="[{ required: true, whitespace: true, message: '请输入面试点名称', trigger: 'blur' }]">
+                    <el-input v-model="point.name" placeholder="如：地铁 1 号线面试点" />
+                  </el-form-item>
+                  <el-form-item label="详细地址">
+                    <el-input v-model="point.address" placeholder="如：兴业路 8 号东门" />
+                  </el-form-item>
+                </div>
+                <el-form-item label="本点面试时间（可选）">
+                  <el-input v-model="point.interview_time" placeholder="如：周一至周五 11:00、14:00" />
+                  <span class="tab-tip point-time-tip">请用 24 小时制，支持单个时间或时段。留空沿用默认日程。</span>
                 </el-form-item>
-                <el-form-item label="详细地址">
-                  <el-input v-model="point.address" placeholder="如：兴业路 8 号东门" />
+                <el-form-item label="本点到场指引（可选）">
+                  <el-input v-model="point.checkin_guide" type="textarea" :rows="2"
+                    placeholder="如：从东门进入，到二楼 224 室登记" />
                 </el-form-item>
-                <el-button link type="danger" :aria-label="'移除面试点 ' + (index + 1)" @click="form.interview_points.splice(index, 1)">移除</el-button>
               </div>
-              <p class="tab-tip">正式预约需要详细地址。以前保存的面试点名称可补录地址。</p>
+              <p v-if="form.interview_points.length" class="tab-tip">岗位资料里的通知模板适合放共用说明。不同点的入口、楼层和房间请填在各自的到场指引。</p>
             </section>
             <el-form-item label="岗位图片地址">
               <el-input v-model="form.image_url" placeholder="https://..." />
@@ -337,7 +351,9 @@ const form = reactive({
   store_address: '',
   store_coordinates: '',
   interview_days: [] as string[],
-  interview_points: [] as Array<{name: string; address: string; original?: unknown}>,
+  interview_points: [] as Array<{
+    name: string; address: string; interview_time: string; checkin_guide: string; original?: unknown
+  }>,
   sections: { ...SECTION_LABELS } as Record<string, string>,
 })
 
@@ -421,9 +437,17 @@ function fill(source: ServicePosition): void {
   form.store_coordinates = String(source.store_coordinates ?? '')
   form.interview_days = readStrings(source.interview_days)
   form.interview_points = Array.isArray(source.interview_points) ? source.interview_points.flatMap(point => {
-    if (typeof point === 'string' && point.trim()) return [{ name: point, address: '', original: point }]
+    if (typeof point === 'string' && point.trim()) {
+      return [{ name: point, address: '', interview_time: '', checkin_guide: '', original: point }]
+    }
     if (point && typeof point.name === 'string' && point.name.trim()) {
-      return [{ name: point.name, address: typeof point.address === 'string' ? point.address : '', original: point }]
+      return [{
+        name: point.name,
+        address: typeof point.address === 'string' ? point.address : '',
+        interview_time: typeof point.interview_time === 'string' ? point.interview_time : '',
+        checkin_guide: typeof point.checkin_guide === 'string' ? point.checkin_guide : '',
+        original: point,
+      }]
     }
     return []
   }) : []
@@ -541,9 +565,11 @@ function buildPayload(): Record<string, unknown> {
     interview_points: form.interview_points.map(point => {
       const name = point.name.trim()
       const address = point.address.trim()
-      if (typeof point.original === 'string' && point.original === name && !address) return point.original
+      const interview_time = point.interview_time.trim()
+      const checkin_guide = point.checkin_guide.trim()
+      if (typeof point.original === 'string' && point.original === name && !address && !interview_time && !checkin_guide) return point.original
       const previous = point.original && typeof point.original === 'object' ? point.original : {}
-      return { ...previous, name, address }
+      return { ...previous, name, address, interview_time, checkin_guide }
     }),
     base_sections: { ...form.sections },
     base_section_labels: labelMap,
@@ -597,8 +623,12 @@ async function submit(): Promise<void> {
 .line-legend, .agent-intro, .field-label-with-line { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .line-legend, .agent-intro { margin: 4px 0 16px; color: var(--el-text-color-regular); font-size: 13px; }
 .point-heading { display: flex; justify-content: space-between; align-items: center; }
-.point-row { display: grid; grid-template-columns: 1fr 1.5fr auto; gap: 12px; align-items: center; }
-@media (max-width: 640px) { .point-row { grid-template-columns: 1fr; gap: 0; } }
+.point-card { border: 1px solid var(--el-border-color); border-radius: 8px; padding: 12px 16px; margin-bottom: 12px; }
+.point-card .point-heading { margin-bottom: 10px; }
+.point-time-tip { margin: 2px 0 0; }
+.point-card :deep(.el-form-item:last-child) { margin-bottom: 0; }
+.point-fields { display: grid; grid-template-columns: 1fr 1.5fr; gap: 0 16px; }
+@media (max-width: 640px) { .point-fields { grid-template-columns: 1fr; } }
 
 .drawer-body {
   min-height: 320px;
