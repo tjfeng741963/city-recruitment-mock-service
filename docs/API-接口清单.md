@@ -48,7 +48,7 @@ curl -X POST http://127.0.0.1:8080/api/v1/auth/login \
 
 岗位详情和保存沿用 `/api/v1/service-positions` 系列接口。岗位响应带有所属 `city_id`，用于准确回填城市。网页表单提交 `work_address` 与 `interview_address`，分别表示工作地址和默认面试地址。已有的 `address` 单地址记录仍可读取。用户通过新表单保存后，两个地址独立存储，旧客户端可继续读取兼容字段 `address`。
 
-`interview_points` 接受旧名称字符串以及 `{name,address}` 对象。Dify 正式预约按候选人选择的面试点校验地址，Agent 将面试点列表加入咨询上下文。城市资料对 Dify 的默认地址、班次与工资的优先级保持原有口径。
+`interview_points` 接受旧名称字符串及 `{name,address,interview_time?,checkin_guide?}` 对象。Dify 正式预约使用所选点的地址和专属时间，未设时间沿用默认日程。收到到场消息时按登记的点名和地址查找专属指引。Agent 将各点的地址、专属时间与指引加入咨询上下文。城市资料对 Dify 的默认取值优先级沿用原有规则。
 
 ## 微信账号列表的回复来源
 

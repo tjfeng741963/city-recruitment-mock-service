@@ -1,4 +1,4 @@
-import { normalizeInterviewPoints, normalizePositionFacts } from "../../shared/position-facts.js";
+import { normalizeInterviewPoints, normalizePositionFacts, type InterviewPoint } from "../../shared/position-facts.js";
 import type { DatabaseSync } from "node:sqlite";
 import { parseDeviceData } from "../../shared/device-factories.js";
 
@@ -41,19 +41,11 @@ function windows(value: string):{start:string;end:string}[] {
   return [{ start, end }];
 }
 
-export function interviewSchedule(db: DatabaseSync, positionId: number, facts: { interview_time?: unknown; interview_address?: unknown }) {
-  const row = db.prepare(`SELECT p.data_json, c.data_json city_json, c.id city_id
-    FROM service_positions p LEFT JOIN factories f ON f.id=p.factory_id
-    LEFT JOIN cities c ON c.id=COALESCE(p.city_id,f.city_id) WHERE p.id=?`).get(positionId) as
-    { data_json: string; city_json: string | null; city_id: number | null } | undefined;
-  const position = parseDeviceData(row?.data_json);
-  const city = parseDeviceData(row?.city_json);
-  const days = weekdays(record(city.interview).days);
-  const rawTime = readText(facts.interview_time);
+function parseSchedule(rawTime: string, explicitDays: number[], overrideDays = false) {
   const rule = /^(?:[^：:]{1,30}[：:]\s*)?(?:周|星期)([一二三四五六日天])\s*(?:至|到|[-–—])\s*(?:周|星期)?([一二三四五六日天])(?:\s*[（(](?:可安排住宿)[）)])?\s*(.+)$/.exec(rawTime);
   const byText = /^(?:每天|每日)/.test(rawTime) ? [1,2,3,4,5,6,0] : [];
   if (rule) {
-    const [first,last]=weekdays([rule[1],rule[2]]);
+    const [[first], [last]] = rule.slice(1, 3).map(day => weekdays([day]));
     if (first!==undefined&&last!==undefined) {
       for(let offset=0;offset<7;offset++){
         const day=(first+offset)%7;
@@ -62,9 +54,28 @@ export function interviewSchedule(db: DatabaseSync, positionId: number, facts: {
       }
     }
   }
-  const explicitDays = days.length ? days : weekdays(position.interview_days);
-  const configuredDays = explicitDays.length && byText.length ? explicitDays.filter(day=>byText.includes(day))
+  const singleDay = overrideDays && !rule ? /^(?:周|星期)([一二三四五六日天])\s+(.+)$/.exec(rawTime) : null;
+  if (singleDay) byText.push(...weekdays([singleDay[1]]));
+  const days = overrideDays && byText.length ? byText
+    : explicitDays.length && byText.length ? explicitDays.filter(day => byText.includes(day))
     : explicitDays.length ? explicitDays : byText;
+  return {
+    days,
+    dayLabels: days.map(day => `周${dayNames[day]}`),
+    slots: windows(rule?.[3] ?? singleDay?.[2] ?? rawTime),
+    timeText: rawTime,
+  };
+}
+
+export function interviewSchedule(db: DatabaseSync, positionId: number, facts: { interview_time?: unknown; interview_address?: unknown }) {
+  const row = db.prepare(`SELECT p.data_json, c.data_json city_json, c.id city_id
+    FROM service_positions p LEFT JOIN factories f ON f.id=p.factory_id
+    LEFT JOIN cities c ON c.id=COALESCE(p.city_id,f.city_id) WHERE p.id=?`).get(positionId) as
+    { data_json: string; city_json: string | null; city_id: number | null } | undefined;
+  const position = parseDeviceData(row?.data_json);
+  const city = parseDeviceData(row?.city_json);
+  const cityDays = weekdays(record(city.interview).days);
+  const defaults = parseSchedule(readText(facts.interview_time), cityDays.length ? cityDays : weekdays(position.interview_days));
   const points = normalizeInterviewPoints(position.interview_points);
   const cityInterview = record(city.interview);
   const address = readText(cityInterview.location) || readText(cityInterview.raw_address) || readText(facts.interview_address) || readText(normalizePositionFacts(position).interview_address);
@@ -72,13 +83,28 @@ export function interviewSchedule(db: DatabaseSync, positionId: number, facts: {
   if (uniquePoints.length === 1 && !uniquePoints[0].address) uniquePoints[0].address = address;
   if (!uniquePoints.length && address) uniquePoints.push({ name: address, address });
   return {
-    days: configuredDays,
-    dayLabels: configuredDays.map(day => `周${dayNames[day]}`),
+    ...defaults,
     points: uniquePoints,
-    slots: windows(rule?.[3] ?? rawTime),
-    timeText: rawTime,
     cityId: row?.city_id ?? null,
   };
+}
+
+type InterviewSchedule = ReturnType<typeof interviewSchedule>;
+
+export function scheduleForPoint(schedule: InterviewSchedule, point: InterviewPoint) {
+  return point.interview_time ? parseSchedule(point.interview_time, schedule.days, true) : schedule;
+}
+
+export function bookableInterviewPoints(schedule: InterviewSchedule) {
+  return schedule.points.filter(point => {
+    const times = scheduleForPoint(schedule, point);
+    return point.address && times.days.length && times.slots.length;
+  });
+}
+
+export function describeInterviewPoint(point: InterviewPoint) {
+  const place = point.address && point.address !== point.name ? `${point.name}（${point.address}）` : point.name;
+  return point.interview_time ? `${place} · ${point.interview_time}` : place;
 }
 
 export function interviewDate(value: string, now = new Date()) {
@@ -98,14 +124,15 @@ export function interviewDate(value: string, now = new Date()) {
 export function validateInterview(db: DatabaseSync, positionId: number, schedule: ReturnType<typeof interviewSchedule>,
   date: string, slot: string, pointName: string, now = new Date()) {
   const point = schedule.points.find(item => item.name === pointName);
-  // Multiple named locations without addresses/hours need staff confirmation.
-  if (!schedule.days.length || !schedule.slots.length || !point?.address) return { error: "这个面试点暂未开放预约。" };
+  if (!point?.address) return { error: "这个面试点暂未开放预约。" };
+  const times = scheduleForPoint(schedule, point);
+  if (!times.days.length || !times.slots.length) return { error: "这个面试点暂未开放预约。" };
   const validDate = interviewDate(date, now);
   const validTime = time(slot);
   if (!validDate || !validTime || Date.parse(`${validDate}T${validTime}:00+08:00`) <= now.getTime()) return { error: "请选择未来的面试日期和时间。" };
   const weekday = new Date(`${validDate}T00:00:00Z`).getUTCDay();
-  if (!schedule.days.includes(weekday)) return { error: "该日期不在已配置的面试星期内，请另选一天。" };
-  if (!schedule.slots.some(window => validTime >= window.start && validTime <= window.end)) return { error: "该时间不在可面试时段内，请另选时间。" };
+  if (!times.days.includes(weekday)) return { error: "该日期不在已配置的面试星期内，请另选一天。" };
+  if (!times.slots.some(window => validTime >= window.start && validTime <= window.end)) return { error: "该时间不在可面试时段内，请另选时间。" };
   const closed = db.prepare(`SELECT 1 FROM service_position_holidays WHERE position_id=? AND holiday_date=? AND is_active=1
     UNION ALL SELECT 1 FROM holiday_schedules WHERE city_id=? AND date=? AND kind='holiday' LIMIT 1`)
     .get(positionId, validDate, schedule.cityId, validDate);

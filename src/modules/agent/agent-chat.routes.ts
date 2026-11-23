@@ -122,7 +122,11 @@ function buildFacts(db: DatabaseSync, row: PositionRow | undefined): Record<stri
     interview_time_text: text(data.interview_time_text),
     interview_address: text(data.interview_address),
     interview_points: normalizeInterviewPoints(data.interview_points)
-      .map(point => point.address && point.address !== point.name ? `${point.name}（${point.address}）` : point.name)
+      .map(point => [
+        point.address && point.address !== point.name ? `${point.name}（${point.address}）` : point.name,
+        point.interview_time && `面试时间：${point.interview_time}`,
+        point.checkin_guide && `到场指引：${point.checkin_guide}`,
+      ].filter(Boolean).join("，"))
       .join("；"),
     interview_material: text(data.interview_material),
     basic_requirements: text(data.basic_requirements),

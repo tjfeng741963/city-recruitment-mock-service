@@ -230,7 +230,10 @@ describe("Dify second reply route", () => {
       .get(city.id) as { id: number };
     app.db.prepare("UPDATE service_positions SET city_id=?,factory_id=? WHERE id=?").run(city.id,factory.id,position);
     const second = app.db.prepare("INSERT INTO service_positions(city_id,factory_id,position_name,status,data_json) VALUES (?,?,'青竹区分拣岗','enabled',?) RETURNING id")
-      .get(city.id,factory.id,JSON.stringify({ wage_text:"26元/小时",district:"青竹区",interview_days:["周一","周二","周三","周四","周五","周六","周日"],interview_time:"每天 14:00-16:00",interview_points:[{name:"东门接待处",address:"青竹路18号"}] })) as { id: number };
+      .get(city.id,factory.id,JSON.stringify({ wage_text:"26元/小时",district:"青竹区",interview_days:["周一","周二","周三","周四","周五","周六","周日"],interview_time:"每天 14:00-16:00",interview_points:[
+        {name:"东门接待处",address:"青竹路18号",interview_time:"每天 15:00-16:00",checkin_guide:"东门前台登记"},
+        {name:"西门面试点",address:"青竹路21号",interview_time:"每天 10:00-11:00",checkin_guide:"西门保安室登记"},
+      ] })) as { id: number };
     const outOfScope = app.db.prepare("INSERT INTO service_positions(position_name,status) VALUES ('外部私有岗','enabled') RETURNING id").get() as { id: number };
     app.db.prepare("UPDATE agent_devices SET data_json=json_set(data_json,'$.factory_ids',json(?)) WHERE json_extract(data_json,'$.device_code')=?")
       .run(JSON.stringify([factory.id]),code);
@@ -246,9 +249,14 @@ describe("Dify second reply route", () => {
     await chat(session,`选择岗位 ${second.id}`);
     expect((await chat(session,"换岗之后的工资多少？")).json()).toMatchObject({ok:true,reply:{messages:[{type:"text",content:"工资26元/小时"}]}});
     const sent = JSON.parse(model.mock.calls.at(-1)![1].body);
-    expect(JSON.parse(sent.inputs.position_data)).toMatchObject({ wage_text:"26元/小时", interview_points:[{name:"东门接待处",address:"青竹路18号"}] });
+    expect(JSON.parse(sent.inputs.position_data)).toMatchObject({ wage_text:"26元/小时", interview_points:[
+      {name:"东门接待处",address:"青竹路18号",interview_time:"每天 15:00-16:00",checkin_guide:"东门前台登记"},
+      {name:"西门面试点",address:"青竹路21号",interview_time:"每天 10:00-11:00",checkin_guide:"西门保安室登记"},
+    ] });
+    expect((await chat(session,"查看面试安排")).json().reply.messages[0].content).toContain("西门面试点（青竹路21号） · 每天 10:00-11:00");
     const date = new Date(Date.now()+3*86400000).toLocaleDateString("sv-SE",{timeZone:"Asia/Shanghai"});
     const draft = `报名 姓名：小陈 电话：13800000000 日期：${date} 时间：15:00 面试点：东门接待处`;
+    expect((await chat(session,draft.replace("东门接待处","西门面试点"))).json().reply.messages[0].content).toContain("不在可面试时段");
     await chat(session,draft);
     expect(app.db.prepare("SELECT count(*) n FROM agent_archive").get()).toMatchObject({n:0});
     app.db.prepare("UPDATE service_positions SET data_json=json_set(data_json,'$.interview_points[0].address','青竹路20号') WHERE id=?").run(second.id);
@@ -282,6 +290,11 @@ describe("Dify second reply route", () => {
     expect((await receipt("R:101:55")).statusCode).toBe(422);
     expect((await receipt("R:100:55")).statusCode).toBe(200);
     expect((await archiveList())[0].notify_status).toBe("sent");
+    const arrival = await app.inject({
+      method:"POST",url:"/api/v1/agent/chat",headers:device,
+      payload:{device_code:code,session_key:session,text:"到了",ordered_reply:true},
+    });
+    expect(arrival.json().reply.messages).toEqual([{type:"text",content:"东门前台登记"}]);
     const previews = ["报名",draft,"确认报名"];
     for (const text of previews) await app.inject({method:"POST",url:"/api/v1/dify/preview",headers:admin,
       payload:{position_id:second.id,session_key:"dify-preview:registration",text}});
