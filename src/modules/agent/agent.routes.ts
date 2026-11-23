@@ -283,27 +283,45 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     const bridge = bridgeStore.status(code);
     const runtime = bridgeStore.runtimeHealth(code);
     const frame = bridgeStore.loginQr(code);
+    // 最近一条「刷新二维码」指令的执行结果：网页据此显示失败原因。
+    // 没有这条记录时返回 null，前端不显示任何额外提示。
+    const refreshRow = db
+      .prepare(
+        `SELECT status,error,created_at,receipt_at FROM bridge_commands
+          WHERE device_code=? AND kind='refresh_login_qr' ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(code) as
+      | { status: string; error: string; created_at: number; receipt_at: number | null }
+      | undefined;
+    const lastRefresh = refreshRow
+      ? {
+          status: String(refreshRow.status),
+          error: String(refreshRow.error || ""),
+          at: new Date(Number(refreshRow.receipt_at || refreshRow.created_at)).toISOString(),
+        }
+      : null;
     const frameAt = frame ? Date.parse(frame.updated_at.replace(" ", "T") + "Z") : 0;
     const heartbeatFresh = Boolean(bridge?.heartbeat_at && now - bridge.heartbeat_at <= 60_000);
     const frameFresh = frame && Number.isFinite(frameAt) && now - frameAt < 120_000;
-    if (!enabled) return { available: false, login_status: "device_disabled" };
+    if (!enabled) return { available: false, login_status: "device_disabled", last_refresh: lastRefresh };
     if (runtime?.connected && runtime.reason === "authorization") {
-      return { available: false, login_status: "authorization_failed" };
+      return { available: false, login_status: "authorization_failed", last_refresh: lastRefresh };
     }
     if (!frameFresh && bridge && heartbeatFresh && bridge.state === "online" && bridge.account_id &&
         (!runtime || runtime.wecom_available)) {
-      return { available: false, login_status: "logged_in" };
+      return { available: false, login_status: "logged_in", last_refresh: lastRefresh };
     }
     if (!frameFresh) {
       const login_status = heartbeatFresh
         ? bridge?.state === "scanning" && frame ? "qr_expired" : "waiting_for_qr"
         : bridge?.heartbeat_at ? "disconnected" : frame ? "qr_expired" : "waiting_for_qr";
-      return { available: false, login_status };
+      return { available: false, login_status, last_refresh: lastRefresh };
     }
     const row = frame;
     return {
       available: true,
       login_status: "waiting_for_scan",
+      last_refresh: lastRefresh,
       // 直接给 data URL，前端 <img src> 拿来即用，不用再拼前缀
       image: row.image_b64.startsWith("data:") ? row.image_b64 : `data:image/png;base64,${row.image_b64}`,
       width: row.width,

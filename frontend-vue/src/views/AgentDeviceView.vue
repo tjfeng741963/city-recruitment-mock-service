@@ -291,6 +291,11 @@
         >
           <span>二维码已过期 · 点这里让客户端换一张</span>
         </div>
+        <p
+          v-if="qrLastRefresh"
+          class="qr-refresh-note"
+          :class="`is-${qrLastRefresh.tone}`"
+        >{{ qrLastRefresh.text }}</p>
         <div v-if="qrFeedback.key !== 'disabled'" class="qr-refresh-row">
           <el-button
             :loading="qrRefreshing"
@@ -721,11 +726,36 @@ const qrAgeText = computed(() => {
   void clockTick.value
   const at = qrResult.value?.captured_at ? Date.parse(qrResult.value.captured_at) : 0
   if (!at || Number.isNaN(at)) return '时间未知'
-  const sec = Math.max(0, Math.round((Date.now() - at) / 1000))
+  return formatAgo(Math.max(0, Math.round((Date.now() - at) / 1000)))
+})
+
+function formatAgo(sec: number): string {
   if (sec < 60) return `${sec} 秒前`
   const min = Math.floor(sec / 60)
   if (min < 60) return `${min} 分 ${sec % 60} 秒前`
   return `${Math.floor(min / 60)} 小时 ${min % 60} 分前`
+}
+
+// 上一轮刷新指令的结果：失败原因必须让运营看见（「没找到登录窗」这类
+// 问题以前只写客户端日志，网页只能靠「图没变」猜）。
+const qrLastRefresh = computed<{ tone: 'error' | 'ok' | 'info'; text: string } | null>(() => {
+  void clockTick.value
+  const row = qrResult.value?.last_refresh
+  if (!row) return null
+  const at = row.at ? Date.parse(row.at) : 0
+  const sec = at && !Number.isNaN(at) ? Math.max(0, Math.round((Date.now() - at) / 1000)) : 0
+  const when = at && !Number.isNaN(at) ? `（${formatAgo(sec)}）` : ''
+  if (row.status === 'failed') {
+    return { tone: 'error', text: `上次刷新失败${when}：${row.error || '客户端未说明原因'}` }
+  }
+  if (row.status === 'succeeded') {
+    // 成功提示只留 2 分钟，之后不再占位置
+    if (at && sec > 120) return null
+    return { tone: 'ok', text: `上次刷新成功${when}` }
+  }
+  // queued / claimed
+  if (at && sec > 300) return null
+  return { tone: 'info', text: `刷新指令已下发${when}，客户端正在处理…` }
 })
 
 const qrRefreshHint = computed(() => {
@@ -1025,6 +1055,25 @@ onUnmounted(() => { clearInterval(devicePoll); latestDeviceRequest += 1 })
 
 .qr-refresh-hint {
   font-size: 12px;
+  color: var(--bd-text-secondary, #909399);
+}
+
+.qr-refresh-note {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.qr-refresh-note.is-error {
+  color: var(--el-color-danger);
+  font-weight: 500;
+}
+
+.qr-refresh-note.is-ok {
+  color: var(--el-color-success);
+}
+
+.qr-refresh-note.is-info {
   color: var(--bd-text-secondary, #909399);
 }
 

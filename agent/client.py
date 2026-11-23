@@ -211,8 +211,13 @@ class BridgeClient:
         lease_token: str,
         status: str,
         message_id: str = "",
+        error: str = "",
     ) -> dict:
-        """POST /receipts：回报指令执行结果（succeeded/failed/unknown）。"""
+        """POST /receipts：回报指令执行结果（succeeded/failed/unknown）。
+
+        error 只在 failed/unknown 时有意义；刷新二维码失败时网页会把它显示给运营
+        （例如「没找到企微登录窗」），所以必须原样传，不能用泛化文案代替。
+        """
         code = quote(self.device_code, safe="")
         return self._request(
             "POST",
@@ -221,8 +226,9 @@ class BridgeClient:
                 "command_id": command_id,
                 "lease_token": lease_token,
                 "status": status,
-                # succeeded 时服务端强制要求非空 message_id
+                # succeeded 时服务端强制要求非空 message_id（刷新指令除外）
                 "message_id": message_id,
+                "error": (error or "")[:500],
             },
         )
 

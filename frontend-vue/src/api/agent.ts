@@ -60,6 +60,8 @@ export interface LoginQrResult {
   width?: number
   height?: number
   captured_at?: string
+  /** 最近一条「刷新二维码」指令的结果；失败时带客户端上报的原因 */
+  last_refresh?: { status: string; error?: string; at?: string } | null
 }
 
 export interface VerifyCodeResult {

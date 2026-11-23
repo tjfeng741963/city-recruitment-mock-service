@@ -112,6 +112,35 @@ describe("login qr refresh command", () => {
     expect(row).toMatchObject({ status: "succeeded", kind: "refresh_login_qr" });
   });
 
+  it("surfaces the client failure reason on the qr endpoint", async () => {
+    await bridge("heartbeat", { state: "scanning", account_id: "" });
+    const queued = await refresh();
+    expect(queued.json().command_id).toBeTruthy();
+    const picked = await claim("refresh_login_qr");
+    const command = picked.json().command;
+
+    const failed = await bridge("receipts", {
+      command_id: command.id,
+      lease_token: command.lease_token,
+      status: "failed",
+      message_id: "",
+      error: "没找到企微登录窗（可能已登录，或窗口被隐藏）",
+    });
+    expect(failed.statusCode).toBe(200);
+
+    // 网页轮询 /login-qr 时能读到失败原因，而不是只能靠「图没变」猜
+    const qr = await app.inject({
+      method: "GET",
+      url: "/api/v1/agent/devices/local-device-001/login-qr",
+      headers: admin,
+    });
+    expect(qr.statusCode).toBe(200);
+    expect(qr.json().last_refresh).toMatchObject({
+      status: "failed",
+      error: "没找到企微登录窗（可能已登录，或窗口被隐藏）",
+    });
+  });
+
   it("rejects the request when the client heartbeat is stale", async () => {
     // 没有任何心跳：不能假装指令发得出去
     const response = await refresh();

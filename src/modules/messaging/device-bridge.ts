@@ -420,7 +420,7 @@ export class DeviceBridgeStore {
       .get(code, command.customer_id) as { nickname?: string } | undefined;
     return { ...command, nickname: conversation?.nickname ?? "" };
   }
-  receipt(code: string, id: string, lease: string, status: "succeeded" | "failed" | "unknown", messageId = "", simulated = false): void {
+  receipt(code: string, id: string, lease: string, status: "succeeded" | "failed" | "unknown", messageId = "", simulated = false, error = ""): void {
     const command = this.command(id);
     if (!command || command.device_code !== code || !lease || command.lease_token !== lease) throw new BridgeError("Invalid command receipt", 403);
     // 刷新二维码没有 messages_id 可回：它不产生客户消息，回执成功不要求 message_id。
@@ -440,8 +440,8 @@ export class DeviceBridgeStore {
     // 走 applyReceipt 会去查 message_deliveries、bridge_outbound 和会话预览，
     // 对一个无正文指令全是无意义查询，还多一条误改风险。
     if (isRefresh) {
-      this.db.prepare("UPDATE bridge_commands SET status=?,receipt_at=COALESCE(receipt_at,?) WHERE id=? AND status='claimed'")
-        .run(status, this.now(), id);
+      this.db.prepare("UPDATE bridge_commands SET status=?,error=?,receipt_at=COALESCE(receipt_at,?) WHERE id=? AND status='claimed'")
+        .run(status, String(error || "").slice(0, 500), this.now(), id);
       return;
     }
     // A real database message can arrive before its HTTP receipt. Reconcile by

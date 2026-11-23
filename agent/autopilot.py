@@ -2667,7 +2667,7 @@ def pump_commands(
             if not pushed:
                 ok, detail = False, "已点击刷新，但没有截到新的登录窗（可能正在登录中）"
         try:
-            bridge.receipt(cmd_id, lease, "succeeded" if ok else "failed", "")
+            bridge.receipt(cmd_id, lease, "succeeded" if ok else "failed", "", "" if ok else detail)
         except Exception as exc:  # noqa: BLE001
             mlog(f"[指令] 刷新二维码回执失败：{agent_client.describe_error(exc)}", level="warning")
         mlog(f"[指令] 刷新二维码：{detail}", level="info" if ok else "warning")
