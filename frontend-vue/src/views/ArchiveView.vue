@@ -53,52 +53,94 @@
       </div>
 
       <div class="arch-right">
-        <div v-if="selected" class="arch-card">
-          <b>登记详情</b>
-          <div class="arch-kv">
-            <div class="k">姓名</div>
-            <div class="v">{{ selected.name || '-' }}</div>
-            <div class="k">电话</div>
-            <div class="v">{{ selected.phone || '-' }}</div>
-            <div class="k">城市</div>
-            <div class="v">{{ selected.city || '-' }}</div>
-            <div class="k">面试时间</div>
-            <div class="v">{{ selected.interview_date }} {{ selected.interview_time }}</div>
-            <div class="k">客户</div>
-            <div class="v">{{ selected.customer_nickname || '-' }}</div>
-            <div class="k">设备</div>
-            <div class="v">
-              {{ selected.device_code || '-' }}
-              <template v-if="selected.group_chat">（群聊：{{ selected.group_chat }}）</template>
+        <div v-if="selected" class="arch-card archive-details">
+          <div>
+            <b>登记详情</b>
+            <div class="arch-kv">
+              <div class="k">姓名</div>
+              <div class="v">{{ selected.name || '-' }}</div>
+              <div class="k">电话</div>
+              <div class="v">{{ selected.phone || '-' }}</div>
+              <div class="k">城市</div>
+              <div class="v">{{ selected.city || '-' }}</div>
+              <div class="k">面试时间</div>
+              <div class="v">{{ selected.interview_date }} {{ selected.interview_time }}</div>
+              <div class="k">客户</div>
+              <div class="v">{{ selected.customer_nickname || '-' }}</div>
+              <div class="k">设备</div>
+              <div class="v">
+                {{ selected.device_code || '-' }}
+                <template v-if="selected.group_chat">（群聊：{{ selected.group_chat }}）</template>
+              </div>
+              <div class="k">确认</div>
+              <div class="v">
+                <span :class="selected.interview_confirmed ? 'tag-ok' : 'tag-wait'">
+                  {{ selected.interview_confirmed ? '已确认' : '待确认' }}
+                </span>
+              </div>
+              <div class="k">群聊通知</div>
+              <div class="v">
+                <span class="pill" :class="`pill-${statusKey(selected.notify_status).replace(/_/g, '-')}`">
+                  {{ statusText(selected.notify_status) }}
+                </span>
+              </div>
+              <div class="k">更新时间</div>
+              <div class="v">{{ selected.updated_at || '-' }}</div>
             </div>
-            <div class="k">确认</div>
-            <div class="v">
-              <span :class="selected.interview_confirmed ? 'tag-ok' : 'tag-wait'">
-                {{ selected.interview_confirmed ? '已确认' : '待确认' }}
-              </span>
+
+            <div class="arrival-block">
+              <b class="arrival-title">到达状态</b>
+              <el-select
+                :model-value="selected.arrival_status || ''"
+                class="arrival-select"
+                @change="(value: string) => setArrival(value)"
+              >
+                <el-option label="待定" value="" />
+                <el-option label="正常到达" value="arrived" />
+                <el-option label="爽约" value="noshow" />
+              </el-select>
             </div>
-            <div class="k">群聊通知</div>
-            <div class="v">
-              <span class="pill" :class="`pill-${statusKey(selected.notify_status).replace(/_/g, '-')}`">
-                {{ statusText(selected.notify_status) }}
-              </span>
-            </div>
-            <div class="k">更新时间</div>
-            <div class="v">{{ selected.updated_at || '-' }}</div>
           </div>
 
-          <div class="arrival-block">
-            <b class="arrival-title">到达状态</b>
-            <el-select
-              :model-value="selected.arrival_status || ''"
-              class="arrival-select"
-              @change="(value: string) => setArrival(value)"
-            >
-              <el-option label="待定" value="" />
-              <el-option label="正常到达" value="arrived" />
-              <el-option label="爽约" value="noshow" />
-            </el-select>
-          </div>
+          <section class="followup-panel" aria-labelledby="followup-title">
+            <div class="followup-head">
+              <h2 id="followup-title">AI 跟进摘要</h2>
+              <el-button
+                v-if="selected.has_conversation"
+                type="primary"
+                plain
+                :loading="currentFollowup?.loading"
+                @click="generateFollowup"
+              >
+                {{ currentFollowup?.summary ? '重新生成' : '生成摘要' }}
+              </el-button>
+            </div>
+            <div aria-live="polite" :aria-busy="currentFollowup?.loading || false">
+              <p v-if="!selected.has_conversation" class="followup-hint">暂无可分析的对话</p>
+              <template v-else>
+                <p v-if="currentFollowup?.loading" class="followup-hint">正在整理关联对话…</p>
+                <p v-if="currentFollowup?.error" class="followup-error" role="alert">{{ currentFollowup.error }}</p>
+                <template v-if="currentFollowup?.summary">
+                  <dl class="followup-facts">
+                    <div><dt>求职意向</dt><dd>{{ currentFollowup.summary.intent || '未明确' }}</dd></div>
+                    <div><dt>已聊清楚</dt><dd>{{ currentFollowup.summary.discussed || '暂未确认' }}</dd></div>
+                    <div v-if="currentFollowup.summary.experience">
+                      <dt>工作经历与到岗</dt><dd>{{ currentFollowup.summary.experience }}</dd>
+                    </div>
+                    <div><dt>下次确认</dt><dd>{{ currentFollowup.summary.next_question || '暂无建议' }}</dd></div>
+                  </dl>
+                  <figure v-if="currentFollowup.summary.quote" class="followup-quote">
+                    <figcaption>候选人原话</figcaption>
+                    <blockquote>“{{ currentFollowup.summary.quote }}”</blockquote>
+                  </figure>
+                  <p class="followup-hint">根据近期对话生成，仅供跟进参考。</p>
+                </template>
+                <p v-else-if="!currentFollowup?.loading && !currentFollowup?.error" class="followup-hint">
+                  整理候选人的求职意向、已确认事项和下次要问的问题。
+                </p>
+              </template>
+            </div>
+          </section>
         </div>
         <div v-else class="arch-card arch-empty">选择左侧一条登记查看详情</div>
       </div>
@@ -136,10 +178,10 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import http from '../api/http'
-import { archiveApi } from '../api/agent'
+import { archiveApi, type ArchiveFollowupSummary } from '../api/agent'
 
 interface ArchiveItem {
   session_key: string
@@ -155,6 +197,7 @@ interface ArchiveItem {
   arrival_status?: string
   notify_status?: string
   updated_at?: string
+  has_conversation?: boolean
 }
 
 interface DeviceRow {
@@ -166,6 +209,8 @@ interface DeviceRow {
 const items = ref<ArchiveItem[]>([])
 const devices = ref<DeviceRow[]>([])
 const selected = ref<ArchiveItem | null>(null)
+const followups = reactive(new Map<string, { summary?: ArchiveFollowupSummary; loading?: boolean; error?: string }>())
+const currentFollowup = computed(() => selected.value ? followups.get(selected.value.session_key) : undefined)
 const groups = ref<Record<string, string[]>>({})
 const groupsLoaded = ref(false)
 const loading = ref(false)
@@ -247,6 +292,22 @@ async function loadGroups(code: string): Promise<void> {
 
 function select(item: ArchiveItem): void {
   selected.value = item
+}
+
+async function generateFollowup(): Promise<void> {
+  const record = selected.value
+  if (!record?.has_conversation) return
+  const key = record.session_key
+  const previous = followups.get(key)
+  if (previous?.loading) return
+  followups.set(key, { summary: previous?.summary, loading: true })
+  try {
+    const { data } = await archiveApi.followupSummary(key)
+    followups.set(key, { summary: data })
+  } catch (error) {
+    const response = (error as { response?: { data?: { detail?: string } } })?.response
+    followups.set(key, { summary: previous?.summary, error: response?.data?.detail || '摘要暂未生成，请重试' })
+  }
 }
 
 async function bindGroup(device: DeviceRow, value: string): Promise<void> {
@@ -344,6 +405,96 @@ onMounted(async () => {
 .arch-card b {
   font-size: 13px;
   color: var(--bd-text-primary);
+}
+
+.arch-right {
+  container-type: inline-size;
+  min-width: 0;
+}
+
+.archive-details {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+@container (min-width: 680px) {
+  .archive-details {
+    grid-template-columns: minmax(240px, 5fr) minmax(340px, 7fr);
+  }
+}
+
+.followup-panel {
+  padding: 16px;
+  border: 1px solid var(--bd-border, #e8ecf3);
+  border-radius: 12px;
+  background: var(--el-fill-color-light);
+  color: var(--bd-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.followup-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  column-gap: 12px;
+  row-gap: 8px;
+}
+
+.followup-head h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.followup-facts {
+  display: grid;
+  gap: 10px;
+  margin: 14px 0 0;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.followup-facts > div {
+  display: grid;
+  grid-template-columns: 7em minmax(0, 1fr);
+  gap: 8px;
+}
+
+.followup-facts dt,
+.followup-quote figcaption,
+.followup-hint {
+  color: var(--el-text-color-secondary);
+}
+
+.followup-facts dd,
+.followup-quote blockquote {
+  margin: 0;
+}
+
+.followup-quote {
+  margin: 14px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--bd-border, #e8ecf3);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.followup-quote figcaption {
+  margin-bottom: 3px;
+}
+
+.followup-hint,
+.followup-error {
+  margin: 10px 0 0;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.followup-error {
+  color: var(--el-color-danger-dark-2);
 }
 
 .card-head :deep(.el-button.is-link) {
