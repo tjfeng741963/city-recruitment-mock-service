@@ -63,9 +63,9 @@ def test_slow_claim_response_returns_after_its_original_lease(setup_agent):
     bridge = FakeBridge({**COMMAND, "lease_until": (clock[0] + 60) * 1000})
     original_claim = bridge.claim
 
-    def delayed_claim():
+    def delayed_claim(only=""):
         clock[0] += 66
-        return original_claim()
+        return original_claim(only=only)
 
     bridge.claim = delayed_claim
     assert_unknown(agent, bridge, agent.pump_commands(_mock_store(), _cfg(), bridge=bridge))

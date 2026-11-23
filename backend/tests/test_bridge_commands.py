@@ -46,13 +46,19 @@ class FakeBridge:
     def __init__(self, command: dict | None = None, claim_exc: Exception | None = None):
         self.command = command
         self.claim_exc = claim_exc
-        self.claim_calls = 0
+        self.claim_filters: list[str] = []
         self.receipts: list[tuple] = []
 
-    def claim(self):
-        self.claim_calls += 1
+    @property
+    def claim_calls(self):
+        return len(self.claim_filters)
+
+    def claim(self, only: str = ""):
+        self.claim_filters.append(only)
         if self.claim_exc is not None:
             raise self.claim_exc
+        if only and (self.command or {}).get("kind", "message") != only:
+            return None
         return self.command
 
     def receipt(self, command_id, lease_token, status, message_id=""):
@@ -180,9 +186,9 @@ def test_send_exception_is_contained(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# 4. 企微非 online / dry-run / 未配置桥接 → 一条都不领
+# 4. 企微非 online 只查刷新指令，dry-run 和未配置桥接时跳过
 # --------------------------------------------------------------------------- #
-def test_does_not_claim_when_not_online(monkeypatch):
+def test_non_online_claims_only_qr_refresh_commands():
     autopilot = _load_autopilot()
     _reset(autopilot)
     bridge = FakeBridge(command=dict(COMMAND))
@@ -190,13 +196,15 @@ def test_does_not_claim_when_not_online(monkeypatch):
     assert autopilot.pump_commands(MagicMock(), _cfg(), bridge=bridge, wecom_state="hidden") == {
         "claimed": 0, "sent": 0, "failed": 0,
     }
-    assert bridge.claim_calls == 0
+    assert bridge.claim_filters == ["refresh_login_qr"]
+    assert bridge.receipts == []
+    autopilot.core_send.send.assert_not_called()
 
     autopilot._last_claim_at = 0.0
     assert autopilot.pump_commands(_mock_store(), _cfg(dry_run=True), bridge=bridge, wecom_state="online") == {
         "claimed": 0, "sent": 0, "failed": 0,
     }
-    assert bridge.claim_calls == 0
+    assert bridge.claim_filters == ["refresh_login_qr"]
     assert autopilot.pump_commands(_mock_store(), _cfg(), bridge=None, wecom_state="online")["claimed"] == 0
 
 
@@ -307,13 +315,16 @@ def test_bridge_client_claim_and_receipt_request_shape(monkeypatch):
     bridge = agent_client.BridgeClient("http://119.91.113.100:4222", "bridge-tok", "pc-office-01")
 
     assert bridge.claim() == {"id": "cmd-1"}
+    assert bridge.claim(only="refresh_login_qr") == {"id": "cmd-1"}
     bridge.receipt("cmd-1", "lease-1", "succeeded", "keyboard-cmd-1")
 
-    claim_req, receipt_req = captured
+    claim_req, refresh_claim_req, receipt_req = captured
     assert claim_req.get_method() == "POST"
     assert claim_req.full_url == "http://119.91.113.100:4222/api/v1/bridge/devices/pc-office-01/claim"
     assert claim_req.get_header("Authorization") == "Bearer bridge-tok"
     assert json.loads(claim_req.data) == {}
+    assert refresh_claim_req.get_method() == "POST"
+    assert refresh_claim_req.full_url == f"{claim_req.full_url}?only=refresh_login_qr"
 
     assert receipt_req.full_url == "http://119.91.113.100:4222/api/v1/bridge/devices/pc-office-01/receipts"
     assert json.loads(receipt_req.data) == {
@@ -321,4 +332,5 @@ def test_bridge_client_claim_and_receipt_request_shape(monkeypatch):
         "lease_token": "lease-1",
         "status": "succeeded",
         "message_id": "keyboard-cmd-1",
+        "error": "",
     }
