@@ -479,10 +479,14 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
           position_id: Number(row.position_id),
           name: String(row.name ?? ""),
           phone: String(row.phone ?? ""),
+          remark: String(row.remark ?? ""),
           city: String(row.city ?? ""),
           interview_date: String(row.interview_date ?? ""),
           interview_time: String(row.interview_time ?? ""),
+          interview_point: String(row.interview_point ?? ""),
+          interview_address: String(row.interview_address ?? ""),
           interview_confirmed: Number(row.interview_confirmed) === 1,
+          arrival_status: String(row.arrival_status ?? ""),
           updated_at: String(row.updated_at ?? ""),
         },
       };
@@ -508,7 +512,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         ORDER BY a.updated_at DESC`,
     ).all() as Array<Record<string, unknown>>;
     const notifyStmt = db.prepare(
-      "SELECT status FROM bridge_commands WHERE idempotency_key=? ORDER BY created_at DESC LIMIT 1",
+      "SELECT status FROM bridge_commands WHERE device_code=? AND substr(idempotency_key,1,?)=? ORDER BY created_at DESC LIMIT 1",
     );
     const items: Array<Record<string, unknown>> = [];
     const candidateBySession = new Map(archiveCandidates(db).map(item => [item.session_key,item]));
@@ -534,16 +538,15 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         notifyStatus = notice.status;
         groupChat = notice.target;
       } else if (complete && groupChat) {
-        const stampCandidates = [
-          `group-notify:${sessionKey}:${String(row.updated_at ?? "")}`,
-          `group-notify:${sessionKey}:${new Date(String(row.updated_at ?? "")).toISOString()}`,
-        ];
-        for (const key of stampCandidates) {
-          const cmd = notifyStmt.get(key) as { status: string } | undefined;
-          if (cmd) {
-            notifyStatus = String(cmd.status);
-            break;
-          }
+        // 按前缀取最新一条群通知指令：入队键带毫秒时间戳，而 updated_at 会被
+        // 「改备注」这类操作刷新——用完整键匹配会突然查不到，状态退回「待推送」。
+        const prefix = `group-notify:${sessionKey}:`;
+        const cmd = notifyStmt.get(deviceCode, prefix.length, prefix) as { status: string } | undefined;
+        if (cmd) {
+          // 指令状态是 sending 语义（succeeded），网页用的是展示语义（sent）：
+          // 不归一化时前端映射表没有 succeeded，会显示成「待推送」。
+          const raw = String(cmd.status);
+          notifyStatus = raw === "succeeded" ? "sent" : raw;
         }
         if (notifyStatus === "pending" && Number(row.group_notified ?? 0)) notifyStatus = "sent";
       }

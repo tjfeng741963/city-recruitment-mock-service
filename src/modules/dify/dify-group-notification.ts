@@ -35,13 +35,14 @@ export function queueDifyGroupNotification(db: DatabaseSync, deviceCode: string,
   const binding = deviceInviteGroupBinding(db, deviceCode);
   if (!binding) return;
 
-  const archive = db.prepare(`SELECT name, phone, city, interview_date, interview_time, interview_address, interview_point,
+  const archive = db.prepare(`SELECT name, phone, city, remark, interview_date, interview_time, interview_address, interview_point,
       dify_notify_binding, dify_notify_content
     FROM agent_archive WHERE session_key=? AND dify_device_code=? AND interview_confirmed=1`)
     .get(archiveKey, deviceCode) as Record<string, string> | undefined;
   if (!archive || (archive.dify_notify_binding && archive.dify_notify_binding !== binding)) return;
   const content = archive.dify_notify_content || buildInviteMessage({
     city: archive.city, interviewDate: archive.interview_date, name: archive.name, phone: archive.phone,
+    remark: archive.remark,   // 备注 = 群里认人的微信名称，和 Agent 链路同一语义
     cityAbbr: readInviteGroupConfig(db).cityAbbr, factoryName: job.factory, jobTitle: job.title,
     interviewTime: archive.interview_time, interviewPlace: archive.interview_address || archive.interview_point,
   }).replace(/\s+/g, " ").replace(/【/g, "〔").replace(/】/g, "〕").trim();

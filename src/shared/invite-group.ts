@@ -103,14 +103,21 @@ export function monthDayOf(interviewDate: string): string {
 
 /**
  * 拼一行名单。字段不全返回空串——宁可这条不发，也不能发半行让群里看不懂。
+ *
+ * `remark` = 群里认人用的微信名称，有就紧跟在姓名后面（2026-11-23 与
+ * Agent 链路对齐）；没填时保持原格式，不影响历史调用方。
  */
-export function buildInviteLine(input: { city: string; interviewDate: string; name: string; phone: string; cityAbbr: Record<string, string> }): string {
+export function buildInviteLine(input: {
+  city: string; interviewDate: string; name: string; phone: string;
+  cityAbbr: Record<string, string>; remark?: string;
+}): string {
   const abbr = cityAbbrOf(input.city, input.cityAbbr);
   const monthDay = monthDayOf(input.interviewDate);
   const name = String(input.name ?? "").trim();
   const phone = String(input.phone ?? "").trim();
   if (!abbr || !monthDay || !name || !/^1[3-9]\d{9}$/.test(phone)) return "";
-  return `${abbr}${monthDay} ${name} ${phone}`;
+  const remark = String(input.remark ?? "").trim();
+  return `${abbr}${monthDay} ${name}${remark ? ` ${remark}` : ""} ${phone}`;
 }
 
 export interface InviteGroupSendInput {
@@ -141,7 +148,7 @@ export interface InviteGroupSendInput {
  */
 export function buildInviteMessage(input: {
   city: string; interviewDate: string; name: string; phone: string;
-  cityAbbr: Record<string, string>;
+  cityAbbr: Record<string, string>; remark?: string;
   jobTitle?: string; factoryName?: string; interviewTime?: string; interviewPlace?: string; district?: string;
 }): string {
   const line = buildInviteLine(input);

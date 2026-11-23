@@ -76,6 +76,9 @@
         <el-table-column prop="nickname" label="昵称" min-width="120" show-overflow-tooltip />
         <el-table-column label="招聘状态" width="105"><template #default="{row}"><el-tag size="small" :type="row.status === 'invited' || row.status === 'checked_in' ? 'success' : 'info'">{{ candidateStatus(row.status) }}</el-tag></template></el-table-column>
         <el-table-column prop="name" label="姓名" width="100"><template #default="{row}">{{ row.name || '待补充' }}</template></el-table-column>
+        <el-table-column label="微信名称" width="130" show-overflow-tooltip>
+          <template #default="{row}">{{ row.remark || row.nickname || '-' }}</template>
+        </el-table-column>
         <el-table-column prop="phone" label="电话" width="140" />
         <el-table-column prop="event_at" label="事件时间" width="175" />
         <el-table-column label="面试日期" width="130"><template #default="{row}">{{ row.interview_date || '-' }}<div class="muted-value">{{ row.interview_time }}</div></template></el-table-column>
@@ -131,6 +134,8 @@ interface CandidateRow {
   nickname: string
   name: string
   phone: string
+  /** 备注 = 群通知里姓名后面那段微信名称（来自面试登记的 remark） */
+  remark?: string
   event_at: string
   interview_date: string
   factory_name: string

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildServer } from "../src/server.js";
 import { buildArchiveNoticeLine } from "../src/modules/agent/archive-notify.js";
+import { buildInviteLine } from "../src/shared/invite-group.js";
 
 // 面试登记备注（remark）与群通知一行文案。
 //
@@ -86,6 +87,42 @@ describe("面试登记备注与群通知", () => {
       .prepare("SELECT content FROM bridge_commands WHERE device_code='local-device-001' AND idempotency_key=?")
       .get(`group-notify:${key}`) as { content: string } | undefined;
     expect(command?.content).toBe("李四 微信名叫小李 13900139000 本地示例工厂 本地示例岗位 11/25 14:00");
+  });
+
+  it("Dify 名单行同样把微信名称放在姓名后面", () => {
+    const line = buildInviteLine({
+      city: "深圳",
+      interviewDate: "2026-11-24",
+      name: "张三",
+      phone: "13800138000",
+      cityAbbr: { 深圳: "深" },
+      remark: "阿三",
+    });
+    expect(line).toBe("深11/24 张三 阿三 13800138000");
+    const withoutRemark = buildInviteLine({
+      city: "深圳",
+      interviewDate: "2026-11-24",
+      name: "张三",
+      phone: "13800138000",
+      cityAbbr: { 深圳: "深" },
+    });
+    expect(withoutRemark).toBe("深11/24 张三 13800138000");
+  });
+
+  it("指令 succeeded 在登记清单里显示为 sent，不是待推送", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/agent/archive/manual",
+      headers,
+      payload: { name: "赵六", phone: "13600136000", interview_date: "2026-11-27", interview_time: "11:00", device_code: "local-device-001" },
+    });
+    const key = res.json().session_key as string;
+    const prefix = `group-notify:${key}:`;
+    app.db
+      .prepare("UPDATE bridge_commands SET status='succeeded' WHERE device_code='local-device-001' AND substr(idempotency_key,1,?)=?")
+      .run(prefix.length, prefix);
+    const list = (await app.inject({ url: "/api/v1/agent/archive/list", headers })).json().items as Array<Record<string, unknown>>;
+    expect(list.find((row) => row.session_key === key)).toMatchObject({ notify_status: "sent" });
   });
 
   it("备注可以改，清单里读得到", async () => {
