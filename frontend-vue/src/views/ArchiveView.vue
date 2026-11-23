@@ -60,6 +60,11 @@
             <div class="v">{{ selected.name || '-' }}</div>
             <div class="k">电话</div>
             <div class="v">{{ selected.phone || '-' }}</div>
+            <div class="k">备注</div>
+            <div class="v">
+              {{ selected.remark || selected.customer_nickname || '-' }}
+              <el-button link type="primary" size="small" @click="editRemark">修改</el-button>
+            </div>
             <div class="k">城市</div>
             <div class="v">{{ selected.city || '-' }}</div>
             <div class="k">面试时间</div>
@@ -112,6 +117,14 @@
         <el-form-item label="电话" required>
           <el-input v-model="manualForm.phone" placeholder="手机号" maxlength="20" />
         </el-form-item>
+        <el-form-item label="备注（微信名称）">
+          <el-input
+            v-model="manualForm.remark"
+            placeholder="群里认人用的微信名称，如：阿三 / 龙华老李介绍"
+            maxlength="64"
+            show-word-limit
+          />
+        </el-form-item>
         <el-form-item label="面试日期">
           <el-date-picker v-model="manualForm.interview_date" type="date" value-format="YYYY-MM-DD" placeholder="选择日期" />
         </el-form-item>
@@ -137,7 +150,7 @@
 
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import http from '../api/http'
 import { archiveApi } from '../api/agent'
 
@@ -148,6 +161,8 @@ interface ArchiveItem {
   group_chat?: string
   name?: string
   phone?: string
+  /** 备注 = 群通知里姓名后面那段微信名称 */
+  remark?: string
   city?: string
   interview_date?: string
   interview_time?: string
@@ -175,6 +190,7 @@ const manualVisible = ref(false)
 const manualForm = reactive({
   name: '',
   phone: '',
+  remark: '',
   interview_date: '',
   interview_time: '',
   city: '',
@@ -262,6 +278,33 @@ async function bindGroup(device: DeviceRow, value: string): Promise<void> {
   }
 }
 
+// 备注 = 群通知里姓名后面那段「微信名称」。改完只影响之后的推送，
+// 已经发到群里的那条不会重发（重发只会刷屏）。
+async function editRemark(): Promise<void> {
+  if (!selected.value) return
+  const key = selected.value.session_key
+  try {
+    const { value } = await ElMessageBox.prompt(
+      '备注会跟在姓名后面一起发到群里，用来对齐客户在企微里的名字。',
+      '修改备注（微信名称）',
+      {
+        inputValue: selected.value.remark || selected.value.customer_nickname || '',
+        inputPlaceholder: '如：阿三 / 龙华老李介绍',
+        inputValidator: (input: string) => (input || '').trim().length <= 64 || '最多 64 个字',
+        confirmButtonText: '保存',
+        cancelButtonText: '取消',
+      },
+    )
+    const { data } = await archiveApi.setRemark(key, (value || '').trim())
+    if (selected.value && selected.value.session_key === key) selected.value.remark = data.remark
+    ElMessage.success('备注已保存，之后的群通知会带上')
+    await load()
+  } catch (error: any) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(error?.response?.data?.detail || '备注保存失败')
+  }
+}
+
 async function setArrival(value: string): Promise<void> {
   if (!selected.value) return
   const key = selected.value.session_key
@@ -281,6 +324,7 @@ function openManual(): void {
   Object.assign(manualForm, {
     name: '',
     phone: '',
+    remark: '',
     interview_date: '',
     interview_time: '',
     city: '',

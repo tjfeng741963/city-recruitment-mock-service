@@ -221,6 +221,8 @@ export interface ArchiveRecord {
   group_chat: string
   name: string
   phone: string
+  /** 备注 = 群里认人的微信名称；空则用 customer_nickname */
+  remark?: string
   city: string
   interview_date: string
   interview_time: string
@@ -242,6 +244,12 @@ export const archiveApi = {
     http.put<Record<string, unknown>>(
       `/api/v1/agent/archive/${encodeURIComponent(key)}/arrival`,
       { arrival_status: arrival },
+    ),
+  /** 备注 = 群通知里姓名后面那段微信名称，只影响之后的群通知 */
+  setRemark: (key: string, remark: string) =>
+    http.put<{ ok: boolean; remark: string }>(
+      `/api/v1/agent/archive/${encodeURIComponent(key)}/remark`,
+      { remark },
     ),
   markCandidate: (id: number | string, payload: Record<string, unknown>) =>
     http.post<Record<string, unknown>>(`/api/v1/agent/candidates/${id}/mark`, payload),

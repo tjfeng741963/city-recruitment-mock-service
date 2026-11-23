@@ -42,7 +42,7 @@ export function archiveCandidates(db:DatabaseSync) {
     return {id:session,session_key:session,position_id:Number(row.position_id),device_code:code,
       device_name:value(deviceData.name,device?.device_name,code),account:value(row.dify_account_id,bridge?.account_id),
       recruiter_id:value(deviceData.recruiter_id),customer_id:value(row.customer_id),nickname:value(row.nickname),
-      name,phone,province,city,district,factory_name:row.dify_device_code?value(row.factory_name,position.factory_name,row.position_name):value(row.conversation_factory,row.factory_name,position.factory_name,row.position_name),
+      name,phone,remark:value(row.remark),province,city,district,factory_name:row.dify_device_code?value(row.factory_name,position.factory_name,row.position_name):value(row.conversation_factory,row.factory_name,position.factory_name,row.position_name),
       interview_date:date,interview_time:time,interview_confirmed:Boolean(row.interview_confirmed),
       interview_point:value(row.interview_point),interview_address:value(row.interview_address),
       event_at:value(row.updated_at),created_at:value(row.updated_at,row.conversation_created),

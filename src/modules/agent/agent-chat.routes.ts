@@ -1,5 +1,6 @@
 import { replyModePending } from "../dify/reply-mode-transition.js";
 import { archiveCandidates } from './archive-candidates.js';
+import { buildArchiveNoticeLine } from './archive-notify.js';
 import { recruitmentCandidates, candidateConversation } from './recruitment-candidates.js';
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
@@ -493,7 +494,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
   app.get("/api/v1/agent/archive/list", async (request, reply) => {
     if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin access required" });
     const rows = db.prepare(
-      `SELECT a.session_key, a.name, a.phone, a.city,
+      `SELECT a.session_key, a.name, a.phone, a.city, a.remark,
               a.interview_date, a.interview_time, a.interview_confirmed,
               a.group_notified, a.arrival_status, a.updated_at,
               c.nickname AS customer_nickname, c.device_code
@@ -552,6 +553,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         group_chat: groupChat,
         name: shared?.name || String(row.name ?? ""),
         phone: shared?.phone || String(row.phone ?? ""),
+        remark: String(shared?.remark ?? row.remark ?? ""),
         city: shared?.city || String(row.city ?? ""),
         interview_date: String(row.interview_date ?? ""),
         interview_time: String(row.interview_time ?? ""),
@@ -644,6 +646,21 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
     },
   );
 
+  // 面试登记备注：群里认人用的那一段（微信名称/介绍人）。
+  // 只改文案来源，不重发已经推过的群消息——运营要的是「下次发对」，
+  // 反复重发一条已经到群里的登记只会刷屏。
+  app.put<{ Params: { key: string }; Body: Record<string, unknown> }>(
+    "/api/v1/agent/archive/:key/remark",
+    async (request, reply) => {
+      if (request.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin access required" });
+      const remark = String((request.body ?? {}).remark ?? "").trim().slice(0, 64);
+      const result = db.prepare(
+        "UPDATE agent_archive SET remark=?, updated_at=CURRENT_TIMESTAMP WHERE session_key=?",
+      ).run(remark, request.params.key);
+      return result.changes ? { ok: true, remark } : reply.code(404).send({ detail: "登记不存在" });
+    },
+  );
+
   // 手动新建约面试：运营自己约好的客户（没走 Agent 对话）也进登记清单，
   // 同样享受群聊通知。session_key 用 manual: 前缀避免和真实会话混淆。
   app.post<{ Body: Record<string, unknown> }>("/api/v1/agent/archive/manual", async (request, reply) => {
@@ -658,11 +675,14 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
     if (!interviewDate && !interviewTime) return reply.code(422).send({ detail: "面试日期与时间至少填一项" });
     const deviceCode = text("device_code");
     const sessionKey = `manual:${randomUUID()}`;
+    const positionId = Number(body.position_id ?? 0) || 0;
+    // 备注 = 群里认人用的微信名称；不填就留空，群消息里那一段自动省略。
+    const remark = text("remark").slice(0, 64);
     db.prepare(
       `INSERT INTO agent_archive(session_key, position_id, name, phone, city,
-         interview_date, interview_time, interview_confirmed, updated_at)
-       VALUES (?,?,?,?,?,?,?,1,CURRENT_TIMESTAMP)`,
-    ).run(sessionKey, Number(body.position_id ?? 0) || 0, name, phone, text("city"), interviewDate, interviewTime);
+         interview_date, interview_time, remark, interview_confirmed, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,1,CURRENT_TIMESTAMP)`,
+    ).run(sessionKey, positionId, name, phone, text("city"), interviewDate, interviewTime, remark);
     if (deviceCode) {
       db.prepare(
         `UPDATE agent_archive SET session_key=? WHERE session_key=?`,
@@ -689,14 +709,17 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
           ).run(deviceCode, groupChat, `group:${groupChat}`);
         }
         const finalKey = `manual:${deviceCode}:${sessionKey}`;
-        const notifyText = [
-          "【面试登记】",
-          `时间：${interviewDate} ${interviewTime}`.trimEnd(),
-          `姓名：${name}`,
-          `电话：${phone}`,
-          `客户：${text("customer_nickname") || name}`,
-          `设备：${deviceCode}`,
-        ].join("\n");
+        // 和 Agent 链路同一套一行文案：姓名 微信名称 手机 工厂 岗位 日期 时间 面试点
+        const notifyText = buildArchiveNoticeLine(db, {
+          name,
+          remark,
+          nickname: text("customer_nickname"),
+          phone,
+          positionId,
+          interviewDate,
+          interviewTime,
+          place: text("interview_address"),
+        });
         db.prepare(
           `INSERT INTO bridge_commands(id,device_code,customer_id,contact_id,content,idempotency_key,created_at)
            VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)`,
@@ -962,7 +985,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       const archiveRow = sessionKey
         ? (db
             .prepare("SELECT * FROM agent_archive WHERE session_key=?")
-            .get(sessionKey) as (ArchiveRecord & { position_id: number }) | undefined)
+            .get(sessionKey) as (ArchiveRecord & { position_id: number; remark?: string; interview_point?: string; interview_address?: string }) | undefined)
         : undefined;
       const archive = sessionKey
         ? mergeArchive(archiveRow ?? null, replyPayload.capture, replyPayload.interview)
@@ -1034,14 +1057,18 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
                    VALUES (?,?,'群聊','active',0,?,CURRENT_TIMESTAMP)`,
                 ).run(convRow.device_code, groupChat, `group:${groupChat}`);
               }
-              const notifyText = [
-                "【面试登记】",
-                `时间：${archive.interview_date || ""} ${archive.interview_time || ""}`.trimEnd(),
-                `姓名：${archive.name || "（待补）"}`,
-                `电话：${archive.phone}`,
-                `客户：${convRow.nickname}`,
-                `设备：${convRow.device_code}`,
-              ].join("\n");
+              // 群通知：一条消息、一行字。姓名后面紧跟微信名称（备注优先，
+              // 其次是客户企微昵称），再是手机、工厂、岗位、日期、时间、面试点。
+              const notifyText = buildArchiveNoticeLine(db, {
+                name: archive.name,
+                remark: String(archiveRow?.remark ?? ""),
+                nickname: convRow.nickname,
+                phone: archive.phone,
+                positionId,
+                interviewDate: archive.interview_date,
+                interviewTime: archive.interview_time,
+                place: String(archiveRow?.interview_address || archiveRow?.interview_point || ""),
+              });
               db.prepare(
                 `INSERT INTO bridge_commands(id,device_code,customer_id,contact_id,content,idempotency_key,created_at)
                  VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)`,

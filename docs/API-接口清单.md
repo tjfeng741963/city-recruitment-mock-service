@@ -126,8 +126,9 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 | POST | `/api/v1/agent/opening/log` | 设备令牌或服务令牌 | 客户端逐条回执：`{session_key,device_code,position_id,seq,kind,status,error}`，返回 `trace_id` 供运营回查发送证据 |
 | GET | `/api/v1/agent/archive?session_key=:key` | admin | 查面试档案：姓名 / 电话 / 城市 / 面试日期与时段（模型 JSON 判断结果累积） |
 | GET | `/api/v1/agent/archive/list` | admin | 面试登记清单。Dify 的 `group_chat` 显示通知对应的目标。状态包括 `no-group`（未绑群）、`group-unavailable`（无法确认目标群）、`pending`、`queued`、`claimed`、`sent`、`failed`、`unknown`。核对目标群的真实设备成功回执后显示 `sent`。 |
-| POST | `/api/v1/agent/archive/manual` | admin | 手动新建约面试（没走 Agent 对话的客户），绑了群聊自动推送 |
+| POST | `/api/v1/agent/archive/manual` | admin | 手动新建约面试（没走 Agent 对话的客户），绑了群聊自动推送；可选 `position_id`（决定群消息里的工厂与岗位）、`remark`（备注，即群里认人的微信名称） |
 | PUT | `/api/v1/agent/archive/:key/arrival` | admin | 到达状态标记，body `{arrival_status: ""/arrived/noshow}` |
+| PUT | `/api/v1/agent/archive/:key/remark` | admin | 面试登记备注，body `{remark}`（≤64 字）。备注优先于客户企微昵称，决定群通知里姓名后面那一段；只影响之后的群通知，不重发已推送的消息 |
 | GET | `/api/v1/agent/candidates?status=&recruiter_id=&event_date=&interview_date=&page=&page_size=` | admin | 候选人员管理：由面试登记聚合出候选行 + 分页统计 |
 | GET | `/api/v1/agent/candidates/:key/messages?before_id=` | admin | 只读查看登记对应的真实对话，按精确 session_key 关联设备及客户；每页最多 200 条，不清未读、不发送 |
 | POST | `/api/v1/agent/chat` | admin/设备令牌 | 一轮对话，body `{position_id,session_key,text,dry,sent_summary?}`；岗位停用时真实回复返回 409，dry QA 可继续使用 |
