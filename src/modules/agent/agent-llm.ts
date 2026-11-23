@@ -8,6 +8,8 @@
  * 路由把它转成 {ok:false,error}，调试页能直接看见「没配模型」而不是 500。
  */
 
+import { ModelProviderError, providerRequest } from "./agent-model-transport.js";
+
 export type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
 
 export type LlmResult = {
@@ -17,7 +19,9 @@ export type LlmResult = {
   latency_ms: number;
 };
 
-export function llmConfig() {
+export type ModelConfig = { baseUrl: string; apiKey: string; model: string; timeoutMs: number; managed?: boolean };
+
+export function environmentModel(): ModelConfig {
   return {
     baseUrl: (process.env.AGENT_LLM_BASE_URL || "https://api.deepseek.com/v1").replace(/\/+$/, ""),
     apiKey: (process.env.AGENT_LLM_API_KEY || "").trim(),
@@ -29,8 +33,8 @@ export function llmConfig() {
 export async function complete(
   messages: ChatMessage[],
   opts: { temperature?: number; maxTokens?: number } = {},
+  config = environmentModel(),
 ): Promise<LlmResult> {
-  const config = llmConfig();
   if (!config.apiKey) {
     const error = new Error("未配置 AGENT_LLM_API_KEY，无法调用模型");
     (error as Error & { code?: string }).code = "no_api_key";
@@ -38,6 +42,16 @@ export async function complete(
   }
 
   const started = Date.now();
+  const payload = {
+    model: config.model,
+    messages,
+    temperature: opts.temperature ?? 0.7,
+    max_tokens: opts.maxTokens ?? 700,
+  };
+  if (config.managed) {
+    const data = await providerRequest(config.baseUrl, config.apiKey, "chat/completions", config.timeoutMs, payload);
+    return completionResult(data, config, started);
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.timeoutMs);
 
@@ -48,12 +62,7 @@ export async function complete(
         "content-type": "application/json",
         authorization: `Bearer ${config.apiKey}`,
       },
-      body: JSON.stringify({
-        model: config.model,
-        messages,
-        temperature: opts.temperature ?? 0.7,
-        max_tokens: opts.maxTokens ?? 700,
-      }),
+      body: JSON.stringify(payload),
       signal: controller.signal,
     });
 
@@ -61,22 +70,45 @@ export async function complete(
     if (!response.ok) {
       throw new Error(`模型返回 HTTP ${response.status}：${raw.slice(0, 200)}`);
     }
-    const data = JSON.parse(raw) as {
-      model?: string;
-      choices?: Array<{ message?: { content?: string } }>;
-      usage?: LlmResult["usage"];
-    };
-    const content = data.choices?.[0]?.message?.content ?? "";
-    if (!content.trim()) throw new Error("模型返回空内容");
-    return {
-      content,
-      model: String(data.model || config.model),
-      usage: data.usage ?? null,
-      latency_ms: Date.now() - started,
-    };
+    return completionResult(JSON.parse(raw), config, started);
   } finally {
     clearTimeout(timer);
   }
+}
+
+function completionResult(value: unknown, config: ModelConfig, started: number): LlmResult {
+  const data = value as {
+    model?: string;
+    choices?: Array<{ message?: { content?: string; reasoning_content?: unknown; reasoning?: unknown } }>;
+    usage?: LlmResult["usage"] & {
+      reasoning_tokens?: number;
+      completion_tokens_details?: { reasoning_tokens?: number };
+    };
+  } | null;
+  const message = data?.choices?.[0]?.message;
+  const content = message?.content;
+  if (message?.reasoning_content || message?.reasoning || /<think(?:\s|>)/i.test(content ?? "") ||
+      Number(data?.usage?.reasoning_tokens) > 0 ||
+      Number(data?.usage?.completion_tokens_details?.reasoning_tokens) > 0) {
+    throw new ModelProviderError("provider_reasoning", "模型返回了思考内容，请选择非思考模型");
+  }
+  if (typeof content !== "string" || !content.trim()) {
+    throw new ModelProviderError("provider_response", "模型返回空内容");
+  }
+  if (config.managed && content.includes(config.apiKey)) {
+    throw new ModelProviderError("provider_response", "模型响应包含不应返回的内容");
+  }
+  const model = data?.model;
+  return {
+    content,
+    model: typeof model === "string" && model && (!config.managed || !model.includes(config.apiKey)) ? model : config.model,
+    usage: data?.usage ? {
+      prompt_tokens: Number.isFinite(data.usage.prompt_tokens) ? data.usage.prompt_tokens : undefined,
+      completion_tokens: Number.isFinite(data.usage.completion_tokens) ? data.usage.completion_tokens : undefined,
+      total_tokens: Number.isFinite(data.usage.total_tokens) ? data.usage.total_tokens : undefined,
+    } : null,
+    latency_ms: Date.now() - started,
+  };
 }
 
 /** 把 ```json 包裹、前后多余文字都剥掉，只留第一个 JSON 对象。 */

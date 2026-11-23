@@ -9,7 +9,8 @@ import type { DatabaseSync } from "node:sqlite";
 import { authorizeProfileRequest } from "./profile.routes.js";
 import { isValidDeviceToken } from "./position-scripts.routes.js";
 import { firstFlowSegment, readFlow } from "./agent-flow.routes.js";
-import { complete, llmConfig, parseJsonObject } from "./agent-llm.js";
+import { complete, environmentModel, parseJsonObject } from "./agent-llm.js";
+import { activeAgentModel, agentModelStatus } from "./agent-model-settings.js";
 import { deviceReplyProvider, generateDifyReply, hasDifyDeviceToken, ownsReplyDevice } from "../dify/dify-reply.js";
 import { difyGroupNotificationState } from "../dify/dify-group-notification.js";
 import { normalizeInterviewPoints, normalizePositionFacts } from "../../shared/position-facts.js";
@@ -309,7 +310,10 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
           title: script.title,
           lines: script.content.split(/\n+/).filter(Boolean).length,
         })),
-        llm: { model: llmConfig().model, configured: Boolean(llmConfig().apiKey) },
+        llm: (() => {
+          const { model, key_configured } = agentModelStatus(db);
+          return { model, configured: key_configured };
+        })(),
       };
     },
   );
@@ -645,7 +649,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
     if (!lines.some(line => line.direction === "inbound")) {
       return reply.code(409).send({ code: "no_candidate_messages", detail: "还没有可分析的候选人文字消息" });
     }
-    const config = llmConfig();
+    const config = environmentModel();
     if (!config.apiKey || !followupModels.has(config.model)) {
       return reply.code(503).send({ detail: "AI 摘要需要配置受支持的非思考模型，请联系管理员" });
     }
@@ -904,7 +908,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
     }
 
     try {
-      const result = await complete(messages);
+      const result = await complete(messages, {}, activeAgentModel(db));
       if (deviceCode && (replyModePending(db, deviceCode) || deviceReplyProvider(db, deviceCode) !== "agent"
         || positionOfDevice(db, deviceCode) !== positionId || positionRow(db, positionId)?.status !== "enabled")) {
         const error = "接待岗位或回复来源已变化，请重新生成回复";

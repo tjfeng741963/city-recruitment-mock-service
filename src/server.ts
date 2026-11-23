@@ -1,5 +1,6 @@
 import Fastify, { type FastifyError } from "fastify";
 import fastifyStatic from "@fastify/static";
+import { createServer } from "node:http";
 import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,6 +30,7 @@ import { registerKbPublishRoutes } from "./modules/agent/kb-publish.routes.js";
 import { registerPositionScriptRoutes } from "./modules/agent/position-scripts.routes.js";
 import { registerAgentPersonaRoutes } from "./modules/agent/agent-persona.routes.js";
 import { registerAgentChatRoutes } from "./modules/agent/agent-chat.routes.js";
+import { registerAgentModelSettings } from "./modules/agent/agent-model-settings.js";
 import { registerReplyProviderRoutes } from "./modules/dify/dify-reply.js";
 import { registerApiDebugRoutes } from "./modules/agent/api-debug.routes.js";
 import { registerAgentFlowRoutes } from "./modules/agent/agent-flow.routes.js";
@@ -206,6 +208,7 @@ export function buildServer() {
   registerAgentPersonaRoutes(app, db);
   // Agent 会话 + 调试台：开场清单、开场回执、一轮对话（人设 + 事实 + 历史）
   registerAgentChatRoutes(app, db);
+  registerAgentModelSettings(app, db);
   registerReplyProviderRoutes(app, db);
   // 接口调试台的后端：把 onRoute 收集到的真实路由原样吐出来
   registerAgentFlowRoutes(app, db);
@@ -303,6 +306,22 @@ export function buildServer() {
   // `preClose`: Fastify's own onClose hook calls server.close() (which waits
   // for live sockets) before user onClose hooks registered here would run.
   app.addHook("preClose", () => { events.closeAll(); });
+  const agentSettingsPort = Number(process.env.REA_AGENT_SETTINGS_PORT ?? 0);
+  if (agentSettingsPort > 0) {
+    // Compose only publishes this listener to the production host's loopback.
+    const settingsServer = createServer((request, response) => app.routing(request, response));
+    app.addHook("onListen", () => {
+      settingsServer.on("error", error => console.error("Agent settings listener:", error.message));
+      settingsServer.listen(agentSettingsPort, config.host);
+    });
+    app.addHook("onClose", () => {
+      if (!settingsServer.listening) return;
+      return new Promise<void>((resolve, reject) => {
+        settingsServer.close(error => error ? reject(error) : resolve());
+        settingsServer.closeAllConnections();
+      });
+    });
+  }
   app.addHook("onClose", () => db.close());
   return app;
 }
