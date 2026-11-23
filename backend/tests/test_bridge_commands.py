@@ -149,6 +149,24 @@ def test_claim_sends_with_keyboard_and_reports_success(monkeypatch, capsys):
 # --------------------------------------------------------------------------- #
 # 2. 发送失败 → 落 failed 回执，指令不会卡在 claimed
 # --------------------------------------------------------------------------- #
+def test_window_blocked_after_manual_text_keeps_partial_delivery_for_review(monkeypatch):
+    autopilot = _load_autopilot()
+    _reset(autopilot)
+    autopilot.desktop_send_ready.side_effect = [(True, ""), (True, ""), (False, "窗口不可用")]
+    autopilot.core_send.split_media_marks = MagicMock(return_value=(COMMAND["content"], [("image", "asset.png")]))
+    autopilot.core_send.send.return_value = {"ok": True, "conversation_id": COMMAND["contact_id"]}
+    bridge = FakeBridge(command=dict(COMMAND))
+    store = _mock_store()
+    store.self_id.return_value = "owner"
+    store._conn.return_value.execute.return_value.fetchall.side_effect = [[], [(102, COMMAND["content"])]]
+
+    assert autopilot.pump_commands(store, _cfg(), bridge=bridge, wecom_state="online")["failed"] == 1
+
+    autopilot.core_send.send.assert_called_once()
+    autopilot.core_send.paste_media.assert_not_called()
+    assert bridge.receipts == [("cmd-0001", "lease-abc", "unknown", f"{COMMAND['contact_id']}:102")]
+
+
 def test_send_failure_reports_failed_receipt(monkeypatch):
     autopilot = _load_autopilot()
     _reset(autopilot)
@@ -188,12 +206,14 @@ def test_send_exception_is_contained(monkeypatch):
 # --------------------------------------------------------------------------- #
 # 4. 企微非 online 只查刷新指令，dry-run 和未配置桥接时跳过
 # --------------------------------------------------------------------------- #
-def test_non_online_claims_only_qr_refresh_commands():
+@pytest.mark.parametrize("wecom_state", ["hidden", "online"])
+def test_unavailable_desktop_claims_only_qr_refresh_commands(wecom_state):
     autopilot = _load_autopilot()
     _reset(autopilot)
+    autopilot.desktop_send_ready.return_value = (False, "企微窗口不可用")
     bridge = FakeBridge(command=dict(COMMAND))
 
-    assert autopilot.pump_commands(MagicMock(), _cfg(), bridge=bridge, wecom_state="hidden") == {
+    assert autopilot.pump_commands(MagicMock(), _cfg(), bridge=bridge, wecom_state=wecom_state) == {
         "claimed": 0, "sent": 0, "failed": 0,
     }
     assert bridge.claim_filters == ["refresh_login_qr"]

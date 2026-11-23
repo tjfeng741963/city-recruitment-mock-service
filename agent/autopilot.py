@@ -46,7 +46,7 @@ import traceback
 from contextlib import closing
 from ctypes import wintypes as wt
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from time import monotonic
 from urllib.parse import quote
 from urllib.error import HTTPError
@@ -1511,6 +1511,65 @@ def _foreground_sample() -> dict:
     return {}
 
 
+def _is_wecom_window_owner(pid: int) -> bool:
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = (wt.DWORD, wt.BOOL, wt.DWORD)
+    kernel.OpenProcess.restype = wt.HANDLE
+    kernel.QueryFullProcessImageNameW.argtypes = (wt.HANDLE, wt.DWORD, wt.LPWSTR, ctypes.POINTER(wt.DWORD))
+    kernel.CloseHandle.argtypes = (wt.HANDLE,)
+    process = kernel.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not process:
+        return False
+    try:
+        path = ctypes.create_unicode_buffer(32768)
+        size = wt.DWORD(len(path))
+        return bool(kernel.QueryFullProcessImageNameW(process, 0, path, ctypes.byref(size))) and (
+            PureWindowsPath(path.value).name.casefold() == "wxwork.exe"
+        )
+    finally:
+        kernel.CloseHandle(process)
+
+
+def desktop_send_ready(route: str) -> tuple[bool, str]:
+    """Inspect the frozen sender's current choice without activating a window."""
+    hwnd = pid = 0
+    visible = False
+    try:
+        if not _reply_desktop_active():
+            reason = "desktop_unavailable"
+        else:
+            target = win.find_window()
+            if not target:
+                reason = "window_missing"
+            else:
+                hwnd = target["hwnd"]
+                gui = win.win32gui
+                if not gui.IsWindow(hwnd):
+                    reason = "window_missing"
+                else:
+                    _, pid = win.win32process.GetWindowThreadProcessId(hwnd)
+                    visible = bool(gui.IsWindowVisible(hwnd))
+                    cloaked = wt.DWORD()
+                    dwm = ctypes.WinDLL("dwmapi")
+                    dwm.DwmGetWindowAttribute.argtypes = (wt.HWND, wt.DWORD, ctypes.c_void_p, wt.DWORD)
+                    if not target["visible"] or not visible:
+                        reason = "window_hidden"
+                    elif dwm.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked)) != 0:
+                        reason = "window_probe_failed"
+                    elif cloaked.value or not gui.IsWindowEnabled(hwnd):
+                        reason = "window_unavailable"
+                    elif gui.GetClassName(hwnd) != "WeWorkWindow" or not _is_wecom_window_owner(pid):
+                        reason = "window_owner_unverified"
+                    else:
+                        return True, ""
+    except Exception:  # A failed probe cannot authorize sending.
+        reason = "window_probe_failed"
+    if route != "health":
+        log("wecom_send_window_blocked", level="warning", scope="send", route=route,
+            reason_code=reason, hwnd=hwnd, window_pid=pid, visible=visible, **_foreground_sample())
+    return False, "企微发送窗口不可用，本次未执行发送"
+
+
 def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
                log_fn, readback_before: dict[str, str] | None = None, **context: object) -> tuple[str, str, str]:
     """Run the existing sender and classify the available target evidence."""
@@ -1539,6 +1598,11 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
             log_fn(message)
 
     event("start")
+    ready, detail = desktop_send_ready(route)
+    if not ready:
+        event("result", level="warning", outcome="blocked", reason_code="send_window_unavailable",
+              duration_ms=int((monotonic() - started) * 1000))
+        return "blocked", detail, ""
     try:
         result = core_send.send(store, name, body, expect_id=cid if cid.startswith(("S:", "R:")) else "",
                                 verify_db=True, log=on_step)
@@ -1585,6 +1649,14 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
     return status, detail, message_id
 
 
+def _send_media(name: str, log_fn, *, route: str) -> tuple[str, str]:
+    ready, detail = desktop_send_ready(route)
+    if not ready:
+        return "blocked", detail
+    ok, detail = core_send.paste_media(name, log=log_fn)
+    return ("sent" if ok else "unknown"), str(detail)
+
+
 def _send_dify_media(store: Store, cid: str, step: dict, log_fn) -> tuple[str, str]:
     """Use the existing media sender and require target conversation readback."""
     me = store.self_id()
@@ -1597,8 +1669,10 @@ def _send_dify_media(store: Store, cid: str, step: dict, log_fn) -> tuple[str, s
                 if msg.get("id") and msg.get("sender_id") == me and msg.get("type") in kinds}
 
     before = sent_ids()
-    ok, detail = core_send.paste_media(step["name"], log=log_fn)
-    if not ok or len(sent_ids() - before) != 1:
+    status, detail = _send_media(step["name"], log_fn, route="dify")
+    if status == "blocked":
+        return status, detail
+    if status != "sent" or len(sent_ids() - before) != 1:
         return "unknown", "未回读到目标会话中唯一的新媒体消息，请核对实际发送"
     return "sent", str(detail)
 
@@ -1640,8 +1714,7 @@ def _send_flow_part(store: Store, name: str, cid: str, part: dict, log_fn, *,
         # risking a paste into whichever chat currently has focus.
         if not part.get("target_verified"):
             return "failed", "媒体节点前必须在本轮先发送已验证落点的文本消息，待人工核对"
-        ok, detail = core_send.paste_media(media, log=log_fn)
-        return ("sent" if ok else "unknown"), str(detail)
+        return _send_media(media, log_fn, route="node")
     return "failed", "流程节点内容为空"
 
 
@@ -1716,6 +1789,9 @@ def _run_flow(store: Store, cfg: dict, cid: str, name: str, flow: dict, *, node_
                                                node_key=key, part_index=idx)
             except Exception as exc:  # a crash after Enter has an unknown result
                 status, detail = "unknown", f"{type(exc).__name__}: {exc}"
+            blocked = status == "blocked"
+            if blocked:
+                status = "failed"  # The outbox keeps the blocked step for operator review.
             state.mark_outbox(cid, key, idx, status, detail if status != "sent" else "")
             if _brain is not None and flow_trace_id:
                 _brain.log_delivery(flow_trace_id, status if status in ("sent", "failed", "unknown") else "unknown",
@@ -1723,7 +1799,8 @@ def _run_flow(store: Store, cfg: dict, cid: str, name: str, flow: dict, *, node_
             if status != "sent":
                 state.set_phase(cid, "held", error=detail)
                 _last_error = detail[:200]
-                _consecutive_send_failures += 1
+                if not blocked:
+                    _consecutive_send_failures += 1
                 log(f"[流程] {name} 暂停：{detail}", level="warning", scope="flow")
                 return "held"
             if part.get("kind", "text") == "text":
@@ -1771,6 +1848,8 @@ def _flow_tick(store: Store, cfg: dict, wecom_state: str) -> None:
         state.set_phase(str(row["session_key"]), "expired", error="复聊后未回复")
     state.daily_snapshot(now)
     if wecom_state != "online" or _brain is None or _consecutive_send_failures:
+        return
+    if not desktop_send_ready("health")[0]:
         return
     try:
         flow = _load_flow()
@@ -2058,6 +2137,9 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             if expired:
                 log("reply_recovery_age_hold", level="warning", scope="send", count=expired)
     items = rlog.pending(include_failed=True)
+    if items and not dry and not desktop_send_ready("auto")[0]:
+        stats["blocked"] += len(items)
+        return stats
     # 每个会话选一条作为回复目标：优先「有文本」的最新一条。
     # 企业微信在加好友、撤回、系统提示时会插入 type=1011 之类的空文本记录，
     # 它们时间更晚；若只按时间取最新，真正要回的文本就被挤掉，知识库拿到
@@ -2281,6 +2363,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                         continue
                     if ores.get("ok") and ores.get("items"):
                         sent_items = 0
+                        opening_uncertain = False
                         for item in ores["items"]:
                             backoff = 1 + min(_consecutive_send_failures, 3)
                             wait = cfg["cooldown"] * backoff - (time.time() - _last_reply_at)
@@ -2312,16 +2395,19 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                     # separate from the sender's guarded input timing.
                                     time.sleep(max(0.0, float(item.get("delay_ms", 2000)) / 1000.0))
                                 else:
-
-                                    _consecutive_send_failures += 1
+                                    if status != "blocked":
+                                        _consecutive_send_failures += 1
                                     _last_error = detail[:200]
-                                    if status == "unknown" or sent_items:
+                                    if status == "unknown" or sent_items or opening_uncertain:
                                         reason = f"开场第 {seq} 项未完成，已有 {sent_items} 项执行成功：{detail}"
                                         rlog.mark_unknown(mid, cid, reason, "开场", str(item["content"]),
                                                           partial=bool(sent_items))
                                         stats["unknown"] += 1
                                         log("wecom_send_hold", level="warning", scope="send", route="opening",
                                             message_id=mid, trace_id=trace, part=seq, completed_items=sent_items)
+                                    elif status == "blocked":
+                                        rlog.mark_failed(mid, cid, detail, "开场")
+                                        stats["blocked"] += 1
                                     else:
                                         rlog.mark_held(mid, cid, "开场发送失败，暂停本轮，待人工核对")
                                         stats["blocked"] += 1
@@ -2346,10 +2432,20 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                         return stats
                                     opening_claimed = True
                                 _last_reply_at = time.time()
-                                ok_m, detail_m = core_send.paste_media(
-                                    item["media_name"], log=lambda s: log(f"    {s}"),
+                                media_status, detail_m = _send_media(
+                                    item["media_name"], lambda s: log(f"    {s}"), route="opening",
                                 )
-                                if ok_m:
+                                if media_status == "blocked":
+                                    _last_error = detail_m[:200]
+                                    if sent_items or opening_uncertain:
+                                        rlog.mark_unknown(mid, cid, detail_m, "开场", partial=bool(sent_items))
+                                        stats["unknown"] += 1
+                                    else:
+                                        rlog.mark_failed(mid, cid, detail_m, "开场")
+                                        stats["blocked"] += 1
+                                    _brain.log_receipt(cid, seq, kind, "failed", detail_m)
+                                    return stats
+                                if media_status == "sent":
                                     rlog.mark_sent(fake_id, cid, f"开场-{kind}", f"{kind}:{item['media_name']}")
                                     opening_trace = _brain.log_receipt(cid, seq, kind, "sent")
                                     _brain.log_delivery(opening_trace, "sent", session_key=cid,
@@ -2358,6 +2454,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                     log(f"    [开场 {seq}] {kind}:{item['media_name']} 已发送", scope="send")
                                     time.sleep(max(0.0, float(item.get("delay_ms", 2000)) / 1000.0))
                                 else:
+                                    opening_uncertain = True
                                     rlog.mark_failed(fake_id, cid, f"{kind} 发送失败：{detail_m}", "开场-媒体")
                                     opening_trace = _brain.log_receipt(cid, seq, kind, "failed", detail_m)
                                     _brain.log_delivery(opening_trace, "failed", session_key=cid, detail=detail_m)
@@ -2523,20 +2620,26 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     break
                 for kind, mname in medias:
                     try:
-                        ok_m, detail_m = core_send.paste_media(
-                            mname, log=lambda s: log(f"    {s}", scope="media", message_id=mid, trace_id=trace)
+                        media_status, detail_m = _send_media(
+                            mname, lambda s: log(f"    {s}", scope="media", message_id=mid, trace_id=trace),
+                            route="auto",
                         )
                         log(f"    [媒体] {kind}:{mname} "
-                            f"{'成功' if ok_m else '失败'}：{detail_m}",
-                            level="info" if ok_m else "warning",
+                            f"{'成功' if media_status == 'sent' else '失败'}：{detail_m}",
+                            level="info" if media_status == "sent" else "warning",
                             scope="media", message_id=mid, trace_id=trace)
+                        if media_status == "blocked":
+                            status, detail = media_status, detail_m
+                            break
                     except Exception as exc:  # noqa: BLE001
                         log(f"    [媒体] {kind}:{mname} 异常（忽略）：{type(exc).__name__}: {exc}",
                             level="warning", scope="media", message_id=mid, trace_id=trace)
+                if status == "blocked":
+                    break
                 if idx < len(parts) - 1:
                     time.sleep(2.0)
             duration_ms = int((time.time() - send_started) * 1000)
-            if status == "unknown" or (status == "failed" and confirmed_parts):
+            if status == "unknown" or (status in ("failed", "blocked") and confirmed_parts):
                 # 回车已按但回读解密库确认不了落点：结果不明。不能记 sent
                 #（可能静默丢失），也不能记 failed（下轮自动补发可能重复发送）。
                 # 记 unknown 不参与自动补发，核对后只能逐条恢复。
@@ -2547,7 +2650,8 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     _brain.log_delivery(agent_trace_id, "unknown", session_key=cid, detail=detail)
                 _last_error = detail[:200]
 
-                _consecutive_send_failures += 1
+                if status != "blocked":
+                    _consecutive_send_failures += 1
                 stats["unknown"] += 1
                 log("wecom_send_hold", level="warning", scope="send", route="auto",
                     message_id=mid, trace_id=trace, duration_ms=duration_ms, confirmed_parts=confirmed_parts)
@@ -2581,20 +2685,26 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     )
                     log(f"    [媒体] {mname} 预取：{pre_detail}", scope="media",
                         message_id=mid, trace_id=trace)
-                    ok_m, detail_m = core_send.paste_media(
-                        mname, log=lambda s: log(f"    {s}"),
+                    media_status, detail_m = _send_media(
+                        mname, lambda s: log(f"    {s}"), route="auto",
                     )
+                    ok_m = media_status == "sent"
                     level = "info" if ok_m else "warning"
                     log(f"    [媒体] {kind}:{mname} {'已发送' if ok_m else '发送失败：' + detail_m}",
                         level=level, scope="media", message_id=mid, trace_id=trace)
+                    if media_status == "blocked":
+                        break
             else:
                 rlog.mark_failed(mid, cid, detail, scene, text)
                 if _brain is not None:
                     _brain.log_delivery(agent_trace_id, "failed", session_key=cid, detail=detail)
                 _last_error = detail[:200]
 
-                _consecutive_send_failures += 1
-                stats["failed"] += 1
+                if status == "blocked":
+                    stats["blocked"] += 1
+                else:
+                    _consecutive_send_failures += 1
+                    stats["failed"] += 1
                 log(f"    发送失败：{detail}", level="warning", scope="send",
                     message_id=mid, trace_id=trace, duration_ms=duration_ms)
         except Exception as exc:  # noqa: BLE001
@@ -2726,14 +2836,14 @@ def pump_commands(
     # 登录态（login_required 等）消息发不出去，但网页可能刚点了「刷新二维码」。
     # 这时只领 refresh_login_qr，绝不碰消息队列——领了也发不出去，还会白占
     # 60 秒租约，把真实待发消息一直往后推。
-    login_only = wecom_state != "online"
     now = time.time()
     if now - _last_claim_at < CLAIM_INTERVAL:
         return stats
     _last_claim_at = now
+    refresh_only = wecom_state != "online" or not desktop_send_ready("health")[0]
 
     try:
-        command = bridge.claim(only="refresh_login_qr" if login_only else "")
+        command = bridge.claim(only="refresh_login_qr" if refresh_only else "")
     except Exception as exc:  # noqa: BLE001
         log(f"[指令] 领取失败（忽略）：{agent_client.describe_error(exc)}")
         return stats
@@ -2742,7 +2852,7 @@ def pump_commands(
     # 「客户端没来领」和「领到了但执行失败」。
     if now - _last_pump_log_at >= 300:
         _last_pump_log_at = now
-        log(f"[指令] 泵运行中：wecom={wecom_state} 只领刷新={login_only} "
+        log(f"[指令] 泵运行中：wecom={wecom_state} 只领刷新={refresh_only} "
             f"本轮={'领到指令' if command else '队列为空'} "
             f"桥接={'已配置' if getattr(bridge, 'enabled', False) else '未配置'}")
     if not command:
@@ -2779,10 +2889,10 @@ def pump_commands(
         stats["sent" if ok else "failed"] += 1
         return stats
 
-    if login_only:
+    if refresh_only:
         # 旧服务端不认 only 参数时会把消息指令发过来：未登录不能发，
         # 也不能回执（回执会把它标成失败）。不回执，等 60 秒租约自然回收。
-        mlog("[指令] 登录态下收到消息指令，未登录不发送；等租约回收", level="warning")
+        mlog("[指令] 当前企微窗口不可用于发送，等待消息指令租约回收", level="warning")
         return stats
 
 
@@ -2871,17 +2981,21 @@ def pump_commands(
     if not content and cmd_medias:
         # 纯媒体指令：没有文本可供回读确认落点，贴完媒体后回执 unknown 待人工核对
         mlog("    纯媒体指令（无文本），贴完媒体后需人工核对落点", level="warning")
+        media_attempted = False
         for kind, mname in cmd_medias:
             try:
-                ok_m, detail_m = core_send.paste_media(
-                    mname, log=lambda s: mlog(f"    {s}")
-                )
+                media_status, detail_m = _send_media(mname, lambda s: mlog(f"    {s}"), route="manual")
+                if media_status == "blocked":
+                    break
+                media_attempted = True
+                ok_m = media_status == "sent"
                 mlog(f"    [媒体] {kind}:{mname} {'成功' if ok_m else '失败'}：{detail_m}",
                      level="info" if ok_m else "warning")
             except Exception as exc:  # noqa: BLE001
+                media_attempted = True
                 mlog(f"    [媒体] {kind}:{mname} 异常（忽略）：{type(exc).__name__}: {exc}",
                      level="warning")
-        receipt("unknown")
+        receipt("unknown" if media_attempted else "failed")
         stats["failed"] += 1
         return stats
     wait = cfg["cooldown"] - (time.time() - _last_reply_at)
@@ -2916,9 +3030,14 @@ def pump_commands(
         # Only a verified text landing authorizes its attachments.
         for kind, mname in cmd_medias:
             try:
-                ok_m, detail_m = core_send.paste_media(
-                    mname, log=lambda s: mlog(f"    {s}")
-                )
+                media_status, detail_m = _send_media(mname, lambda s: mlog(f"    {s}"), route="manual")
+                if media_status == "blocked":
+                    _last_error = detail_m[:200]
+                    mlog("    文本已通过回读，附件未执行发送，待核对", level="warning", message_id=message_id)
+                    receipt("unknown", message_id)
+                    stats["failed"] += 1
+                    return stats
+                ok_m = media_status == "sent"
                 mlog(f"    [媒体] {kind}:{mname} {'已执行发送' if ok_m else '失败'}：{detail_m}",
                      level="info" if ok_m else "warning")
             except Exception as exc:  # noqa: BLE001
@@ -2933,7 +3052,7 @@ def pump_commands(
         _last_error = detail[:200]
         stats["failed"] += 1
         mlog(f"    {detail}", level="warning", duration_ms=manual_duration)
-        receipt(status)
+        receipt("failed" if status == "blocked" else status)
     return stats
 
 
@@ -3457,7 +3576,10 @@ def main() -> int:
             elif not _reply_desktop_active():
                 reason = "desktop_unavailable"
             elif allowed and not cfg.get("dry_run"):
-                reason = "auto_send_failed" if _consecutive_send_failures else "ready"
+                if not desktop_send_ready("health")[0]:
+                    reason = "desktop_unavailable"
+                else:
+                    reason = "auto_send_failed" if _consecutive_send_failures else "ready"
             else:
                 reason = "reply_paused"
             runtime_heartbeat.observe(state, str(store.self_id() or ""), reason, reporter)

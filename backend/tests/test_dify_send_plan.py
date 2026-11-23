@@ -34,6 +34,19 @@ def test_unknown_media_outcome_stops_invitation(monkeypatch):
     assert sender.call_count == 1
 
 
+@pytest.mark.parametrize("kind", ["image", "video"])
+def test_blocked_dify_media_is_never_pasted(kind):
+    agent = load_autopilot()
+    agent.desktop_send_ready.return_value = (False, "企微窗口不可用")
+    store = MagicMock()
+    store.self_id.return_value = "account"
+
+    status, detail = agent._send_dify_media(store, "S:contact", {"type": kind, "name": "asset"}, MagicMock())
+
+    assert (status, detail) == ("blocked", "企微窗口不可用")
+    agent.core_send.paste_media.assert_not_called()
+
+
 @pytest.mark.parametrize("delays,valid", [([0, 5300], True), ([0], False), ([0, True], False)])
 def test_client_accepts_only_valid_server_plan(delays, valid):
     agent = load_autopilot()
