@@ -4,7 +4,7 @@
       <div class="yuanyi-login__stage" @pointerenter="startReflection" @pointermove="moveReflection" @pointerleave="hideReflection">
         <div class="yuanyi-login__light" aria-hidden="true" />
         <div ref="reflection" class="yuanyi-login__reflection" aria-hidden="true" />
-        <div class="yuanyi-login__stage-inset" aria-hidden="true" />
+        <div class="yuanyi-login__contours" aria-hidden="true" />
         <YuanyiMark animated label="源绎" class="yuanyi-login__artwork" />
       </div>
 
@@ -165,27 +165,16 @@ async function handleSubmit(): Promise<void> {
   --login-muted: #5e6575;
   --login-focus: #376bc5;
   display: grid;
-  align-items: center;
   min-height: 100vh;
   min-height: 100svh;
-  padding: clamp(20px, 3.3vw, 56px);
-  background: #f5f6f9;
+  background: #f9fafc;
   color: var(--login-ink);
   font-family: "Google Sans Flex", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 
 .yuanyi-login__frame {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
-  width: min(100%, 1460px);
-  min-height: clamp(570px, 79svh, 850px);
-  margin: auto;
-  padding: 8px;
-  overflow: hidden;
-  border: 1px solid #e4e7ed;
-  border-radius: 36px;
-  background: #fdfdff;
-  box-shadow: 0 22px 65px -39px #26375466, 0 2px 5px #2a365309;
+  grid-template-columns: minmax(0, 1.64fr) minmax(350px, 1fr);
 }
 
 .yuanyi-login__stage {
@@ -195,8 +184,7 @@ async function handleSubmit(): Promise<void> {
   place-items: center;
   overflow: hidden;
   min-width: 0;
-  border-radius: 29px;
-  background: #edf3fb;
+  background: #e0e8f8;
 }
 
 .yuanyi-login__light {
@@ -204,11 +192,12 @@ async function handleSubmit(): Promise<void> {
   z-index: -2;
   inset: -1px;
   background:
-    radial-gradient(ellipse at 92% 82%, #edc5d9a8, transparent 47%),
-    radial-gradient(ellipse at 74% 111%, #f7dca4d9, transparent 50%),
-    radial-gradient(ellipse at 1% 90%, #b3e1d3c9, transparent 59%),
-    radial-gradient(ellipse at 86% 7%, #b8c5f9d9, transparent 61%),
-    radial-gradient(ellipse at 36% 30%, #f8fbff, #e4eefb 56%, #dce8f6);
+    radial-gradient(ellipse at 49% 46%, #f9fcff 0%, #f4f8ffb8 23%, transparent 59%),
+    radial-gradient(ellipse at 7% 91%, #a7dacc 0%, #bde5dccc 25%, transparent 57%),
+    radial-gradient(ellipse at 76% 109%, #f5d79f 1%, #f9e2b0a8 24%, transparent 58%),
+    radial-gradient(ellipse at 100% 78%, #e8afc7 0%, #eec9ddc9 24%, transparent 62%),
+    radial-gradient(ellipse at 96% 4%, #96a2e3 0%, #b8bff3d9 28%, transparent 66%),
+    radial-gradient(ellipse at 0% 0%, #a5c7ed 0%, #c0ddf4 30%, #dde7f8 70%);
 }
 
 .yuanyi-login__reflection {
@@ -228,29 +217,40 @@ async function handleSubmit(): Promise<void> {
   opacity: 1;
 }
 
-.yuanyi-login__stage-inset {
+.yuanyi-login__contours {
   position: absolute;
   z-index: -1;
-  inset: 22px;
-  overflow: hidden;
-  border: 1px solid #ffffff87;
-  border-radius: 18px;
-  box-shadow: 0 0 0 1px #7d93b609 inset;
+  top: 4%;
+  left: -34%;
+  width: 173%;
+  height: 85%;
+  transform: rotate(-24deg);
+  mask-image: linear-gradient(111deg, #000 9%, #000 30%, transparent 58%, #000 78%);
   pointer-events: none;
 }
 
-.yuanyi-login__stage-inset::before {
+.yuanyi-login__contours::before,
+.yuanyi-login__contours::after {
   position: absolute;
-  inset: 0;
-  background:
-    linear-gradient(90deg, transparent 32px, #ffffff72 32px, #ffffff72 33px, transparent 33px),
-    linear-gradient(0deg, transparent 32px, #ffffff72 32px, #ffffff72 33px, transparent 33px);
+  border: 1px solid #ffffffa8;
+  border-radius: 46% 54% 43% 57% / 57% 45% 55% 43%;
   content: '';
 }
 
+.yuanyi-login__contours::before {
+  inset: 0;
+  box-shadow: 0 0 0 22px #ffffff22, 0 0 0 23px #ffffff54;
+}
+
+.yuanyi-login__contours::after {
+  inset: 12% 2.4% -8% 3.8%;
+  border-color: #ffffff83;
+  box-shadow: 0 0 0 28px #ffffff1d, 0 0 0 29px #ffffff49;
+}
+
 .yuanyi-login__artwork {
-  width: min(70%, 455px);
-  margin-top: -1.5%;
+  width: min(68%, 790px, max(290px, 88svh));
+  margin-top: -2%;
 }
 
 .yuanyi-login__access {
@@ -258,11 +258,15 @@ async function handleSubmit(): Promise<void> {
   align-items: center;
   justify-items: center;
   min-width: 0;
-  padding: clamp(30px, 6vw, 92px);
+  padding: clamp(38px, 5vw, 112px) clamp(28px, 5vw, 112px);
+  border-inline-start: 1px solid #c7d0e165;
+  background:
+    radial-gradient(ellipse at 100% 0%, #edf1fa 0%, transparent 63%),
+    linear-gradient(153deg, #fcfcfe 25%, #f7f9fd 100%);
 }
 
 .yuanyi-login__content {
-  width: min(100%, 354px);
+  width: min(100%, 390px);
 }
 
 .yuanyi-login__content h1 {
@@ -457,41 +461,27 @@ async function handleSubmit(): Promise<void> {
 }
 
 @media (max-width: 760px) {
-  .yuanyi-login {
-    align-items: start;
-    padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right))
-      max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
-  }
-
   .yuanyi-login__frame {
     grid-template-columns: minmax(0, 1fr);
-    min-height: auto;
-    max-width: 510px;
-    padding: 5px;
-    border-radius: 27px;
+    grid-template-rows: auto 1fr;
   }
 
   .yuanyi-login__stage {
-    min-height: clamp(174px, 29svh, 295px);
-    border-radius: 22px;
-  }
-
-  .yuanyi-login__stage-inset {
-    inset: 13px;
-    border-radius: 14px;
-  }
-
-  .yuanyi-login__stage-inset::before {
-    display: none;
+    min-height: clamp(165px, 29svh, 295px);
+    padding-top: env(safe-area-inset-top);
   }
 
   .yuanyi-login__artwork {
-    width: min(67%, 310px);
+    width: min(60%, 288px, max(180px, 35svh));
     margin-top: 0;
   }
 
   .yuanyi-login__access {
-    padding: 29px clamp(20px, 6vw, 42px) 36px;
+    align-items: start;
+    padding: 34px max(25px, env(safe-area-inset-right)) max(36px, env(safe-area-inset-bottom))
+      max(25px, env(safe-area-inset-left));
+    border-inline-start: 0;
+    border-block-start: 1px solid #c7d0e165;
   }
 
   .yuanyi-login__intro {
