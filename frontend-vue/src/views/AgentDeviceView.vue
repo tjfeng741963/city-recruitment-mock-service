@@ -68,14 +68,14 @@
           <template #default="{ row }">
             <div class="device-name">{{ row.name || row.device_name || row.device_code }}</div>
             <el-tag v-if="isWebTestDevice(row)" size="small" type="info">网页测试 · 未连接企微</el-tag>
-            <div v-if="row.factories && row.factories.length" class="factory-tags">
+            <div v-if="row.reply_provider === 'dify' && row.factories?.length" class="factory-tags">
               <el-tag v-for="factory in row.factories" :key="factory.id" size="small" effect="plain">
                 {{ factory.name }}
               </el-tag>
             </div>
-            <span v-else class="muted factory-empty">{{ row.position_id ? '按绑定岗位使用资料' : '尚未选择接待岗位' }}</span>
+            <span v-if="!row.position_id" class="muted factory-empty">尚未选择接待岗位</span>
             <div v-if="row.position_id" class="position-label">
-              岗位：{{ positionName(row.position_id) }}
+              {{ row.reply_provider === 'dify' ? '默认岗位' : '接待岗位' }}：{{ positionName(row.position_id) }}
             </div>
           </template>
         </el-table-column>
@@ -210,7 +210,7 @@
         <el-form-item label="负责人">
           <el-input v-model="form.recruiter_id" placeholder="填写已有招聘人员的账号，留空为未分配" />
         </el-form-item>
-        <el-form-item label="绑定工厂">
+        <el-form-item v-if="form.provider === 'dify'" label="接待工厂（可多选）">
           <el-select
             v-model="form.factory_ids"
             multiple
@@ -228,7 +228,7 @@
             />
           </el-select>
         </el-form-item>
-        <el-form-item label="绑定岗位">
+        <el-form-item :label="form.provider === 'dify' ? '默认岗位' : '接待岗位'">
           <el-select
             v-model="form.position_id"
             filterable
@@ -247,7 +247,9 @@
           <div v-if="receptionFactoryConflict" class="form-hint" role="alert">
             此岗位所属工厂不在当前绑定范围内。请在上方加入该工厂，或返回上一步换一个账号。
           </div>
-          <div v-else-if="!receptionPosition" class="form-hint">工厂改变后必须同步选择岗位；留空时系统会自动选该工厂的第一个启用岗位。</div>
+          <div v-else-if="!receptionPosition" class="form-hint">
+            {{ form.provider === 'dify' ? 'Dify 可按所选工厂推荐多个岗位。默认岗位用于开始接待。' : '系统 Agent 使用这里选择的一个岗位。' }}
+          </div>
         </el-form-item>
         <el-form-item label="报名通知群">
           <el-input
@@ -475,7 +477,9 @@ async function loadPositions(): Promise<void> {
 }
 
 const positionOptionsForForm = computed(() => {
-  return positionOptions.value.filter(position => positionMatchesFactories(position, form.factory_ids))
+  return form.provider === 'dify'
+    ? positionOptions.value.filter(position => positionMatchesFactories(position, form.factory_ids))
+    : positionOptions.value
 })
 
 function positionLabel(position: ServicePosition): string {
@@ -491,6 +495,7 @@ function positionName(positionId: number | null | undefined): string {
 
 /* ---------- 新增 / 编辑 ---------- */
 interface DeviceForm {
+  provider: 'agent' | 'dify'
   device_code: string
   name: string
   recruiter_id: string
@@ -515,11 +520,12 @@ function generateDeviceCode(): string {
 }
 const form = reactive<DeviceForm>(emptyForm())
 const receptionFactoryConflict = computed(() => Boolean(
-  receptionPosition.value && !positionMatchesFactories(receptionPosition.value, form.factory_ids),
+  form.provider === 'dify' && receptionPosition.value && !positionMatchesFactories(receptionPosition.value, form.factory_ids),
 ))
 
 function emptyForm(): DeviceForm {
   return {
+    provider: 'agent',
     device_code: '',
     name: '',
     recruiter_id: '',
@@ -552,6 +558,7 @@ function openCreate(): void {
 function openEdit(row: AgentDeviceItem): void {
   editingId.value = row.id
   Object.assign(form, {
+    provider: row.reply_provider === 'dify' ? 'dify' : 'agent',
     device_code: row.device_code || '',
     name: row.name || row.device_name || '',
     recruiter_id: row.recruiter_id || '',
@@ -614,7 +621,8 @@ async function saveDevice(): Promise<void> {
     device_name: form.name.trim() || form.device_code.trim(),
     name: form.name.trim() || form.device_code.trim(),
     recruiter_id: form.recruiter_id.trim(),
-    factory_ids: form.factory_ids,
+    ...(form.provider === 'dify' ? { factory_ids: form.factory_ids } : {}),
+    ...(editingId.value ? { expected_reply_provider: form.provider } : {}),
     position_id: form.position_id,
     group_chat: form.group_chat.trim(),
   }

@@ -3,6 +3,8 @@ import type { DatabaseSync } from "node:sqlite";
 import { parsePagination } from "../../shared/pagination.js";
 import { serializeCity, serializeFactory, serializeServicePosition } from "../../shared/response-serializers.js";
 import { applyCityDefaultsToPosition, normalizePositionFacts } from "../../shared/position-facts.js";
+import { parseDeviceData, resolveDevicePosition } from "../../shared/device-factories.js";
+import { replyModeRow } from "../dify/reply-mode-transition.js";
 import { canAccessCity, cityConstraint, getUserScope, type UserScope } from "../../auth/user-scopes.js";
 
 function mergePositionData(raw: string, body: Record<string, unknown>): Record<string, unknown> {
@@ -34,17 +36,16 @@ export async function registerCoreRoutes(app: FastifyInstance, db: DatabaseSync)
   const denyCityWrite = (scope: UserScope, cityId: number, reply: import("fastify").FastifyReply) => canAccessCity(scope, cityId) ? null : reply.code(403).send({ detail: "无权访问该城市" });
 
   // 城市招聘状态推导（2026-11-17 用户定论：不给人手改，按有的来）。
-  // 链路：agent_devices 绑定岗位（data_json.position_id）→ 该岗位启用中
+  // 已确认回复来源的接待岗位启用时，对应城市为招聘中。
   // → 岗位所属城市 = 招聘中（active）；没有设备绑定的城市 = 已停止（inactive）。
   // 推导结果回写 recruitment_status——前端展示、状态筛选、数据库三者永远一致。
   const syncCityRecruitmentStatus = () => {
-    const boundPids = (
-      db.prepare(
-        "SELECT DISTINCT json_extract(data_json,'$.position_id') AS pid FROM agent_devices WHERE status='enabled'",
-      ).all() as Array<{ pid: number | null }>
-    )
-      .map((row) => Number(row.pid ?? 0))
-      .filter((pid) => pid > 0);
+    const devices = db.prepare("SELECT data_json FROM agent_devices WHERE status='enabled'").all() as Array<{ data_json: string }>;
+    const boundPids = new Set(devices.map(row => {
+      const data = parseDeviceData(row.data_json);
+      const provider = replyModeRow(db, String(data.device_code ?? ""))?.effective ?? data.reply_provider;
+      return resolveDevicePosition(db, data, provider);
+    }));
     const recruitingCityIds = new Set<number>();
     for (const pid of boundPids) {
       const pos = db.prepare("SELECT city_id FROM service_positions WHERE id=? AND status='enabled'").get(pid) as

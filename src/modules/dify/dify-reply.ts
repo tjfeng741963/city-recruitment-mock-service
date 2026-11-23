@@ -133,7 +133,10 @@ export function registerReplyProviderRoutes(app: FastifyInstance, db: DatabaseSy
       const cfg = config();
       if (!cfg.key || !validBase(cfg.base)) return reply.code(409).send({ detail: "Dify 尚未完成连接配置" });
     }
-    if (!devicePositionId(db, code)) return reply.code(409).send({ detail: "请先给设备绑定接待岗位" });
+    const positionId = devicePositionId(db, code, provider);
+    if (provider === "dify" && !recruitmentPositionAvailable(db, code, positionId, positionId, false)) {
+      return reply.code(409).send({ detail: "Dify 缺少可用的默认岗位，请检查接待设置" });
+    }
     beginReplyMode(db, code, provider, false);
     return currentMode(code);
   });

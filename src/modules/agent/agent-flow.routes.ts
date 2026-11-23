@@ -361,6 +361,9 @@ export async function registerAgentFlowRoutes(app: FastifyInstance, db: Database
     const reply_mode_id = mode?.phase === "applying" && !mode.rollback ? mode.id : mode?.generation || "";
     if (deviceReplyProvider(db, code) === "dify") return { ok: true, provider: "dify", reply_mode_id, version: 0, nodes: [], edges: [], status: "disabled" };
     const positionId = devicePositionId(db, code);
+    if (!db.prepare("SELECT 1 FROM service_positions WHERE id=? AND status='enabled'").get(positionId)) {
+      return { position_id: positionId, reply_mode_id, version: 0, nodes: [], edges: [], status: "disabled" };
+    }
     const result = readFlow(db, positionId);
     // 停用只阻止新会话；在途会话使用本地持久化快照。
     return { ...result, ...(result.status === "enabled" ? {} : { nodes: [], edges: [] }), reply_mode_id };

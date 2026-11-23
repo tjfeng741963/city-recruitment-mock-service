@@ -1,17 +1,8 @@
 import type { DatabaseSync } from "node:sqlite";
 
 /**
- * 设备 → 工厂「多选」绑定的唯一读写入口。
- *
- * 契约（三端约定，docs/对齐-设备工厂绑定与资料导入.md 的延伸）：
- * - 存储：agent_devices.data_json.factory_ids = number[]（factories.id）；
- *   老字段 factory_name 保留不动，向后兼容。
- * - 空数组 / 字段缺失 = 不绑任何厂 → 所有消费方退回「按城市全量」的老逻辑。
- * - 脏数据一律「忽略而不是报错」：重复 id 去重、非整数丢弃、库里不存在的 id 丢弃。
- *
- * 抽成共享模块的原因：设备列表（4222 admin）、岗位/城市查询（8090 服务间）、
- * 配置下发（设备客户端）三处读的是同一份 data_json，容错规则必须一致，
- * 否则「后台存得进、查询看不见」这类不一致最难查。
+ * Dify 使用 position_id 和 factory_ids 作为默认岗位与推荐范围。
+ * Agent 使用 agent_position_id，缺少该字段的旧账号继承原岗位。
  */
 
 export type DeviceFactory = { id: number; name: string; city_name: string };
@@ -65,19 +56,23 @@ export function deviceFactoryIds(db: DatabaseSync, deviceCode: string): number[]
   const row = db.prepare("SELECT data_json FROM agent_devices WHERE json_extract(data_json,'$.device_code')=?")
     .get(code) as { data_json: string } | undefined;
   if (!row) return [];
-  return readDeviceFactoryIds(db, parseDeviceData(row.data_json).factory_ids);
+  return receptionFactoryIds(db, parseDeviceData(row.data_json));
+}
+
+export function receptionFactoryIds(
+  db: DatabaseSync, data: Record<string, unknown>, provider = data.reply_provider,
+): number[] {
+  if (provider === "dify") return readDeviceFactoryIds(db, data.factory_ids);
+  const positionId = resolveDevicePosition(db, data, provider);
+  const position = db.prepare("SELECT factory_id FROM service_positions WHERE id=?").get(positionId) as
+    { factory_id: number | null } | undefined;
+  return position?.factory_id ? [position.factory_id] : [];
 }
 
 /**
- * Resolve the single service position used by a device.
- *
- * Older device records only stored position_id.  If an operator later changes
- * factory_ids, that stale id must not keep serving the old factory.  When the
- * stored position belongs to one of the bound factories it remains authoritative;
- * otherwise we select the first enabled position under the bound factories.
- * With no factory binding we preserve the legacy position_id behaviour.
+ * Resolve the position for the requested source, or the source being applied by Windows.
  */
-export function devicePositionId(db: DatabaseSync, deviceCode: string): number {
+export function devicePositionId(db: DatabaseSync, deviceCode: string, provider?: "agent" | "dify"): number {
   const code = deviceCode.trim();
   if (!code) return 0;
   const row = db
@@ -85,10 +80,19 @@ export function devicePositionId(db: DatabaseSync, deviceCode: string): number {
     .get(code) as { data_json: string } | undefined;
   if (!row) return 0;
   const data = parseDeviceData(row.data_json);
-  const rawPositionId = typeof data.position_id === "number" || typeof data.position_id === "string"
-    ? Number(data.position_id)
+  return resolveDevicePosition(db, data, provider ?? data.reply_provider);
+}
+
+export function resolveDevicePosition(db: DatabaseSync, data: Record<string, unknown>, provider: unknown): number {
+  const raw = provider !== "dify" && Object.hasOwn(data, "agent_position_id")
+    ? data.agent_position_id : data.position_id;
+  const rawPositionId = typeof raw === "number" || typeof raw === "string"
+    ? Number(raw)
     : 0;
   const storedPositionId = Number.isSafeInteger(rawPositionId) && rawPositionId > 0 ? rawPositionId : 0;
+  if (provider !== "dify" && (storedPositionId || Object.hasOwn(data, "agent_position_id"))) {
+    return storedPositionId;
+  }
   const factoryIds = readDeviceFactoryIds(db, data.factory_ids);
 
   if (!factoryIds.length) return storedPositionId;
