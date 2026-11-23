@@ -68,7 +68,7 @@ def test_result_committed_before_http_and_retries_after_restart_without_sending(
     recovered = ReceiptBridge()
     assert replay.pump_commands(_mock_store(), _cfg(), bridge=recovered, wecom_state="offline")["sent"] == 0
     replay.core_send.send.assert_not_called()
-    assert recovered.claim_calls == 0
+    assert recovered.claim_filters == ["refresh_login_qr"]
     assert recovered.receipts == bridge.receipts
     assert pending(replay, recovered) == []
     assert replay.rlog.recent_manual_receipts()[0]["receipt_state"] == "acked"
