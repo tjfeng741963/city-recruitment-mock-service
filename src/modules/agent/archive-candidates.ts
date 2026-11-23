@@ -4,27 +4,33 @@ const value=(...values:unknown[])=>String(values.find(v=>v!==null&&v!==undefined
 const object=(raw:unknown):Row=>{try{return JSON.parse(String(raw||'{}')) as Row}catch{return {}}};
 
 /** One row per archive. Exact session association only; never join by nickname or phone. */
-export function archiveCandidates(db:DatabaseSync) {
+export function archiveCandidates(db:DatabaseSync, sessionKey?: string) {
   const rows=db.prepare(`SELECT a.*, c.device_code AS conversation_device,c.customer_id,c.nickname,c.recruit_status,
     c.name AS conversation_name,c.phone AS conversation_phone,c.province,c.city AS conversation_city,c.district,
     c.factory_name AS conversation_factory,c.profile_json,c.created_at AS conversation_created,
     sp.position_name,sp.data_json AS position_data,f.factory_name
     FROM agent_archive a LEFT JOIN agent_conversations c ON c.id=CASE
-      WHEN a.dify_device_code<>'' THEN (SELECT cc.id FROM agent_conversations cc
+      WHEN a.session_key LIKE 'manual:%' OR a.session_key LIKE 'group:%' OR a.session_key LIKE 'R:%' THEN NULL
+      WHEN a.dify_device_code<>'' OR a.session_key LIKE 'dify:%' THEN (SELECT cc.id FROM agent_conversations cc
         WHERE cc.id=a.dify_conversation_row_id AND cc.device_code=a.dify_device_code
-          AND cc.external_conversation_id=a.dify_external_session)
+          AND cc.external_conversation_id=a.dify_external_session
+          AND a.dify_device_code<>'' AND a.dify_external_session<>''
+          AND cc.external_conversation_id NOT LIKE 'group:%' AND cc.external_conversation_id NOT LIKE 'R:%')
       ELSE (
       SELECT cc.id FROM agent_conversations cc WHERE cc.external_conversation_id=a.session_key
       AND (SELECT COUNT(*) FROM agent_conversations same WHERE same.external_conversation_id=a.session_key)=1
       ORDER BY cc.updated_at DESC,cc.id DESC LIMIT 1) END
     LEFT JOIN service_positions sp ON sp.id=a.position_id
     LEFT JOIN factories f ON f.id=sp.factory_id
-    WHERE a.name<>'' OR a.phone<>'' OR a.interview_date<>''
-    ORDER BY a.updated_at DESC,a.session_key`).all() as Row[];
+    WHERE (a.name<>'' OR a.phone<>'' OR a.interview_date<>'')
+      ${sessionKey === undefined ? "" : "AND a.session_key=?"}
+    ORDER BY a.updated_at DESC,a.session_key`).all(...(sessionKey === undefined ? [] : [sessionKey])) as Row[];
   return rows.map(row=>{
     const session=String(row.session_key),profile=object(row.profile_json),position=object(row.position_data);
-    const matches=row.dify_device_code?Number(Boolean(row.conversation_device)):
-      (db.prepare('SELECT COUNT(*) n FROM agent_conversations WHERE external_conversation_id=?').get(session) as {n:number}).n;
+    const canUseLegacyKey = !row.dify_device_code && !/^(?:dify:|manual:|group:|R:)/i.test(session);
+    const matches = canUseLegacyKey
+      ? (db.prepare('SELECT COUNT(*) n FROM agent_conversations WHERE external_conversation_id=?').get(session) as {n:number}).n
+      : Number(Boolean(row.conversation_device));
     // Historical manual IDs carry the device code, but do not imply a customer chat exists.
     const manualDevice=session.startsWith('manual:')&&session.includes(':manual:')?session.slice(7,session.indexOf(':manual:')):'';
     const code=value(row.conversation_device,row.dify_device_code,manualDevice);

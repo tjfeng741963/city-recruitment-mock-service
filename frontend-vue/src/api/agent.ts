@@ -233,6 +233,14 @@ export interface ArchiveRecord {
   [key: string]: unknown
 }
 
+export interface ArchiveFollowupSummary {
+  intent: string | null
+  discussed: string | null
+  experience: string | null
+  next_question: string | null
+  quote: string | null
+}
+
 export const archiveApi = {
   list: (params: PageQuery = {}) =>
     http.get<{ items: ArchiveRecord[] }>('/api/v1/agent/archive/list', { params }),
@@ -240,6 +248,10 @@ export const archiveApi = {
     http.get<Record<string, unknown>>('/api/v1/agent/archive', { params }),
   manual: (payload: Record<string, unknown>) =>
     http.post<Record<string, unknown>>('/api/v1/agent/archive/manual', payload),
+  followupSummary: (key: string) =>
+    http.post<ArchiveFollowupSummary>(
+      `/api/v1/agent/archive/${encodeURIComponent(key)}/followup-summary`, undefined, { timeout: 60000 },
+    ),
   setArrival: (key: string, arrival: string) =>
     http.put<Record<string, unknown>>(
       `/api/v1/agent/archive/${encodeURIComponent(key)}/arrival`,
