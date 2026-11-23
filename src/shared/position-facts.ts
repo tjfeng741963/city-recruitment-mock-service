@@ -2,7 +2,14 @@ type Values = Record<string, unknown>;
 
 const text = (value: unknown): string => String(value ?? "").trim();
 
-export function normalizeInterviewPoints(value: unknown): Array<{name: string; address: string}> {
+export interface InterviewPoint {
+  name: string;
+  address: string;
+  interview_time?: string;
+  checkin_guide?: string;
+}
+
+export function normalizeInterviewPoints(value: unknown): InterviewPoint[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap(item => {
     if (typeof item === "string") return item.trim() ? [{name: item.trim(), address: ""}] : [];
@@ -10,7 +17,13 @@ export function normalizeInterviewPoints(value: unknown): Array<{name: string; a
     const point = item as Values;
     const name = typeof point.name === "string" ? point.name.trim() : "";
     const address = typeof point.address === "string" ? point.address.trim() : "";
-    return name ? [{name, address}] : [];
+    const interviewTime = typeof point.interview_time === "string" ? point.interview_time.trim() : "";
+    const checkinGuide = typeof point.checkin_guide === "string" ? point.checkin_guide.trim() : "";
+    return name ? [{
+      name, address,
+      ...(interviewTime && { interview_time: interviewTime }),
+      ...(checkinGuide && { checkin_guide: checkinGuide }),
+    }] : [];
   });
 }
 

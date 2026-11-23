@@ -2,7 +2,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { parseDeviceData, parseFactoryIds } from "../../shared/device-factories.js";
 import { difyContext, difyContextConflict } from "./dify-context.js";
 import { queueDifyGroupNotification } from "./dify-group-notification.js";
-import { interviewDate, interviewSchedule, validateInterview } from "./dify-interview.js";
+import { bookableInterviewPoints, describeInterviewPoint, interviewDate, interviewSchedule, scheduleForPoint, validateInterview } from "./dify-interview.js";
 import { invitationStage, setInvitationStage } from "./dify-invitation.js";
 import { invitationMedia, type DifyMessage } from "./dify-material-reply.js";
 import { queueInterviewReminder, stopInterviewReminder } from "./dify-interview-reminder.js";
@@ -214,8 +214,11 @@ export function recruitmentTurn(db:DatabaseSync, input:{
   }
   if (saved && input.ordered && /^(?:我)?(?:已经)?到了(?:门口|楼下|面试点)?$/.test(query)) {
     const context = difyContext(db,saved.position_id);
-    const guide = context && !difyContextConflict(context) && context.interview_points.length === 1
-      && context.interview_points[0].address === saved.interview_address && context.city_materials.checkin_guide;
+    const point = context?.interview_points.find(point =>
+      point.name === saved.interview_point && point.address === saved.interview_address,
+    );
+    const guide = context && !difyContextConflict(context) && point
+      && (point.checkin_guide || (context.interview_points.length === 1 && context.city_materials.checkin_guide));
     if (input.canWrite) stopInterviewReminder(db,archiveKey);
     return respond(guide || "收到，你已经到面试点了。稍等一下。");
   }
@@ -242,22 +245,26 @@ export function recruitmentTurn(db:DatabaseSync, input:{
   const context = difyContext(db,current.id);
   if (!context || difyContextConflict(context)) return respond("这个岗位的面试安排暂未公布。");
   const schedule = interviewSchedule(db,current.id,context as Record<string,unknown>);
-  if (timeQuestion) {
-    const times = schedule.timeText ? `这个岗位的面试时段是${schedule.timeText}。` : "";
-    return respond(`${times}${saved ? `你原来约的是${saved.interview_date} ${saved.interview_time}。` : ""}你大概哪天几点能到？`);
-  }
+  const defaultTime = schedule.timeText || (schedule.dayLabels.length ? `面试日 ${schedule.dayLabels.join("、")}` : "");
+  const hasPointTimes = schedule.points.some(point => point.interview_time);
   const availability = [
     current.title,
-    schedule.timeText || (schedule.dayLabels.length ? `面试日 ${schedule.dayLabels.join("、")}` : ""),
-    schedule.points.length ? `面试地点 ${schedule.points.map(point=>point.address && point.address!==point.name ? `${point.name}（${point.address}）` : point.name).join("、")}` : "",
+    defaultTime && (hasPointTimes ? `未单独设置的面试点沿用 ${defaultTime}` : defaultTime),
+    schedule.points.length ? `面试地点 ${schedule.points.map(describeInterviewPoint).join("、")}` : "",
   ].filter(Boolean).join("\n");
+  if (timeQuestion) {
+    const selected = schedule.points.find(point => point.name === (saved?.interview_point || draft.point));
+    const timeText = selected ? scheduleForPoint(schedule, selected).timeText : schedule.timeText;
+    const times = hasPointTimes && !selected ? `${availability}\n` : timeText ? `可面试时段是${timeText}。` : "";
+    return respond(`${times}${saved ? `你原来约的是${saved.interview_date} ${saved.interview_time}。` : ""}你大概哪天几点能到？`);
+  }
   if (scheduleRequest) return respond(availability);
   if (cancel) {
     save(current.id,{});
     return respond("已清除本次待确认的报名资料。");
   }
   if (!input.preview && !input.canWrite) return respond("请在当前企微会话中完成报名确认。");
-  if (!schedule.days.length || !schedule.slots.length || !schedule.points.some(point=>point.address)) {
+  if (!bookableInterviewPoints(schedule).length) {
     if (draft.reviewed) save(current.id,{...draft,reviewed:undefined});
     return respond(`${availability}\n这个岗位暂未开放预约。`);
   }
@@ -285,7 +292,12 @@ export function recruitmentTurn(db:DatabaseSync, input:{
   if ((offered || natural) && valid && "error" in valid) return respond(`${valid.error}\n${availability}`);
   if (!draft.name || !draft.phone || !valid) {
     if (offered || natural) {
-      if (!draft.date || !draft.time) return respond(!draft.date ? `${availability}\n想约哪天几点？` : `你想约${draft.date}几点？${schedule.timeText ? `可面试时段是${schedule.timeText}。` : ""}`);
+      if (!draft.date || !draft.time) {
+        const selected = schedule.points.find(point => point.name === draft.point);
+        const times = selected ? scheduleForPoint(schedule, selected).timeText : schedule.timeText;
+        return respond(!draft.date || (hasPointTimes && !selected) ? `${availability}\n想约哪天几点？`
+          : `你想约${draft.date}几点？${times ? `可面试时段是${times}。` : ""}`);
+      }
       if (!draft.point) return respond(`你想去哪个面试点？\n${availability}`);
       const missing = [!draft.name && "姓名",!draft.phone && "手机号"].filter(Boolean).join("和");
       return respond(`可以把${missing}发我吗？我这边帮你登记面试。`);
