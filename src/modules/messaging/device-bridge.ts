@@ -340,6 +340,10 @@ export class DeviceBridgeStore {
   }
   /** 设备上报的群聊清单整体替换（device_group_chats 表）。 */
   saveGroups(code: string, groups: Array<{ conv_id: string; name: string }>): number {
+    // 空清单不覆盖（2026-11-23）：客户端企微登出时读不到会话，会拿空数组上报。
+    // 整体替换语义下一次空上报就把运营绑定的群名全清掉，前端下拉直接变空，
+    // 面试登记再也推不出去。保留旧清单，等客户端真正读到群后再替换。
+    if (!groups.length) return this.listGroups(code).length;
     this.db.exec("BEGIN");
     try {
       this.db.prepare("DELETE FROM device_group_chats WHERE device_code=?").run(code);

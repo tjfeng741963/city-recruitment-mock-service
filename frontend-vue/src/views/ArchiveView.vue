@@ -34,20 +34,27 @@
         <div class="arch-card">
           <b>设备绑定群聊（登记完成后自动推送）</b>
           <p class="arch-hint">
-            群聊清单由客户端从企微读取上报。选设备 → 选群聊 → 保存，登记完成自动推送。
+            群聊清单由客户端从企微读取上报（企微登录后自动同步）。可以直接选，也可以手输群名——
+            发送时和发给个人一样，按群名搜索会话。
           </p>
           <div v-for="device in devices" :key="device.id" class="arch-row">
             <span class="device-label">{{ device.device_code }}</span>
             <el-select
               v-model="device.group_chat"
               class="group-select"
-              :placeholder="groupsLoaded ? '未绑定' : '加载中…'"
+              filterable
+              allow-create
+              default-first-option
+              :placeholder="groupsLoaded ? '未绑定（可手输群名）' : '加载中…'"
               @change="(value: string) => bindGroup(device, value)"
             >
               <el-option label="未绑定" value="" />
               <el-option v-for="group in groups[device.device_code] || []" :key="group" :label="group" :value="group" />
             </el-select>
           </div>
+          <p v-if="groupsLoaded && !uploadedGroupCount" class="arch-hint">
+            客户端还没上报群聊清单（企微未登录时读不到）。可以直接手输群名，登录后会同步真实清单。
+          </p>
           <div v-if="!devices.length" class="arch-empty">暂无设备</div>
         </div>
       </div>
@@ -229,6 +236,10 @@ const followups = reactive(new Map<string, { summary?: ArchiveFollowupSummary; l
 const currentFollowup = computed(() => selected.value ? followups.get(selected.value.session_key) : undefined)
 const groups = ref<Record<string, string[]>>({})
 const groupsLoaded = ref(false)
+// 客户端上报的群聊总数：为 0 说明企微没登录/还没同步，页面提示可以手输群名
+const uploadedGroupCount = computed(() =>
+  Object.values(groups.value).reduce((sum, list) => sum + (list?.length || 0), 0),
+)
 const loading = ref(false)
 const saving = ref(false)
 const manualVisible = ref(false)

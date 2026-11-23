@@ -1003,6 +1003,11 @@ class Reporter:
                 for s in self.store.sessions(limit=500)
                 if s.get("type") == "群聊" and (s.get("name") or "").strip()
             ]
+            # 空清单绝不上报（2026-11-23）：企微登出/读不到会话时 sessions 是空的，
+            # 而服务端 saveGroups 是「整体替换」——一次空上报就把运营在面试登记页
+            # 绑定的群名清空，前端下拉变空，登记再也推不出去。
+            if not groups:
+                return
             result = bridge.report_groups(groups)
             log(f"[群聊] 已上报 {result.get('count', len(groups))} 个群聊")
         except Exception as exc:  # noqa: BLE001
