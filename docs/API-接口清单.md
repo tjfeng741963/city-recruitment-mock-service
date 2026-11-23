@@ -82,6 +82,7 @@ POST /api/v1/agent/devices/:code/login-qr/refresh 让客户端刷新登录二维
 | POST | `/api/v1/agent-opening` | admin | 追加一条开场，自动排到末尾 |
 | PUT | `/api/v1/agent-opening/:id` | admin | 改一条，body 可含 `kind/content/media_name/delay_ms/status` |
 | DELETE | `/api/v1/agent-opening/:id` | admin | 删除一条 |
+| POST | `/api/v1/agent-opening/batch-delete` | admin | 一次删除本岗位选中的条目。提交 `position_id`、`ids` 及读取开场时返回的 `opening_revision`（请求参数名 `revision`）。列表变更时返回 409。 |
 | POST | `/api/v1/agent-opening/reorder` | admin | 重排，body `{position_id,ids:[...]}` |
 
 <!-- api-check:end -->
@@ -169,7 +170,7 @@ Dify 的 `city_materials` 也包含岗位表单的同名段落，适用于招聘
 | GET | `/api/v1/agent/devices/:code/reply-provider` | admin | 返回 `{provider:agent/dify,configured:boolean}`，不返回密钥 |
 | PUT | `/api/v1/agent/devices/:code/reply-provider` | admin | body `{provider:agent/dify,fresh_client_state_confirmed:true}`；兼容旧客户端的手动方式。客户端报告支持新切换后必须走 reply-mode |
 
-设备选 Dify 后，`GET /agent/opening` 返回空清单与 `provider:dify`。`POST /agent/chat` 默认使用绑定岗位。求职者明确提到的城市在设备绑定范围内且只有一个可匹配岗位时，该会话切换到对应岗位，直接咨询使用该岗位资料。多个匹配岗位由求职者选择，超出绑定范围时说明该城市暂无可推荐岗位。返回兼容的 `reply.messages`。设备令牌必须匹配 `body.device_code`，Dify 模式要求 `session_key`。`dry:true` 返回中性岗位输入且不调用模型。Dify 会话以设备、当前登录账号、联系人、岗位和应用配置隔离。失败返回 `ok:false,provider:dify,code,error`，金额不在当前事实中时暂停发送。
+设备选 Dify 后，`GET /agent/opening` 返回空清单与 `provider:dify`。`POST /agent/chat` 默认使用绑定岗位。求职者明确提到的城市在设备绑定范围内且只有一个可匹配岗位时，该会话切换到对应岗位，直接咨询使用该岗位资料。多个匹配岗位由求职者选择，超出绑定范围时说明该城市暂无可推荐岗位。素材请求缺少主题时，系统追问并在同一会话、同一岗位的下一轮保留所需的图片或视频类型，有效期为 5 分钟。返回兼容的 `reply.messages`。设备令牌必须匹配 `body.device_code`，Dify 模式要求 `session_key`。`dry:true` 返回中性岗位输入且不调用模型。Dify 会话以设备、当前登录账号、联系人、岗位和应用配置隔离。失败返回 `ok:false,provider:dify,code,error`，金额不在当前事实中时暂停发送。
 
 模式二收到明确的图片、视频或面试导航请求时，服务端直接读取现有素材库与所选岗位面试点。回复按现有客户端协议返回文字和 `{type:"image"|"video",name,content}`，其中 `content` 用于网页试答展示素材名称。客户端下载沿用 `GET /api/v1/agent/media/:name`，模式二使用含文件哈希的名称，避免同名素材更新后复用旧文件。发送前查找启用且文件存在的岗位素材。地铁品类使用已有的通用工作图、工作视频和宿舍图。面试图仅用于绑定了该素材且只有一个面试点的岗位。导航以该面试点的地址生成高德地图搜索链接。多个面试点且提问没有指定其一时先要求选择。地图搜索结果需以随消息附上的详细地址核对。
 
@@ -198,6 +199,10 @@ Dify 会话与调用表为 `dify_reply_sessions`、`dify_reply_calls`（迁移 0
 | `history` | 否 | 仅无状态模式（没有 `session_key`）用：`[{role:"customer"\|"agent", text:"..."}]` |
 | `dry` | 否 | `true` 只返回拼好的 messages，不调模型、不写会话 |
 | `sent_summary` | 否 | 已真实发送的流程摘要数组，最多 50 项；显式传空数组也会停止注入完整旧开场，省略则保持旧客户端兼容 |
+| `ordered_reply` | 否 | Windows 支持 Dify 有序发送时传 `true`。Dify 返回按发送顺序排列的 `reply.messages` 和对应的 `reply.delays_before_ms`。首项为 0，其余是上一条发送确认后到本条的最小等待毫秒数。缺省时兼容旧客户端。 |
+| `turn_id` | 否 | Dify 设备的本轮入站消息 ID。连发文本在 `text` 中用换行分隔。相同设备、账号、会话和轮次短时重试时复用已生成的最新发送计划。 |
+
+Dify 有序回复支持 `text`（`content`）、`image` 和 `video`（`name` 为系统素材引用）。同一轮只下发当前应发的内容，城市、意向、面试时间和报名确认由服务端按会话推进。`/api/v1/dify/preview` 显示有序回复，不产生真实发送、登记或面试提醒指令。正式登记成功后可按服务端配置加入面试当天提醒，Windows 从现有桥接队列领取已到时的任务。
 
 `dry=true` 返回的 `messages` 是实际模型请求使用的完整 prompt，可用于核对事实是否进入模型上下文。事实区包含岗位基本字段，以及面试时间说明、面试地址、面试材料、基本招聘要求、入职注意事项、通用素材清单 `media_catalog` 和本岗位启用的面试图片/视频 `interview_address_image`、`interview_video`；事实标签同时显示字段 key。其他岗位专属素材及停用素材不注入。素材出现在 prompt 只证明模型可选用该素材，不代表客户端已经发送或客户已经收到。
 

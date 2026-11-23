@@ -37,6 +37,85 @@ describe("Dify second reply route", () => {
     bridge.heartbeat(code,"online","test-account");return result;
   };
   const chat=(session="S:test",text="工资多少？",headers=device)=>app.inject({method:"POST",url:"/api/v1/agent/chat",headers,payload:{device_code:code,session_key:session,text}});
+  it("issues ordered subway invitations and waits for the candidate before offering times", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "dify-invitation-"));
+    vi.stubEnv("REA_MEDIA_DIR", dir);
+    vi.stubEnv("REA_DIFY_SEND_INTERVAL_MS", "3500");
+    vi.stubEnv("REA_DIFY_AFTER_MEDIA_MS", "6500");
+    vi.stubEnv("REA_DIFY_INTERVIEW_REMINDER_MINUTES", "120");
+    try {
+      const factoryIds = ["广州", "南昌"].map((city, index) => {
+        const cityId = ((app.db.prepare("SELECT id FROM cities WHERE city_name=?").get(city)
+          ?? app.db.prepare("INSERT INTO cities(city_name) VALUES (?) RETURNING id").get(city)) as {id:number}).id;
+        app.db.prepare("UPDATE cities SET data_json='{}' WHERE id=?").run(cityId);
+        const factory = (app.db.prepare("INSERT INTO factories(city_id,factory_name,status) VALUES (?,?,'enabled') RETURNING id")
+          .get(cityId, `${city}地铁`) as {id:number}).id;
+        const data = JSON.stringify({wage_text:`${index ? 80 : 120}元/班`,hours_text:"每班8小时",job_content:"乘客行李安检",
+          interview_time:"每天 14:00-16:00",interview_points:[{name:`${city}面试点`,address:`${city}测试路1号`}]});
+        const job = index ? (app.db.prepare("INSERT INTO service_positions(city_id,factory_id,position_name,status,data_json) VALUES (?,?,?,'enabled',?) RETURNING id")
+          .get(cityId,factory,`${city}地铁安检`,data) as {id:number}).id : position;
+        if (!index) app.db.prepare("UPDATE service_positions SET city_id=?,factory_id=?,position_name=?,data_json=? WHERE id=?")
+          .run(cityId,factory,`${city}地铁安检`,data,job);
+        const name = `工作现场${index}.mp4`;
+        writeFileSync(join(dir,name),name);
+        app.db.prepare("INSERT INTO media_assets(name,kind,storage_path,sha256,bytes,status,position_id) VALUES (?,'video',?,?,?,'enabled',?)")
+          .run(name,name,createHash("sha256").update(name).digest("hex"),Buffer.byteLength(name),job);
+        return factory;
+      });
+      app.db.prepare("UPDATE agent_devices SET data_json=json_set(data_json,'$.factory_ids',json(?))").run(JSON.stringify(factoryIds));
+      await select();
+      const model=vi.fn(async () => new Response(JSON.stringify({answer:"每班8小时。",conversation_id:"invitation-qa"})));
+      vi.stubGlobal("fetch",model);
+      const say = async (session: string, text: string, turn_id?:string) => (await app.inject({method:"POST",url:"/api/v1/agent/chat",headers:device,
+        payload:{device_code:code,session_key:session,text,ordered_reply:true,turn_id}})).json().reply;
+      expect((await say("S:gz-flow","你好，想找工作")).messages).toEqual([{type:"text",content:expect.stringContaining("哪个城市")}]);
+      const opening = await say("S:gz-flow","广州","42");
+      expect(await say("S:gz-flow","广州","42")).toEqual(opening);
+      expect(opening.messages.map((m:{type:string})=>m.type)).toEqual(["text","text","video","text"]);
+      expect(opening.messages[1].content).toContain("120元/班");
+      expect(opening.messages[3].content).toContain("面试");
+      expect(opening.delays_before_ms).toEqual([0,3500,3500,6500]);
+      expect(JSON.stringify(opening)).not.toContain("测试路");
+      expect((await say("S:gz-flow","每班多长？")).messages).toEqual([{type:"text",content:"每班8小时。"}]);
+      const mixed = await say("S:gz-flow","可以啊\n可以只上一个班次吗？");
+      expect(mixed.messages.map((item:{content:string})=>item.content)).toEqual(["每班8小时。"]);
+      expect((await say("S:gz-flow","如果朋友那边没成，我明天上午再来")).messages[0].content).toContain("确定");
+      expect((await say("S:gz-flow","好的")).messages[0].content).not.toContain("广州测试路1号");
+      const invitation = await say("S:gz-flow","可以，想去面试");
+      expect(JSON.stringify(invitation)).toContain("广州测试路1号");
+      expect(JSON.stringify(invitation)).toContain("14:00-16:00");
+      expect((await say("S:gz-flow","明天下午能晚一点到吗？")).messages[0].content).toContain("哪天几点");
+      const nc = "S:test-account_ncreg";
+      const bridge = new DeviceBridgeStore(app.db);
+      bridge.contact(code,nc,"南昌模拟候选人");
+      expect((await say(nc,"我想找南昌的工作")).messages[0].content).toContain("80元/班");
+      expect((await say(nc,"可以接受")).messages[0].content).toContain("南昌测试路1号");
+      expect((await say(nc,"后天下午")).messages[0].content).toContain("几点");
+      expect((await say(nc,"下午三点")).messages[0].content).toContain("姓名和手机号");
+      expect((await say(nc,"小陈\n13800000000")).messages[0].content).toContain("请核对报名资料");
+      expect(app.db.prepare("SELECT count(*) n FROM agent_archive").get()).toEqual({n:0});
+      const notice = await say(nc,"确认报名");
+      expect(notice.messages.map((item:{content:string})=>item.content)).toEqual([
+        expect.stringContaining("南昌测试路1号"),expect.stringContaining("uri.amap.com"),"到了给我发个消息。",
+      ]);
+      await say(nc,"确认报名");
+      expect(app.db.prepare("SELECT count(*) n FROM agent_archive").get()).toEqual({n:1});
+      expect(bridge.claim(code)).toBeNull();
+      expect(app.db.prepare("SELECT count(*) n FROM bridge_commands").get()).toEqual({n:0});
+      const task = app.db.prepare("SELECT due_at FROM dify_interview_reminders").get() as {due_at:number};
+      expect(new DeviceBridgeStore(app.db,()=>task.due_at-1).claim(code)).toBeNull();
+      const due = new DeviceBridgeStore(app.db,()=>task.due_at);
+      due.heartbeat(code,"online","test-account");
+      const claimed = due.claim(code);
+      expect(app.db.prepare("SELECT status FROM bridge_commands").all()).toEqual([{status:"claimed"}]);
+      expect(claimed).toMatchObject({contact_id:nc,content:expect.stringContaining("面试时间是15:00")});
+      expect(due.claim(code)).toBeNull();
+      expect(model).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(dir,{recursive:true,force:true});
+    }
+  });
   it("sends configured media and map search through the existing text and media contract", async () => {
     const dir = mkdtempSync(join(tmpdir(), "dify-media-"));
     const old = process.env.REA_MEDIA_DIR;
@@ -66,6 +145,17 @@ describe("Dify second reply route", () => {
         {type:"image",name:expect.stringMatching(/^dify-asset-\d+-[a-f0-9]{64}\.jpg$/),content:"图片 · 工作内容(1).jpg"},
         {type:"video",name:expect.stringMatching(/^dify-asset-\d+-[a-f0-9]{64}\.mp4$/),content:"视频 · 安检.mp4"},
       ]);
+      expect((await chat("S:video","有视频吗？")).json().reply.messages[0].content).toContain("视频");
+      expect((await chat("S:photo","有图片吗？")).json().reply.messages[0].content).toContain("照片");
+      expect((await chat("S:video","工作的")).json().reply.messages.slice(1)).toEqual([media[2]]);
+      expect((await chat("S:photo","工作环境的")).json().reply.messages.slice(1)).toEqual([media[1]]);
+      expect((await chat("S:cancel-media","有视频可以看吗？")).json().reply.messages[0].content).toContain("视频");
+      expect((await chat("S:cancel-media","不用发了")).json().reply.messages).toEqual([{type:"text",content:"好的。"}]);
+      expect((await chat("S:expired-media","有视频吗？")).json().reply.messages[0].content).toContain("视频");
+      app.db.exec("UPDATE dify_material_followup SET expires_at=0");
+      network.mockResolvedValueOnce(new Response(JSON.stringify({conversation_id:"expired-media",answer:"想了解工作内容吗？"}),{status:200}));
+      expect((await chat("S:expired-media","工作的")).json().reply.messages).toEqual([{type:"text",content:"想了解工作内容吗？"}]);
+      network.mockClear();
       const assetDownload = await app.inject({url:`/api/v1/agent/media/${media[1].name}`,headers:device});
       expect(assetDownload.statusCode).toBe(200);
       expect(assetDownload.body).toBe("工作内容(1).jpg");

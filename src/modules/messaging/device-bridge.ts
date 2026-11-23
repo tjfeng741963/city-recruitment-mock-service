@@ -20,6 +20,7 @@ export interface BridgeCommand {
 const commandSource = (command: BridgeCommand) => command.idempotency_key.endsWith(":reply")
   ? command.idempotency_key.slice(0, -6) + ":outbound" : command.idempotency_key + ":outbound";
 const normalizedText = (text: string) => text.replace(/\r\n?/g, "\n").trim();
+const isDifyReminder = (command: BridgeCommand) => command.idempotency_key.startsWith("followup:") && command.idempotency_key.endsWith(":dify");
 
 export class DeviceBridgeStore {
   constructor(private readonly db: DatabaseSync, private readonly now: () => number = Date.now,
@@ -362,6 +363,38 @@ export class DeviceBridgeStore {
     ).all(code) as Array<{ conv_id: string; name: string }>;
   }
 
+  private queueDueDifyReminder(code: string, account: string, now: number) {
+    if (!account) return;
+    const due = this.db.prepare(`SELECT r.archive_key, r.interview_date, r.interview_time, r.interview_address, c.customer_id
+      FROM dify_interview_reminders r
+      JOIN agent_archive a ON a.session_key=r.archive_key AND a.dify_device_code=r.device_code
+      JOIN service_positions p ON p.id=a.position_id AND p.status='enabled'
+      JOIN agent_conversations c ON c.id=a.dify_conversation_row_id AND c.device_code=r.device_code
+      JOIN bridge_contacts b ON b.device_code=r.device_code AND b.customer_id=c.customer_id AND b.contact_id=a.dify_external_session
+      WHERE r.device_code=? AND a.dify_account_id=? AND r.command_id IS NULL AND r.suppressed=0
+        AND r.due_at<=? AND r.expires_at>? AND a.interview_confirmed=1 AND COALESCE(a.arrival_status,'')=''
+        AND c.external_conversation_id=a.dify_external_session AND COALESCE(c.takeover,0)=0
+        AND a.interview_date=r.interview_date AND a.interview_time=r.interview_time AND a.interview_address=r.interview_address
+      ORDER BY r.due_at,r.archive_key LIMIT 1`);
+    if (!due.get(code,account,now,now)) return;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const task = due.get(code,account,now,now) as {archive_key:string;customer_id:number;interview_date:string;interview_time:string;interview_address:string} | undefined;
+      if (task) {
+        const address = task.interview_address.replace(/[【】]/g, c => c === "【" ? "〔" : "〕");
+        const command = this.enqueue({deviceCode:code,customerId:task.customer_id,
+          idempotencyKey:`followup:${code}:${task.customer_id}:${task.interview_date}:dify`,
+          content:`提醒一下，今天的面试时间是${task.interview_time}，地点在${address}。到了给我发个消息。`,
+        });
+        this.db.prepare("UPDATE dify_interview_reminders SET command_id=? WHERE archive_key=?").run(command.id,task.archive_key);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   /**
    * 领一条指令。
    *
@@ -377,26 +410,56 @@ export class DeviceBridgeStore {
     // 刷新指令允许在 scanning/offline（登录态）下领取，只要心跳新鲜；
     // 消息指令仍要求 online，与原来一致。
     if (device?.state !== "online" && !(onlyKind === "refresh_login_qr" && heartbeatFresh)) return null;
-    const pending = onlyKind
-      ? this.db.prepare("SELECT * FROM bridge_commands WHERE device_code=? AND status='queued' AND kind=? ORDER BY created_at,rowid LIMIT 1")
-      : this.db.prepare("SELECT * FROM bridge_commands WHERE device_code=? AND status='queued' ORDER BY created_at,rowid LIMIT 1");
-    const nextQueued = () =>
-      (onlyKind ? pending.get(code, onlyKind) : pending.get(code)) as unknown as BridgeCommand | undefined;
-    let next = nextQueued();
-    // 刷新二维码：超 5 分钟没人领就作废（客户端可能关机了，再刷也没意义）。
-    // 与 dify 群通知的过滤放在同一个循环里，保证总能取到真正可执行的队首。
-    while (next && next.kind === "refresh_login_qr" && this.now() - Number(next.created_at) > 5 * 60_000) {
-      this.db.prepare("UPDATE bridge_commands SET status='failed' WHERE id=? AND status='queued'").run(next.id);
-      next = nextQueued();
+    const now = this.now();
+    // Dify 提醒只在正常回复态排队；登录态只领刷新指令，不碰消息队列。
+    if (!onlyKind && device?.state === "online" && this.db.prepare("SELECT 1 FROM agent_devices WHERE json_extract(data_json,'$.device_code')=? AND json_extract(data_json,'$.reply_provider')='dify'").get(code)) {
+      this.queueDueDifyReminder(code, device?.account_id ?? "", now);
     }
-    while (next?.idempotency_key.startsWith(DIFY_GROUP_NOTIFICATION_PREFIX)) {
-      const archiveKey = next.idempotency_key.slice(DIFY_GROUP_NOTIFICATION_PREFIX.length);
-      const archive = this.db.prepare(`SELECT dify_account_id FROM agent_archive WHERE session_key=?
-        AND dify_device_code=? AND interview_confirmed=1`).get(archiveKey, code) as { dify_account_id: string } | undefined;
-      const group = resolveDeviceInviteGroup(this.db, code, deviceInviteGroupBinding(this.db, code));
-      if (archive?.dify_account_id === device?.account_id && group?.conv_id === next.contact_id) {
-        ensureGroupConversation(this.db, code, group.conv_id, group.name);
+    const pending = onlyKind
+      ? this.db.prepare(`SELECT c.*, NULL AS reminder_expires_at FROM bridge_commands c
+          WHERE c.device_code=? AND c.status='queued' AND c.kind=? ORDER BY c.created_at,c.rowid LIMIT 1`)
+      : this.db.prepare(`SELECT c.*,r.expires_at AS reminder_expires_at FROM bridge_commands c
+          LEFT JOIN dify_interview_reminders r ON r.command_id=c.id
+          WHERE c.device_code=? AND c.status='queued' AND (r.command_id IS NULL OR r.due_at<=?) ORDER BY c.created_at,c.rowid LIMIT 1`);
+    type PendingCommand = BridgeCommand & {reminder_expires_at: number | null};
+    const nextQueued = () =>
+      (onlyKind ? pending.get(code, onlyKind) : pending.get(code, now)) as unknown as PendingCommand | undefined;
+    let next = nextQueued();
+    while (next) {
+      // 刷新二维码：超 5 分钟没人领就作废（客户端可能关机了，再刷也没意义）。
+      // 它不参与 dify 提醒/群通知的过滤，直接交给下面领走。
+      if (next.kind === "refresh_login_qr") {
+        if (this.now() - Number(next.created_at) > 5 * 60_000) {
+          this.db.prepare("UPDATE bridge_commands SET status='failed' WHERE id=? AND status='queued'").run(next.id);
+          next = nextQueued();
+          continue;
+        }
         break;
+      }
+      if (isDifyReminder(next)) {
+        const valid = next.reminder_expires_at !== null && next.reminder_expires_at > now && this.db.prepare(`SELECT 1 FROM dify_interview_reminders r
+          JOIN agent_archive a ON a.session_key=r.archive_key
+          JOIN service_positions p ON p.id=a.position_id AND p.status='enabled'
+          JOIN agent_devices d ON json_extract(d.data_json,'$.device_code')=a.dify_device_code AND d.status='enabled'
+          JOIN agent_conversations c ON c.id=a.dify_conversation_row_id AND c.device_code=a.dify_device_code
+          WHERE r.command_id=? AND r.suppressed=0 AND a.dify_device_code=? AND a.dify_account_id=? AND a.dify_external_session=?
+            AND c.external_conversation_id=a.dify_external_session AND c.customer_id=? AND COALESCE(c.takeover,0)=0
+            AND a.interview_confirmed=1 AND COALESCE(a.arrival_status,'')=''
+            AND a.interview_date=r.interview_date AND a.interview_time=r.interview_time AND a.interview_address=r.interview_address
+            AND json_extract(d.data_json,'$.reply_provider')='dify'`)
+          .get(next.id,code,device?.account_id ?? "",next.contact_id,next.customer_id);
+        if (valid) break;
+      } else if (!next.idempotency_key.startsWith(DIFY_GROUP_NOTIFICATION_PREFIX)) {
+        break;
+      } else {
+        const archiveKey = next.idempotency_key.slice(DIFY_GROUP_NOTIFICATION_PREFIX.length);
+        const archive = this.db.prepare(`SELECT dify_account_id FROM agent_archive WHERE session_key=?
+          AND dify_device_code=? AND interview_confirmed=1`).get(archiveKey, code) as { dify_account_id: string } | undefined;
+        const group = resolveDeviceInviteGroup(this.db, code, deviceInviteGroupBinding(this.db, code));
+        if (archive?.dify_account_id === device?.account_id && group?.conv_id === next.contact_id) {
+          ensureGroupConversation(this.db, code, group.conv_id, group.name);
+          break;
+        }
       }
       this.db.prepare("UPDATE bridge_commands SET status='failed' WHERE id=? AND status='queued'").run(next.id);
       next = nextQueued();
@@ -409,7 +472,7 @@ export class DeviceBridgeStore {
       if (health && !health.reply_ready && health.reason !== "auto_send_failed") return null;
     }
     const claimed = this.db.prepare("UPDATE bridge_commands SET status='claimed',lease_token=?,lease_until=? WHERE id=? AND status='queued'")
-      .run(randomBytes(24).toString("hex"), this.now() + 60_000, next.id);
+      .run(randomBytes(24).toString("hex"), Math.min(now + 60_000, next.reminder_expires_at ?? Infinity), next.id);
     if (!claimed.changes) return null;
     const command = this.command(next.id);
     if (!command) return null;
@@ -423,20 +486,20 @@ export class DeviceBridgeStore {
   receipt(code: string, id: string, lease: string, status: "succeeded" | "failed" | "unknown", messageId = "", simulated = false, error = ""): void {
     const command = this.command(id);
     if (!command || command.device_code !== code || !lease || command.lease_token !== lease) throw new BridgeError("Invalid command receipt", 403);
-    // 刷新二维码没有 messages_id 可回：它不产生客户消息，回执成功不要求 message_id。
+    // 刷新二维码没有 message_id 可回：它不产生客户消息，回执成功不要求 message_id。
     const isRefresh = command.kind === "refresh_login_qr";
     if (status === "succeeded" && !isRefresh && !messageId.trim()) throw new BridgeError("Successful receipt requires message_id", 422);
-    if (status === "succeeded" && !simulated && command.idempotency_key.startsWith(DIFY_GROUP_NOTIFICATION_PREFIX)) {
+    if (status === "succeeded" && !simulated && !isRefresh && (command.idempotency_key.startsWith(DIFY_GROUP_NOTIFICATION_PREFIX) || isDifyReminder(command))) {
       const prefix = command.contact_id + ":";
       if (!messageId.startsWith(prefix) || !messageId.slice(prefix.length).trim()) {
-        throw new BridgeError("Receipt does not match the target group", 422);
+        throw new BridgeError("Receipt does not match the target conversation", 422);
       }
     }
     if (["succeeded", "failed"].includes(command.status)) {
       if (command.status !== status || command.message_id !== messageId || Boolean(command.simulated) !== simulated) throw new BridgeError("Conflicting receipt");
       return;
     }
-    // 刷新二维码不产生任何客户消息：只落指令状态，不进消息/投递/会话表。
+    // 刷新二维码不产生任何客户消息：只落指令状态和失败原因，不进消息/投递/会话表。
     // 走 applyReceipt 会去查 message_deliveries、bridge_outbound 和会话预览，
     // 对一个无正文指令全是无意义查询，还多一条误改风险。
     if (isRefresh) {

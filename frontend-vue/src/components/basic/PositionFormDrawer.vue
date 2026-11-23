@@ -556,7 +556,7 @@ function buildPayload(): Record<string, unknown> {
 }
 
 async function submit(): Promise<void> {
-  if (!formRef.value) return
+  if (!formRef.value || saving.value) return
   if (props.mode !== 'create' && !original.value) return
   const names = form.interview_points.map(point => point.name.trim().toLowerCase())
   if (names.some(name => !name) || new Set(names).size !== names.length) {
@@ -565,18 +565,25 @@ async function submit(): Promise<void> {
     return
   }
   const valid = await formRef.value.validate().catch(() => false)
-  if (!valid) return
+  if (!valid || saving.value) return
   saving.value = true
   try {
     const payload = buildPayload() as Partial<ServicePosition>
     if (props.mode === 'edit' && props.positionId) {
-      await positionsApi.update(props.positionId, payload)
+      const current = original.value
+      const submittedForm = JSON.stringify(form)
+      const { data } = await positionsApi.update(props.positionId, payload)
+      if (original.value === current) {
+        original.value = data
+        base.value = { ...data }
+        formBaseline.value = submittedForm
+      }
       ElMessage.success('岗位已保存')
     } else {
       await positionsApi.create(payload)
       ElMessage.success(props.mode === 'copy' ? '岗位副本已创建' : '岗位已创建')
+      emit('update:modelValue', false)
     }
-    emit('update:modelValue', false)
     emit('saved')
   } catch (error: any) {
     ElMessage.error(apiErrorMessage(error, '保存失败'))

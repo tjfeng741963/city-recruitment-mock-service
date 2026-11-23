@@ -44,9 +44,9 @@
 
       <el-tab-pane :label="`开场（${openings.length}）`" name="opening">
         <div class="opening-toolbar">
-          <el-button size="small" :disabled="loading" class="pill-btn" @click="startAdd('text')">+ 文本</el-button>
-          <el-button size="small" :disabled="loading" class="pill-btn" @click="startAdd('image')">+ 图片</el-button>
-          <el-button size="small" :disabled="loading" class="pill-btn" @click="startAdd('video')">+ 视频</el-button>
+          <el-button size="small" :disabled="openingBusy" class="pill-btn" @click="startAdd('text')">+ 文本</el-button>
+          <el-button size="small" :disabled="openingBusy" class="pill-btn" @click="startAdd('image')">+ 图片</el-button>
+          <el-button size="small" :disabled="openingBusy" class="pill-btn" @click="startAdd('video')">+ 视频</el-button>
           <span class="opening-hint" v-if="embedded">先填消息正文。旧版开场使用这里保存的内容。使用节点流程的岗位，请在画布选入文字、编排顺序并保存。</span>
           <span class="opening-hint" v-else>旧版开场按此顺序发送。启用的节点流程以画布保存的顺序为准。</span>
         </div>
@@ -89,6 +89,23 @@
           </div>
         </div>
 
+        <div v-if="!loading && openings.length" class="opening-selection">
+          <el-checkbox
+            :model-value="selectedIds.length === openings.length"
+            :indeterminate="selectedIds.length > 0 && selectedIds.length < openings.length"
+            :disabled="openingBusy || !openingRevision"
+            @change="toggleAllOpenings"
+          >全选</el-checkbox>
+          <el-button
+            size="small"
+            type="danger"
+            plain
+            :disabled="!selectedIds.length || openingBusy || Boolean(draft)"
+            :loading="deletingOpenings"
+            @click="removeSelected"
+          >{{ selectedIds.length ? `删除所选（${selectedIds.length}）` : '删除所选' }}</el-button>
+        </div>
+
         <div v-if="loading" class="opening-empty">加载中…</div>
         <div v-else-if="!openings.length" class="opening-empty">
           还没有开场。点「文本」新增要发送的内容。
@@ -101,21 +118,29 @@
           :class="{ 'is-editing': draft?.id === entry.id }"
         >
           <div class="opening-head">
-            <span class="kind-tag" :class="entry.kind">{{ KIND_LABEL[entry.kind] }} · 第 {{ index + 1 }} 条</span>
+            <div class="opening-label">
+              <el-checkbox
+                :model-value="selectedIds.includes(entry.id)"
+                :disabled="openingBusy || !openingRevision"
+                :aria-label="`选择第 ${index + 1} 条开场`"
+                @change="(checked: unknown) => toggleSelection(entry.id, checked === true)"
+              />
+              <span class="kind-tag" :class="entry.kind">{{ KIND_LABEL[entry.kind] }} · 第 {{ index + 1 }} 条</span>
+            </div>
             <div class="opening-tools">
-              <el-button v-if="!embedded" link size="small" :disabled="index === 0" title="上移" @click="move(index, -1)">↑</el-button>
+              <el-button v-if="!embedded" link size="small" :disabled="openingBusy || index === 0" title="上移" @click="move(index, -1)">↑</el-button>
               <el-button
                 v-if="!embedded"
                 link
                 size="small"
-                :disabled="index === openings.length - 1"
+                :disabled="openingBusy || index === openings.length - 1"
                 title="下移"
                 @click="move(index, 1)"
               >
                 ↓
               </el-button>
-              <el-button link size="small" @click="startEdit(entry)">编辑</el-button>
-              <el-button link size="small" type="danger" @click="removeEntry(entry)">删除</el-button>
+              <el-button link size="small" :disabled="openingBusy" @click="startEdit(entry)">编辑</el-button>
+              <el-button link size="small" type="danger" :disabled="openingBusy" @click="removeEntry(entry)">删除</el-button>
             </div>
           </div>
           <div class="opening-body">
@@ -183,6 +208,10 @@ const loadError = ref('')
 const persona = ref('')
 const savedPersona = ref('')
 const openings = ref<PersonaOpening[]>([])
+const selectedIds = ref<number[]>([])
+const openingRevision = ref('')
+const deletingOpenings = ref(false)
+const updatingOpenings = ref(false)
 const mediaItems = ref<MediaItem[]>([])
 const savingPersona = ref(false)
 const savingOpening = ref(false)
@@ -190,6 +219,8 @@ const uploading = ref(false)
 const draft = ref<OpeningDraft | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
 const editorRef = ref<HTMLElement | null>(null)
+
+const openingBusy = computed(() => loading.value || savingOpening.value || deletingOpenings.value || updatingOpenings.value)
 
 const personaDirty = computed(() => persona.value !== savedPersona.value)
 const delaySeconds = computed({
@@ -213,11 +244,14 @@ async function load(opening = false): Promise<void> {
   loadError.value = ''
   draft.value = null
   tab.value = drawerTabForLoad(tab.value, props.initialTab, opening)
+  selectedIds.value = []
+  openingRevision.value = ''
   try {
     const { data } = await agentApi.personaGet(props.position.id)
     persona.value = String(data.persona?.content || '')
     savedPersona.value = persona.value
     openings.value = (Array.isArray(data.openings) ? data.openings : []) as unknown as PersonaOpening[]
+    openingRevision.value = data.opening_revision || ''
   } catch (error: any) {
     loadError.value = error?.response?.data?.detail || 'Agent 配置加载失败，请重新打开岗位设置。'
   } finally {
@@ -351,7 +385,61 @@ async function saveDraft(): Promise<void> {
   }
 }
 
+function toggleAllOpenings(checked: unknown): void {
+  selectedIds.value = checked === true ? openings.value.map(entry => entry.id) : []
+}
+
+function toggleSelection(id: number, checked: boolean): void {
+  selectedIds.value = checked
+    ? [...selectedIds.value, id]
+    : selectedIds.value.filter(selected => selected !== id)
+}
+
+async function removeSelected(): Promise<void> {
+  const positionId = props.position?.id
+  const ids = [...selectedIds.value]
+  const revision = openingRevision.value
+  if (!positionId || !ids.length || !revision || openingBusy.value || draft.value) return
+  deletingOpenings.value = true
+  try {
+    await ElMessageBox.confirm(
+      `确定删除选中的 ${ids.length} 条旧版开场？已保存的画布节点继续按当前配置执行。`,
+      '批量删除开场',
+      { type: 'warning', confirmButtonText: `删除 ${ids.length} 条`, cancelButtonText: '取消' },
+    )
+    if ((!props.embedded && !props.modelValue) || props.position?.id !== positionId) return
+    const { data } = await agentApi.removeOpenings({ position_id: positionId, ids, revision })
+    if (props.position?.id !== positionId) return
+    openings.value = data.items as unknown as PersonaOpening[]
+    openingRevision.value = data.opening_revision
+    selectedIds.value = []
+    ElMessage.success(`已删除 ${data.deleted_count} 条开场`)
+    emit('changed')
+  } catch (error: any) {
+    if (error === 'cancel' || error === 'close' || props.position?.id !== positionId) return
+    if (error?.response?.status === 409) {
+      ElMessage.warning('开场列表已更新，请重新勾选')
+      try {
+        const { data } = await agentApi.personaGet(positionId)
+        if (props.position?.id === positionId) {
+          openings.value = (data.openings || []) as unknown as PersonaOpening[]
+          openingRevision.value = data.opening_revision || ''
+          selectedIds.value = []
+        }
+      } catch {
+        ElMessage.error('开场刷新失败，请重新打开配置')
+      }
+    } else {
+      ElMessage.error(error?.response?.data?.detail || '批量删除失败')
+    }
+  } finally {
+    deletingOpenings.value = false
+  }
+}
+
 async function removeEntry(entry: PersonaOpening): Promise<void> {
+  if (openingBusy.value) return
+  updatingOpenings.value = true
   try {
     await ElMessageBox.confirm('删除后，旧版开场将跳过此条。已保存的画布节点仍使用编排时选入的文字。', '删除开场', { type: 'warning' })
     await agentApi.removeOpening(entry.id)
@@ -360,28 +448,33 @@ async function removeEntry(entry: PersonaOpening): Promise<void> {
     emit('changed')
   } catch (error: any) {
     if (error !== 'cancel' && error !== 'close') ElMessage.error(error?.response?.data?.detail || '删除失败')
+  } finally {
+    updatingOpenings.value = false
   }
 }
 
 async function move(index: number, offset: number): Promise<void> {
   const target = index + offset
-  if (target < 0 || target >= openings.value.length || !props.position) return
+  if (openingBusy.value || target < 0 || target >= openings.value.length || !props.position) return
   const ids = openings.value.map((entry) => entry.id)
   const swapped = [...ids]
   ;[swapped[index], swapped[target]] = [swapped[target], swapped[index]]
   try {
+    updatingOpenings.value = true
     await agentApi.reorderOpenings({ position_id: props.position.id, ids: swapped })
     await load()
     emit('changed')
   } catch (error: any) {
     ElMessage.error(error?.response?.data?.detail || '排序失败')
+  } finally {
+    updatingOpenings.value = false
   }
 }
 onMounted(() => {
   if (props.embedded) void load(true)
 })
 
-defineExpose({ hasPendingChanges: () => personaDirty.value || draft.value !== null || savingPersona.value || savingOpening.value })
+defineExpose({ hasPendingChanges: () => personaDirty.value || draft.value !== null || savingPersona.value || openingBusy.value })
 </script>
 
 <style scoped>
@@ -482,6 +575,18 @@ defineExpose({ hasPendingChanges: () => personaDirty.value || draft.value !== nu
   border: 1px solid var(--bd-border, #e8ecf3);
   border-radius: 10px;
   padding: 10px 12px;
+  margin-bottom: 8px;
+}
+
+.opening-selection,
+.opening-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.opening-selection {
+  justify-content: space-between;
   margin-bottom: 8px;
 }
 

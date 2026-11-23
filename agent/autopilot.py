@@ -1571,6 +1571,44 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
     return status, detail, message_id
 
 
+def _send_dify_media(store: Store, cid: str, step: dict, log_fn) -> tuple[str, str]:
+    """Use the existing media sender and require target conversation readback."""
+    me = store.self_id()
+    if not me or me == "unknown":
+        return "failed", "无法核验本机企微账号"
+    kinds = (3, 13) if step["type"] == "image" else (43, 49)
+
+    def sent_ids() -> set[str]:
+        return {str(msg["id"]) for msg in store.messages(cid, 40)
+                if msg.get("id") and msg.get("sender_id") == me and msg.get("type") in kinds}
+
+    before = sent_ids()
+    ok, detail = core_send.paste_media(step["name"], log=log_fn)
+    if not ok or len(sent_ids() - before) != 1:
+        return "unknown", "未回读到目标会话中唯一的新媒体消息，请核对实际发送"
+    return "sent", str(detail)
+
+
+def _send_dify_plan(store: Store, name: str, cid: str, plan: list[dict], log_fn) -> tuple[str, str, int]:
+    """Execute each server-supplied step after its delay, stopping on uncertain delivery."""
+    global _last_reply_at
+    status, detail, confirmed = "failed", "未发送", 0
+    for step in plan:
+        if step["delay_ms"]:
+            time.sleep(step["delay_ms"] / 1000)
+        if cid in remote_cfg.takeover_sessions() or cid in remote_cfg.abandoned_sessions():
+            return "failed", "会话已接管或结束", confirmed
+        _last_reply_at = time.time()
+        if step["type"] == "text":
+            status, detail, _ = _send_text(store, name, cid, step["content"], route="dify", log_fn=log_fn)
+        else:
+            status, detail = _send_dify_media(store, cid, step, log_fn)
+        if status != "sent":
+            break
+        confirmed += 1
+    return status, detail, confirmed
+
+
 def _send_flow_part(store: Store, name: str, cid: str, part: dict, log_fn, *,
                     node_key: str, part_index: int) -> tuple[str, str]:
     """Send one flow part through the existing guarded core sender."""
@@ -1976,8 +2014,7 @@ def _hold_expired_replies() -> int:
 def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "online") -> dict:
     """按消息时间正序处理 pending + failed。
 
-    同一会话有多条未回消息时只回最新一条（其余标 skipped）——
-    对方连发三条属于同一次接触，回三条会把风控和客户体验一起搞坏。
+    同一会话每轮只回复一次。Dify 保留合并的消息正文，Agent 留用最新一条。
 
     `wecom_state != "online"` 时**一条都不发**，直接返回：
     窗口被隐藏/退回登录页还继续点，就是 11-02 被强退的原因。
@@ -2012,6 +2049,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
     # 它们时间更晚；若只按时间取最新，真正要回的文本就被挤掉，知识库拿到
     # 空字符串直接拒答（实测：Garbo_C 加好友，三条记录里只有第一条有文字）。
     newest: dict[str, dict] = {}
+    earlier_by_session: dict[str, list[dict]] = {}
     for it in items:
         cid = it["conv_id"]
         cur = newest.get(cid)
@@ -2028,11 +2066,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             newest[cid] = it
     for it in items:
         if newest[it["conv_id"]]["message_id"] != it["message_id"]:
-            if not dry:
-                rlog.mark_skipped(it["message_id"], it["conv_id"], "同会话合并到最新一条")
-            stats["merged"] += 1
-    if stats["merged"]:
-        log(f"同会话合并：{stats['merged']} 条旧消息并入最新一条，不单独回")
+            earlier_by_session.setdefault(it["conv_id"], []).append(it)
 
     for it in sorted(newest.values(), key=lambda x: int(x["msg_time"] or 0)):
         if not dry and cfg.get("_reply_mode_enabled") and not _check_reply_mode(wecom_state):
@@ -2041,9 +2075,17 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         cid = it["conv_id"]
         name = it["conv_name"] or ""
         trace = it.get("trace_id") or ""
+        dify_mode = getattr(_brain, "reply_provider", None) == "dify"
+        earlier = earlier_by_session.get(cid, [])
+        if not dify_mode:
+            for entry in earlier:
+                if not dry:
+                    rlog.mark_skipped(entry["message_id"], cid, "同会话合并到最新一条")
+                stats["merged"] += 1
         recovering = it.get("last_step") == "recovery-queued"
         preview = (it["in_text"] or "").strip()[:20].replace("\n", " ") or f"[type={it['in_type']}]"
         agent_medias: list[tuple[str, str]] = []
+        dify_plan: list[dict] = []
 
         if is_system_conv(cid, name):
             if not dry:
@@ -2086,6 +2128,13 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         # 新节点流程推进期间是这一轮的唯一出口；最后一个等待节点没有
         # 后继时，本条客户回复直接交给 chat，不能消耗掉后再等客户重说。
         hint = _inbound_hint(it)
+        if dify_mode:
+            prior = [item for item in earlier if str(item.get("in_text") or "").strip()]
+            lines = [str(item.get("dify_turn") or item["in_text"]).strip() for item in prior]
+            hint = "\n".join(filter(None, [*lines, str(it.get("dify_turn") or hint)]))[-2000:]
+            if earlier and not dry:
+                rlog.merge_dify_turn(cid, mid, [item["message_id"] for item in earlier], hint)
+                stats["merged"] += len(earlier)
         flow_state = _flow_store() if not dry else None
         flow_row = flow_state.get(cid) if flow_state is not None else None
         if recovering and flow_row is not None and flow_row.get("phase") not in ("expired", "followup_sent", "replied"):
@@ -2194,7 +2243,8 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
 
         agent_trace_id = ""
         if _brain is not None:
-            hint = _inbound_hint(it)
+            if not dify_mode:
+                hint = _inbound_hint(it)
             agent_medias: list[tuple[str, str]] = []
             res = {"ok": False, "detail": "Agent 未初始化"}
             opening_claimed = False
@@ -2315,9 +2365,11 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 elif hint:
                     # 会话记忆在服务端：只报 session_key（会话 id）+ 这句话。
                     # 服务端自己持有全量上下文（含开场序列），客户端不传历史。
-                    res = _brain.chat(hint, cid, sent_summary=_flow_summary(cid) if flow is not None else None)
+                    chat_kwargs = {"turn_id": str(mid)} if dify_mode else {}
+                    res = _brain.chat(hint, cid, sent_summary=_flow_summary(cid) if flow is not None else None, **chat_kwargs)
                     agent_trace_id = str(res.get("trace_id") or "")
                     agent_medias = res.get("medias") or []
+                    dify_plan = res.get("plan") or []
                 if res.get("code") == "reply_mode_pending":
                     stats["blocked"] += 1
                     break  # The server generated no reply. Keep the inbound pending.
@@ -2392,7 +2444,18 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
 
         # 真正按键之前先把素材补到本地：send.paste_media 只认本地文件，
         # 缺文件它只会打一行"未找到"。这里失败也不阻断，文字照发。
-        _prefetch_media(parts, cfg)
+        if dify_plan:
+            dify_media = [(step["type"], step["name"]) for step in dify_plan if step["type"] != "text"]
+            ready_media = media_fetch.prefetch(dify_media, base_url=(cfg.get("bridge_server") or "").strip(),
+                                               token=(cfg.get("bridge_token") or "").strip(), log=log)
+            if any(not ready_media.get(name) for _, name in dify_media):
+                detail = "Dify 发送计划的素材未就绪，待核对后恢复"
+                rlog.mark_held(mid, cid, detail)
+                _last_error = detail
+                stats["blocked"] += 1
+                continue
+        else:
+            _prefetch_media(parts, cfg)
 
         # 按键之前先确认剪贴板可写，避免 Ctrl+F 打开搜索框后才卡住
         if not compat.wait_clipboard_writable(timeout=15):
@@ -2422,7 +2485,11 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             # "零成本"立即打下一个会话（2026-11-16 掉登录事故的操作模式）。
             _last_reply_at = time.time()
             status, detail = "failed", "未发送"
-            for idx, raw_part in enumerate(parts):
+            if dify_plan:
+                status, detail, confirmed_parts = _send_dify_plan(
+                    store, name, cid, dify_plan, lambda msg: log(f"    {msg}", scope="send", message_id=mid, trace_id=trace),
+                )
+            for idx, raw_part in enumerate([] if dify_plan else parts):
                 try:
                     body, medias = core_send.split_media_marks(raw_part)
                 except Exception:  # noqa: BLE001
@@ -2459,7 +2526,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 #（可能静默丢失），也不能记 failed（下轮自动补发可能重复发送）。
                 # 记 unknown 不参与自动补发，核对后只能逐条恢复。
                 if confirmed_parts:
-                    detail = f"已确认 {confirmed_parts} 段文本，其余未完成：{detail}"
+                    detail = f"已确认 {confirmed_parts} 条消息，其余未完成：{detail}"
                 rlog.mark_unknown(mid, cid, detail, scene, text, partial=bool(confirmed_parts))
                 if _brain is not None:
                     _brain.log_delivery(agent_trace_id, "unknown", session_key=cid, detail=detail)
