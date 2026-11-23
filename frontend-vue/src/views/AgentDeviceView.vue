@@ -751,7 +751,11 @@ const qrLastRefresh = computed<{ tone: 'error' | 'ok' | 'info'; text: string } |
   if (row.status === 'succeeded') {
     // 成功提示只留 2 分钟，之后不再占位置
     if (at && sec > 120) return null
-    return { tone: 'ok', text: `上次刷新成功${when}` }
+    const note = (row.error || '').trim()
+    // 客户端说明「码还有效、企微没有刷新可点」时用浅色提示，
+    // 不把它当成"换了一张新码"，免得用户再问"怎么还是同一张"。
+    if (note.includes('无需点击')) return { tone: 'info', text: `二维码当前有效，无需刷新${when}` }
+    return { tone: 'ok', text: note ? `上次刷新成功${when}：${note}` : `上次刷新成功${when}` }
   }
   // queued / claimed
   if (at && sec > 300) return null

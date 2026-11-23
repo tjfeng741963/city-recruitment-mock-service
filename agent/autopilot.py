@@ -215,6 +215,11 @@ _consecutive_send_failures = 0
 # 保证任意时刻只有一个键鼠发送者。轮询按时间戳判断，不额外起线程。
 CLAIM_INTERVAL = 10.0
 _last_claim_at = 0.0
+# 指令泵自检日志节流：登录态下领不到刷新指令时，5 分钟记一行，
+# 让「网页点了刷新、客户端到底有没有来领」这件事在日志里能查。
+_last_pump_log_at = 0.0
+# 泵入口探针节流（60 秒一行，pump_safely 用）
+_last_pump_entry_at = 0.0
 _last_receipt_retry_at = 0.0
 RECEIPT_RETRY_INTERVAL = 10.0
 
@@ -2688,7 +2693,7 @@ def pump_commands(
     所以发送前必须确认目标名在企微会话列表里且不是系统会话；
     发送后再回读解密库，落点不是该 contact_id 就回执 unknown，待人工核对。
     """
-    global _last_reply_at, _last_error, _last_claim_at
+    global _last_reply_at, _last_error, _last_claim_at, _last_pump_log_at
     stats = {"claimed": 0, "sent": 0, "failed": 0}
 
     if dry or cfg.get("dry_run") or bridge is None or not getattr(bridge, "enabled", False):
@@ -2709,6 +2714,14 @@ def pump_commands(
     except Exception as exc:  # noqa: BLE001
         log(f"[指令] 领取失败（忽略）：{agent_client.describe_error(exc)}")
         return stats
+    # 5 分钟一条自检：确认指令泵在跑、领的是哪一类、领到没有。
+    # 排查「网页点了刷新没反应」时先看这一行，能立刻区分
+    # 「客户端没来领」和「领到了但执行失败」。
+    if now - _last_pump_log_at >= 300:
+        _last_pump_log_at = now
+        log(f"[指令] 泵运行中：wecom={wecom_state} 只领刷新={login_only} "
+            f"本轮={'领到指令' if command else '队列为空'} "
+            f"桥接={'已配置' if getattr(bridge, 'enabled', False) else '未配置'}")
     if not command:
         return stats
 
@@ -2734,7 +2747,9 @@ def pump_commands(
             if not pushed:
                 ok, detail = False, "已点击刷新，但没有截到新的登录窗（可能正在登录中）"
         try:
-            bridge.receipt(cmd_id, lease, "succeeded" if ok else "failed", "", "" if ok else detail)
+            # 成功也带上说明：二维码还有效时不会点击（企微没有「刷新」可点），
+            # 这句会显示在网页上，避免用户以为「点了刷新却还是同一张码」。
+            bridge.receipt(cmd_id, lease, "succeeded" if ok else "failed", "", detail)
         except Exception as exc:  # noqa: BLE001
             mlog(f"[指令] 刷新二维码回执失败：{agent_client.describe_error(exc)}", level="warning")
         mlog(f"[指令] 刷新二维码：{detail}", level="info" if ok else "warning")
@@ -2889,13 +2904,41 @@ def pump_commands(
     return stats
 
 
+def pump_refresh_only(cfg: dict, bridge, wecom_state: str) -> None:
+    """登录前等待循环里的精简指令泵：只领「刷新二维码」。
+
+    为什么单独一个函数：主循环的 pump_safely 依赖 store（消息指令要用它读会话
+    名单），而 store 要等企微登录后才能建。但二维码过期恰好只发生在登录前，
+    所以这条路上必须有一个不依赖 store 的入口。
+
+    pump_commands 里 `login_only=True` 时会先处理刷新指令，其余指令直接跳过
+    并等租约回收，因此传 store=None 是安全的：走不到任何用 store 的分支。
+    """
+    try:
+        pump_commands(None, cfg, bridge=bridge, wecom_state=wecom_state,
+                      dry=bool(cfg.get("dry_run")))
+    except Exception as exc:  # noqa: BLE001
+        log(f"[指令] 等待登录时领取失败（忽略）：{type(exc).__name__}: {exc}")
+
+
 def pump_safely(store: Store, cfg: dict, reporter: "Reporter | None", wecom_state: str) -> None:
     """pump_commands 的安全外壳：任何异常都不许冒泡到主循环。"""
+    global _last_pump_entry_at
     try:
+        bridge = reporter.bridge if reporter is not None else None
+        now = time.time()
+        # 60 秒一条入口探针：排查「网页点了刷新没反应」时，第一眼看这里就能
+        # 区分是泵没被调用、桥接没配、还是状态判断把消息队列挡了。
+        if now - _last_pump_entry_at >= 60:
+            _last_pump_entry_at = now
+            log(f"[指令] 泵入口 reporter={'有' if reporter is not None else '无'} "
+                f"bridge={'有' if bridge is not None else '无'} "
+                f"enabled={getattr(bridge, 'enabled', None)} wecom={wecom_state} "
+                f"dry={cfg.get('dry_run')}")
         pump_commands(
             store,
             cfg,
-            bridge=(reporter.bridge if reporter is not None else None),
+            bridge=bridge,
             wecom_state=wecom_state,
             dry=bool(cfg.get("dry_run")),
         )
@@ -3297,6 +3340,12 @@ def main() -> int:
         while wecom_state != "online":
             try:
                 _check_reply_mode(wecom_state)
+                # 登录前也要领指令（2026-11-23）：主循环的指令泵要等登录成功、
+                # 数据库初始化后才进得去，而二维码过期恰恰只发生在登录前——
+                # 网页点「刷新二维码」的指令就永远躺在队列里没人领。
+                # 这里复用同一个 pump_commands（store 还没建，传 None），
+                # login_only 分支保证只领 refresh_login_qr，绝不碰消息队列。
+                pump_refresh_only(cfg, remote_client, wecom_state)
                 time.sleep(cfg["interval"])
                 wecom_state = probe_wecom()
                 startup_status = "waiting_login" if wecom_state == "login_required" else "waiting_wecom"
@@ -3399,9 +3448,12 @@ def main() -> int:
             result = drain(store, cfg, dry=cfg["dry_run"], wecom_state=wecom_state)
             if reception_ready(wecom_state):
                 _flow_tick(store, cfg, wecom_state)
-                pump_safely(store, cfg, reporter, wecom_state)
         else:
             result = {"waiting_reply_mode": True}
+        # 指令泵不受接待闸门限制（2026-11-23）：登录态下它只领
+        # kind=refresh_login_qr，这正是「网页点刷新」在没登录时唯一的出口。
+        # 放在闸门里会导致二维码过期后永远领不到指令（21:04 实测指令挂了 5 分钟没人领）。
+        pump_safely(store, cfg, reporter, wecom_state)
         _flow_report(cfg)
         if reporter is not None:
             reporter.wait(25)  # 等心跳/上报发完再退出，最多 25 秒
@@ -3416,7 +3468,7 @@ def main() -> int:
         drain(store, cfg, dry=cfg["dry_run"], wecom_state=wecom_state)
         if reception_ready(wecom_state):
             _flow_tick(store, cfg, wecom_state)
-            pump_safely(store, cfg, reporter, wecom_state)
+    pump_safely(store, cfg, reporter, wecom_state)
     _flow_report(cfg)
     last_sig = wal_signature(store.data_dir)
     log("开始监听（Ctrl+C 退出）")
@@ -3481,7 +3533,8 @@ def main() -> int:
                 drain(store, cfg, dry=cfg["dry_run"], wecom_state=wecom_state)
                 if reception_ready(wecom_state):
                     _flow_tick(store, cfg, wecom_state)
-                    pump_safely(store, cfg, reporter, wecom_state)
+            # 同上：指令泵每轮都跑，登录态下只领刷新二维码指令。
+            pump_safely(store, cfg, reporter, wecom_state)
             _flow_report(cfg)
         except KeyboardInterrupt:
             log("已停止")
