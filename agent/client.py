@@ -188,15 +188,21 @@ class BridgeClient:
             },
         )
 
-    def claim(self) -> dict | None:
+    def claim(self, only: str = "") -> dict | None:
         """POST /claim：领一条待发指令（人工回复/接管）。
 
         没有可领的指令、或设备不在线时服务端返回 {"command": null}。
         返回结构：{id, device_code, customer_id, contact_id, nickname,
-        content, status, lease_token, ...}
+        content, status, lease_token, kind, ...}
+
+        only="refresh_login_qr"：登录态下只领二维码刷新指令，不碰消息队列
+        （消息发不出去，领了只会白占 60 秒租约）。
         """
         code = quote(self.device_code, safe="")
-        res = self._request("POST", f"/api/v1/bridge/devices/{code}/claim", {})
+        path = f"/api/v1/bridge/devices/{code}/claim"
+        if only:
+            path += f"?only={quote(only, safe='')}"
+        res = self._request("POST", path, {})
         return res.get("command") or None
 
     def receipt(

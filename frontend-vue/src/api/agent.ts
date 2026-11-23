@@ -85,6 +85,13 @@ export const devicesApi = {
     http.get<{ items: DeviceGroup[] }>(`/api/v1/agent/devices/${encodeURIComponent(code)}/groups`),
   loginQr: (code: string, signal?: AbortSignal) =>
     http.get<LoginQrResult>(`/api/v1/agent/devices/${encodeURIComponent(code)}/login-qr`, { signal, timeout: 5000 }),
+  // 让客户端点登录窗的「刷新」并立即重传二维码（服务端写一条 refresh_login_qr 指令）
+  refreshLoginQr: (code: string) =>
+    http.post<{ queued: boolean; command_id: string; deduped: boolean }>(
+      `/api/v1/agent/devices/${encodeURIComponent(code)}/login-qr/refresh`,
+      {},
+      { timeout: 8000 },
+    ),
   verifyCodeGet: (code: string) =>
     http.get<VerifyCodeResult>(`/api/v1/agent/devices/${encodeURIComponent(code)}/verify-code`),
   verifyCodePost: (code: string, payload: Record<string, unknown>) =>

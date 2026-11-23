@@ -13,6 +13,9 @@ interface BridgeDevice { device_code: string; account_id: string; state: string;
 export interface BridgeCommand {
   id: string; device_code: string; customer_id: number; contact_id: string; content: string;
   status: string; lease_token: string; message_id: string; simulated: number; idempotency_key: string;
+  created_at: number;
+  /** message（默认，发消息）| refresh_login_qr（让客户端刷新登录二维码） */
+  kind: string;
 }
 const commandSource = (command: BridgeCommand) => command.idempotency_key.endsWith(":reply")
   ? command.idempotency_key.slice(0, -6) + ":outbound" : command.idempotency_key + ":outbound";
@@ -296,6 +299,41 @@ export class DeviceBridgeStore {
       .run(id, input.deviceCode, input.customerId, mapping.contact_id, input.content, input.idempotencyKey, this.now());
     return this.command(id)!;
   }
+  /**
+   * 登录二维码刷新指令（2026-11-23）。
+   *
+   * 网页点「刷新二维码」时调用：写一条无正文、无联系人的指令，客户端领到后
+   * 点企微登录窗的「刷新」，再立即截一帧新码上传。
+   *
+   * 为什么需要 kind：这条指令不发给任何客户，不能走 enqueue（它要求
+   * bridge_contacts 映射）。kind 让客户端明确分支，也避免老客户端把空
+   * content 当消息发出去。
+   *
+   * 幂等窗口默认 60 秒：同一设备一分钟内重复点只入队一条，防止连点把
+   * 指令队列刷满。
+   */
+  enqueueRefreshQr(code: string, windowMs = 60_000): { command: BridgeCommand; created: boolean } {
+    if (!this.enabled(code)) throw new BridgeError("Device disabled");
+    const key = `refresh-qr:${Math.floor(this.now() / windowMs)}`;
+    const find = () =>
+      this.db.prepare("SELECT * FROM bridge_commands WHERE device_code=? AND idempotency_key=?")
+        .get(code, key) as unknown as BridgeCommand | undefined;
+    const old = find();
+    if (old) return { command: old, created: false };
+    const id = randomUUID();
+    try {
+      this.db.prepare(
+        `INSERT INTO bridge_commands(id,device_code,customer_id,contact_id,content,idempotency_key,kind,created_at)
+         VALUES (?,?,0,'','',?, 'refresh_login_qr',?)`,
+      ).run(id, code, key, this.now());
+    } catch {
+      // 并发点两次：唯一约束会挡下第二条，直接读回第一条
+      const raced = find();
+      if (raced) return { command: raced, created: false };
+      throw new BridgeError("Failed to enqueue refresh command");
+    }
+    return { command: this.command(id)!, created: true };
+  }
   command(id: string): BridgeCommand | null {
     return this.db.prepare("SELECT * FROM bridge_commands WHERE id=?").get(id) as unknown as BridgeCommand ?? null;
   }
@@ -324,27 +362,52 @@ export class DeviceBridgeStore {
     ).all(code) as Array<{ conv_id: string; name: string }>;
   }
 
-  claim(code: string): (BridgeCommand & { nickname: string }) | null {
+  /**
+   * 领一条指令。
+   *
+   * `onlyKind` 给登录态用：二维码过期时设备在服务端是 offline，消息指令本来
+   * 也发不出去；客户端只要 `refresh_login_qr`，不能去碰消息队列（碰了会把
+   * 真实待发消息白占 60 秒租约）。
+   */
+  claim(code: string, onlyKind = ""): (BridgeCommand & { nickname: string }) | null {
     this.expireClaims(code);
     const device = this.status(code);
-    if (!this.enabled(code) || replyModePending(this.db, code) || device?.state !== "online") return null;
-    const health = this.runtimeHealth(code);
-    if (health && !health.reply_ready && health.reason !== "auto_send_failed") return null;
-    const pending = this.db.prepare("SELECT * FROM bridge_commands WHERE device_code=? AND status='queued' ORDER BY created_at,rowid LIMIT 1");
-    let next = pending.get(code) as unknown as BridgeCommand | undefined;
+    if (!this.enabled(code) || replyModePending(this.db, code)) return null;
+    const heartbeatFresh = Boolean(device?.heartbeat_at && this.now() - device.heartbeat_at <= 60_000);
+    // 刷新指令允许在 scanning/offline（登录态）下领取，只要心跳新鲜；
+    // 消息指令仍要求 online，与原来一致。
+    if (device?.state !== "online" && !(onlyKind === "refresh_login_qr" && heartbeatFresh)) return null;
+    const pending = onlyKind
+      ? this.db.prepare("SELECT * FROM bridge_commands WHERE device_code=? AND status='queued' AND kind=? ORDER BY created_at,rowid LIMIT 1")
+      : this.db.prepare("SELECT * FROM bridge_commands WHERE device_code=? AND status='queued' ORDER BY created_at,rowid LIMIT 1");
+    const nextQueued = () =>
+      (onlyKind ? pending.get(code, onlyKind) : pending.get(code)) as unknown as BridgeCommand | undefined;
+    let next = nextQueued();
+    // 刷新二维码：超 5 分钟没人领就作废（客户端可能关机了，再刷也没意义）。
+    // 与 dify 群通知的过滤放在同一个循环里，保证总能取到真正可执行的队首。
+    while (next && next.kind === "refresh_login_qr" && this.now() - Number(next.created_at) > 5 * 60_000) {
+      this.db.prepare("UPDATE bridge_commands SET status='failed' WHERE id=? AND status='queued'").run(next.id);
+      next = nextQueued();
+    }
     while (next?.idempotency_key.startsWith(DIFY_GROUP_NOTIFICATION_PREFIX)) {
       const archiveKey = next.idempotency_key.slice(DIFY_GROUP_NOTIFICATION_PREFIX.length);
       const archive = this.db.prepare(`SELECT dify_account_id FROM agent_archive WHERE session_key=?
         AND dify_device_code=? AND interview_confirmed=1`).get(archiveKey, code) as { dify_account_id: string } | undefined;
       const group = resolveDeviceInviteGroup(this.db, code, deviceInviteGroupBinding(this.db, code));
-      if (archive?.dify_account_id === device.account_id && group?.conv_id === next.contact_id) {
+      if (archive?.dify_account_id === device?.account_id && group?.conv_id === next.contact_id) {
         ensureGroupConversation(this.db, code, group.conv_id, group.name);
         break;
       }
       this.db.prepare("UPDATE bridge_commands SET status='failed' WHERE id=? AND status='queued'").run(next.id);
-      next = pending.get(code) as unknown as BridgeCommand | undefined;
+      next = nextQueued();
     }
     if (!next) return null;
+    // 回复就绪检查只针对「发消息」。登录二维码刷新恰恰发生在未登录、不可能
+    // reply_ready 的时候——用同一条 health 门槛会把刷新指令永久卡在队列里。
+    if (next.kind !== "refresh_login_qr") {
+      const health = this.runtimeHealth(code);
+      if (health && !health.reply_ready && health.reason !== "auto_send_failed") return null;
+    }
     const claimed = this.db.prepare("UPDATE bridge_commands SET status='claimed',lease_token=?,lease_until=? WHERE id=? AND status='queued'")
       .run(randomBytes(24).toString("hex"), this.now() + 60_000, next.id);
     if (!claimed.changes) return null;
@@ -360,7 +423,9 @@ export class DeviceBridgeStore {
   receipt(code: string, id: string, lease: string, status: "succeeded" | "failed" | "unknown", messageId = "", simulated = false): void {
     const command = this.command(id);
     if (!command || command.device_code !== code || !lease || command.lease_token !== lease) throw new BridgeError("Invalid command receipt", 403);
-    if (status === "succeeded" && !messageId.trim()) throw new BridgeError("Successful receipt requires message_id", 422);
+    // 刷新二维码没有 messages_id 可回：它不产生客户消息，回执成功不要求 message_id。
+    const isRefresh = command.kind === "refresh_login_qr";
+    if (status === "succeeded" && !isRefresh && !messageId.trim()) throw new BridgeError("Successful receipt requires message_id", 422);
     if (status === "succeeded" && !simulated && command.idempotency_key.startsWith(DIFY_GROUP_NOTIFICATION_PREFIX)) {
       const prefix = command.contact_id + ":";
       if (!messageId.startsWith(prefix) || !messageId.slice(prefix.length).trim()) {
@@ -369,6 +434,14 @@ export class DeviceBridgeStore {
     }
     if (["succeeded", "failed"].includes(command.status)) {
       if (command.status !== status || command.message_id !== messageId || Boolean(command.simulated) !== simulated) throw new BridgeError("Conflicting receipt");
+      return;
+    }
+    // 刷新二维码不产生任何客户消息：只落指令状态，不进消息/投递/会话表。
+    // 走 applyReceipt 会去查 message_deliveries、bridge_outbound 和会话预览，
+    // 对一个无正文指令全是无意义查询，还多一条误改风险。
+    if (isRefresh) {
+      this.db.prepare("UPDATE bridge_commands SET status=?,receipt_at=COALESCE(receipt_at,?) WHERE id=? AND status='claimed'")
+        .run(status, this.now(), id);
       return;
     }
     // A real database message can arrive before its HTTP receipt. Reconcile by

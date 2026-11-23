@@ -312,6 +312,44 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     };
   });
 
+  /**
+   * 让客户端刷新登录二维码（2026-11-23）。
+   *
+   * 网页上的「刷新」以前只重新 GET 上面那个缓存帧，客户端 30 秒才推一次，
+   * 所以点了像没反应。这里下发一条 kind=refresh_login_qr 的桥接指令，客户端
+   * 领到后点企微登录窗的「刷新」，再立即截一帧新码上传。
+   *
+   * 幂等：同一设备 60 秒内重复点只入队一条，deduped=true 让前端提示
+   * 「刚刚已请求，正在刷新」而不是报错。
+   */
+  app.post<{ Params: { code: string } }>(
+    "/api/v1/agent/devices/:code/login-qr/refresh",
+    async (request, reply) => {
+      const code = String(request.params.code);
+      if (!canAccessDevice(getUserScope(db, request.auth!), code)) {
+        return reply.code(403).send({ detail: "Device scope required" });
+      }
+      const device = db
+        .prepare("SELECT status FROM agent_devices WHERE json_extract(data_json,'$.device_code')=?")
+        .get(code) as { status: string } | undefined;
+      if (!device) return reply.code(404).send({ detail: "设备不存在" });
+      if (String(device.status) !== "enabled") return reply.code(409).send({ detail: "设备已停用，启用后才能刷新二维码" });
+      // 二维码过期=未登录，设备在服务端就是 offline/scanning，不能按 online 拦。
+      // 只要求心跳新鲜（60 秒内），证明客户端进程和网络都活着、指令领得走。
+      const bridge = bridgeStore.status(code);
+      const heartbeatFresh = Boolean(bridge?.heartbeat_at && Date.now() - Number(bridge.heartbeat_at) <= 60_000);
+      if (!heartbeatFresh) {
+        return reply.code(409).send({ detail: "客户端心跳已超过 60 秒，刷新指令发不出去；请确认 Win 上客户端已启动" });
+      }
+      try {
+        const { command, created } = bridgeStore.enqueueRefreshQr(code);
+        return { queued: true, command_id: command.id, deduped: !created };
+      } catch (error) {
+        return reply.code(500).send({ detail: `指令入队失败：${(error as Error).message}` });
+      }
+    },
+  );
+
   // ── 企微登录验证码通道（扫码后企微可能要求短信验证码）──────────────
   // 前端提交（管理员），设备轮询取走（设备令牌，one-shot）。
   app.post<{ Params: { code: string }; Body: Record<string, unknown> }>(

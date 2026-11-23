@@ -253,7 +253,10 @@ export function registerDeviceBridgeRoutes(app: FastifyInstance, db: DatabaseSyn
       if (action === "claim") {
         const device = store.status(code);
         if (device?.state === "online") queuePendingDifyGroupNotifications(db, code, device.account_id);
-        const command = store.claim(code);
+        // only=refresh_login_qr：登录态下只领刷新指令，不碰消息队列。
+        const query = (req.query ?? {}) as Record<string, unknown>;
+        const only = typeof query.only === "string" ? query.only : "";
+        const command = store.claim(code, only);
         if (command) notifier.commandUpdated(code, command);
         return { command };
       }

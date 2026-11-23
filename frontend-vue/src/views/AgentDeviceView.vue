@@ -278,10 +278,27 @@
         </div>
         <template v-if="showQrImage">
           <img class="qr-image" :src="qrResult?.image" alt="企微登录二维码" />
-          <p v-if="qrResult?.captured_at" class="dialog-hint">二维码更新时间：{{ formatDateTime(qrResult.captured_at) }}</p>
+          <p v-if="qrResult?.captured_at" class="dialog-hint">二维码更新于 {{ qrAgeText }}</p>
         </template>
+        <!-- 过期时整块可点：用户第一反应就是去点那张过期的图 -->
+        <div
+          v-if="qrFeedback.key === 'expired'"
+          class="qr-expired-hit"
+          role="button"
+          tabindex="0"
+          @click="requestQrRefresh"
+          @keydown.enter="requestQrRefresh"
+        >
+          <span>二维码已过期 · 点这里让客户端换一张</span>
+        </div>
         <div v-if="qrFeedback.key !== 'disabled'" class="qr-refresh-row">
-          <el-button :loading="qrLoading" @click="fetchQr()" size="small">刷新状态</el-button>
+          <el-button
+            :loading="qrRefreshing"
+            :disabled="qrRefreshing"
+            @click="requestQrRefresh"
+            size="small"
+          >刷新二维码</el-button>
+          <span class="qr-refresh-hint">{{ qrRefreshHint }}</span>
         </div>
         <div v-if="canSubmitVerifyCode" class="verify-row">
           <el-input
@@ -691,9 +708,73 @@ const qrFeedback = computed(() => {
 const showQrImage = computed(() => qrFeedback.value.key === 'scan' && !!qrResult.value?.image)
 const canSubmitVerifyCode = computed(() => ['scan', 'waiting', 'expired'].includes(qrFeedback.value.key))
 
+// ── 刷新二维码：驱动客户端重拍，而不是重读缓存 ─────────────────────
+// 以前按钮只重发 GET，客户端 30 秒才推一次，点了像没反应。现在改为调
+// refreshLoginQr：服务端写一条 refresh_login_qr 指令，客户端点登录窗的
+// 「刷新」再立即上传新帧，网页下一次轮询就能看到。
+const qrRefreshing = ref(false)
+const qrRefreshAt = ref(0)
+const clockTick = ref(0)
+let qrClock: ReturnType<typeof setInterval> | null = null
+
+const qrAgeText = computed(() => {
+  void clockTick.value
+  const at = qrResult.value?.captured_at ? Date.parse(qrResult.value.captured_at) : 0
+  if (!at || Number.isNaN(at)) return '时间未知'
+  const sec = Math.max(0, Math.round((Date.now() - at) / 1000))
+  if (sec < 60) return `${sec} 秒前`
+  const min = Math.floor(sec / 60)
+  if (min < 60) return `${min} 分 ${sec % 60} 秒前`
+  return `${Math.floor(min / 60)} 小时 ${min % 60} 分前`
+})
+
+const qrRefreshHint = computed(() => {
+  void clockTick.value
+  if (qrRefreshing.value) return '正在通知客户端刷新…'
+  if (qrRefreshAt.value) {
+    const sec = Math.round((Date.now() - qrRefreshAt.value) / 1000)
+    if (sec < 60) return `${sec} 秒前已请求，客户端每 10 秒领一次指令`
+  }
+  return '客户端每 30 秒自动上传一次'
+})
+
+async function requestQrRefresh(): Promise<void> {
+  const code = qrDevice.value?.device_code
+  if (!code || qrRefreshing.value) return
+  qrRefreshing.value = true
+  try {
+    const { data } = await devicesApi.refreshLoginQr(code)
+    qrRefreshAt.value = Date.now()
+    if (data.deduped) {
+      ElMessage.info('刚刚已经请求过，客户端正在刷新，请等 3-5 秒')
+    } else {
+      ElMessage.success('已通知客户端刷新二维码，正在获取新码…')
+    }
+    // 指令落地有延迟：3 秒后主动拉一次，比干等轮询更早看到新码
+    setTimeout(() => { void fetchQr() }, 3000)
+  } catch (err: any) {
+    ElMessage.warning(err?.response?.data?.detail || '请求刷新失败，请稍后重试')
+  } finally {
+    qrRefreshing.value = false
+  }
+}
+
+function startQrClock(): void {
+  stopQrClock()
+  qrClock = setInterval(() => { clockTick.value += 1 }, 1000)
+}
+function stopQrClock(): void {
+  if (qrClock) {
+    clearInterval(qrClock)
+    qrClock = null
+  }
+}
+
 function openQr(row: AgentDeviceItem): void {
   closeQrTimer()
   qrDevice.value = row
+  qrRefreshAt.value = 0
+  startQrClock()
   qrResult.value = null
   qrError.value = ''
   verifyCode.value = ''
@@ -746,6 +827,8 @@ function closeQrTimer(): void {
   qrRequest?.abort()
   qrRequest = undefined
   qrLoading.value = false
+  qrRefreshing.value = false
+  stopQrClock()
   if (qrTimer) {
     clearInterval(qrTimer)
     qrTimer = null
@@ -910,6 +993,39 @@ onUnmounted(() => { clearInterval(devicePoll); latestDeviceRequest += 1 })
   border: 1px solid var(--bd-border);
   border-radius: 8px;
   background: #fff;
+}
+
+/* 过期时整块可点：不需要用户去找按钮 */
+.qr-expired-hit {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 8px 0;
+  padding: 10px 14px;
+  border: 1px dashed var(--el-color-warning);
+  border-radius: 8px;
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning-dark-2);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.qr-expired-hit:hover {
+  background: var(--el-color-warning-light-8);
+  border-color: var(--el-color-warning-dark-2);
+}
+
+.qr-refresh-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.qr-refresh-hint {
+  font-size: 12px;
+  color: var(--bd-text-secondary, #909399);
 }
 
 

@@ -1,0 +1,14 @@
+-- 登录二维码刷新指令（2026-11-23）
+--
+-- 背景：网页上的「刷新」按钮以前只 GET 一次服务端缓存帧，客户端 30 秒才推一次，
+-- 所以点击看起来"没反应"。要让网页真正驱动客户端重新截屏，必须能下发一条
+-- 无正文指令。
+--
+-- bridge_commands 原本只有"发消息"一种语义（content 必填、需要 contact 映射），
+-- 装不下"刷新二维码"。这里加 kind 区分：
+--   message          现有发消息（默认值，老数据/老客户端不受影响）
+--   refresh_login_qr 让客户端点登录窗的「刷新」并立即上传新二维码
+--
+-- 客户端只对 kind='refresh_login_qr' 走新分支，其余一律按原消息链路处理，
+-- 因此老版本客户端领到这种指令会因为 content 为空而失败，不会误发消息。
+ALTER TABLE bridge_commands ADD COLUMN kind TEXT NOT NULL DEFAULT 'message';

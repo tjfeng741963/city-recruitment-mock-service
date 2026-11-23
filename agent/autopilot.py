@@ -2611,7 +2611,8 @@ def pump_commands(
     与自动回复的关系（红线）：
     - 和 drain() 跑在同一个线程、同一轮里，天然互斥，不会同时抢键鼠；
     - 复用 `_last_reply_at` 冷却，人工与自动之间也留够间隔；
-    - 只在企微 online 时领指令——离线领了只能失败，还会把指令锁 60 秒；
+    - 消息指令只在企微 online 时领——离线领了只能失败，还会把指令锁 60 秒；
+    - 登录态下只领刷新二维码指令（kind=refresh_login_qr），不碰消息队列；
     - 未发送的失败回执 failed，执行结果不明确回执 unknown，不自动重发；
     - 自动回复的判定逻辑（知识库、场景、合并）完全不改。
 
@@ -2627,15 +2628,17 @@ def pump_commands(
         return stats
     if not flush_manual_receipts(bridge):
         return stats
-    if wecom_state != "online":
-        return stats
+    # 登录态（login_required 等）消息发不出去，但网页可能刚点了「刷新二维码」。
+    # 这时只领 refresh_login_qr，绝不碰消息队列——领了也发不出去，还会白占
+    # 60 秒租约，把真实待发消息一直往后推。
+    login_only = wecom_state != "online"
     now = time.time()
     if now - _last_claim_at < CLAIM_INTERVAL:
         return stats
     _last_claim_at = now
 
     try:
-        command = bridge.claim()
+        command = bridge.claim(only="refresh_login_qr" if login_only else "")
     except Exception as exc:  # noqa: BLE001
         log(f"[指令] 领取失败（忽略）：{agent_client.describe_error(exc)}")
         return stats
@@ -2652,6 +2655,31 @@ def pump_commands(
 
     def mlog(msg: str, *, level: str | None = None, **fields: object) -> None:
         log(msg, level=level, scope="manual", command_id=cmd_id, **fields)
+
+    # ── 刷新登录二维码指令（2026-11-23）────────────────────────────────
+    # 网页点「刷新二维码」→ 服务端写 kind=refresh_login_qr → 这里点登录窗的
+    # 「刷新」并立即截一帧上传。动作与 login_refresh 的自动刷新完全一致，
+    # 只是由指令提前触发；不新增任何键鼠动作类型。
+    if str(command.get("kind") or "message") == "refresh_login_qr":
+        ok, detail = login_refresh.click_now(log=mlog)
+        if ok:
+            pushed = login_qr.LoginQrPusher().push_now(bridge, log=mlog)
+            if not pushed:
+                ok, detail = False, "已点击刷新，但没有截到新的登录窗（可能正在登录中）"
+        try:
+            bridge.receipt(cmd_id, lease, "succeeded" if ok else "failed", "")
+        except Exception as exc:  # noqa: BLE001
+            mlog(f"[指令] 刷新二维码回执失败：{agent_client.describe_error(exc)}", level="warning")
+        mlog(f"[指令] 刷新二维码：{detail}", level="info" if ok else "warning")
+        stats["sent" if ok else "failed"] += 1
+        return stats
+
+    if login_only:
+        # 旧服务端不认 only 参数时会把消息指令发过来：未登录不能发，
+        # 也不能回执（回执会把它标成失败）。不回执，等 60 秒租约自然回收。
+        mlog("[指令] 登录态下收到消息指令，未登录不发送；等租约回收", level="warning")
+        return stats
+
 
     try:
         if not rlog.begin_manual_command(bridge.base_url, bridge.device_code, cmd_id, lease):

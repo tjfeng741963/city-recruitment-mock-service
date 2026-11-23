@@ -175,3 +175,33 @@ def maybe_refresh_expired_qr(log=None) -> bool:
 
     threading.Thread(target=_worker, daemon=True).start()
     return True
+
+
+def click_now(log=None) -> tuple[bool, str]:
+    """网页手动请求刷新：同步点一次并等企微出码，返回 (ok, detail)。
+
+    与 maybe_refresh_expired_qr 的区别：
+    - 同步：指令通道要拿结果回执，不能后台跑；
+    - 跳过 90 秒冷却：这是用户主动点的；点完仍登记时间，避免自动流程紧接着再点；
+    - 返回失败原因：找不到登录窗、点击异常都如实回给网页，不假装成功。
+
+    动作本身与自动流程完全一致（同一坐标比例、同一 mouse_event），不新增动作类型。
+    """
+    global _last_click_ts
+    if sys.platform != "win32":
+        return False, "当前不是 Windows，无法点击登录窗"
+    win = _find_login_window()
+    if not win:
+        return False, "没找到企微登录窗（可能已登录，或窗口被隐藏）"
+    _hwnd, left, top, width, height = win
+    x = left + int(width * REFRESH_REL_X)
+    y = top + int(height * REFRESH_REL_Y)
+    try:
+        if log:
+            log(f"[qr-refresh] 网页请求刷新：窗口 ({left},{top}) {width}x{height}，点击 ({x},{y})")
+        _click_at(x, y)
+        _last_click_ts = time.time()
+        time.sleep(_VERIFY_DELAY)
+        return True, f"已点击刷新并等待 {_VERIFY_DELAY:.0f} 秒"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"点击异常：{type(exc).__name__}: {exc}"

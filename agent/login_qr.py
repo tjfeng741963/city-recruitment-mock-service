@@ -178,6 +178,18 @@ class LoginQrPusher:
         log(f"[登录二维码] 已上传到网页（{width}x{height}，{len(image_b64) // 1024}KB）")
         return True
 
+    def push_now(self, bridge, log=print) -> bool:
+        """网页点了「刷新二维码」：清掉 30 秒节流，立即截一帧上传。
+
+        只在 login_required 时有效——没有登录窗就截不到二维码。与 tick 的区别
+        只有"跳过节流"：截图、防黑图、上传全部复用同一条路，不新增任何动作。
+
+        返回 True 表示真的上传了一帧；False 由调用方回执 failed，让网页如实
+        显示"没截到"，而不是假装刷新成功。
+        """
+        self._last_push = 0.0
+        return self.tick("login_required", bridge, log)
+
     def _log_throttled(self, log, message: str) -> None:
         """同一条错误 60 秒内只记一次，避免每轮刷屏。"""
         now = _now()
