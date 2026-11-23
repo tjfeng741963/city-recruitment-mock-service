@@ -378,6 +378,10 @@ def wal_signature(data_dir: Path) -> tuple:
 def is_system_conv(conv_id: str, name: str = "") -> bool:
     if any(conv_id.startswith(p) for p in SYSTEM_PREFIXES):
         return True
+    # 群聊（R: 前缀）不可能是官方服务号；群名里出现「企业微信招聘群」这类
+    # 字样很常见，按名字拦会误杀正常群消息（2026-11-23 代码核对）。
+    if conv_id.startswith("R:"):
+        return False
     return any(n in (name or "") for n in SYSTEM_NAMES)
 
 
@@ -2608,13 +2612,26 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
     return stats
 
 
-def _session_names(store: Store) -> set[str]:
-    """企微本地会话表里的全部会话名，用于人工发送前校验目标真实存在。"""
+def _session_index(store: Store) -> dict[str, str]:
+    """会话名 → 真实会话 id（群是 R: 前缀，单聊是 S: 前缀）。读不到返回空字典。
+
+    一次查询同时供两件事用：盲发前校验名字存在、群名换成真实 id 做落点回读。
+    """
     try:
         sessions = store.sessions(limit=500)
     except Exception:  # noqa: BLE001
-        return set()
-    return {(item.get("name") or "").strip() for item in sessions if (item.get("name") or "").strip()}
+        return {}
+    index: dict[str, str] = {}
+    for item in sessions:
+        name = (item.get("name") or "").strip()
+        if name and name not in index:
+            index[name] = str(item.get("id") or "")
+    return index
+
+
+def _session_names(store: Store) -> set[str]:
+    """企微本地会话表里的全部会话名，用于人工发送前校验目标真实存在。"""
+    return set(_session_index(store))
 
 
 def _outbound_snapshot(store: Store, contact_id: str) -> dict[str, str] | None:
@@ -2815,7 +2832,17 @@ def pump_commands(
     # 盲发护栏：目标必须是企微里真实存在的非系统会话，否则键盘搜索落空时
     # 消息会被上一个打开的真实客户收走（11-05 已发生一次）。
     contact_id = str(command.get("contact_id") or "")
-    names = _session_names(store)
+    sessions_by_name = _session_index(store)
+    names = set(sessions_by_name)
+    # 群和个人同一条发送链路，但入队的 contact_id 有两种：真实会话 id（S:/R:），
+    # 或者群名（Agent 推群就是这样）。发送前统一换成真实 id——回读落点、回执
+    # message_id 都用它；换成 R: 之后系统会话判定也不会再按群名误杀。
+    if contact_id and not contact_id.startswith(("S:", "R:")):
+        resolved = sessions_by_name.get(name, "")
+        if resolved:
+            if resolved != contact_id:
+                mlog(f"    目标会话「{name}」→ {resolved}")
+            contact_id = resolved
     if is_system_conv(contact_id, name):
         mlog(f"    拒绝发送：{name} 是系统/官方会话，人工发送不允许", level="warning")
         receipt("failed")
