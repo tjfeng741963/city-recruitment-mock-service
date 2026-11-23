@@ -3005,6 +3005,14 @@ def print_history(limit: int = 20) -> None:
     print("\n统计:", rlog.stats())
 
 
+class LoginBridgeClient(agent_client.BridgeClient):
+    """Restore the one-time retrieval contract used by the installed login helper."""
+
+    def fetch_verify_code(self) -> dict:
+        code = quote(self.device_code, safe="")
+        return self._request("GET", f"/api/v1/agent/devices/{code}/verify-code")
+
+
 def _make_bridge(cfg: dict, device_code: str) -> agent_client.BridgeClient | None:
     """按 config.json 建桥接客户端；没配 bridge_server/bridge_token 就返回 None。"""
     bserver = (cfg.get("bridge_server") or "").strip()
@@ -3012,7 +3020,7 @@ def _make_bridge(cfg: dict, device_code: str) -> agent_client.BridgeClient | Non
     if not bserver or not btoken:
         log("[桥接] 未配置 bridge_server / bridge_token，跳过桥接上报")
         return None
-    bridge = agent_client.BridgeClient(bserver, btoken, device_code)
+    bridge = LoginBridgeClient(bserver, btoken, device_code)
     if not bridge.enabled:
         log("[桥接] device_code 缺失，跳过桥接上报")
         return None

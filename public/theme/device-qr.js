@@ -131,7 +131,7 @@
     head.className = "rk-devqr-head";
     const headText = document.createElement("div");
     headText.append(Object.assign(document.createElement("h2"), { textContent: "企微扫码登录" }));
-    headText.append(Object.assign(document.createElement("p"), { textContent: "扫码后本机企微自动恢复登录，无需到服务器现场操作" }));
+    headText.append(Object.assign(document.createElement("p"), { textContent: "按企微登录窗口的提示扫码或在手机上确认" }));
     head.append(headText);
     const close = document.createElement("button");
     close.type = "button";
@@ -193,12 +193,26 @@
       dynamic.innerHTML = "";
       dynamic.append(kv);
 
+      const verificationMessage = qr.login_status === "logged_in" ? "企微登录成功" : {
+        pending: "验证码已提交，等待 Windows 取码。",
+        received: "验证码已下发到 Windows，正在等待企微确认登录。",
+        expired: "Windows 取码超时。请确认验证码窗口仍打开，再提交当前验证码。",
+        unconfirmed: "企微尚未确认登录。请在 Win 查看验证结果。",
+      }[qr.verification_status];
+      const verifyRow = body.querySelector(".rk-devqr-verify");
+      verifyRow.hidden = ["logged_in", "device_disabled", "authorization_failed", "disconnected"].includes(qr.login_status);
+      if (verificationMessage) {
+        const notice = Object.assign(document.createElement("p"), { textContent: verificationMessage });
+        notice.setAttribute("role", "status");
+        dynamic.append(notice);
+      }
+
       if (qr.available && qr.image) {
         const frame = document.createElement("div");
         frame.className = "rk-devqr-frame";
         const img = document.createElement("img");
         img.src = qr.image;
-        img.alt = "企微登录二维码";
+        img.alt = "企微登录窗口截图";
         frame.append(img);
         frame.append(Object.assign(document.createElement("div"), { className: "scanline" }));
         dynamic.append(frame);
@@ -206,7 +220,7 @@
           className: "rk-devqr-stamp",
           textContent: "截图时间 " + (qr.captured_at || "") + " · 每 30 秒自动刷新",
         }));
-      } else {
+      } else if (!verificationMessage) {
         const wait = document.createElement("div");
         wait.className = "rk-devqr-wait";
         wait.textContent = device.online
@@ -220,7 +234,7 @@
     }
   }
 
-  /** 验证码输入行：扫码后企微要求短信验证码时用。 */
+  /** 企微验证窗口对应的验证码输入。 */
   function buildVerifyRow(code) {
     const row = document.createElement("div");
     row.className = "rk-devqr-verify";
@@ -228,7 +242,8 @@
       type: "text",
       inputMode: "numeric",
       maxLength: 8,
-      placeholder: "企微要求验证码时在此输入",
+      placeholder: "企微验证码（通常为六位）",
+      autocomplete: "off",
     });
     const submit = document.createElement("button");
     submit.type = "button";
@@ -243,8 +258,9 @@
       submit.textContent = "提交中…";
       try {
         await api("POST", `/api/v1/agent/devices/${code}/verify-code`, { code: value });
-        toast("验证码已下发，设备几秒内自动输入");
+        toast("验证码已提交，等待 Windows 取码");
         input.value = "";
+        void paintBody(code);
       } catch (error) {
         toast("提交失败：" + error.message, true);
       }
@@ -256,7 +272,7 @@
     });
     const hint = document.createElement("p");
     hint.className = "rk-devqr-verify-hint";
-    hint.textContent = "扫码并在手机上确认 → 等左侧截图变成验证码界面 → 收到短信码立刻在这里输入（几分钟内有效）。提交后设备会在界面出现时自动敲入，不用重复提交。";
+    hint.textContent = "Win 弹出验证码窗口时，输入手机企业微信显示的验证码。若企微要求短信验证，请输入短信中的验证码。";
     row.append(input, submit, hint);
     return row;
   }
