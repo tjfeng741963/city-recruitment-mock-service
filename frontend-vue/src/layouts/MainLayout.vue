@@ -3,7 +3,10 @@
     <aside class="sidebar" :class="{ collapsed }">
       <div class="sidebar-logo">
         <YuanyiMark label="源绎" class="sidebar-brand" />
-        <span v-if="!collapsed" class="logo-text">城市配置管理</span>
+        <div v-if="!collapsed" class="sidebar-brand-copy">
+          <span class="sidebar-brand-account" :title="auth.user?.username">{{ auth.user?.username }}</span>
+          <span class="sidebar-brand-name">源绎 AI 系统</span>
+        </div>
       </div>
 
       <el-menu
@@ -139,6 +142,28 @@ function handleLogout(): void {
   border-radius: 10px;
   border: 1px solid #dce3ef;
   background: linear-gradient(140deg, #fdfdff, #edf2fd 60%, #eef7f1);
+}
+
+.sidebar-brand-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar-brand-account {
+  overflow: hidden;
+  color: var(--rk-ink-1, #26314f);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 20px;
+  text-overflow: ellipsis;
+}
+
+.sidebar-brand-name {
+  color: var(--rk-ink-2, #536176);
+  font-size: 12px;
+  line-height: 16px;
 }
 
 .sidebar {

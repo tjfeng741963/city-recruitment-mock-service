@@ -4,9 +4,15 @@ import { describe, expect, it } from 'vitest';
 const layout = readFileSync(new URL('../frontend-vue/src/layouts/MainLayout.vue', import.meta.url), 'utf8');
 
 describe('console brand placement', () => {
-  it('shows the static Yuanyi mark beside the sidebar title, even when collapsed', () => {
+  it('keeps the static Yuanyi mark visible even when the sidebar is collapsed', () => {
     expect(layout).toMatch(/<div class="sidebar-logo">\s*<YuanyiMark\s+label="源绎"\s+class="sidebar-brand"\s*\/>/);
-    expect(layout).toContain('<span v-if="!collapsed" class="logo-text">城市配置管理</span>');
+  });
+
+  it('shows the signed-in username above the system name when expanded', () => {
+    expect(layout).toMatch(
+      /<div v-if="!collapsed" class="sidebar-brand-copy">\s*<span[^>]*class="sidebar-brand-account"[^>]*>\s*\{\{\s*auth\.user\?\.username\s*\}\}\s*<\/span>\s*<span class="sidebar-brand-name">源绎 AI 系统<\/span>/,
+    );
+    expect(layout).not.toContain('城市配置管理');
   });
 
   it('keeps the original account avatar and account controls in the right header', () => {
