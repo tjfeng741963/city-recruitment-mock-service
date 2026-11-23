@@ -44,6 +44,21 @@ curl -X POST http://127.0.0.1:8080/api/v1/auth/login \
 
 ---
 
+## 系统 Agent 大模型
+
+管理员从「设置 → Agent 服务配置 → 系统 Agent 大模型」管理正式回复用的模型。模型 API URL 填供应商提供的 OpenAI 兼容 HTTPS 基础地址，包含供应商要求的版本路径。
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/api/v1/settings/agent/model` | 返回生效 URL、模型、配置来源、版本号和 Key 是否已配置 |
+| POST | `/api/v1/settings/agent/model/models` | 提交 `base_url` 和 `api_key`，读取供应商 `GET /models` 返回的模型 ID |
+| POST | `/api/v1/settings/agent/model/test` | 带当前 `revision`、连接参数和 `model` 发起一次真实测试，验证 Agent 回复格式并返回五分钟内有效的 `test_id` |
+| PUT | `/api/v1/settings/agent/model` | 使用测试过的参数和 `test_id` 启用配置，返回新的生效状态和版本号 |
+
+Key 由服务端加密保存，接口响应只显示是否配置。同一地址换模型时可留空沿用当前 Key。供应商未提供模型目录时可直接输入模型 ID。正式 Agent 接待请求使用最新生效配置，无需重启进程。Web 管理配置前，Agent 使用部署环境中的模型参数。
+
+通过 HTTPS 或本机 SSH 转发页面提交 Key。持久化加密使用 `AGENT_LLM_CONFIG_SECRET`，缺省时从生产登录签名密钥派生。启用后应保留原加密密钥供重启和数据库备份恢复使用。
+
 ## 岗位工作地址与面试点
 
 岗位详情和保存沿用 `/api/v1/service-positions` 系列接口。岗位响应带有所属 `city_id`，用于准确回填城市。网页表单提交 `work_address` 与 `interview_address`，分别表示工作地址和默认面试地址。已有的 `address` 单地址记录仍可读取。用户通过新表单保存后，两个地址独立存储，旧客户端可继续读取兼容字段 `address`。

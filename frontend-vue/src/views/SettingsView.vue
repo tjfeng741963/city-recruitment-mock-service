@@ -76,6 +76,11 @@
         </el-form>
         <p v-if="agentIsDefault" class="section-hint">当前使用默认 Agent 地址。</p>
 
+        <template v-if="auth.user?.role === 'admin'">
+          <el-divider />
+          <AgentModelSettingsPanel ref="agentModelPanel" />
+        </template>
+
         <el-divider />
 
         <h3 class="block-title">一键同步</h3>
@@ -140,6 +145,11 @@ import {
   type SyncResult,
 } from '../api/system'
 import { downloadBlob } from '../utils/format'
+import { useAuthStore } from '../stores/auth'
+import AgentModelSettingsPanel from '../components/system/AgentModelSettingsPanel.vue'
+
+const auth = useAuthStore()
+const agentModelPanel = ref<InstanceType<typeof AgentModelSettingsPanel> | null>(null)
 
 const loading = ref(false)
 const loadError = ref('')
@@ -201,6 +211,7 @@ async function loadAgent(): Promise<void> {
 function loadAll(): void {
   void loadSettings()
   void loadAgent()
+  void agentModelPanel.value?.load()
 }
 
 async function saveSettings(): Promise<void> {

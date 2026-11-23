@@ -10,6 +10,7 @@ services:
     environment:
       REA_HOST: 0.0.0.0
       REA_PORT: 4222
+      REA_AGENT_SETTINGS_PORT: 14222
       REA_DATABASE_PATH: /data/app.sqlite
       # 前端用 public/ 下的 Vue 版本（旧界面 + theme/ 注入层）。
       # 2026-11-14 客户明确要求：要旧版布局样式，功能保持现状。
@@ -27,6 +28,7 @@ services:
       REA_KB_SERVICE_TOKEN_FILE: /run/kb/service-token
     ports:
       - "4222:4222"
+      - "127.0.0.1:14222:14222"
     volumes:
       - ./data:/data
       # 服务间令牌：Python 启动时生成写入，这里只读

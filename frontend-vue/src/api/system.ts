@@ -233,12 +233,32 @@ export interface ImportResult {
 
 export type SettingsPayload = GlobalSettings & Record<string, unknown>
 
+export interface AgentModelSettings {
+  base_url: string
+  model: string
+  source: 'settings' | 'environment'
+  key_configured: boolean
+  revision: number
+  updated_at: string | null
+}
+
+type ModelCredentials = { base_url: string; api_key?: string }
+type ModelDraft = ModelCredentials & { model: string; revision: number }
+const agentModelPath = '/api/v1/settings/agent/model'
+
 export const settingsApi = {
   get: () => http.get<GlobalSettings>('/api/v1/settings'),
   save: (payload: SettingsPayload) => http.put<GlobalSettings>('/api/v1/settings', payload),
   agentGet: () => http.get<AgentSettings>('/api/v1/settings/agent'),
   agentSave: (agentBaseUrl: string) =>
     http.put<AgentSettings>('/api/v1/settings/agent', { agent_base_url: agentBaseUrl }),
+  agentModel: () => http.get<AgentModelSettings>(agentModelPath),
+  discoverAgentModels: (payload: ModelCredentials) =>
+    http.post<{ models: string[] }>(agentModelPath + '/models', payload, { timeout: 15000 }),
+  testAgentModel: (payload: ModelDraft) =>
+    http.post<{ test_id: string; latency_ms: number }>(agentModelPath + '/test', payload, { timeout: 25000 }),
+  saveAgentModel: (payload: ModelDraft & { test_id: string }) =>
+    http.put<AgentModelSettings>(agentModelPath, payload),
   sync: () => http.post<SyncResult>('/api/v1/settings/sync', {}),
 
   /** 数据初始化模板（xlsx blob） */
