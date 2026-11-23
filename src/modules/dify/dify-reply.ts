@@ -320,22 +320,31 @@ export async function generateDifyReply(db: DatabaseSync, input:{deviceCode:stri
     }
     const selected=difyInput(facts,input.text);
     if(!selected)return failure('dify_context_too_large','城市关键字段过长，请精简薪资、时间或面试地点；完整话术请放入原文段落或知识库');
-    // Keep the published Dify conversation per application and selected position.
+    // Dify conversation inputs can retain their values from the first message.
+    // Keep the recruitment session, but start fresh in Dify when the facts change.
     const identity=digest(JSON.stringify([input.deviceCode,account?.account_id||"",input.sessionKey,positionId,cfg.base,digest(cfg.key)]));
     const stage = ordered && invitationStage(db,scope,positionId);
+    const contextHash = digest(JSON.stringify([
+      digest(JSON.stringify(facts)),
+      Object.keys(selected.city_materials).sort(),
+      selected.knowledge.map(entry => entry.id).sort(),
+      stage || '',
+    ]));
     const payload={inputs:{position_data:JSON.stringify({...selected,...(stage ? {invitation_stage:stage} : {})}),current_time:new Date().toLocaleString("sv-SE",{timeZone:"Asia/Shanghai"})},query:input.text,response_mode:"blocking",user:`recruit-${identity}`};
     if(input.dry)return {ok:true,provider:"dify",dry:true,position_id:positionId,inputs:payload.inputs};
     if(!input.sessionKey)return failure("dify_session_required","Dify 模式需要 session_key");
     if(!cfg.key||!validBase(cfg.base))return failure("dify_not_configured","Dify 服务端地址或应用密钥未配置");
     const started=Date.now();let errorCode="";
     try {
-      const stored=db.prepare("SELECT conversation_id FROM dify_reply_sessions WHERE identity=?").get(identity) as {conversation_id:string}|undefined;
+      const stored=db.prepare("SELECT conversation_id FROM dify_reply_sessions WHERE identity=? AND context_hash=?").get(identity,contextHash) as {conversation_id:string}|undefined;
       const response=await fetch(`${cfg.base}/chat-messages`,{method:"POST",redirect:"error",headers:{authorization:`Bearer ${cfg.key}`,"content-type":"application/json"},body:JSON.stringify({...payload,...(stored?{conversation_id:stored.conversation_id}:{})}),signal:AbortSignal.timeout(35_000)});
       if(!response.ok)throw new Error("dify_http_error");
       const body=await response.json() as {answer?:unknown;conversation_id?:unknown};
       if(typeof body.conversation_id!=="string"||!body.conversation_id)throw new Error("dify_invalid_response");
       // Persist provider conversation even if its reply needs manual review, to avoid silently restarting.
-      db.prepare("INSERT INTO dify_reply_sessions(identity,device_code,conversation_id) VALUES (?,?,?) ON CONFLICT(identity) DO UPDATE SET conversation_id=excluded.conversation_id,updated_at=CURRENT_TIMESTAMP").run(identity,input.deviceCode,body.conversation_id);
+      db.prepare(`INSERT INTO dify_reply_sessions(identity,device_code,conversation_id,context_hash) VALUES (?,?,?,?)
+        ON CONFLICT(identity) DO UPDATE SET conversation_id=excluded.conversation_id,context_hash=excluded.context_hash,updated_at=CURRENT_TIMESTAMP`)
+        .run(identity,input.deviceCode,body.conversation_id,contextHash);
       const answer=typeof body.answer==="string"?body.answer.trim():"";
       if(!answer||answer.length>12000||/##[^#\n]+##|https?:\/\/|图片[（(]|文件[（(]|【\s*(?:图片|视频|文件)\s*[:：]/i.test(answer))throw new Error("dify_invalid_reply");
       const amounts=(value:string)=>[...value.matchAll(/(\d+(?:\.\d+)?)(?:\s*[-~～–—到至]\s*(\d+(?:\.\d+)?))?\s*(?:(?:元|块)(?:\s*[/每]\s*(小时|时|天|班次?|月|晚))?|[/每]\s*(小时|时|天|班次?|月|晚))/g)].flatMap(m=>{

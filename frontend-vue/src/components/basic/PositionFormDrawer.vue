@@ -95,10 +95,10 @@
               <el-tag effect="plain" type="primary">系统 Agent</el-tag>
               <span>读取本岗位资料。</span>
               <el-tag effect="plain" type="warning">Dify 工作流</el-tag>
-              <span>同一字段优先读取城市资料，城市对应内容为空时读取本岗位。</span>
+              <span>下次回复优先读取已保存的岗位资料，空白项沿用城市资料。</span>
             </div>
             <div v-if="cityOverrides.length" class="line-legend">
-              <el-tag effect="plain" type="warning">Dify 当前城市取值</el-tag>
+              <el-tag effect="plain" type="warning">Dify 城市默认值</el-tag>
               <span v-for="value in cityOverrides" :key="value">{{ value }}</span>
             </div>
             <el-collapse v-model="openGroups">
@@ -113,7 +113,7 @@
                     <span class="field-label-with-line">
                       <span data-position-field-name>{{ sectionLabel(key) }}</span>
                       <el-tag size="small" effect="plain" type="primary">系统 Agent</el-tag>
-                      <el-tag size="small" effect="plain" type="warning">Dify · 城市优先</el-tag>
+                      <el-tag size="small" effect="plain" type="warning">Dify · 岗位优先</el-tag>
                     </span>
                   </template>
                   <el-input
@@ -130,7 +130,7 @@
           <el-tab-pane label="面试与门店" name="interview">
             <div class="line-legend">
               <el-tag effect="plain" type="primary">系统 Agent</el-tag><span>根据已填地址和面试点回答。</span>
-              <el-tag effect="plain" type="warning">Dify 工作流</el-tag><span>预约使用所选面试点的地址和专属时间。未填专属时间时，沿用现有默认日程。</span>
+              <el-tag effect="plain" type="warning">Dify 工作流</el-tag><span>预约优先使用所选面试点的地址和专属时间。默认日程优先读取已保存的岗位，空白项沿用城市资料。</span>
             </div>
             <div class="grid-2">
               <el-form-item label="面试时间">

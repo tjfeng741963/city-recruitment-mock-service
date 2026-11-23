@@ -127,7 +127,7 @@ async function preview(generate: boolean): Promise<void> {
     if (!data.ok || !data.inputs) throw new Error(data.error || '读取 Dify 岗位资料失败')
     const input = JSON.parse(data.inputs.position_data)
     const wageSource = input.sources?.fields?.wage_text
-    const wage = wageSource === 'city' ? '城市资料' : wageSource === 'position_fallback' ? '岗位补充' : '未提供'
+    const wage = wageSource === 'city' ? '城市资料' : (wageSource === 'position' || wageSource === 'position_fallback') ? '岗位资料' : '未提供'
     const knowledge = Array.isArray(input.knowledge) ? input.knowledge.length : 0
     const omitted = Number(input.retrieval?.omitted) || 0
     evidenceSummary.value = [input.job_title ? `岗位 ${input.job_title}` : '', `城市 ${input.city || '未提供'}`, `工资来源 ${wage}`, `${knowledge} 条适用问答`,
