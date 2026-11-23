@@ -31,7 +31,7 @@ export function invitationTurn(db: DatabaseSync, input: {
   if (!context || difyContextConflict(context)) return;
   const city = context.city.replace(/市$/, "");
   if (!["广州","南昌"].includes(city) || !/地铁|轨道|城际|安检|安保/.test(context.job_title)) return;
-  const schedule = interviewSchedule(db,positionId,context);
+  const schedule = interviewSchedule(db,positionId,context,true);
   const available = bookableInterviewPoints(schedule);
   if (!context.wage_text || !context.hours_text || !available.length) return;
   const stage = invitationStage(db,identity,positionId);
