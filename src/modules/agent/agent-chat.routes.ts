@@ -760,14 +760,15 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
   // ── 一轮对话 ──────────────────────────────────────────────────
   app.post<{ Body: Record<string, unknown> }>("/api/v1/agent/chat", async (request, reply) => {
     // 客户端（设备令牌）与调试台（管理员 JWT）都可调：对话链路的两个调用方
-    if (!isAdmin(request) && !isValidDeviceToken(db, request)) return reply.code(403).send(ADMIN_REQUIRED);
     const body = request.body ?? {};
     const deviceCode = text(body.device_code).trim();
+    if (!isAdmin(request) && (!deviceCode || !hasDifyDeviceToken(db, request, deviceCode))) {
+      return reply.code(403).send(ADMIN_REQUIRED);
+    }
     if (deviceCode && replyModePending(db, deviceCode)) {
       return { ok: false, code: "reply_mode_pending", error: "回复来源正在切换" };
     }
     if (deviceCode && deviceReplyProvider(db, deviceCode) === "dify") {
-      if (!ownsReplyDevice(db, request, deviceCode)) return reply.code(403).send(ADMIN_REQUIRED);
       const input = text(body.text).trim();
       if (!input || input.length > 2000) return reply.code(422).send({ detail: "text is required (max 2000)" });
       const admin = isAdmin(request);
@@ -777,7 +778,11 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         turnId: !admin && /^[A-Za-z0-9_-]{1,80}$/.test(text(body.turn_id)) ? text(body.turn_id) : undefined,
         canWriteRegistration: hasDifyDeviceToken(db,request,deviceCode) });
     }
-    const positionId = int(body.position_id) || (deviceCode ? positionOfDevice(db, deviceCode) : 0);
+    const requestedPosition = int(body.position_id);
+    const positionId = deviceCode ? positionOfDevice(db, deviceCode) : requestedPosition;
+    if (deviceCode && requestedPosition && requestedPosition !== positionId) {
+      return reply.code(409).send({ detail: "系统 Agent 只能使用该设备绑定的岗位" });
+    }
     if (body.preview === true) {
       if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
       if (body.session_key || deviceCode) return reply.code(422).send({ detail: '模拟回答不能绑定真实会话或设备' });
@@ -900,6 +905,12 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
 
     try {
       const result = await complete(messages);
+      if (deviceCode && (replyModePending(db, deviceCode) || deviceReplyProvider(db, deviceCode) !== "agent"
+        || positionOfDevice(db, deviceCode) !== positionId || positionRow(db, positionId)?.status !== "enabled")) {
+        const error = "接待岗位或回复来源已变化，请重新生成回复";
+        saveTrace("failed", { code: "agent_binding_changed", error });
+        return { ok: false, code: "agent_binding_changed", error, trace_id: traceId, evidence };
+      }
       // JSON 解析失败单独一档：带着耗时与 token 返回，调试台能看到
       // 「模型花了多少毫秒、烧了多少 token 才吐出这段不合格的输出」。
       let parsed: Record<string, unknown>;

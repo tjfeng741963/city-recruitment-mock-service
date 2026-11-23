@@ -1,4 +1,4 @@
-import { replyModeRow } from "../dify/reply-mode-transition.js";
+import { replyModePending, replyModeRow } from "../dify/reply-mode-transition.js";
 import type { FastifyInstance } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
 import { difyDashboard } from "../dify/dify-context.js";
@@ -12,7 +12,7 @@ import { NOOP_NOTIFIER, type StreamNotifier } from "../messaging/stream-events.j
 import { readWeComConfig } from "../wecom/wecom-config.js";
 import { listReminderTasks } from "./followup.js";
 import { isValidDeviceToken } from "./position-scripts.routes.js";
-import { loadFactories, parseDeviceData, readDeviceFactoryIds } from "../../shared/device-factories.js";
+import { loadFactories, parseDeviceData, readDeviceFactoryIds, receptionFactoryIds, resolveDevicePosition } from "../../shared/device-factories.js";
 
 const ADMIN_REQUIRED = { detail: "Admin access required" } as const;
 
@@ -130,12 +130,12 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
       // serialize 的声明类型不含 device_code，故显式放宽为字典以通过 typecheck。
       items: rows
         .map((row) => {
-          // 设备 → 工厂多选绑定：每行带上 factory_ids 与厂名/城市，
-          // 后台设备列表直接回显多选结果，不用前端再逐台去拉 /factories。
-          const factoryIds = readDeviceFactoryIds(db, parseDeviceData(row.data_json).factory_ids);
+          const data = parseDeviceData(row.data_json);
           const serialized = serializeAgentDevice(row) as Record<string, unknown>;
           const mode = replyModeRow(db, String(serialized.device_code ?? ""));
           if (mode) serialized.reply_provider = mode.effective;
+          const factoryIds = receptionFactoryIds(db, data, serialized.reply_provider);
+          serialized.position_id = resolveDevicePosition(db, data, serialized.reply_provider);
           const bridge = bridgeStore.status(String(serialized.device_code ?? ""));
           if (bridge) {
             const health = bridgeStore.runtimeHealth(String(serialized.device_code ?? ""));
@@ -165,7 +165,11 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     // 只有调用方明确传 observe_only:false 时（企微官方客服 API 通道）才放行。
     const data = { observe_only: true, ...(request.body ?? {}) } as Record<string, unknown>;
     delete data.config_sync; // 仅对应设备令牌的专用上报接口可生成配置同步证据。
+    delete data.agent_position_id;
+    delete data.expected_reply_provider;
+    delete data.position_ids;
     const factoryIds = readDeviceFactoryIds(db, data.factory_ids);
+    if (factoryIds.length > 1) return reply.code(422).send({ detail: "系统 Agent 只能绑定一个岗位" });
     try {
       normalizeDevicePosition(db, data, factoryIds, "position_id" in (request.body ?? {}));
     } catch (error) {
@@ -183,26 +187,54 @@ export async function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync
     if (!row || !canAccessDevice(getUserScope(db, request.auth!), String(data.device_code ?? ""))) {
       return reply.code(404).send({ detail: "设备不存在" });
     }
-    const merged = { ...data, ...(request.body ?? {}) } as Record<string, unknown>;
+    const body = request.body ?? {};
+    const merged = { ...data, ...body } as Record<string, unknown>;
+    const code = String(data.device_code ?? "");
+    const mode = replyModeRow(db, code);
+    const provider = (mode?.effective ?? data.reply_provider) === "dify" ? "dify" : "agent";
+    const hasPosition = Object.hasOwn(body, "position_id");
+    const hasFactories = Object.hasOwn(body, "factory_ids");
+    delete merged.expected_reply_provider;
+    delete merged.position_ids;
+    if ((hasPosition || hasFactories) && replyModePending(db, code)) {
+      return reply.code(409).send({ detail: "回复来源正在切换，请在切换完成后保存岗位" });
+    }
+    if ((hasPosition || hasFactories) && body.expected_reply_provider !== undefined && body.expected_reply_provider !== provider) {
+      return reply.code(409).send({ detail: "回复来源已变化，请关闭接待设置后重新打开" });
+    }
+    if (Object.hasOwn(data, "agent_position_id")) merged.agent_position_id = data.agent_position_id;
+    else delete merged.agent_position_id;
     if (data.config_sync === undefined) delete merged.config_sync;
     else merged.config_sync = data.config_sync;
     if (data.reply_provider === undefined) delete merged.reply_provider;
     else merged.reply_provider = data.reply_provider;
-    // Dify 已全链路下线（2026-11-17）：本次提交与历史遗留的 dify 字段一律不落库
+    // Dify 的连接配置由服务端统一维护。
     for (const key of ["dify_url", "dify_key", "dify_key_env"]) delete merged[key];
-    // 设备 → 工厂多选绑定：本次提交了 factory_ids 就规范化后落库——
-    // 去重、丢掉非整数与库里不存在的 id（忽略而不是整单 422），空数组 = 不绑任何厂。
-    // 没提交这个键时保持原值，老客户端不受影响（与 vertical_id 的按需校验同一思路）。
-    if ("factory_ids" in (request.body ?? {})) {
-      merged.factory_ids = readDeviceFactoryIds(db, (request.body as Record<string, unknown>).factory_ids);
-    }
     try {
-      normalizeDevicePosition(
-        db,
-        merged,
-        readDeviceFactoryIds(db, merged.factory_ids),
-        "position_id" in (request.body ?? {}),
-      );
+      if (hasPosition || hasFactories) {
+        const factoryIds = hasFactories ? readDeviceFactoryIds(db, body.factory_ids) : [];
+        if (provider === "agent" && factoryIds.length > 1) throw new Error("系统 Agent 只能绑定一个岗位");
+        const legacyFactoryUpdate = !hasPosition && !mode && data.reply_provider === undefined
+          && !Object.hasOwn(data, "agent_position_id") && readDeviceFactoryIds(db, data.factory_ids).length <= 1;
+        if (provider === "dify" || legacyFactoryUpdate) {
+          if (provider === "dify" && !Object.hasOwn(data, "agent_position_id")) {
+            merged.agent_position_id = resolveDevicePosition(db, data, "agent") || null;
+          }
+          if (hasFactories) merged.factory_ids = factoryIds;
+          normalizeDevicePosition(db, merged, readDeviceFactoryIds(db, merged.factory_ids), hasPosition);
+        } else {
+          const binding = { position_id: hasPosition ? body.position_id : null };
+          if (!hasPosition && !factoryIds.length) binding.position_id = resolveDevicePosition(db, data, "agent");
+          normalizeDevicePosition(db, binding, factoryIds, hasPosition);
+          merged.agent_position_id = binding.position_id ?? null;
+          if (!Object.hasOwn(data, "position_id") && !readDeviceFactoryIds(db, data.factory_ids).length && binding.position_id) {
+            merged.position_id = binding.position_id;
+          } else {
+            merged.position_id = data.position_id;
+          }
+          merged.factory_ids = data.factory_ids;
+        }
+      }
     } catch (error) {
       return reply.code(422).send({ detail: error instanceof Error ? error.message : String(error) });
     }

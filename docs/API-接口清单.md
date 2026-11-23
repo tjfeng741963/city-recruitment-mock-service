@@ -56,6 +56,8 @@ curl -X POST http://127.0.0.1:8080/api/v1/auth/login \
 
 支持新版运行状态的设备会附带 windows_runtime，包含 connected、wecom_available、reply_ready、reason、sync、backlog。桥接心跳可上报 runtime，服务器只保存状态枚举与计数。超过 60 秒未刷新则标记离线并停止领取网页发送指令。旧客户端继续使用原心跳契约。
 
+账号列表的 `position_id`、`factory_ids` 和 `factories` 按 Windows 已确认的回复来源返回。Agent 显示一个接待岗位和该岗位所属工厂，Dify 显示默认岗位和多工厂接待范围。保存接待设置时，`PUT /api/v1/agent/devices/:id` 按当前来源写入对应配置。网页提交 `expected_reply_provider`，来源已变化或正在切换时返回 409。旧账号沿用原接待岗位，Dify 的多工厂配置随切换保留。
+
 GET /api/v1/agent/devices/:code/login-qr 保留原 available 与可用图片字段。另返回 login_status，区分 logged_in、waiting_for_scan、waiting_for_qr、qr_expired、disconnected、device_disabled 和 authorization_failed。新鲜企微登录心跳可确认登录完成，超过两分钟的二维码截图不再返回。限时安全验证由操作者在 Win 的官方企业微信窗口完成。
 
 POST /api/v1/agent/devices/:code/login-qr/refresh 让客户端刷新登录二维码。只在设备启用且桥接状态 online 时接受，写一条 `kind=refresh_login_qr` 的指令（无正文、不关联客户）；同一设备 60 秒内重复请求只入队一条，返回 `{queued, command_id, deduped}`。客户端领到后点击企微登录窗的「刷新」，等待约 4 秒再立即截取新码上传；超过 5 分钟未领取的指令作废。该指令不受「回复就绪」门槛限制——二维码过期时本来就无法回复。
@@ -65,6 +67,8 @@ POST /api/v1/agent/devices/:code/login-qr/refresh 让客户端刷新登录二维
 ## 设备人工发送队列的只读检查
 
 `GET /api/v1/bridge/devices/:code/config` 使用对应设备的 Bearer token（服务间调用沿用 `X-Profile-Token`）。响应新增 `command_queue: {queued: number, claimed: number, unknown: number}`，默认均为 0。统计仅覆盖该设备、包含全部历史记录，不受最近 50 条列表限制，不返回客户或消息正文。
+
+Agent 的下发配置带当前单岗 `position_id`（已绑定时），岗位话术只含该岗位与通用条目。Dify 继续按工厂接待范围下发。
 
 该 GET 不领取任务、不回收过期租约、不改变任何任务状态；队列计数为实时值，不参与配置 `version`。启动前应读取本次响应的计数，不能复用旧缓存；`queued` 或 `claimed` 非零时先核对原任务，`unknown` 需人工核对送达结果，不应盲目重发。字段缺失表示服务尚未支持统计，不能当作队列为空。此字段仅用于检查，不会自动启动或暂停客户端。
 
@@ -132,7 +136,7 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 | POST | `/api/v1/agent/archive/:key/followup-summary` | admin | 读取当前登记精确关联的近期对话，按需生成跟进摘要 `{intent,discussed,experience,next_question,quote}`。字段无依据时返回 null。无会话或候选人文字时返回 409。结果仅用于网页，生成操作不清未读、不改登记、不发消息。 |
 | GET | `/api/v1/agent/candidates?status=&recruiter_id=&event_date=&interview_date=&page=&page_size=` | admin | 候选人员管理：由面试登记聚合出候选行 + 分页统计 |
 | GET | `/api/v1/agent/candidates/:key/messages?before_id=` | admin | 只读查看登记对应的真实对话，按精确 session_key 关联设备及客户；每页最多 200 条，不清未读、不发送 |
-| POST | `/api/v1/agent/chat` | admin/设备令牌 | 一轮对话，body `{position_id,session_key,text,dry,sent_summary?}`；岗位停用时真实回复返回 409，dry QA 可继续使用 |
+| POST | `/api/v1/agent/chat` | admin/设备令牌 | 一轮对话，body `{device_code,position_id,session_key,text,dry,sent_summary?}`。设备令牌须匹配设备码，Agent 只能读取该设备绑定的岗位。管理员可按岗位独立试答。生成期间来源或岗位发生变化时，暂停旧回复并返回 `agent_binding_changed`。 |
 | GET | `/api/v1/agent/execution-traces?trace_id=&session_key=&device_code=&position_id=&limit=` | admin | 查询试答或正式会话的岗位、资料来源、流程版本和结果证据 |
 | POST | `/api/v1/agent/execution-traces` | admin/设备令牌 | 为客户端直接执行的流程节点创建执行记录，返回 `trace_id` |
 | POST | `/api/v1/agent/execution-traces/:trace_id/delivery` | admin/设备令牌 | 客户端回传真实发送结果：`{status,message_id,detail,device_code,session_key,node_key}` |

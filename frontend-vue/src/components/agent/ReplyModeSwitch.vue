@@ -73,8 +73,8 @@ function label(mode: ReplyProvider) { return mode === 'dify' ? 'Dify' : '系统 
 
 function scopeHint(mode?: ReplyProvider) {
   if (mode === 'agent') return 'Agent 使用一个绑定岗位。'
-  if (mode === 'dify') return 'Dify 可接待多个已绑定城市。'
-  return 'Agent 接待单岗，Dify 支持多城市。'
+  if (mode === 'dify') return 'Dify 可在配置范围内接待多个岗位。'
+  return 'Agent 接待单岗，Dify 支持多岗位。'
 }
 
 function apply(next: ReplyModeStatus) {
@@ -141,7 +141,7 @@ async function switchMode(target: unknown) {
   confirming.value = true
   try {
     await ElMessageBox.confirm(
-      `机器码 ${props.deviceCode}。${scopeHint(target)}${target === 'dify' ? '在接待设置中多选「绑定工厂」可配置接待范围。' : '将使用接待设置中的「绑定岗位」。'}`
+      `机器码 ${props.deviceCode}。${scopeHint(target)}${target === 'dify' ? '切换后可在接待设置中维护接待工厂。' : '切换后可在接待设置中更换接待岗位。'}`
         + (current.client_connected ? 'Win 完成当前任务后执行切换。' : 'Win 重连后执行切换。')
         + '发送结果不明的记录会保留待核对。',
       '切换回复来源',
