@@ -132,11 +132,16 @@
       </div>
     </div>
 
-    <el-dialog v-model="previewVisible" :title="previewItem?.name || '预览'" width="720px">
-      <div class="preview-body">
-        <img v-if="previewItem && thumbUrls[previewItem.id]" :src="thumbUrls[previewItem.id]" alt="preview" />
-        <video v-else-if="previewItem && thumbUrls[previewItem.id]" :src="thumbUrls[previewItem.id]" controls />
-        <el-empty v-else description="素材内容加载中…" />
+    <el-dialog v-model="previewVisible" :title="previewItem?.name || '预览'" width="720px" @close="clearPreview">
+      <div class="preview-body" aria-live="polite">
+        <el-empty v-if="previewError" :description="previewError" />
+        <template v-else-if="previewItem && previewUrl">
+          <video v-if="previewItem.kind === 'video'" :src="previewUrl" controls playsinline
+            @error="previewError = '无法播放此视频，请检查文件或编码。'" />
+          <img v-else :src="previewUrl" :alt="previewItem.name"
+            @error="previewError = '无法显示此图片，请检查文件。'" />
+        </template>
+        <el-empty v-else-if="previewItem" description="素材内容加载中…" />
       </div>
     </el-dialog>
   </section>
@@ -148,7 +153,7 @@ import { useRoute } from 'vue-router'
 import PositionContext from '../components/agent/PositionContext.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Picture, Refresh, Search, Upload, VideoCamera } from '@element-plus/icons-vue'
-import http, { backendUrl } from '../api/http'
+import http from '../api/http'
 import { mediaApi, positionsApi } from '../api/core'
 import type { PageResult, ServicePosition } from '../api/types'
 import { formatBytes } from '../utils/format'
@@ -178,7 +183,20 @@ const pageSize = ref(20)
 const fileInput = ref<HTMLInputElement | null>(null)
 const previewVisible = ref(false)
 const previewItem = ref<MediaRow | null>(null)
-// 素材下载接口需要 Authorization 头，<img src> 带不上——用 blob + objectURL 显示
+const previewUrl = ref('')
+const previewError = ref('')
+let previewRequest: AbortController | undefined
+let disposed = false
+
+// 素材请求通过 http 带鉴权，再交给浏览器渲染 Blob。
+async function fetchMedia(row: MediaRow, signal?: AbortSignal): Promise<Blob> {
+  const { data } = await http.get<Blob>(`/api/v1/agent/media/${encodeURIComponent(row.name)}`, {
+    responseType: 'blob',
+    signal,
+  })
+  return data
+}
+
 const thumbUrls = ref<Record<number, string>>({})
 const thumbLoading = ref<Record<number, boolean>>({})
 
@@ -186,9 +204,8 @@ async function loadThumb(row: MediaRow): Promise<void> {
   if (thumbUrls.value[row.id] || thumbLoading.value[row.id]) return
   thumbLoading.value[row.id] = true
   try {
-    const { data } = await http.get<Blob>(`/api/v1/agent/media/${encodeURIComponent(row.name)}`, {
-      responseType: 'blob',
-    })
+    const data = await fetchMedia(row)
+    if (disposed) return
     thumbUrls.value = { ...thumbUrls.value, [row.id]: URL.createObjectURL(data) }
   } catch {
     /* 拉不到就保持占位图标 */
@@ -202,7 +219,11 @@ function revokeThumbs(): void {
   thumbUrls.value = {}
 }
 
-onBeforeUnmount(revokeThumbs)
+onBeforeUnmount(() => {
+  disposed = true
+  clearPreview()
+  revokeThumbs()
+})
 
 const imageCount = computed(() => items.value.filter((i) => i.kind === 'image').length)
 const videoCount = computed(() => items.value.filter((i) => i.kind === 'video').length)
@@ -239,11 +260,12 @@ async function load(): Promise<void> {
     })
     items.value = data.items || []
     loading.value = false
-    // 缩略图按批拉取，避免一次打满连接
+    // 列表只下载图片缩略图，视频等打开预览时再加载。
+    const images = items.value.filter(row => row.kind === 'image')
     const batch = 4
-    for (let index = 0; index < items.value.length; index += batch) {
-      items.value.slice(index, index + batch).forEach((row) => void loadThumb(row))
-      await new Promise((resolve) => setTimeout(resolve, 120))
+    for (let index = 0; index < images.length && !disposed; index += batch) {
+      images.slice(index, index + batch).forEach(row => void loadThumb(row))
+      await new Promise(resolve => setTimeout(resolve, 120))
     }
     return
   } catch (error: any) {
@@ -335,9 +357,27 @@ async function remove(row: MediaRow): Promise<void> {
   }
 }
 
-function preview(row: MediaRow): void {
+function clearPreview(): void {
+  previewRequest?.abort()
+  previewRequest = undefined
+  if (previewUrl.value) URL.revokeObjectURL(previewUrl.value)
+  previewUrl.value = ''
+  previewItem.value = null
+  previewError.value = ''
+}
+
+async function preview(row: MediaRow): Promise<void> {
+  clearPreview()
   previewItem.value = row
   previewVisible.value = true
+  const request = new AbortController()
+  previewRequest = request
+  try {
+    const data = await fetchMedia(row, request.signal)
+    if (!request.signal.aborted) previewUrl.value = URL.createObjectURL(data)
+  } catch {
+    if (!request.signal.aborted) previewError.value = '素材加载失败，请关闭后重新预览。'
+  }
 }
 
 onMounted(async () => {
@@ -400,6 +440,8 @@ onMounted(async () => {
 .preview-body img,
 .preview-body video {
   max-width: 100%;
+  max-height: 65vh;
+  object-fit: contain;
   border-radius: 8px;
 }
 </style>
