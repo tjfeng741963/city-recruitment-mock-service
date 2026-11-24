@@ -210,6 +210,20 @@ _last_reply_at = 0.0
 # 对企微连做 3 次键鼠发送，正是触发风控掉登录的操作模式。
 _consecutive_send_failures = 0
 
+# 「落点不确定」和「链路不可用」要分开算（2026-11-24）：
+# 键鼠链路正常、只是回车后消息落到了别的会话（搜索命中歧义/换账号残留），
+# 说明输入框、前台、窗口都是好的，下一条消息会重新搜索定位。
+# 之前这种也算进 _consecutive_send_failures，一次发错就把全局自动回复锁死
+# （reception_ready 直接返回 auto_send_failed），累计到 2 还会误判成
+# login_required 去推登录二维码——业务整体停摆，比个别会话发错更严重。
+# 现在这类只把该会话 hold 住，不影响全局发送能力。
+_TARGET_MISS_HINTS = ("回读发现消息落到其他会话", "未回读到目标会话中唯一的新消息")
+
+
+def _is_target_miss(detail: str) -> bool:
+    """落点不确定（不是链路坏了）。"""
+    return any(hint in (detail or "") for hint in _TARGET_MISS_HINTS)
+
 # ── 人工指令（4222 控制台主动发消息）────────────────────────────────────────
 # 主循环里与自动回复串行执行（同一个线程），共享 _last_reply_at 冷却，
 # 保证任意时刻只有一个键鼠发送者。轮询按时间戳判断，不额外起线程。
@@ -1955,7 +1969,7 @@ def _run_flow(store: Store, cfg: dict, cid: str, name: str, flow: dict, *, node_
             if status != "sent":
                 state.set_phase(cid, "held", error=detail)
                 _last_error = detail[:200]
-                if not blocked:
+                if not blocked and not _is_target_miss(detail):
                     _consecutive_send_failures += 1
                 log(f"[流程] {name} 暂停：{detail}", level="warning", scope="flow")
                 return "held"
@@ -2214,14 +2228,17 @@ def _is_first_contact(cid: str, seen: set[str]) -> bool:
 
     判定依据（按可靠性排序）：
     1. `.greeted.json` 里已有 → 不是首次（跨重启有效）；
-    2. `reply_log` 里已有 status='sent' 记录 → 不是首次。这一条是为了兼容
-       "升级前就在聊"的老会话：它们从没进过 greeted 集合，但明显已经打过招呼，
-       不能当新好友再发一遍首句；命中时顺手补登记，后面不再反复查库。
+    2. `reply_log` 里已有**开场白**发送成功记录 → 不是首次。
+
+    2026-11-24 修正：第 2 条原来用「有任何 sent 记录」，本意是兼容"升级前
+    就在聊"的老会话。但换账号后那批客户只被 Agent 回了几句话、从没收到过
+    岗位信息开场白，也被一并算成"打过招呼"，开场白永远不发（全库 scene='开场'
+    只有 1 条）。现在只认真正发过开场白，客户下次来消息会补上开场清单。
     """
     if cid in seen:
         return False
     try:
-        if rlog.sent_count(cid) > 0:
+        if rlog.opening_sent(cid):
             seen.add(cid)
             _save_greeted(seen)
             return False
@@ -2833,7 +2850,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     _brain.log_delivery(agent_trace_id, "unknown", session_key=cid, detail=detail)
                 _last_error = detail[:200]
 
-                if status != "blocked":
+                if status != "blocked" and not _is_target_miss(detail):
                     _consecutive_send_failures += 1
                 stats["unknown"] += 1
                 log("wecom_send_hold", level="warning", scope="send", route="auto",
@@ -2885,6 +2902,9 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
 
                 if status == "blocked":
                     stats["blocked"] += 1
+                elif _is_target_miss(detail):
+                    # 落点不确定不锁全局，只记该条失败
+                    stats["failed"] += 1
                 else:
                     _consecutive_send_failures += 1
                     stats["failed"] += 1
@@ -3137,6 +3157,20 @@ def pump_commands(
             if resolved != contact_id:
                 mlog(f"    目标会话「{name}」→ {resolved}")
             contact_id = resolved
+    # 换账号护栏（2026-11-24）：企微切过账号后，本地会话表和服务端会话里仍留着
+    # 别的账号的会话（实测 Daylan 属于 1688854931904397，当前登录 1688855894882096）。
+    # 这类会话在企微里搜不到，回车会落回当前会话，消息直接发给上一个客户——
+    # 14:17 实测那条自检消息就落到了「小u」。单聊 id 形如 S:<A>_<B>，自己必在其中
+    # 之一；两个 id 都不是自己就说明是别的账号的会话，直接拒绝，不碰窗口。
+    me_id = str(store.self_id() or "")
+    if me_id and contact_id.startswith("S:"):
+        parts = contact_id[2:].split("_")
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit() and me_id not in parts[:2]:
+            mlog(f"    拒绝发送：目标会话属于账号 {parts[0]}/{parts[1]}，当前登录 {me_id}"
+                 f"（换账号前的历史会话，企微搜不到会发错人）", level="warning")
+            receipt("failed")
+            stats["failed"] += 1
+            return stats
     if is_system_conv(contact_id, name):
         mlog(f"    拒绝发送：{name} 是系统/官方会话，人工发送不允许", level="warning")
         receipt("failed")

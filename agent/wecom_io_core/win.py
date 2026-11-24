@@ -42,6 +42,66 @@ class RECT(ctypes.Structure):
     _fields_ = [("left", wt.LONG), ("top", wt.LONG), ("right", wt.LONG), ("bottom", wt.LONG)]
 
 
+class _BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [("biSize", wt.DWORD), ("biWidth", wt.LONG), ("biHeight", wt.LONG),
+                ("biPlanes", wt.WORD), ("biBitCount", wt.WORD), ("biCompression", wt.DWORD),
+                ("biSizeImage", wt.DWORD), ("biXPelsPerMeter", wt.LONG),
+                ("biYPelsPerMeter", wt.LONG), ("biClrUsed", wt.DWORD),
+                ("biClrImportant", wt.DWORD)]
+
+
+def _renders_content(hwnd: int, w: int, h: int) -> bool:
+    """窗口是否真的在绘制内容。
+
+    企微「切换账号」会留下一个 IsWindowVisible=True 但整块全黑的实例窗口
+    （2026-11-24 现场：hwnd=591122 截图 2.4KB 全黑，盖在真窗口 hwnd=2426148
+    的 156KB 截图之上）。只看 visible 会选中它，之后 Ctrl+F/Ctrl+V 全打在空气上，
+    表现为「已回车进入会话」但输入框校验必然失败。
+
+    用 PrintWindow 取若干行像素算平均亮度：全黑窗口亮度趋近 0，正常窗口是浅色底。
+    不能按「颜色种类」判断——聊天区空白处整行就是纯色，会被误杀。
+    探测失败时返回 True（宁可保持旧行为，也不要误杀唯一窗口）。
+    """
+    try:
+        gdi32 = ctypes.windll.gdi32
+        hdc = user32.GetWindowDC(hwnd)
+        if not hdc:
+            return True
+        memdc = gdi32.CreateCompatibleDC(hdc)
+        bmp = gdi32.CreateCompatibleBitmap(hdc, w, h)
+        old = gdi32.SelectObject(memdc, bmp)
+        try:
+            if not user32.PrintWindow(hwnd, memdc, 2):
+                return True
+            bi = _BITMAPINFOHEADER()
+            bi.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+            bi.biWidth = w
+            bi.biHeight = -h
+            bi.biPlanes = 1
+            bi.biBitCount = 32
+            buf = ctypes.create_string_buffer(w * h * 4)
+            # 必须整图取：GetDIBits 在 biHeight=-1 时对 uStartScan 的处理与预期不符，
+            # 逐行取（cScanLines=1）在本机实测恒返回全 0（2026-11-24）。
+            if not gdi32.GetDIBits(memdc, bmp, 0, h, buf, ctypes.byref(bi), 0):
+                return True
+            data = buf.raw
+            total = 0
+            count = 0
+            for i in range(0, len(data) - 3, 4 * 97):
+                total += data[i] + data[i + 1] + data[i + 2]
+                count += 1
+            if not count:
+                return True
+            return (total / count / 3) > 25
+        finally:
+            gdi32.SelectObject(memdc, old)
+            gdi32.DeleteObject(bmp)
+            gdi32.DeleteDC(memdc)
+            user32.ReleaseDC(hwnd, hdc)
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def find_window() -> dict | None:
     found = []
 
@@ -62,7 +122,21 @@ def find_window() -> dict | None:
         return True
 
     user32.EnumWindows(_cb, None)
-    return max(found, key=lambda d: d["rect"][2] * d["rect"][3]) if found else None
+    if not found:
+        return None
+    # 企微「切换账号」会同时留下新旧两个实例的 WeWorkWindow：旧账号那个仍存在但被隐藏，
+    # 且尺寸往往更大。只按面积挑会选中已登出的旧窗口，发送必然被拦（2026-11-24 实测
+    # hwnd=853446 pid=4968 隐藏、hwnd=591122 pid=6772 可见）。优先可见窗口。
+    visible = [d for d in found if d["visible"]]
+    pool = visible or found
+    if len(pool) > 1:
+        # 可见窗口也可能不止一个，其中会有「可见但全黑」的切换账号残留窗口，
+        # 它常常尺寸更大并盖在真窗口上。挑第一个真正在渲染的。
+        pool = sorted(pool, key=lambda d: d["rect"][2] * d["rect"][3], reverse=True)
+        for item in pool:
+            if _renders_content(item["hwnd"], item["rect"][2], item["rect"][3]):
+                return item
+    return max(pool, key=lambda d: d["rect"][2] * d["rect"][3])
 
 
 def activate(hwnd: int) -> bool:

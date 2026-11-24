@@ -828,6 +828,24 @@ def sent_count(conv_id: str) -> int:
         con.close()
 
 
+def opening_sent(conv_id: str) -> bool:
+    """该会话是否真的发过开场白。
+
+    2026-11-24：`_is_first_contact` 原来用 sent_count>0 判断「已打过招呼」，
+    只要回过任何一句话就把会话记进 greeted，导致换账号后那批只被 AI 回过
+    几句、从没收到岗位信息开场白的客户永远收不到开场白。改判定依据为
+    「有没有 scene='开场' 的 sent 记录」。
+    """
+    con = _conn()
+    try:
+        return con.execute(
+            "SELECT 1 FROM reply_log WHERE conv_id=? AND scene='开场' AND status='sent' LIMIT 1",
+            (str(conv_id),),
+        ).fetchone() is not None
+    finally:
+        con.close()
+
+
 def known_message_ids() -> set[str]:
     con = _conn()
     try:
