@@ -51,14 +51,20 @@
           <span class="opening-hint" v-else>旧版开场按此顺序发送。启用的节点流程以画布保存的顺序为准。</span>
         </div>
 
-        <div v-if="draft" ref="editorRef" class="opening-edit">
-          <div class="edit-head">
-            <span class="kind-tag">
-              {{ KIND_LABEL[draft.kind] }} ·
-              {{ draft.id ? `编辑第 ${draft.seq ?? ''} 条` : '新增一条' }}
-            </span>
-            <el-button link size="small" @click="draft = null">取消</el-button>
-          </div>
+        <el-dialog
+          v-model="editorVisible"
+          :title="draft ? `${KIND_LABEL[draft.kind]} · ${draft.id ? '编辑开场' : '新增开场'}` : '开场'"
+          width="680px"
+          append-to-body
+          destroy-on-close
+          class="opening-editor-dialog"
+          @closed="onEditorClosed"
+        >
+          <div v-if="draft" class="opening-edit">
+            <div class="edit-head">
+              <span class="kind-tag">{{ KIND_LABEL[draft.kind] }} · {{ draft.id ? `第 ${draft.seq ?? ''} 条` : '新增一条' }}</span>
+              <span class="opening-hint">保存后按列表顺序逐条发送</span>
+            </div>
           <el-input
             v-if="draft.kind === 'text'"
             v-model="draft.content"
@@ -84,10 +90,12 @@
           <el-form-item v-if="!embedded" label="间隔（秒）" class="delay-row">
             <el-input-number v-model="delaySeconds" :min="2" :max="120" controls-position="right" />
           </el-form-item>
-          <div class="edit-tools">
-            <el-button type="primary" :loading="savingOpening" @click="saveDraft">保存</el-button>
           </div>
-        </div>
+          <template #footer>
+            <el-button @click="editorVisible = false">取消</el-button>
+            <el-button type="primary" :loading="savingOpening" @click="saveDraft">保存</el-button>
+          </template>
+        </el-dialog>
 
         <div v-if="!loading && openings.length" class="opening-selection">
           <el-checkbox
@@ -115,7 +123,18 @@
           v-for="(entry, index) in openings"
           :key="entry.id"
           class="opening-card"
-          :class="{ 'is-editing': draft?.id === entry.id }"
+          :class="{
+            'is-editing': draft?.id === entry.id,
+            'is-dragging': dragIndex === index,
+            'is-drag-over': dragOverIndex === index && dragIndex !== index,
+            'is-draggable': canDrag,
+          }"
+          :draggable="canDrag"
+          @dragstart="onDragStart(index, $event)"
+          @dragover.prevent="onDragOver(index)"
+          @dragleave="onDragLeave(index)"
+          @drop.prevent="onDrop(index)"
+          @dragend="onDragEnd"
         >
           <div class="opening-head">
             <div class="opening-label">
@@ -158,7 +177,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { ElDrawer, ElMessage, ElMessageBox } from 'element-plus'
 import { agentApi } from '../../api/agent'
 import { mediaApi } from '../../api/core'
@@ -217,9 +236,15 @@ const savingOpening = ref(false)
 const uploading = ref(false)
 const draft = ref<OpeningDraft | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
-const editorRef = ref<HTMLElement | null>(null)
+// 编辑改为模态框：内联展开在长列表里会把下面的条目顶走，改一条要来回滚
+const editorVisible = ref(false)
+// 拖拽排序：只记录下标，落点高亮靠 CSS，真正重排走 reorderOpenings
+const dragIndex = ref<number | null>(null)
+const dragOverIndex = ref<number | null>(null)
 
 const openingBusy = computed(() => loading.value || savingOpening.value || deletingOpenings.value || updatingOpenings.value)
+// 只有一条时拖拽没有意义；embedded（内嵌在岗位抽屉）里仍允许拖，顺序对发送有影响
+const canDrag = computed(() => !openingBusy.value && openings.value.length > 1)
 
 const personaDirty = computed(() => persona.value !== savedPersona.value)
 const delaySeconds = computed({
@@ -258,12 +283,6 @@ async function load(opening = false): Promise<void> {
   }
 }
 
-function revealEditor(): void {
-  void nextTick(() => {
-    editorRef.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
-  })
-}
-
 async function loadMedia(): Promise<void> {
   try {
     const { data } = await mediaApi.list()
@@ -291,7 +310,7 @@ async function savePersona(): Promise<void> {
 function startAdd(kind: 'text' | 'image' | 'video'): void {
   void loadMedia()
   draft.value = { id: null, kind, content: '', media_name: '', delay_ms: MIN_DELAY_MS }
-  revealEditor()
+  editorVisible.value = true
 }
 
 function startEdit(entry: PersonaOpening): void {
@@ -304,7 +323,64 @@ function startEdit(entry: PersonaOpening): void {
     delay_ms: entry.delay_ms ?? MIN_DELAY_MS,
     seq: entry.seq,
   }
-  revealEditor()
+  editorVisible.value = true
+}
+
+function onEditorClosed(): void {
+  draft.value = null
+}
+
+function onDragStart(index: number, event: DragEvent): void {
+  if (!canDrag.value) return
+  dragIndex.value = index
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', String(index))
+  }
+}
+
+function onDragOver(index: number): void {
+  if (dragIndex.value === null || dragIndex.value === index) return
+  dragOverIndex.value = index
+}
+
+function onDragLeave(index: number): void {
+  if (dragOverIndex.value === index) dragOverIndex.value = null
+}
+
+function onDragEnd(): void {
+  dragIndex.value = null
+  dragOverIndex.value = null
+}
+
+/** 拖到目标位置：先本地重排让界面跟手，再让后端在一个事务里重写 seq。 */
+async function onDrop(index: number): Promise<void> {
+  const from = dragIndex.value
+  dragIndex.value = null
+  dragOverIndex.value = null
+  if (from === null || from === index || !props.position || openingBusy.value) return
+  const positionId = props.position.id
+  const ids = openings.value.map((entry) => entry.id)
+  const moved = [...ids]
+  const [picked] = moved.splice(from, 1)
+  moved.splice(index, 0, picked)
+  const reordered = [...openings.value]
+  const [item] = reordered.splice(from, 1)
+  reordered.splice(index, 0, item)
+  openings.value = reordered
+  try {
+    updatingOpenings.value = true
+    await agentApi.reorderOpenings({ position_id: positionId, ids: moved })
+    if (props.position?.id !== positionId) return
+    await load()
+    emit('changed')
+    ElMessage.success('顺序已更新')
+  } catch (error: any) {
+    ElMessage.error(error?.response?.data?.detail || '排序失败')
+    await load()
+  } finally {
+    updatingOpenings.value = false
+  }
 }
 
 function pickMedia(): void {
@@ -374,6 +450,7 @@ async function saveDraft(): Promise<void> {
     if (entry.id) await agentApi.updateOpening(entry.id, payload)
     else await agentApi.createOpening(payload)
     ElMessage.success(entry.id ? '已保存' : '已添加')
+    editorVisible.value = false
     draft.value = null
     await load()
     emit('changed')
@@ -573,6 +650,29 @@ defineExpose({ hasPendingChanges: () => personaDirty.value || draft.value !== nu
   border-radius: 10px;
   padding: 10px 12px;
   margin-bottom: 8px;
+}
+
+/* 拖动排序：抓住卡片任意位置拖动，落点用虚线边框 + 顶部高亮线提示 */
+.opening-card.is-draggable {
+  cursor: grab;
+}
+
+.opening-card.is-draggable:active {
+  cursor: grabbing;
+}
+
+.opening-card.is-dragging {
+  opacity: 0.4;
+}
+
+.opening-card.is-drag-over {
+  border-color: var(--bd-primary, #0b57d0);
+  border-style: dashed;
+  box-shadow: 0 -2px 0 0 var(--bd-primary, #0b57d0);
+}
+
+.opening-editor-dialog .opening-edit {
+  padding: 0;
 }
 
 .opening-selection,

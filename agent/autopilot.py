@@ -2539,6 +2539,24 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                         opening_uncertain = False
                         opening_source = _reply_source_identity()
                         opening_target_verified = False
+
+                        def _finish_opening_on_media_failure(detail_m: str) -> None:
+                            """文本已确认落点、媒体没确认时的收尾（2026-11-24）。
+
+                            开场配的是「招聘要求 → 薪资班次 → 视频」，视频粘贴后企微要
+                            上传转码，回读库常常超时。原来只要媒体没确认就把整条开场标
+                            unknown，`has_unconfirmed_opening()` 随即把这个会话锁死，
+                            客户后面问什么都不回（实测青冥「包吃包住吗」被 held）。
+                            文本已经用哨兵法确认过落点，说明会话选对了、消息也发出去了，
+                            媒体没确认不该否定整轮：只记媒体失败，开场按完成收尾。
+                            """
+                            greeted.add(cid)
+                            _save_greeted(greeted)
+                            rlog.mark_skipped(
+                                mid, cid, f"首次接触只播开场（文本已确认 {sent_items} 条，媒体未确认：{detail_m[:60]}）")
+                            stats["skipped"] += 1
+                            log(f"[开场] {name} 文本已确认 {sent_items} 条，媒体未确认：{detail_m}",
+                                level="warning", scope="send", message_id=mid, trace_id=trace)
                         for item in ores["items"]:
                             backoff = 1 + min(_consecutive_send_failures, 3)
                             wait = cfg["cooldown"] * backoff - (time.time() - _last_reply_at)
@@ -2619,8 +2637,11 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                 reason = _sequence_block_reason(cid, cfg, opening_source, store, name)
                                 if not ok_pre or reason:
                                     detail_m = reason or f"开场媒体预取失败：{pre_detail}"
-                                    rlog.mark_unknown(mid, cid, detail_m, "开场", partial=bool(sent_items))
                                     _brain.log_receipt(cid, seq, kind, "failed", detail_m)
+                                    if sent_items:
+                                        _finish_opening_on_media_failure(detail_m)
+                                        return stats
+                                    rlog.mark_unknown(mid, cid, detail_m, "开场")
                                     stats["unknown"] += 1
                                     return stats
                                 if not opening_claimed:
@@ -2634,13 +2655,15 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                 )
                                 if media_status == "blocked":
                                     _last_error = detail_m[:200]
-                                    if sent_items or opening_uncertain:
-                                        rlog.mark_unknown(mid, cid, detail_m, "开场", partial=bool(sent_items))
+                                    _brain.log_receipt(cid, seq, kind, "failed", detail_m)
+                                    if sent_items:
+                                        _finish_opening_on_media_failure(detail_m)
+                                    elif opening_uncertain:
+                                        rlog.mark_unknown(mid, cid, detail_m, "开场")
                                         stats["unknown"] += 1
                                     else:
                                         rlog.mark_failed(mid, cid, detail_m, "开场")
                                         stats["blocked"] += 1
-                                    _brain.log_receipt(cid, seq, kind, "failed", detail_m)
                                     return stats
                                 if media_status == "sent":
                                     rlog.mark_sent(fake_id, cid, f"开场-{kind}", f"{kind}:{item['media_name']}")
@@ -2656,8 +2679,11 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                     opening_trace = _brain.log_receipt(cid, seq, kind, "failed", detail_m)
                                     _brain.log_delivery(opening_trace, "failed", session_key=cid, detail=detail_m)
                                     log(f"    [开场 {seq}] {kind}:{item['media_name']} 发送失败：{detail_m}", level="warning")
-                                    rlog.mark_unknown(mid, cid, detail_m, "开场", partial=bool(sent_items))
-                                    stats["unknown"] += 1
+                                    if sent_items:
+                                        _finish_opening_on_media_failure(detail_m)
+                                    else:
+                                        rlog.mark_unknown(mid, cid, detail_m, "开场")
+                                        stats["unknown"] += 1
                                     return stats
                             else:
                                 # 空内容/未知类型：跳过并上报
@@ -2667,9 +2693,17 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                         greeted.add(cid)
                         _save_greeted(greeted)
                         log(f"[开场] {name} 播完 {sent_items}/{len(ores['items'])} 条文本，之后进入 Agent 对话")
-                        rlog.mark_skipped(mid, cid, "首次接触只播开场，不再同轮调用 chat")
+                        if not (hint or "").strip():
+                            # 加好友系统消息（type=1011 等）没有正文，播完开场就收尾
+                            rlog.mark_skipped(mid, cid, "首次接触只播开场，无正文不调用 chat")
+                            stats["skipped"] += 1
+                            continue
+                        # 有正文（客户第一句就是「找工作」「多少钱」这类）：开场播完后
+                        # 继续回复这一句。原来无条件 continue，客户问了一句却只收到
+                        # 岗位清单、没有针对性回应，看起来像没回（2026-11-24 确认要改）。
+                        rlog.mark_skipped(mid, cid, "开场已播，继续回复客户正文")
                         stats["skipped"] += 1
-                        continue
+                        log(f"[开场] {name} 开场已播完，继续回复客户这一句", scope="send", message_id=mid)
                     else:
                         log(f"    [开场] 没取到清单（{ores.get('detail')}），直接进对话")
                 if not hint and not dry:
