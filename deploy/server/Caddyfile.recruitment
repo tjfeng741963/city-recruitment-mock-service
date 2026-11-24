@@ -1,6 +1,9 @@
 {
 	admin off
 	default_sni 119.91.113.100
+	servers {
+		protocols h1 h2
+	}
 }
 
 https://119.91.113.100 {

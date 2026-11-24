@@ -76,6 +76,9 @@ describe("upload endpoints persist files", () => {
     const served = await app.inject({ method: "GET", url: String(url) });
     expect(served.statusCode).toBe(200);
     expect(Buffer.from(served.rawPayload)).toEqual(payload);
+    expect(served.headers["content-type"]).toBe("image/png");
+    expect(served.headers["content-security-policy"]).toBe("sandbox");
+    expect(served.headers["x-content-type-options"]).toBe("nosniff");
   });
 
   it("sanitizes path separators in the original filename", async () => {
