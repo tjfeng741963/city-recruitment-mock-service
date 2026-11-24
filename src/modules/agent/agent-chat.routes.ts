@@ -736,8 +736,12 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         if (!groupExists) {
           db.prepare(
             `INSERT INTO agent_conversations(device_code,customer_id,nickname,state,unread,external_conversation_id,updated_at)
-             VALUES (?,?,'群聊','active',0,?,CURRENT_TIMESTAMP)`,
-          ).run(deviceCode, groupChat, `group:${groupChat}`);
+             VALUES (?,?,?,'active',0,?,CURRENT_TIMESTAMP)`,
+          ).run(deviceCode, groupChat, groupChat, `group:${groupChat}`);
+        } else {
+          db.prepare(
+            "UPDATE agent_conversations SET nickname=? WHERE device_code=? AND customer_id=? AND nickname<>?",
+          ).run(groupChat, deviceCode, groupChat, groupChat);
         }
         const finalKey = `manual:${deviceCode}:${sessionKey}`;
         // 和 Agent 链路同一套一行文案：姓名 微信名称 手机 工厂 岗位 日期 时间 面试点
@@ -1094,10 +1098,18 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
                 )
                 .get(convRow.device_code, groupChat);
               if (!groupExists) {
+                // nickname 必须是真实群名：客户端是拿 nickname 去企微搜索框里找会话的，
+                // 早先写死成「群聊」会搜不到，发送被「不在企微会话列表」拦掉
+                // （2026-11-25 实测：面试信息采集成功，群通知发不出去）。
                 db.prepare(
                   `INSERT INTO agent_conversations(device_code,customer_id,nickname,state,unread,external_conversation_id,updated_at)
-                   VALUES (?,?,'群聊','active',0,?,CURRENT_TIMESTAMP)`,
-                ).run(convRow.device_code, groupChat, `group:${groupChat}`);
+                   VALUES (?,?,?,'active',0,?,CURRENT_TIMESTAMP)`,
+                ).run(convRow.device_code, groupChat, groupChat, `group:${groupChat}`);
+              } else {
+                // 历史行 nickname 是「群聊」，顺手纠正过来
+                db.prepare(
+                  "UPDATE agent_conversations SET nickname=? WHERE device_code=? AND customer_id=? AND nickname<>?",
+                ).run(groupChat, convRow.device_code, groupChat, groupChat);
               }
               // 群通知：一条消息、一行字。姓名后面紧跟微信名称（备注优先，
               // 其次是客户企微昵称），再是手机、工厂、岗位、日期、时间、面试点。

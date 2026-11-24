@@ -376,6 +376,28 @@ def begin_reply_attempt(message_id: str, conv_id: str, scene: str, reply_text: s
         con.close()
 
 
+def reopen_for_reply(message_id: str, conv_id: str) -> bool:
+    """把被开场「占位」的记录复位成 pending，让同一条消息能继续走正常回复。
+
+    开场发送前会调 begin_reply_attempt(mid, ...)，把这条记录先置成
+    status='unknown'（防止崩溃后重放）。开场文本确认成功后要接着回复客户这句
+    话，但 begin_reply_attempt 只接受 pending/failed，于是发送被静默跳过
+    （2026-11-25 实测：日志有 [Agent] 生成内容，却没有任何 wecom_send）。
+    只在「开场文本已确认」后调用，避免掩盖真正的 unknown。
+    """
+    con = _conn()
+    try:
+        cur = con.execute(
+            "UPDATE reply_log SET status='pending', error=NULL, last_step='reopen-after-opening'"
+            " WHERE conv_id=? AND message_id=? AND status IN ('unknown','skipped')",
+            (str(conv_id), str(message_id)),
+        )
+        con.commit()
+        return cur.rowcount == 1
+    finally:
+        con.close()
+
+
 def has_unconfirmed_opening(conv_id: str) -> bool:
     con = _conn()
     try:
