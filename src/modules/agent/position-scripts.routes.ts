@@ -205,9 +205,17 @@ export async function registerPositionScriptRoutes(app: FastifyInstance, db: Dat
     if (compatibilityPreview) {
       if (asset.kind !== "video") return reply.code(422).send({ detail: "仅支持生成视频预览。" });
       if (!fs.existsSync(absolute)) return reply.code(404).send({ detail: "Media file missing" });
-      const preview = await compatibleVideoPreview(absolute);
-      if ("status" in preview) return reply.code(preview.status).send({ detail: preview.detail });
-      return reply.header("Cache-Control", "private, no-store").type("video/mp4").send(preview.data);
+      const controller = new AbortController();
+      const abort = () => controller.abort();
+      reply.raw.once("close", abort);
+      try {
+        const preview = await compatibleVideoPreview(absolute, controller.signal);
+        if (controller.signal.aborted) return reply;
+        if ("status" in preview) return reply.code(preview.status).send({ detail: preview.detail });
+        return reply.header("Cache-Control", "private, no-store").type("video/mp4").send(preview.data);
+      } finally {
+        reply.raw.removeListener("close", abort);
+      }
     }
     let buffer: Buffer;
     try {

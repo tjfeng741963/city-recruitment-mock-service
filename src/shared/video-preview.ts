@@ -12,7 +12,7 @@ export type VideoPreviewResult =
   | { data: Buffer }
   | { status: 422 | 503; detail: string };
 
-export async function compatibleVideoPreview(source: string): Promise<VideoPreviewResult> {
+export async function compatibleVideoPreview(source: string, signal?: AbortSignal): Promise<VideoPreviewResult> {
   if (activeConversions >= 2) return { status: 503, detail: "视频预览正在处理其他文件，请稍后重试。" };
   activeConversions += 1;
   let directory: string | undefined;
@@ -28,7 +28,7 @@ export async function compatibleVideoPreview(source: string): Promise<VideoPrevi
       "-c:v", "libx264", "-threads", "2", "-preset", "veryfast", "-crf", "25",
       "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart",
       "-fs", String(MEDIA_MAX_BYTES + 1024 * 1024), output,
-    ], { timeout: 45_000, killSignal: "SIGKILL", maxBuffer: 128 * 1024, windowsHide: true });
+    ], { signal, timeout: 45_000, killSignal: "SIGKILL", maxBuffer: 128 * 1024, windowsHide: true });
     const { size } = await stat(output);
     if (!size || size > MEDIA_MAX_BYTES) return { status: 422, detail: "视频预览超出大小限制，请压缩视频后重新上传。" };
     return { data: await readFile(output) };
