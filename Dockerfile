@@ -26,6 +26,8 @@ FROM node:22.21.1-bookworm-slim AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
+
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/src/db/migrations ./src/db/migrations

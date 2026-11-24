@@ -11,7 +11,7 @@
         <span class="preview-badge">{{ kind === 'video' ? '查看视频' : '查看图片' }}</span>
       </button>
       <el-image v-else-if="kind === 'image'" :src="url" :alt="name" fit="contain" :preview-src-list="[url]" preview-teleported @error="error = '图片解码失败，请检查素材文件'" />
-      <video v-else :src="url" controls preload="metadata" :aria-label="`视频预览 ${name}`" @error="error = '视频解码失败，请检查素材文件'" />
+      <VideoPreview v-else :key="url" :src="url" :name="name" />
     </template>
   </div>
 </template>
@@ -19,6 +19,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref, watch } from 'vue'
 import http from '../../api/http'
+import VideoPreview from './VideoPreview.vue'
 const props = defineProps<{ name: string; kind: string; compact?: boolean }>()
 defineEmits<{ (event: 'preview'): void }>()
 const url = ref('')
@@ -52,8 +53,8 @@ onBeforeUnmount(() => { sequence += 1; clear() })
 </script>
 
 <style scoped>
-.flow-media-preview { margin: 8px 0; min-width: 0; }
-.flow-media-preview :deep(.el-image),.flow-media-preview > video { display: block; width: 100%; max-height: 280px; border-radius: 5px; background: var(--el-fill-color-light); }
+.flow-media-preview { --preview-video-height: 280px; margin: 8px 0; min-width: 0; }
+.flow-media-preview :deep(.el-image) { display: block; width: 100%; max-height: 280px; border-radius: 5px; background: var(--el-fill-color-light); }
 .preview-placeholder { display: grid; gap: 4px; padding: 12px 6px; color: var(--el-text-color-secondary); font-size: 12px; text-align: center; background: var(--el-fill-color-light); }
 .compact { margin: 3px 0; flex-shrink: 0; height: 42px; }
 .compact .preview-placeholder { padding: 8px; }

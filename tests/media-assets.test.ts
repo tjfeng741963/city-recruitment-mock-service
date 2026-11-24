@@ -116,6 +116,21 @@ describe("media assets", () => {
     expect((await app.inject({ method: "GET", url: "/api/v1/agent/media/%E6%B2%A1%E6%9C%89.png", headers: svc })).statusCode).toBe(404);
   });
 
+  it("limits compatible previews to administrators and leaves the original download intact", async () => {
+    const name = "image-preview-fixture.png";
+    const created = await upload(name);
+    expect(created.statusCode).toBe(200);
+    const url = `/api/v1/agent/media/${name}`;
+    const preview = `${url}?preview=compatible`;
+    for (const headers of [device, svc, {}]) {
+      expect((await app.inject({ method: "GET", url: preview, headers })).statusCode).toBe(403);
+    }
+    expect((await app.inject({ method: "GET", url: preview, headers: admin })).statusCode).toBe(422);
+    const original = await app.inject({ method: "GET", url, headers: device });
+    expect(original.headers["x-content-sha256"]).toBe(PNG_SHA);
+    expect(original.rawPayload.equals(PNG_BUFFER)).toBe(true);
+  });
+
   it("rejects bad uploads and supports delete", async () => {
     expect((await upload("")).statusCode).toBe(422);
     expect((await upload("a.png", "audio")).statusCode).toBe(422);

@@ -306,7 +306,7 @@ HTTP 仍是 200——调用方按 `ok` 判断，不要按状态码。模型输�
 | GET | `/api/v1/media` | admin | 素材库列表 |
 | POST | `/api/v1/media` | admin | 上传，body `{name,kind,data_base64}`，单文件 ≤ 20MB |
 | DELETE | `/api/v1/media/:id` | admin | 删记录（文件按 sha 复用，不删文件） |
-| GET | `/api/v1/agent/media/:name` | admin JWT、设备令牌或服务令牌 | 客户端下载/管理员预览素材；普通用户 JWT 不允许 |
+| GET | `/api/v1/agent/media/:name` | admin JWT、设备令牌或服务令牌 | 默认返回原文件与校验和。仅管理员可传 `?preview=compatible`，按需生成 H.264/AAC MP4 供网页预览。原文件与下发校验和保持原值。 |
 
 ---
 
