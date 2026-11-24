@@ -7,7 +7,8 @@
     <template v-else-if="url">
       <button v-if="compact" class="thumbnail-button" :aria-label="`查看${kind === 'video' ? '视频' : '图片'} ${name}`" @click="$emit('preview')">
         <img v-if="kind === 'image'" :src="url" :alt="name" @error="error = '图片解码失败，请检查素材文件'" />
-        <template v-else><video :src="url" muted preload="metadata" /><span class="video-badge">▶ 查看视频</span></template>
+        <video v-else :src="url" muted preload="metadata" />
+        <span class="preview-badge">{{ kind === 'video' ? '查看视频' : '查看图片' }}</span>
       </button>
       <el-image v-else-if="kind === 'image'" :src="url" :alt="name" fit="contain" :preview-src-list="[url]" preview-teleported @error="error = '图片解码失败，请检查素材文件'" />
       <video v-else :src="url" controls preload="metadata" :aria-label="`视频预览 ${name}`" @error="error = '视频解码失败，请检查素材文件'" />
@@ -58,5 +59,5 @@ onBeforeUnmount(() => { sequence += 1; clear() })
 .compact .preview-placeholder { padding: 8px; }
 .thumbnail-button { position: relative; width: 100%; height: 42px; padding: 0; overflow: hidden; border: 0; border-radius: 4px; background: var(--el-fill-color-light); cursor: pointer; }
 .thumbnail-button img,.thumbnail-button video { width: 100%; height: 100%; object-fit: contain; }
-.video-badge { position: absolute; inset: 0; display: grid; place-items: center; color: #fff; background: #0005; font-size: 12px; }
+.preview-badge { position: absolute; right: 4px; bottom: 4px; padding: 2px 5px; border-radius: 4px; color: #fff; background: #16233de6; font-size: 12px; line-height: 16px; }
 </style>

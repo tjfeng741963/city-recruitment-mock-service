@@ -4,7 +4,7 @@
       <aside class="left-panel">
         <div class="panel-title">
           <span>设备列表</span>
-          <el-button link size="small" title="收起设备列表" @click="leftCollapsed = true">‹</el-button>
+          <el-button link size="small" aria-label="收起设备列表" @click="leftCollapsed = true">收起</el-button>
         </div>
         <div v-loading="devicesLoading" class="device-list">
           <div

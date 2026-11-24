@@ -3,11 +3,11 @@
     <div class="canvas-toolbar">
       <span class="canvas-caption">{{ flow.nodes.length }} 个节点 · {{ flow.edges.length }} 条连接</span>
       <div class="zoom-controls" aria-label="画布缩放">
-        <el-button size="small" :icon="Minus" aria-label="缩小画布" title="缩小" :disabled="zoom <= 0.25" @click="zoomBy(-0.1)" />
+        <el-button size="small" :icon="Minus" :disabled="zoom <= 0.25" @click="zoomBy(-0.1)">缩小</el-button>
         <el-slider :model-value="zoomPercent" :min="25" :max="150" :step="5" :format-tooltip="(value: number) => `${value}%`" aria-label="画布缩放比例" @update:model-value="setZoomPercent" />
         <span class="zoom-value" aria-live="polite">{{ zoomPercent }}%</span>
-        <el-button size="small" :icon="Plus" aria-label="放大画布" title="放大" :disabled="zoom >= 1.5" @click="zoomBy(0.1)" />
-        <el-button size="small" @click="setZoom(1)">100%</el-button>
+        <el-button size="small" :icon="Plus" :disabled="zoom >= 1.5" @click="zoomBy(0.1)">放大</el-button>
+        <el-button size="small" @click="setZoom(1)">重置缩放</el-button>
         <el-button size="small" :icon="FullScreen" @click="fitToCanvas">适配画布</el-button>
       </div>
     </div>

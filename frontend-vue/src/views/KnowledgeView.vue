@@ -73,7 +73,7 @@
             <el-option label="启用" value="enabled" />
             <el-option label="停用" value="disabled" />
           </el-select>
-          <el-button :icon="Refresh" circle title="刷新" @click="load" />
+          <el-button :icon="Refresh" @click="load">刷新</el-button>
         </div>
 
         <div v-if="selectedIds.length || batchBusy" class="kb-batch-bar">

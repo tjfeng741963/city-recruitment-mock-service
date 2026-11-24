@@ -6,7 +6,12 @@
     <span v-if="error" role="alert">{{ error }}</span>
     <span v-else-if="!selected" class="hint">先选岗位，流程、问答和素材会使用同一份招聘资料。</span>
     <template v-else>
-      <el-button v-for="link in links" :key="link.path" :type="route.path === link.path ? 'primary' : 'default'" plain @click="navigate(link.path)">{{ link.label }}</el-button>
+      <nav class="position-links" aria-label="岗位接待页面">
+        <template v-for="link in links" :key="link.path">
+          <span v-if="route.path === link.path" class="position-link" aria-current="page">{{ link.label }}</span>
+          <RouterLink v-else class="position-link" :to="positionLink(link.path, selected)">{{ link.label }}</RouterLink>
+        </template>
+      </nav>
     </template>
   </div>
 </template>
@@ -31,7 +36,6 @@ async function change(value: unknown) {
   savePositionContext(user(), id)
   await router.replace({ query: { ...route.query, position_id: id ? String(id) : undefined } })
 }
-function navigate(path: string) { void router.push(positionLink(path, selected.value || 0)) }
 onMounted(async () => {
   try {
     const {data} = await positionsApi.list({page:1,page_size:1000})
@@ -61,4 +65,32 @@ watch(() => route.query.position_id, async raw => {
 <style scoped>
 .position-context{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 0 16px;padding:12px;border:1px solid var(--bd-border);border-radius:8px;background:var(--el-bg-color)}
 .position-context .el-select{width:300px;max-width:100%}.hint{font-size:12px;color:var(--bd-text-tertiary)}
+.position-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.position-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 4px 12px;
+  border: 1px solid var(--bd-border);
+  border-radius: 8px;
+  color: var(--rk-accent-deep);
+  font-size: 14px;
+  text-decoration: none;
+}
+a.position-link:hover {
+  background: var(--el-fill-color-light);
+}
+a.position-link:focus-visible {
+  outline: 2px solid var(--rk-accent);
+  outline-offset: 2px;
+}
+.position-link[aria-current="page"] {
+  background: var(--el-color-primary-light-9);
+  border-color: var(--el-color-primary-light-5);
+  font-weight: 600;
+}
 </style>

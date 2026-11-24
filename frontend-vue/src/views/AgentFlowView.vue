@@ -249,10 +249,9 @@
                           link
                           type="danger"
                           :disabled="selectedNode.parts!.length <= 1"
-                          title="删除内容"
                           :icon="Delete"
                           @click="removePart(selectedNode!, index)"
-                        />
+                        >删除内容</el-button>
                       </div>
                       <el-select v-if="part.kind === 'text' && savedOpeningTexts.length"
                         aria-label="选用已保存开场文字" class="full-width opening-picker" filterable
@@ -326,10 +325,9 @@
                     link
                     type="danger"
                     :disabled="isRequiredEdge(selectedEdge)"
-                    title="删除可选连接"
                     :icon="Delete"
                     @click="removeSelectedEdge"
-                  />
+                  >删除连接</el-button>
                 </div>
                 <el-form label-position="top" size="small" class="inspector-form">
                   <el-form-item label="从节点">

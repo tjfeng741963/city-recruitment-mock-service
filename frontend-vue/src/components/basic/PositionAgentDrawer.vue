@@ -128,16 +128,15 @@
               <span class="kind-tag" :class="entry.kind">{{ KIND_LABEL[entry.kind] }} · 第 {{ index + 1 }} 条</span>
             </div>
             <div class="opening-tools">
-              <el-button v-if="!embedded" link size="small" :disabled="openingBusy || index === 0" title="上移" @click="move(index, -1)">↑</el-button>
+              <el-button v-if="!embedded" link size="small" :disabled="openingBusy || index === 0" @click="move(index, -1)">上移</el-button>
               <el-button
                 v-if="!embedded"
                 link
                 size="small"
                 :disabled="openingBusy || index === openings.length - 1"
-                title="下移"
                 @click="move(index, 1)"
               >
-                ↓
+                下移
               </el-button>
               <el-button link size="small" :disabled="openingBusy" @click="startEdit(entry)">编辑</el-button>
               <el-button link size="small" type="danger" :disabled="openingBusy" @click="removeEntry(entry)">删除</el-button>
@@ -529,8 +528,6 @@ defineExpose({ hasPendingChanges: () => personaDirty.value || draft.value !== nu
   margin-bottom: 10px;
 }
 
-/* 主题层的 .el-button.is-plain 把背景刷成实心、文字压成同色，
-   这里直接写死配色，不依赖 Element Plus 的 variant 级联。 */
 .pill-btn {
   background: #ffffff !important;
   border: 1px solid #c4c7c5 !important;
