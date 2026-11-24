@@ -47,7 +47,8 @@ def store(tmp_path):
     obj.sessions.return_value = []
     obj.recent.return_value = []
     obj._conn.side_effect = lambda name: sqlite3.connect(f"file:{path}?mode=ro", uri=True) if name == "user.db" else None
-    obj.contacts.side_effect = lambda: {row[0]: row[1] for row in read(path, "SELECT wxid,name FROM wechat_contactV1")}
+    obj.contacts.side_effect = lambda: {row[0]: row[1] for row in read(
+        path, "SELECT id,name FROM user_table UNION ALL SELECT wxid,name FROM wechat_contactV1")}
     return obj
 
 
@@ -59,7 +60,9 @@ def read(path, sql, parameters=()):
         return con.execute(sql, parameters).fetchall()
 
 
-def add(store, contact_id, name="New customer", table="wechat_contactV1"):
+def add(store, contact_id, name=None, table="wechat_contactV1"):
+    if name is None:
+        name = f"New customer {contact_id}"
     with sqlite3.connect(store.data_dir / "user.db") as con:
         con.execute(f"INSERT OR REPLACE INTO {table} VALUES (?,?)", (contact_id, name))
 
@@ -316,3 +319,177 @@ def test_partial_database_refresh_is_not_accepted_and_can_be_retried(agent, stor
         agent.refresh_store(store)
     agent.refresh_store(store)
     assert store.refresh.call_count == 2
+
+
+def test_unknown_account_never_creates_baseline_or_contact_trigger(agent, store):
+    store.self_id.return_value = "unknown"
+    add(store, "old")
+    assert agent.scan_added_contacts(store, CFG) == 0
+    assert read(agent.rlog.DB_PATH, "SELECT COUNT(*) FROM contact_baselines") == [(0,)]
+
+
+def test_duplicate_search_names_wait_until_the_new_contact_is_unique(agent, store):
+    baseline(agent, store)
+    add(store, "new", "Old customer")
+    assert agent.scan_added_contacts(store, CFG) == 0
+    assert agent.rlog.pending() == []
+    add(store, "new", "Unique name")
+    assert agent.scan_added_contacts(store, CFG) == 1
+
+
+@pytest.mark.parametrize("kind", ["image", "video"])
+def test_media_first_opening_never_pastes_into_an_unselected_chat(agent, store, kind):
+    baseline(agent, store)
+    agent._brain.opening.return_value = {"ok": True, "items": [
+        {"seq": 1, "kind": kind, "media_name": "asset", "delay_ms": 0},
+        {"seq": 2, "kind": "text", "content": "Later", "delay_ms": 0},
+    ]}
+    agent.media_fetch.ensure_media = MagicMock(return_value=(True, "ready"))
+    add(store, "new")
+    agent.scan_added_contacts(store, CFG)
+    agent.drain(store, CFG)
+    agent.core_send.paste_media.assert_not_called()
+    agent.core_send.send.assert_not_called()
+    assert "S:own_new" not in agent._load_greeted()
+
+
+@pytest.mark.parametrize("failure", ["prefetch", "send"])
+def test_failed_opening_media_stops_all_later_items_and_never_marks_welcomed(agent, store, failure):
+    baseline(agent, store)
+    agent._brain.opening.return_value = {"ok": True, "items": [
+        {"seq": 1, "kind": "text", "content": "First", "delay_ms": 0},
+        {"seq": 2, "kind": "image", "media_name": "asset", "delay_ms": 0},
+        {"seq": 3, "kind": "text", "content": "Must not send", "delay_ms": 0},
+    ]}
+    agent.media_fetch.ensure_media = MagicMock(return_value=(failure != "prefetch", "prefetch result"))
+    agent.core_send.paste_media.return_value = (False, "uncertain")
+    add(store, "new")
+    agent.scan_added_contacts(store, CFG)
+    agent.drain(store, CFG)
+    assert agent.core_send.send.call_count == 1
+    assert "S:own_new" not in agent._load_greeted()
+    assert agent.rlog.has_unconfirmed_opening("S:own_new")
+    agent.drain(store, CFG)
+    assert agent.core_send.send.call_count == 1
+
+
+@pytest.mark.parametrize("control", ["takeover", "abandoned", "mode"])
+@pytest.mark.parametrize("flow", [False, True])
+def test_control_change_during_gap_stops_remaining_introduction(agent, store, monkeypatch, control, flow):
+    baseline(agent, store)
+    if flow:
+        agent._brain.flow.return_value = {"position_id": 1, "version": 1, "status": "enabled", "entry_key": "intro",
+            "nodes": [{"node_key": "intro", "node_type": "text", "parts": [
+                {"kind": "text", "body": "First", "delay_ms": 0},
+                {"kind": "text", "body": "Must not send", "delay_ms": 0}], "await_reply": True}], "edges": []}
+    def change_control(_seconds):
+        if control == "mode":
+            agent._brain.reply_provider = "dify"
+        else:
+            monkeypatch.setattr(agent.remote_cfg, control + "_sessions", lambda: {"S:own_new"})
+    monkeypatch.setattr(agent.time, "sleep", change_control)
+    add(store, "new")
+    agent.scan_added_contacts(store, CFG)
+    agent.drain(store, CFG)
+    assert agent.core_send.send.call_count == 1
+    if flow:
+        assert agent._flow_state.get("S:own_new")["phase"] == "held"
+    else:
+        assert "S:own_new" not in agent._load_greeted()
+
+
+def test_mode_transition_preserves_contact_until_the_effective_source_is_ready(agent, store):
+    baseline(agent, store)
+    agent._brain.reply_provider = "dify"
+    agent._brain.reply_mode_status = {"phase": "applying"}
+    add(store, "new")
+    assert agent.scan_added_contacts(store, CFG) == 0
+    agent._brain.reply_mode_status = {"phase": "completed"}
+    agent._brain.reply_provider = "agent"
+    assert agent.scan_added_contacts(store, CFG) == 1
+
+
+@pytest.mark.parametrize("kind", ["image", "video"])
+@pytest.mark.parametrize("delivery", ["confirmed", "missing", "other-chat", "ambiguous", "refresh-failed"])
+def test_agent_media_requires_unique_new_target_message_after_refresh(agent, store, kind, delivery):
+    path = store.data_dir / "message.db"
+    with sqlite3.connect(path) as con:
+        con.execute("CREATE TABLE message_table(message_id INTEGER,conversation_id TEXT,sender_id TEXT,content_type INTEGER,send_time INTEGER)")
+        con.execute("INSERT INTO message_table VALUES(1,'S:own_new','own',?,100)", (3 if kind == "image" else 43,))
+    original = store._conn.side_effect
+    store._conn.side_effect = lambda name: sqlite3.connect(path) if name == "message.db" else original(name)
+    def paste(*args, **kwargs):
+        if delivery not in ("missing", "refresh-failed"):
+            with sqlite3.connect(path) as con:
+                con.execute("INSERT INTO message_table VALUES(2,?,'own',?,200)",
+                    ("S:own_other" if delivery == "other-chat" else "S:own_new", 3 if kind == "image" else 43))
+                if delivery == "ambiguous":
+                    con.execute("INSERT INTO message_table VALUES(3,'S:own_new','own',?,200)", (3 if kind == "image" else 43,))
+        return True, "Enter pressed"
+    agent.core_send.paste_media.side_effect = paste
+    if delivery == "refresh-failed":
+        store.refresh.return_value = {"failed": 1}
+    status, _ = agent._send_agent_media(store, "S:own_new", "asset", kind, MagicMock(), route="opening")
+    assert status == ("sent" if delivery == "confirmed" else "unknown")
+    assert store.refresh.call_count == 1
+    agent.core_send.paste_media.assert_called_once()
+
+
+def test_unreadable_media_snapshot_prevents_any_media_input(agent, store):
+    status, _ = agent._send_agent_media(store, "S:own_new", "asset", "image", MagicMock(), route="opening")
+    assert status == "failed"
+    agent.core_send.paste_media.assert_not_called()
+
+
+@pytest.mark.parametrize("change", ["duplicate", "rename"])
+def test_search_identity_is_checked_again_after_contact_trigger_is_queued(agent, store, change):
+    baseline(agent, store)
+    add(store, "new", "Original name")
+    assert agent.scan_added_contacts(store, CFG) == 1
+    add(store, "old" if change == "duplicate" else "new", "Original name" if change == "duplicate" else "Changed name")
+    agent.drain(store, CFG)
+    agent.core_send.send.assert_not_called()
+    assert "S:own_new" not in agent._load_greeted()
+
+
+def test_external_contact_sharing_employee_name_is_not_searched_ambiguously(agent, store):
+    baseline(agent, store)
+    add(store, "employee", "Same name", table="user_table")
+    add(store, "new", "Same name")
+    assert agent.scan_added_contacts(store, CFG) == 0
+    assert agent.rlog.pending() == []
+
+
+def test_two_contact_scanners_commit_only_one_welcome_trigger(agent, store):
+    from concurrent.futures import ThreadPoolExecutor
+    baseline(agent, store)
+    add(store, "new")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: agent.scan_added_contacts(store, CFG), range(2)))
+    assert sorted(results) == [0, 1]
+    assert len(agent.rlog.pending()) == 1
+
+
+@pytest.mark.parametrize("failure", ["wrong-chat", "missing-id", "exception", "second-part"])
+def test_contact_opening_uncertainty_survives_restart_and_new_inbound_without_replay(agent, store, failure):
+    baseline(agent, store)
+    add(store, "new")
+    agent.scan_added_contacts(store, CFG)
+    confirmed = {"ok": True, "conversation_id": "S:own_new"}
+    if failure == "exception":
+        agent.core_send.send.side_effect = RuntimeError("after Enter")
+    elif failure == "second-part":
+        agent.core_send.send.side_effect = [confirmed, {"ok": False, "detail": "interrupted"}]
+    else:
+        agent.core_send.send.side_effect = None
+        agent.core_send.send.return_value = {"ok": True, "conversation_id": "S:own_other" if failure == "wrong-chat" else ""}
+    agent.drain(store, CFG)
+    assert agent.rlog.has_unconfirmed_opening("S:own_new")
+    expected = 2 if failure == "second-part" else 1
+    agent.rlog = load_reply_store(agent.rlog.DB_PATH)
+    assert agent.scan_added_contacts(store, CFG) == 0
+    agent.rlog.record_incoming({"id": "later", "conv_id": "S:own_new", "conv_name": "New customer new",
+                               "text": "New question", "type": 2, "time": 123456})
+    agent.drain(store, CFG)
+    assert agent.core_send.send.call_count == expected
+    assert "S:own_new" not in agent._load_greeted()

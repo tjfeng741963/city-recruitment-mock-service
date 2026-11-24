@@ -1231,7 +1231,7 @@ def match_target(m: dict, target: str) -> bool:
 def scan_added_contacts(store: Store, cfg: dict) -> int:
     """Welcome newly observed WeChat contacts without requiring inbound text.
 
-    The first complete, readable external-contact snapshot is baseline only.
+    The first readable external-contact snapshot is baseline only.
     Explicit target mode retains its existing operator-selected welcome path.
     Never use the mixed corporate address book for unsolicited all-contact scans.
     """
@@ -1239,10 +1239,11 @@ def scan_added_contacts(store: Store, cfg: dict) -> int:
     target = str(cfg.get("target") or "all")
     try:
         self_id = str(store.self_id() or "")
-        if not self_id:
+        if self_id in ("", "unknown"):
             return 0
         sessions = {str(row.get("id") or "") for row in store.sessions(with_names=False)}
-        contacts = store.contacts() if target != "all" else {}
+        search_contacts = store.contacts()
+        contacts = search_contacts if target != "all" else {}
     except Exception as exc:  # noqa: BLE001 - 联系人读取失败不影响消息扫描
         log(f"[加好友] 联系人读取失败（忽略）：{type(exc).__name__}: {exc}", level="warning")
         return 0
@@ -1286,16 +1287,28 @@ def scan_added_contacts(store: Store, cfg: dict) -> int:
         # Brain starts without an acknowledged provider. Keep observations
         # pending until reply-mode sync establishes who owns the opening.
         return 0
+    mode_status = getattr(_brain, "reply_mode_status", {})
+    if isinstance(mode_status, dict) and mode_status.get("phase") in ("waiting", "applying"):
+        return 0
     if provider == "dify":
         for contact_id in observations:
             rlog.resolve_contact_welcome(account_key, contact_id)
         return 0
 
     greeted = _load_greeted()
+    name_ids: dict[str, set[str]] = {}
+    for contact_id, name in {**search_contacts, **(external or {})}.items():
+        normalized = str(name or "").strip().casefold()
+        if normalized:
+            name_ids.setdefault(normalized, set()).add(str(contact_id))
     added = 0
     for contact_id, name in contacts.items():
         contact_id, name = str(contact_id or ""), str(name or "").strip()
         if not contact_id or contact_id == self_id or not name:
+            continue
+        if len(name_ids.get(name.casefold(), ())) > 1:
+            # The frozen sender searches by display name. A post-send ID check
+            # is too late to make an ambiguous name safe; keep this observation.
             continue
         # 已有会话直接沿用数据库中的真实 id；尚未产生消息的新单聊按当前
         # 企微版本的实际写法先用 S:<self>_<contact>，发送后仍会回读校验。
@@ -1741,6 +1754,75 @@ def _send_dify_media(store: Store, cid: str, step: dict, log_fn) -> tuple[str, s
     return "sent", str(detail)
 
 
+def _media_outbound_snapshot(store: Store, cid: str, kind: str) -> set[str] | None:
+    try:
+        me = store.self_id()
+        if not isinstance(me, str) or me in ("", "unknown"):
+            return None
+        con = store._conn("message.db")
+        if con is None:
+            return None
+        kinds = (3, 13) if kind == "image" else (43, 49)
+        with closing(con):
+            return {str(row[0]) for row in con.execute(
+                "SELECT message_id FROM message_table WHERE conversation_id=? AND sender_id=? "
+                "AND content_type IN (?,?) ORDER BY send_time DESC,message_id DESC LIMIT 100",
+                (cid, me, *kinds),
+            )}
+    except Exception:
+        return None
+
+
+def _send_agent_media(store: Store, cid: str, name: str, kind: str, log_fn, *, route: str) -> tuple[str, str]:
+    before = _media_outbound_snapshot(store, cid, kind)
+    if before is None:
+        return "failed", "媒体目标会话回读不可用，本次未执行媒体发送"
+    status, detail = _send_media(name, log_fn, route=route)
+    if status != "sent":
+        return status, detail
+    try:
+        refresh_store(store)
+        after = _media_outbound_snapshot(store, cid, kind)
+    except Exception:
+        after = None
+    if after is None or len(after - before) != 1:
+        return "unknown", "未回读到目标会话中唯一的新媒体消息，请人工核对，不自动重发"
+    return "sent", detail
+
+
+def _reply_source_identity() -> tuple:
+    return getattr(_brain, "reply_provider", None), getattr(_brain, "reply_mode_generation", None)
+
+
+def _sequence_block_reason(cid: str, cfg: dict, source: tuple, store: Store, name: str) -> str:
+    if cid in remote_cfg.takeover_sessions():
+        return "会话已被人工接管，停止后续介绍"
+    if cid in remote_cfg.abandoned_sessions():
+        return "客户已流失，停止后续介绍"
+    if cfg.get("_reply_mode_enabled") and not _check_reply_mode("online"):
+        return "回复来源尚未就绪，停止后续介绍"
+    if _reply_source_identity() != source:
+        return "回复来源已切换，停止旧介绍"
+    try:
+        me = store.self_id()
+        # Only actual two-member IDs can identify the counterpart. Do not
+        # guess by splitting underscores, which can occur in external IDs.
+        if isinstance(me, str) and me not in ("", "unknown") and cid.startswith("S:"):
+            members = cid[2:]
+            other = (members[len(me) + 1:] if members.startswith(me + "_") else
+                     members[:-len(me) - 1] if members.endswith("_" + me) else "")
+            if other:
+                contacts = store.contacts()
+                normalized = name.strip().casefold()
+                matches = {str(key) for key, value in contacts.items()
+                           if str(value or "").strip().casefold() == normalized}
+                if matches != {other}:
+                    return "联系人名称已变化或不能唯一搜索，停止介绍并待人工核对"
+    except Exception:
+        return "联系人搜索信息不可读，停止介绍"
+    return ""
+
+
 def _send_dify_plan(store: Store, name: str, cid: str, plan: list[dict], log_fn) -> tuple[str, str, int]:
     """Execute each server-supplied step after its delay, stopping on uncertain delivery."""
     global _last_reply_at
@@ -1778,7 +1860,7 @@ def _send_flow_part(store: Store, name: str, cid: str, part: dict, log_fn, *,
         # risking a paste into whichever chat currently has focus.
         if not part.get("target_verified"):
             return "failed", "媒体节点前必须在本轮先发送已验证落点的文本消息，待人工核对"
-        return _send_media(media, log_fn, route="node")
+        return _send_agent_media(store, cid, media, kind, log_fn, route="node")
     return "failed", "流程节点内容为空"
 
 
@@ -1802,6 +1884,7 @@ def _run_flow(store: Store, cfg: dict, cid: str, name: str, flow: dict, *, node_
         )
     state.set_phase(cid, "running")
     verified_target = False
+    source = _reply_source_identity()
     visited = set()
     backoff = 1 + min(_consecutive_send_failures, 3)
     wait = float(cfg.get("cooldown", 8)) * backoff - (time.time() - _last_reply_at)
@@ -1831,6 +1914,10 @@ def _run_flow(store: Store, cfg: dict, cid: str, name: str, flow: dict, *, node_
         parts = current.get("parts") or []
         idx = int(step_index)
         while idx < len(parts):
+            reason = _sequence_block_reason(cid, cfg, source, store, name)
+            if reason:
+                state.set_phase(cid, "held", error=reason)
+                return "held"
             part = parts[idx] if isinstance(parts[idx], dict) else {}
             if not state.claim_step(cid, key, idx, body=str(part.get("body") or ""), media_name=str(part.get("media_name") or "")):
                 prior = next((row for row in state.outbox(cid, key) if row["part_index"] == idx), {})
@@ -1847,10 +1934,15 @@ def _run_flow(store: Store, cfg: dict, cid: str, name: str, flow: dict, *, node_
                         base_url=str(cfg.get("bridge_server") or ""), token=str(cfg.get("bridge_token") or ""), log=log)
                     if not ok:
                         raise ValueError(f"媒体预取失败：{detail}")
-                _last_reply_at = time.time()
-                status, detail = _send_flow_part(store, name, cid, {**part, "target_verified": verified_target},
-                                               lambda msg: log(f"    [流程] {msg}"),
-                                               node_key=key, part_index=idx)
+                reason = (_sequence_block_reason(cid, cfg, source, store, name)
+                          if part.get("kind") in ("image", "video") else "")
+                if reason:
+                    status, detail = "failed", reason
+                else:
+                    _last_reply_at = time.time()
+                    status, detail = _send_flow_part(store, name, cid, {**part, "target_verified": verified_target},
+                                                   lambda msg: log(f"    [流程] {msg}"),
+                                                   node_key=key, part_index=idx)
             except Exception as exc:  # a crash after Enter has an unknown result
                 status, detail = "unknown", f"{type(exc).__name__}: {exc}"
             blocked = status == "blocked"
@@ -2428,11 +2520,21 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     if ores.get("ok") and ores.get("items"):
                         sent_items = 0
                         opening_uncertain = False
+                        opening_source = _reply_source_identity()
+                        opening_target_verified = False
                         for item in ores["items"]:
                             backoff = 1 + min(_consecutive_send_failures, 3)
                             wait = cfg["cooldown"] * backoff - (time.time() - _last_reply_at)
                             if wait > 0:
                                 time.sleep(wait)
+                            reason = _sequence_block_reason(cid, cfg, opening_source, store, name)
+                            if reason:
+                                if sent_items:
+                                    rlog.mark_unknown(mid, cid, reason, "开场", partial=True)
+                                else:
+                                    rlog.mark_held(mid, cid, reason, "开场")
+                                stats["blocked"] += 1
+                                return stats
                             seq, kind = int(item["seq"]), str(item["kind"])
                             fake_id = f"opening:{cid}:{seq}"
                             if kind == "text" and (item["content"] or "").strip():
@@ -2448,6 +2550,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                     message_id=mid, trace_id=trace,
                                 )
                                 if status == "sent":
+                                    opening_target_verified = True
                                     _last_error, _consecutive_send_failures = "", 0
                                     rlog.mark_sent(fake_id, cid, "开场", str(item["content"]))
                                     opening_trace = _brain.log_receipt(cid, seq, kind, "sent")
@@ -2479,6 +2582,12 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                     _brain.log_receipt(cid, seq, kind, "failed", _last_error)
                                     return stats
                             elif kind in ("image", "video") and (item["media_name"] or "").strip():
+                                if not opening_target_verified:
+                                    detail_m = "媒体开场前必须先有本轮已验证落点的文字，未执行媒体发送"
+                                    rlog.mark_held(mid, cid, detail_m, "开场")
+                                    _brain.log_receipt(cid, seq, kind, "failed", detail_m)
+                                    stats["blocked"] += 1
+                                    return stats
                                 # 真实发送媒体：先检索本地 media 目录（约束 3：本地有
                                 # 就不再下载），缺了再从 4222 媒体库拉（bridge 通道，
                                 # 设备令牌鉴权）。粘贴用上游原有 paste_media，不新增动作。
@@ -2490,14 +2599,21 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                     log=lambda s: log(f"    {s}"),
                                 )
                                 log(f"    [媒体] {item['media_name']} 预取：{pre_detail}")
+                                reason = _sequence_block_reason(cid, cfg, opening_source, store, name)
+                                if not ok_pre or reason:
+                                    detail_m = reason or f"开场媒体预取失败：{pre_detail}"
+                                    rlog.mark_unknown(mid, cid, detail_m, "开场", partial=bool(sent_items))
+                                    _brain.log_receipt(cid, seq, kind, "failed", detail_m)
+                                    stats["unknown"] += 1
+                                    return stats
                                 if not opening_claimed:
                                     if not rlog.begin_reply_attempt(mid, cid, "开场"):
                                         stats["blocked"] += 1
                                         return stats
                                     opening_claimed = True
                                 _last_reply_at = time.time()
-                                media_status, detail_m = _send_media(
-                                    item["media_name"], lambda s: log(f"    {s}"), route="opening",
+                                media_status, detail_m = _send_agent_media(
+                                    store, cid, item["media_name"], kind, lambda s: log(f"    {s}"), route="opening",
                                 )
                                 if media_status == "blocked":
                                     _last_error = detail_m[:200]
@@ -2523,6 +2639,9 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                     opening_trace = _brain.log_receipt(cid, seq, kind, "failed", detail_m)
                                     _brain.log_delivery(opening_trace, "failed", session_key=cid, detail=detail_m)
                                     log(f"    [开场 {seq}] {kind}:{item['media_name']} 发送失败：{detail_m}", level="warning")
+                                    rlog.mark_unknown(mid, cid, detail_m, "开场", partial=bool(sent_items))
+                                    stats["unknown"] += 1
+                                    return stats
                             else:
                                 # 空内容/未知类型：跳过并上报
                                 rlog.mark_skipped(fake_id, cid, f"开场项类型 {kind} 无内容")
@@ -3670,9 +3789,10 @@ def main() -> int:
         write_client_state("ready", detail="数据库初始化完成，可处理消息", wecom_state=wecom_state)
         if reporter is not None:
             reporter.tick(wecom_state, pending_count(), force=True)
+        ready = reception_ready(wecom_state)
         scan_added_contacts(store, cfg)
         scan(store, cfg)
-        if reception_ready(wecom_state):
+        if ready:
             result = drain(store, cfg, dry=cfg["dry_run"], wecom_state=wecom_state)
             if reception_ready(wecom_state):
                 _flow_tick(store, cfg, wecom_state)
@@ -3690,9 +3810,10 @@ def main() -> int:
         return 0
 
     write_client_state("ready", detail="数据库初始化完成，可处理消息", wecom_state=wecom_state)
+    ready = reception_ready(wecom_state)
     scan_added_contacts(store, cfg)
     scan(store, cfg)
-    if reception_ready(wecom_state):
+    if ready:
         drain(store, cfg, dry=cfg["dry_run"], wecom_state=wecom_state)
         if reception_ready(wecom_state):
             _flow_tick(store, cfg, wecom_state)
@@ -3752,11 +3873,12 @@ def main() -> int:
             if sig != last_sig:
                 refresh_store(store)
                 last_sig = sig
+            ready = reception_ready(wecom_state)
             n = scan_added_contacts(store, cfg)
             n += scan(store, cfg)
             if n:
                 log(f"新登记 {n} 条")
-            if reception_ready(wecom_state):
+            if ready:
                 drain(store, cfg, dry=cfg["dry_run"], wecom_state=wecom_state)
                 if reception_ready(wecom_state):
                     _flow_tick(store, cfg, wecom_state)

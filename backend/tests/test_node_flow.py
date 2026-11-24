@@ -32,6 +32,9 @@ CFG = {"cooldown": 0, "device_code": "pc", "dry_run": False}
 def agent(tmp_path, monkeypatch):
     module = load_autopilot()
     stub_text_readback(module, monkeypatch)
+    monkeypatch.setattr(module, "_media_outbound_snapshot", lambda *args: {
+        str(i) for i in range(module.core_send.paste_media.call_count)
+    })
     module._brain = MagicMock()
     module._brain.flow.return_value = json.loads(json.dumps(FLOW))
     module._brain.chat.return_value = {"ok": True, "reply": "这是答疑", "parts": ["这是答疑"], "medias": []}
@@ -267,13 +270,16 @@ def test_legacy_opening_waits_each_configured_delay_after_success(agent, monkeyp
     agent._brain.opening.return_value = {"ok": True, "items": [
         {"seq": 1, "kind": kind, "content": "开场文本", "media_name": "test.png", "delay_ms": 3500},
     ]}
+    if kind != "text":
+        agent._brain.opening.return_value["items"].insert(0,
+            {"seq": 0, "kind": "text", "content": "确认目标", "delay_ms": 0})
     waits = []
     agent.core_send.paste_media.return_value = (True, "sent")
     monkeypatch.setattr(agent.time, "sleep", waits.append)
 
     start(agent)
 
-    assert waits == [3.5]
+    assert waits == ([3.5] if kind == "text" else [0.0, 3.5])
     if kind == "text":
         agent.core_send.send.assert_called_once()
     else:
@@ -287,13 +293,17 @@ def test_failed_legacy_opening_does_not_add_success_delay_or_retry(agent, monkey
         {"seq": 1, "kind": kind, "content": "开场文本", "media_name": "test.png", "delay_ms": 3500},
     ]}
     agent.core_send.send.return_value = {"ok": False, "detail": "failed"}
+    if kind != "text":
+        agent._brain.opening.return_value["items"].insert(0,
+            {"seq": 0, "kind": "text", "content": "确认目标", "delay_ms": 0})
+        agent.core_send.send.return_value = {"ok": True, "conversation_id": "S:customer"}
     agent.core_send.paste_media.return_value = (False, "failed")
     waits = []
     monkeypatch.setattr(agent.time, "sleep", waits.append)
 
     start(agent)
 
-    assert waits == []
+    assert waits == ([] if kind == "text" else [0.0])
     if kind == "text":
         agent.core_send.send.assert_called_once()
     else:
