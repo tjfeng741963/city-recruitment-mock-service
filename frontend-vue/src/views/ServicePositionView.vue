@@ -6,7 +6,7 @@
         <p class="page-desc">维护各城市的岗位、招聘资料和面试安排</p>
       </div>
       <div class="header-actions">
-        <el-button :icon="Upload" @click="importVisible = true">鲸才导入 / 导入导出</el-button>
+        <el-button :icon="Upload" @click="importVisible = true">导入 / 导出</el-button>
         <el-button :icon="Refresh" @click="load">刷新</el-button>
         <el-button type="primary" :icon="Plus" @click="openCreate">添加岗位</el-button>
       </div>

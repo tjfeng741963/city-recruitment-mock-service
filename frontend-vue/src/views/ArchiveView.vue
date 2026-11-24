@@ -57,6 +57,16 @@
           </p>
           <div v-if="!devices.length" class="arch-empty">暂无设备</div>
         </div>
+
+        <section v-if="items.length" class="arch-card conversation-coverage" aria-labelledby="coverage-title">
+          <h2 id="coverage-title">对话覆盖</h2>
+          <div class="coverage-value"><strong>{{ linkedCount }}</strong><span> / {{ items.length }} 条登记可分析</span></div>
+          <progress :value="linkedCount" :max="items.length" aria-label="有对话的登记数"></progress>
+          <dl class="coverage-counts">
+            <div><dt>已关联对话</dt><dd>{{ linkedCount }} 条</dd></div>
+            <div><dt>暂无关联对话</dt><dd>{{ items.length - linkedCount }} 条</dd></div>
+          </dl>
+        </section>
       </div>
 
       <div class="arch-right">
@@ -115,47 +125,57 @@
             </div>
           </div>
 
-          <section class="followup-panel" aria-labelledby="followup-title">
-            <div class="followup-head">
-              <h2 id="followup-title">AI 跟进摘要</h2>
-              <el-button
-                v-if="selected.has_conversation"
-                type="primary"
-                plain
-                :loading="currentFollowup?.loading"
-                @click="generateFollowup"
-              >
-                {{ currentFollowup?.summary ? '重新生成' : '生成摘要' }}
-              </el-button>
-            </div>
-            <div aria-live="polite" :aria-busy="currentFollowup?.loading || false">
-              <p v-if="!selected.has_conversation" class="followup-hint">暂无可分析的对话</p>
-              <template v-else>
-                <p v-if="currentFollowup?.loading" class="followup-hint">正在整理关联对话…</p>
-                <p v-if="currentFollowup?.error" class="followup-error" role="alert">{{ currentFollowup.error }}</p>
-                <template v-if="currentFollowup?.summary">
-                  <dl class="followup-facts">
-                    <div><dt>求职意向</dt><dd>{{ currentFollowup.summary.intent || '未明确' }}</dd></div>
-                    <div><dt>已聊清楚</dt><dd>{{ currentFollowup.summary.discussed || '暂未确认' }}</dd></div>
-                    <div v-if="currentFollowup.summary.experience">
-                      <dt>工作经历与到岗</dt><dd>{{ currentFollowup.summary.experience }}</dd>
-                    </div>
-                    <div><dt>下次确认</dt><dd>{{ currentFollowup.summary.next_question || '暂无建议' }}</dd></div>
-                  </dl>
-                  <figure v-if="currentFollowup.summary.quote" class="followup-quote">
-                    <figcaption>候选人原话</figcaption>
-                    <blockquote>“{{ currentFollowup.summary.quote }}”</blockquote>
-                  </figure>
-                  <p class="followup-hint">根据近期对话生成，仅供跟进参考。</p>
-                </template>
-                <p v-else-if="!currentFollowup?.loading && !currentFollowup?.error" class="followup-hint">
-                  整理候选人的求职意向、已确认事项和下次要问的问题。
-                </p>
-              </template>
-            </div>
-          </section>
         </div>
         <div v-else class="arch-card arch-empty">选择左侧一条登记查看详情</div>
+
+        <section v-if="selected" class="followup-panel" aria-labelledby="followup-title">
+          <div class="followup-head">
+            <div>
+              <h2 id="followup-title">AI 跟进分析</h2>
+              <p class="followup-source">根据近期对话生成，仅供跟进参考。</p>
+            </div>
+            <el-button
+              v-if="selected.has_conversation"
+              :loading="currentFollowup?.loading"
+              @click="generateFollowup"
+            >
+              {{ currentFollowup?.summary ? '重新生成' : '生成摘要' }}
+            </el-button>
+          </div>
+          <div class="followup-body" aria-live="polite" :aria-busy="currentFollowup?.loading || false">
+            <template v-if="selected.has_conversation">
+              <p v-if="currentFollowup?.loading" class="followup-hint">正在整理关联对话…</p>
+              <p v-if="currentFollowup?.error" class="followup-error" role="alert">{{ currentFollowup.error }}</p>
+              <p v-if="!currentFollowup?.summary && !currentFollowup?.loading && !currentFollowup?.error" class="followup-hint">
+                点击「生成摘要」，从这条登记关联的对话整理跟进要点。
+              </p>
+            </template>
+            <p v-else class="followup-hint">暂无可分析的对话</p>
+
+            <dl class="followup-facts">
+              <div class="followup-fact fact-intent">
+                <dt><el-icon aria-hidden="true"><Aim /></el-icon>求职意向</dt>
+                <dd>{{ currentFollowup?.summary?.intent || (currentFollowup?.summary ? '未明确' : '—') }}</dd>
+              </div>
+              <div class="followup-fact fact-discussed">
+                <dt><el-icon aria-hidden="true"><ChatLineRound /></el-icon>已沟通事项</dt>
+                <dd>{{ currentFollowup?.summary?.discussed || (currentFollowup?.summary ? '暂未确认' : '—') }}</dd>
+              </div>
+              <div class="followup-fact fact-experience">
+                <dt><el-icon aria-hidden="true"><Suitcase /></el-icon>工作经历与到岗</dt>
+                <dd>{{ currentFollowup?.summary?.experience || (currentFollowup?.summary ? '对话未提及' : '—') }}</dd>
+              </div>
+              <div class="followup-fact fact-next">
+                <dt><el-icon aria-hidden="true"><Flag /></el-icon>下次确认</dt>
+                <dd>{{ currentFollowup?.summary?.next_question || (currentFollowup?.summary ? '暂无建议' : '—') }}</dd>
+              </div>
+            </dl>
+            <figure v-if="currentFollowup?.summary?.quote" class="followup-quote">
+              <figcaption>候选人原话</figcaption>
+              <blockquote>“{{ currentFollowup.summary.quote }}”</blockquote>
+            </figure>
+          </div>
+        </section>
       </div>
     </div>
 
@@ -201,6 +221,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Aim, ChatLineRound, Flag, Suitcase } from '@element-plus/icons-vue'
 import http from '../api/http'
 import { archiveApi, type ArchiveFollowupSummary } from '../api/agent'
 
@@ -230,10 +251,11 @@ interface DeviceRow {
 }
 
 const items = ref<ArchiveItem[]>([])
+const linkedCount = computed(() => items.value.filter(item => item.has_conversation).length)
 const devices = ref<DeviceRow[]>([])
 const selected = ref<ArchiveItem | null>(null)
 const followups = reactive(new Map<string, { summary?: ArchiveFollowupSummary; loading?: boolean; error?: string }>())
-const currentFollowup = computed(() => selected.value ? followups.get(selected.value.session_key) : undefined)
+const currentFollowup = computed(() => selected.value?.has_conversation ? followups.get(selected.value.session_key) : undefined)
 const groups = ref<Record<string, string[]>>({})
 const groupsLoaded = ref(false)
 // 客户端上报的群聊总数：为 0 说明企微没登录/还没同步，页面提示可以手输群名
@@ -442,7 +464,7 @@ onMounted(async () => {
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr);
   gap: 14px;
-  align-items: start;
+  min-height: inherit;
 }
 
 .arch-left {
@@ -466,27 +488,71 @@ onMounted(async () => {
 .arch-right {
   container-type: inline-size;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 
-.archive-details {
+.conversation-coverage {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 12px;
+  background: linear-gradient(155deg, #fff 30%, #eef4ff);
+}
+
+.conversation-coverage h2 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.coverage-value {
+  color: #435475;
+  font-size: 13px;
+}
+
+.coverage-value strong {
+  color: #244b9e;
+  font-size: 34px;
+  font-variant-numeric: tabular-nums;
+}
+
+.conversation-coverage progress {
+  width: 100%;
+  height: 9px;
+  accent-color: #315cc3;
+}
+
+.coverage-counts {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 20px;
-  align-items: start;
+  gap: 8px;
+  margin: 0;
+  color: #435475;
+  font-size: 13px;
 }
 
-@container (min-width: 680px) {
-  .archive-details {
-    grid-template-columns: minmax(240px, 5fr) minmax(340px, 7fr);
-  }
+.coverage-counts > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.coverage-counts dd {
+  margin: 0;
+  color: #17284d;
+  font-weight: 600;
 }
 
 .followup-panel {
-  padding: 16px;
-  border: 1px solid var(--bd-border, #e8ecf3);
-  border-radius: 12px;
-  background: var(--el-fill-color-light);
-  color: var(--bd-text-primary);
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: clamp(16px, 2.6cqw, 28px);
+  border: 1px solid #c9d7f2;
+  border-radius: 18px;
+  background: radial-gradient(ellipse at 96% 0%, #dce9ff, transparent 55%), linear-gradient(145deg, #f2f5ff, #fcfdff 58%, #eef6ff);
+  color: #17284d;
   overflow-wrap: anywhere;
 }
 
@@ -501,28 +567,73 @@ onMounted(async () => {
 
 .followup-head h2 {
   margin: 0;
-  font-size: 14px;
+  font-size: clamp(19px, 3cqw, 27px);
   font-weight: 700;
 }
 
+.followup-source {
+  margin: 5px 0 0;
+  color: #465879;
+  font-size: 13px;
+}
+
+.followup-head :deep(.el-button) {
+  flex-shrink: 0;
+}
+
+.followup-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 16px;
+}
+
 .followup-facts {
+  flex: 1;
   display: grid;
-  gap: 10px;
-  margin: 14px 0 0;
+  gap: 12px;
+  margin: 0;
   font-size: 13px;
   line-height: 1.6;
 }
 
-.followup-facts > div {
-  display: grid;
-  grid-template-columns: 7em minmax(0, 1fr);
+.followup-fact {
+  display: flex;
+  flex-direction: column;
   gap: 8px;
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid #dce5f5;
+  border-radius: 12px;
+  background: #ffffffde;
 }
 
-.followup-facts dt,
-.followup-quote figcaption,
-.followup-hint {
-  color: var(--el-text-color-secondary);
+.followup-fact dt {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-weight: 700;
+}
+
+.followup-fact .el-icon {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  background: var(--fact-tint);
+  color: var(--fact-ink);
+  font-size: 16px;
+}
+
+.fact-intent { --fact-tint: #e5edff; --fact-ink: #284c9c; }
+.fact-discussed { --fact-tint: #e3f4f3; --fact-ink: #185e63; }
+.fact-experience { --fact-tint: #ede8fb; --fact-ink: #573d97; }
+.fact-next {
+  --fact-tint: #fbeedb;
+  --fact-ink: #815213;
+  background: #fffaf2;
+  border-color: #efdfc4;
 }
 
 .followup-facts dd,
@@ -531,26 +642,45 @@ onMounted(async () => {
 }
 
 .followup-quote {
-  margin: 14px 0 0;
-  padding-top: 12px;
-  border-top: 1px solid var(--bd-border, #e8ecf3);
+  margin: 0;
+  padding: 10px 14px;
+  border-inline-start: 3px solid #6585cb;
+  border-radius: 0 8px 8px 0;
+  background: #e8effd;
   font-size: 13px;
   line-height: 1.65;
 }
 
 .followup-quote figcaption {
-  margin-bottom: 3px;
+  color: #465879;
+  font-size: 12px;
 }
 
 .followup-hint,
 .followup-error {
-  margin: 10px 0 0;
+  margin: 0;
   font-size: 13px;
   line-height: 1.6;
 }
 
+.followup-hint {
+  color: #465879;
+}
+
 .followup-error {
   color: var(--el-color-danger-dark-2);
+}
+
+@container (min-width: 570px) {
+  .followup-facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@container (min-width: 660px) {
+  .arch-kv {
+    grid-template-columns: repeat(2, 84px minmax(0, 1fr));
+  }
 }
 
 .card-head :deep(.el-button.is-link) {
@@ -725,6 +855,7 @@ onMounted(async () => {
 @media (max-width: 1100px) {
   .arch-grid {
     grid-template-columns: minmax(0, 1fr);
+    min-height: 0;
   }
 }
 </style>
