@@ -19,7 +19,7 @@ FROZEN_CORE = (
     "agent/wecom_io_core/crypto.py",
 )
 APPROVED_CORE_HASHES = {
-    "win.py": "994e6c1c0456e694ed24fc50f587ad335230f3b3fa09fc632d38fbcd59029b05",
+    "win.py": "d80bcd8fd59ec9803173828bf119e302beb8b2af15a9689011b5c09f4ffd0127",
     "send.py": "03c2f2cc63bd4005e1f78a35e580cd6da95d3c06637cdeb497ec675ea8935fff",
     "store.py": "4c5ae0a2cfce0214289aa7ef18a30e961c3f47af81a50af62de2bc5e92476e62",
     "crypto.py": "0622c4452812711dc59b36fefa6a5beaaba512591e047f88d8b87b5dbb5db8e3",
