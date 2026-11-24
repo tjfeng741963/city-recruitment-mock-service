@@ -198,8 +198,6 @@
 :root body .el-menu-item {
   transition: background-color var(--rk-dur-2) var(--rk-ease-standard), color var(--rk-dur-2) var(--rk-ease-standard), transform var(--rk-dur-1) var(--rk-ease-standard);
 }
-:root body .sidebar-menu .el-menu-item:active,
-:root body .sidebar-menu .el-sub-menu__title:active,
 :root body .el-pager li:active,
 :root body .customer-item:active,
 :root body .device-item:active {

@@ -17,7 +17,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { positionsApi } from '../../api/core'
 import type { ServicePosition } from '../../api/types'
@@ -29,6 +29,8 @@ const emit = defineEmits<{ (event:'validated',id:number):void }>()
 const selected = ref<number | undefined>(), positions = ref<ServicePosition[]>([]), loading = ref(true), error = ref('')
 const links = [{path:'/recruitment-flow',label:'话术流程'},{path:'/knowledge',label:'问答知识库'},{path:'/media',label:'图片与视频'}]
 const user = () => auth.user?.id ?? auth.user?.username ?? ''
+let disposed = false
+
 async function change(value: unknown) {
   const id = Number(value) || 0
   error.value = ''
@@ -36,30 +38,32 @@ async function change(value: unknown) {
   savePositionContext(user(), id)
   await router.replace({ query: { ...route.query, position_id: id ? String(id) : undefined } })
 }
+
 onMounted(async () => {
   try {
-    const {data} = await positionsApi.list({page:1,page_size:1000})
+    const { data } = await positionsApi.list({ page: 1, page_size: 1000 })
+    if (disposed) return
     positions.value = data.items || []
-    const requested = Number(route.query.position_id) || readPositionContext(user())
-    if (positions.value.some(item => item.id === requested)) { selected.value = requested; await change(requested) }
-    else if (requested) {
-      savePositionContext(user(),0)
-      await router.replace({query:{...route.query,position_id:undefined}})
+    const explicit = route.query.position_id
+    const requested = explicit === undefined ? readPositionContext(user()) : Number(explicit)
+    if (positions.value.some(item => item.id === requested)) {
+      selected.value = requested
+      savePositionContext(user(), requested)
+    } else if (explicit !== undefined || requested) {
+      if (explicit === undefined) savePositionContext(user(), 0)
       error.value = '此前选择的岗位不存在或无权访问，请重新选择岗位。'
     }
-  } catch { error.value = '岗位加载失败，请刷新重试。' }
-  finally { loading.value = false; emit('validated', error.value ? -1 : (selected.value || 0)) }
-})
-watch(() => route.query.position_id, async raw => {
-  const id=Number(raw)||0
-  if (!loading.value && id && !positions.value.some(item=>item.id===id)) {
-    selected.value=undefined;savePositionContext(user(),0)
-    await router.replace({query:{...route.query,position_id:undefined}})
-    error.value='岗位不存在或无权访问，请重新选择。'
-    return
+  } catch {
+    error.value = '岗位加载失败，请刷新重试。'
+  } finally {
+    if (!disposed) {
+      loading.value = false
+      emit('validated', error.value ? -1 : (selected.value ?? 0))
+    }
   }
-  selected.value=id||undefined
 })
+
+onBeforeUnmount(() => { disposed = true })
 </script>
 
 <style scoped>

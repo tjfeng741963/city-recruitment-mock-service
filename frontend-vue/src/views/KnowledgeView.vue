@@ -16,7 +16,7 @@
       </div>
     </div>
 
-    <PositionContext @validated="id => contextReady = id >= 0" />
+    <PositionContext @validated="applyPositionContext" />
 
     <el-alert v-if="activeTab !== 'library'" title="历史资料与治理工具；当前接待只读取通用和本岗位问答。这里的旧实体范围不代表已接入回复。" type="info" :closable="false" />
     <el-tabs v-model="activeTab" class="kb-tabs">
@@ -286,11 +286,17 @@ import FaqGovernancePanel from '../components/kb/FaqGovernancePanel.vue'
 import KbEntityPanel from '../components/kb/KbEntityPanel.vue'
 import KbDeviceBinding from '../components/kb/KbDeviceBinding.vue'
 
-const route = useRoute()
 const router = useRouter()
+const route = useRoute()
 const auth = useAuthStore()
-const contextReady=ref(false)
-const positionId = computed(() => Number(route.query.position_id) || 0)
+const contextReady = ref(false)
+const positionId = ref(Number(route.query.position_id) || 0)
+
+function applyPositionContext(id: number): void {
+  positionId.value = Math.max(id, 0)
+  contextReady.value = id >= 0
+}
+
 const positionName = ref('')
 const activeTab = ref('library')
 const items = ref<KnowledgeItem[]>([])

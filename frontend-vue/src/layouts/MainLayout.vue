@@ -10,21 +10,23 @@
       </div>
 
       <el-menu
-        :default-active="activeMenu"
+        :default-active="navPath"
         :collapse="collapsed"
         :collapse-transition="false"
         :default-openeds="defaultOpeneds"
         class="sidebar-menu"
         router
         unique-opened
+        @select="handleMenuSelect"
       >
         <template v-for="group in navigation" :key="group.key">
-          <el-menu-item v-if="group.key === 'home'" index="/dashboard">
+          <el-menu-item v-if="group.key === 'home'" index="/dashboard" aria-label="首页" tabindex="0" @keydown.enter.space.prevent="activateMenuItem">
             <el-icon><DataBoard /></el-icon><template #title>首页</template>
           </el-menu-item>
           <el-sub-menu v-else :index="group.key">
             <template #title><el-icon><component :is="groupIcon(group.key)" /></el-icon><span>{{ group.label }}</span></template>
-            <el-menu-item v-for="item in group.items" :key="item.path" :index="menuTarget(item.path)">
+            <el-menu-item v-for="item in group.items" :key="item.path" :index="item.path" :route="menuTarget(item.path)"
+              :aria-label="item.label" tabindex="0" @keydown.enter.space.prevent="activateMenuItem">
               <el-icon><component :is="itemIcon(item.path)" /></el-icon><template #title>{{ item.label }}</template>
             </el-menu-item>
           </el-sub-menu>
@@ -39,6 +41,7 @@
 
     <div class="main-area">
       <header class="top-header">
+        <span v-if="pendingMenu" class="sidebar-navigation-status" role="status">正在打开{{ pendingMenu }}…</span>
         <div class="header-right">
           <el-avatar :size="32" class="user-avatar">{{ initial }}</el-avatar>
           <span class="user-name">{{ auth.user?.username || 'local-admin' }}</span>
@@ -57,6 +60,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import YuanyiMark from '../components/YuanyiMark.vue'
 import { useAuthStore } from '../stores/auth'
 import { navigationForRole, activeNavigationPath } from './navigation'
@@ -66,6 +70,8 @@ const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const navigation = computed(() => navigationForRole(auth.user?.role || 'customer'))
+const pendingMenu = ref('')
+let navigationAttempt = 0
 function groupIcon(key: string): string {
   return ({operations:'ChatDotRound',basic:'Briefcase',knowledge:'ChatLineRound',system:'Tools'} as Record<string,string>)[key] || 'Grid'
 }
@@ -73,8 +79,32 @@ function itemIcon(path: string): string {
   return ({'/conversations':'ChatLineRound','/candidates':'User','/archive':'Tickets','/agent-devices':'Monitor','/cities':'Location','/service-positions':'Briefcase','/recruitment-flow':'Share','/knowledge':'Reading','/media':'Picture','/users':'Lock','/settings':'Setting','/recruiters':'Avatar'} as Record<string,string>)[path] || 'Star'
 }
 function menuTarget(path: string): string {
-  const id = readPositionContext(auth.user?.id ?? auth.user?.username ?? '')
-  return path === '/recruitment-flow' && id ? `${path}?position_id=${id}` : path
+  if (path === route.path) return route.fullPath
+  if (path !== '/recruitment-flow') return path
+  const currentPosition = route.path === '/knowledge' || route.path === '/media'
+    ? Number(route.query.position_id)
+    : 0
+  const id = Number.isSafeInteger(currentPosition) && currentPosition > 0
+    ? currentPosition
+    : readPositionContext(auth.user?.id ?? auth.user?.username ?? '')
+  return id ? `${path}?position_id=${id}` : path
+}
+
+function activateMenuItem(event: KeyboardEvent): void {
+  if (event.currentTarget instanceof HTMLElement) event.currentTarget.click()
+}
+
+async function handleMenuSelect(path: string, _indexPath: string[], _item: unknown, result?: Promise<unknown>): Promise<void> {
+  if (!result) return
+  const attempt = ++navigationAttempt
+  pendingMenu.value = navigation.value.flatMap(group => group.items).find(item => item.path === path)?.label ?? '页面'
+  try {
+    await result
+  } catch {
+    if (attempt === navigationAttempt) ElMessage.error('页面加载失败，请刷新后重试。')
+  } finally {
+    if (attempt === navigationAttempt) pendingMenu.value = ''
+  }
 }
 // 对齐 theme/sidebar.js：收起状态记忆在 localStorage，窄屏（≤1200px）自动收起
 const NAV_COLLAPSED_KEY = 'rk-nav-collapsed'
@@ -100,7 +130,6 @@ const onNarrowChange = (event: MediaQueryListEvent): void => {
 
 const initial = computed(() => (auth.user?.username || 'L').slice(0, 1).toUpperCase())
 const navPath = computed(() => activeNavigationPath(route.path))
-const activeMenu = computed(() => menuTarget(navPath.value))
 
 /** 打开当前所在分组 */
 const defaultOpeneds = computed(() => {
@@ -196,5 +225,11 @@ function handleLogout(): void {
 
 .sidebar-footer:hover {
   color: var(--bd-primary);
+}
+
+.sidebar-navigation-status {
+  margin-right: auto;
+  color: var(--rk-ink-2);
+  font-size: 13px;
 }
 </style>

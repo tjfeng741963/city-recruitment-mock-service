@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { navigationForRole, positionLink, activeNavigationPath, cityPositionsLink } from '../frontend-vue/src/layouts/navigation.js';
 
@@ -38,5 +39,18 @@ describe('招聘导航', () => {
   it('carries the selected position to each AI workspace', () => {
     expect(positionLink('/knowledge', 28)).toEqual({ path: '/knowledge', query: { position_id: '28' } });
     expect(positionLink('/media', 0)).toEqual({ path: '/media', query: {} });
+  });
+
+  it('restores the selected position without starting a new route navigation', () => {
+    const read = (path: string) => readFileSync(new URL(`../frontend-vue/src/${path}`, import.meta.url), 'utf8');
+    const context = read('components/agent/PositionContext.vue');
+    const restore = context.slice(context.indexOf('onMounted(async'), context.indexOf('</script>'));
+    expect(restore).not.toMatch(/router\.(replace|push)\(|await change\(/);
+    const canvas = read('views/AgentFlowView.vue');
+    const load = canvas.slice(canvas.indexOf('async function loadPositions'), canvas.indexOf('async function loadFlow'));
+    expect(load).not.toMatch(/router\.(replace|push)\(/);
+    for (const view of ['KnowledgeView', 'MediaView']) {
+      expect(read(`views/${view}.vue`)).toContain('@validated="applyPositionContext"');
+    }
   });
 });

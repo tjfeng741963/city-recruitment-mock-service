@@ -204,9 +204,13 @@ const router = createRouter({
 router.beforeEach((to) => {
   if (!to.meta.public && !hasToken()) return { path: '/login', query: { redirect: to.fullPath } }
   if (to.path === '/login' && hasToken()) return '/dashboard'
+  return true
+})
+
+router.afterEach((to, _from, failure) => {
+  if (failure) return
   const title = (to.meta.title as string) || ''
   document.title = to.name === 'login' ? '登录 · 源绎招聘' : title ? `${title} · 城市配置管理` : '城市配置管理'
-  return true
 })
 
 export default router

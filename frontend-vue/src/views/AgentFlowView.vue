@@ -530,15 +530,18 @@ function chooseSelection(value: AgentFlow): void {
 }
 
 async function loadPositions(): Promise<void> {
+  const routeAtStart = route.fullPath
   positionsLoading.value = true
   pageError.value = ''
   try {
     const { data } = await positionsApi.list({ page: 1, page_size: 1000 })
+    if (route.fullPath !== routeAtStart) return
     positions.value = toArray<ServicePosition>(data)
     let requestedPosition = route.query.position_id
     const requestedDevice = route.query.device_code
     if (!requestedPosition && route.query.test_engine === 'dify' && typeof requestedDevice === 'string' && requestedDevice) {
       const accounts = await devicesApi.list()
+      if (route.fullPath !== routeAtStart) return
       const account = accounts.data.items.find(device => device.device_code === requestedDevice)
       if (!account?.position_id) return
       requestedPosition = String(account.position_id)
@@ -548,9 +551,6 @@ async function loadPositions(): Promise<void> {
     const nextId = selection.id
     positionId.value = nextId
     if (nextId) savePositionContext(userKey(), nextId)
-    if (nextId && String(route.query.position_id || '') !== String(nextId)) {
-      await router.replace({ query: { ...route.query, position_id: String(nextId) } })
-    }
     if (nextId) await loadFlow(nextId)
   } catch (error) {
     pageError.value = errorText(error, '岗位列表加载失败')

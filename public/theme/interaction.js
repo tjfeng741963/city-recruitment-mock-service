@@ -1,8 +1,6 @@
 const REDUCED = matchMedia("(prefers-reduced-motion: reduce)");
 const HOSTS = [
   ".el-button:not(.is-text):not(.is-link)",
-  ".sidebar-menu .el-menu-item",
-  ".sidebar-menu .el-sub-menu__title",
   ".el-pager li",
   ".el-radio-button__inner",
   ".customer-item",

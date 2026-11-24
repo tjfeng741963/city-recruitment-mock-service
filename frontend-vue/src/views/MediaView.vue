@@ -22,7 +22,7 @@
       </div>
     </div>
 
-    <PositionContext @validated="id => contextReady = id >= 0" />
+    <PositionContext @validated="applyPositionContext" />
     <div class="stats-row">
       <div class="stat-card">
         <div class="stat-value">{{ items.length }}</div>
@@ -168,9 +168,15 @@ interface MediaRow {
   position_name: string | null
 }
 
+const contextReady = ref(false)
 const route = useRoute()
-const contextReady=ref(false)
-const positionId = computed(() => Number(route.query.position_id) || 0)
+const positionId = ref(Number(route.query.position_id) || 0)
+
+function applyPositionContext(id: number): void {
+  positionId.value = Math.max(id, 0)
+  contextReady.value = id >= 0
+}
+
 const items = ref<MediaRow[]>([])
 const positions = ref<ServicePosition[]>([])
 const loading = ref(false)
