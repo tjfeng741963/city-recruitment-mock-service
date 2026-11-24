@@ -1,6 +1,9 @@
 services:
   app:
-    build: .
+    build:
+      context: .
+      args:
+        DEBIAN_MIRROR: http://mirrors.cloud.tencent.com
     image: city-recruitment-mock-service:latest
     container_name: city-recruitment-app
     restart: unless-stopped
