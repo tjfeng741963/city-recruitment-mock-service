@@ -1,0 +1,21 @@
+{
+	admin off
+	default_sni 119.91.113.100
+	servers {
+		protocols h1 h2
+	}
+}
+
+https://119.91.113.100 {
+	tls {
+		issuer acme https://acme-v02.api.letsencrypt.org/directory {
+			profile shortlived
+			disable_tlsalpn_challenge
+		}
+	}
+
+	header Strict-Transport-Security "max-age=31536000"
+	reverse_proxy 127.0.0.1:14222 {
+		header_up X-Forwarded-Proto https
+	}
+}

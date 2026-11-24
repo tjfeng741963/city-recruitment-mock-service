@@ -240,6 +240,7 @@ export interface AgentModelSettings {
   key_configured: boolean
   revision: number
   updated_at: string | null
+  settings_https_url?: string
 }
 
 type ModelCredentials = { base_url: string; api_key?: string }

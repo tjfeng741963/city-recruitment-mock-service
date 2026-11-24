@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { createServer, request } from "node:http";
+import type { AddressInfo } from "node:net";
 import { buildServer } from "../src/server.js";
 import { providerRequest } from "../src/modules/agent/agent-model-transport.js";
 
@@ -86,4 +88,57 @@ it("rejects private destinations, reasoning replies and browser submissions over
   expect((await testDraft()).statusCode).toBe(422);
   vi.mocked(providerRequest).mockResolvedValue({ choices: [{ message: { content: "<think>reasoning</think>" + message.content } }] });
   expect((await testDraft()).statusCode).toBe(422);
+});
+
+it("lets multiple administrators use the same HTTPS gateway and rejects forged headers at the HTTP listener", async () => {
+  vi.stubEnv("REA_AGENT_SETTINGS_HTTPS_ORIGIN", "https://recruitment.example");
+  const credentials = { ...draft, api_key: "replacement-synthetic-key" };
+  vi.mocked(providerRequest).mockResolvedValue({ model: draft.model, choices: [{ message }] });
+  const secureHeaders = { ...headers, host: "recruitment.example", origin: "https://recruitment.example",
+    "x-forwarded-proto": "https" };
+  const gatewayListener = createServer((request, response) => app.routing(request, response));
+  await new Promise<void>(resolve => gatewayListener.listen(0, "127.0.0.1", resolve));
+  const port = (gatewayListener.address() as AddressInfo).port;
+  vi.stubEnv("REA_AGENT_SETTINGS_PORT", String(port));
+  const send = (authHeaders: Record<string, string>, action = "/test", payload = credentials) =>
+    new Promise<{ status: number; body: { test_id: string } }>((resolve, reject) => {
+      const body = JSON.stringify(payload);
+      const req = request(`http://127.0.0.1:${port}${endpoint}${action}`, {
+        method: action ? "POST" : "PUT",
+        headers: { ...authHeaders, "content-type": "application/json", "content-length": Buffer.byteLength(body) },
+      }, response => {
+        const chunks: Buffer[] = [];
+        response.on("data", chunk => chunks.push(chunk));
+        response.on("end", () => {
+          try { resolve({ status: response.statusCode!, body: JSON.parse(Buffer.concat(chunks).toString()) }); }
+          catch (error) { reject(error); }
+        });
+        response.on("error", reject);
+      });
+      req.on("error", reject);
+      req.end(body);
+    });
+  try {
+    const rejected = await app.inject({ method: "POST", url: endpoint + "/test", headers: secureHeaders, payload: credentials });
+    expect(rejected.statusCode).toBe(400);
+    expect((await send({ ...secureHeaders, origin: "https://elsewhere.example" })).status).toBe(400);
+    expect(vi.mocked(providerRequest)).not.toHaveBeenCalled();
+
+    const adminTest = await send(secureHeaders);
+    expect(adminTest.status).toBe(200);
+    const { test_id } = adminTest.body;
+    app.db.prepare("INSERT INTO users(username,password_hash,role) SELECT 'other-model-admin',password_hash,'admin' FROM users WHERE username='local-admin'").run();
+    const login = await app.inject({ method: "POST", url: "/api/v1/auth/login",
+      payload: { username: "other-model-admin", password: "local-demo-only" } });
+    expect(login.statusCode).toBe(200);
+    const other = { ...secureHeaders, authorization: "Bearer " + login.json().access_token };
+    expect((await send(other, "", { ...credentials, test_id })).status).toBe(409);
+    const otherTest = await send(other);
+    expect(otherTest.status).toBe(200);
+    expect((await send(other, "", { ...credentials, test_id: otherTest.body.test_id })).status).toBe(200);
+    const status = await app.inject({ method: "GET", url: endpoint, headers });
+    expect(status.json()).toMatchObject({ revision: 1, settings_https_url: "https://recruitment.example/settings" });
+  } finally {
+    await new Promise<void>(resolve => gatewayListener.close(() => resolve()));
+  }
 });

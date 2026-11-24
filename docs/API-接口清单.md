@@ -50,14 +50,16 @@ curl -X POST http://127.0.0.1:8080/api/v1/auth/login \
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| GET | `/api/v1/settings/agent/model` | 返回生效 URL、模型、配置来源、版本号和 Key 是否已配置 |
+| GET | `/api/v1/settings/agent/model` | 返回生效 URL、模型、配置来源、版本号、Key 是否已配置，以及生产配置指定的 `settings_https_url` |
 | POST | `/api/v1/settings/agent/model/models` | 提交 `base_url` 和 `api_key`，读取供应商 `GET /models` 返回的模型 ID |
 | POST | `/api/v1/settings/agent/model/test` | 带当前 `revision`、连接参数和 `model` 发起一次真实测试，验证 Agent 回复格式并返回五分钟内有效的 `test_id` |
 | PUT | `/api/v1/settings/agent/model` | 使用测试过的参数和 `test_id` 启用配置，返回新的生效状态和版本号 |
 
 Key 由服务端加密保存，接口响应只显示是否配置。同一地址换模型时可留空沿用当前 Key。供应商未提供模型目录时可直接输入模型 ID。正式 Agent 接待请求使用最新生效配置，无需重启进程。Web 管理配置前，Agent 使用部署环境中的模型参数。
 
-通过 HTTPS 或本机 SSH 转发页面提交 Key。持久化加密使用 `AGENT_LLM_CONFIG_SECRET`，缺省时从生产登录签名密钥派生。启用后应保留原加密密钥供重启和数据库备份恢复使用。
+生产管理员各用自己的账号登录 `https://119.91.113.100/settings`，启用的模型配置对系统 Agent 全局生效。旧的 HTTP 页面会显示 HTTPS 入口链接。旧端口继续服务现有 Windows 客户端。Caddy 在公网 80 完成证书校验并自动续期，在 443 提供 HTTPS，仅通过宿主机回环端口 14222 访问设置监听器。
+
+持久化加密使用 `AGENT_LLM_CONFIG_SECRET`，缺省时从生产登录签名密钥派生。启用后应保留原加密密钥供重启和数据库备份恢复使用。
 
 ## 岗位工作地址与面试点
 

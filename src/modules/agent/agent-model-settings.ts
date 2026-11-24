@@ -53,6 +53,7 @@ export function activeAgentModel(db: DatabaseSync): ModelConfig {
 export function agentModelStatus(db: DatabaseSync) {
   const current = row(db);
   const defaults = environmentModel();
+  const httpsOrigin = settingsHttpsOrigin();
   return {
     base_url: current?.base_url ?? defaults.baseUrl,
     model: current?.model ?? defaults.model,
@@ -60,11 +61,21 @@ export function agentModelStatus(db: DatabaseSync) {
     key_configured: current ? true : Boolean(defaults.apiKey),
     revision: current?.revision ?? 0,
     updated_at: current?.updated_at ?? null,
+    settings_https_url: httpsOrigin ? httpsOrigin + "/settings" : "",
   };
 }
 
 function field(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function settingsHttpsOrigin(): string {
+  try {
+    const url = new URL(process.env.REA_AGENT_SETTINGS_HTTPS_ORIGIN ?? "");
+    return url.protocol === "https:" && !url.username && !url.password ? url.origin : "";
+  } catch {
+    return "";
+  }
 }
 
 function requireProtectedOrigin(request: FastifyRequest) {
@@ -75,10 +86,16 @@ function requireProtectedOrigin(request: FastifyRequest) {
   try { originUrl = origin ? new URL(origin) : undefined; } catch { /* reject invalid origins below */ }
   const settingsPort = Number(process.env.REA_AGENT_SETTINGS_PORT ?? 0);
   const socket = request.raw.socket;
+  const publicOrigin = settingsHttpsOrigin();
+  // The HTTPS gateway overwrites this header and forwards to the private settings listener.
+  // The public HTTP listener must never use it to decide whether a request is secure.
+  const fromGateway = settingsPort > 0 && socket.localPort === settingsPort && publicOrigin &&
+    request.headers["x-forwarded-proto"] === "https" && "https://" + request.host === publicOrigin;
+  if (fromGateway && (!origin || origin === publicOrigin)) return;
   const localConnection = settingsPort
     ? socket.localPort === settingsPort
     : isLoopback(socket.remoteAddress ?? "") && isLoopback(socket.localAddress ?? "127.0.0.1");
-  if ((request.protocol === "https" && (!origin || originUrl?.protocol === "https:")) ||
+  if ((request.protocol === "https" && (!origin || origin === "https://" + request.host)) ||
       (localConnection && isLoopback(request.hostname) &&
         (!origin || (originUrl?.protocol === "http:" && originUrl.host === request.host)))) return;
   throw new ModelProviderError("insecure_origin", "请通过 HTTPS 或本机安全转发打开设置后再提交 Key");

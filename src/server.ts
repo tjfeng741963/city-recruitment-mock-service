@@ -164,6 +164,11 @@ export function buildServer() {
     root: config.uploadsDir(),
     prefix: "/uploads/",
     decorateReply: false,
+    setHeaders(response) {
+      // Uploaded documents must never execute with the settings page's origin.
+      response.setHeader("Content-Security-Policy", "sandbox");
+      response.setHeader("X-Content-Type-Options", "nosniff");
+    },
   });
   // 开发调试站：独立页面（自己的布局与路由），不挂在后台 Vue 里。
   // 直接读文件返回，不走 SPA fallback——它和后台是两套前端。
