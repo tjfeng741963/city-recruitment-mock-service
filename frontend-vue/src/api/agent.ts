@@ -274,9 +274,11 @@ export const oldFriendsApi = {
 
 /** ---------- 开场白 / 人设 / 聊天 ---------- */
 export interface AgentFlowPart {
-  kind: 'text' | 'image' | 'video' | string
+  kind: 'text' | 'image' | 'video' | 'favorite_location' | string
   body?: string
   media_name?: string
+  interview_point?: string
+  delay_before_ms?: number
   delay_ms?: number
 }
 
@@ -399,6 +401,7 @@ export const agentApi = {
       code?: string
       error?: string
       inputs?: { position_data: string }
+      favorite_location_preview?: import('../components/agent/favorite-location-preview').FavoriteLocationPreview
       reply?: { messages: Array<{content: string}> }
       latency_ms?: number
     }>('/api/v1/dify/preview', payload, { timeout: 40000, signal }),

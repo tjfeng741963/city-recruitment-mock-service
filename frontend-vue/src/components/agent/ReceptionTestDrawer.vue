@@ -15,6 +15,10 @@
         <el-tab-pane label="Dify 工作流" name="dify">
           <p class="hint">模拟对话使用当前岗位资料和适用问答。流程节点在 Dify 后台维护。</p>
           <form class="test-form" @submit.prevent="preview(true)">
+            <el-select v-if="locationPoints.length" aria-label="选择要测试定位的面试点" :model-value="testPoint" :disabled="!!busy"
+              placeholder="选择面试点，填入定位测试问题" @change="useLocationPoint">
+              <el-option v-for="point in locationPoints" :key="point.name" :value="point.name" :label="`${point.name} · ${point.title}`" />
+            </el-select>
             <label for="dify-question">求职者问题</label>
             <el-input id="dify-question" v-model="question" type="textarea" :rows="3" maxlength="2000"
               placeholder="例如，推荐岗位、查看面试安排。报名试填请使用虚构姓名和手机号。" />
@@ -26,6 +30,7 @@
           </form>
           <el-alert v-if="testError" :title="testError" type="error" :closable="false" show-icon />
           <p v-if="testNotice" class="hint" role="status">{{ testNotice }}</p>
+          <el-alert v-if="locationNotice" title="位置卡预览" :description="locationNotice" type="info" :closable="false" show-icon />
           <div v-if="turns.length" class="test-results" aria-live="polite">
             <div v-for="(turn, index) in turns" :key="index">
               <p><strong>求职者</strong> {{ turn.question }}</p>
@@ -61,6 +66,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import PositionQa from './PositionQa.vue'
+import { describeFavoriteLocation, locationPointOptions } from './favorite-location-preview'
 import { agentApi, devicesApi, type AgentDeviceItem } from '../../api/agent'
 import type { ServicePosition } from '../../api/types'
 
@@ -77,11 +83,14 @@ const props = defineProps<{
 const engine = ref<Engine>(props.initialEngine)
 const testPosition = ref<number | undefined>(props.initialDevice ? undefined : props.positionId || undefined)
 const question = ref('')
+const testPoint = ref<string>()
+const locationPoints = computed(() => locationPointOptions(props.positions.find(position => position.id === testPosition.value)?.interview_points))
 const turns = ref<Array<{ question: string; answer: string }>>([])
 const evidence = ref<string | null>(null)
 const evidenceSummary = ref('')
 const testError = ref('')
 const testNotice = ref('')
+const locationNotice = ref('')
 const busy = ref<'answer' | 'evidence'>()
 const canPreview = computed(() => !!testPosition.value && !!question.value.trim() && !busy.value && !props.positionsLoading)
 let previewRequest: AbortController | undefined
@@ -102,6 +111,13 @@ function resetTest(): void {
   evidenceSummary.value = ''
   testError.value = ''
   testNotice.value = ''
+  locationNotice.value = ''
+  testPoint.value = undefined
+}
+
+function useLocationPoint(name: string): void {
+  testPoint.value = name
+  question.value = `发一下${name}的定位`
 }
 
 function errorText(error: unknown, fallback: string): string {
@@ -121,10 +137,12 @@ async function preview(generate: boolean): Promise<void> {
   evidence.value = null
   testError.value = ''
   testNotice.value = ''
+  locationNotice.value = ''
   try {
     const { data } = await agentApi.difyPreview({ position_id: position, text, session_key: session, dry: true }, controller.signal)
     if (!current()) return
     if (!data.ok || !data.inputs) throw new Error(data.error || '读取 Dify 岗位资料失败')
+    locationNotice.value = describeFavoriteLocation(data.favorite_location_preview)
     const input = JSON.parse(data.inputs.position_data)
     const wageSource = input.sources?.fields?.wage_text
     const wage = wageSource === 'city' ? '城市资料' : (wageSource === 'position' || wageSource === 'position_fallback') ? '岗位资料' : '未提供'

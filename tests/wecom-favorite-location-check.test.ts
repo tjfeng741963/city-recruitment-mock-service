@@ -45,6 +45,15 @@ describe("企微收藏位置卡匹配", () => {
     })).toEqual({ exitCode: 0, body: { status: "matched", title: location.title, address: location.address } });
   });
 
+  it("允许空格、全半角、大小写等书写差异，但相同搜索键的多张卡仍需核对", () => {
+    const location = { ...card, title: "A区 · 广汽本田龙华店(北门)" };
+    const payload = { ...input, favorite_title: "ａ区 广汽本田龙华店（北门）",
+      snapshot: { ...input.snapshot, items: [location] } };
+    expect(runCheck(payload)).toEqual({ exitCode: 0, body: { status: "matched", title: location.title, address: location.address } });
+    expect(runCheck({ ...payload, snapshot: { ...payload.snapshot, items: [location, { ...location, title: "A区广汽本田龙华店 · 北门" }] } }))
+      .toEqual({ exitCode: 1, body: { status: "ambiguous" } });
+  });
+
   it.each([
     ["not_found", { ...input, favorite_title: "广汽本田龙华电" }],
     ["not_found", { ...input, snapshot: { ...input.snapshot, items: [{ ...card, kind: "other" }] } }],

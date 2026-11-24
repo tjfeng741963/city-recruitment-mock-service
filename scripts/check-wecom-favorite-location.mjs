@@ -6,6 +6,10 @@ function normalizeTitle(value) {
   return typeof value === "string" ? value.trim().normalize("NFC") : "";
 }
 
+function searchKey(title) {
+  return title.normalize("NFKC").toLowerCase().replace(/[\s·・,、()[\]【】]+/gu, "");
+}
+
 function isAccountId(value) {
   return typeof value === "string" && value.length > 0 && value === value.trim();
 }
@@ -28,7 +32,10 @@ function matchFavoriteLocation(input) {
     return invalidInput;
   }
 
-  const matches = snapshot.items.filter(item => item.kind === "location" && normalizeTitle(item.title) === title);
+  const locations = snapshot.items.filter(item => item.kind === "location");
+  const exact = locations.filter(item => normalizeTitle(item.title) === title);
+  const key = searchKey(title);
+  const matches = exact.length || !key ? exact : locations.filter(item => searchKey(item.title) === key);
   if (matches.length === 0) return { status: "not_found" };
   if (matches.length > 1) return { status: "ambiguous" };
 

@@ -65,7 +65,11 @@ Key 由服务端加密保存，接口响应只显示是否配置。同一地址�
 
 岗位详情和保存沿用 `/api/v1/service-positions` 系列接口。岗位响应带有所属 `city_id`，用于准确回填城市。网页表单提交 `work_address` 与 `interview_address`，分别表示工作地址和默认面试地址。已有的 `address` 单地址记录仍可读取。用户通过新表单保存后，两个地址独立存储，旧客户端可继续读取兼容字段 `address`。
 
-`interview_points` 接受旧名称字符串及 `{name,address,interview_time?,checkin_guide?}` 对象。Dify 正式预约使用所选点的地址和专属时间，未设时间沿用默认日程。收到到场消息时按登记的点名和地址查找专属指引。Agent 将各点的地址、专属时间与指引加入咨询上下文。城市资料对 Dify 的默认取值优先级沿用原有规则。
+`interview_points` 接受旧名称字符串及 `{name,address,interview_time?,checkin_guide?,favorite_title?}` 对象。Dify 正式预约使用所选点的地址和专属时间，未设时间沿用默认日程。收到到场消息时按登记的点名和地址查找专属指引。Agent 将各点的地址、专属时间与指引加入咨询上下文。城市资料对 Dify 的默认取值优先级沿用原有规则。
+
+`favorite_title` 是企微收藏位置卡的完整名称，支持最多 100 个字符的单行文字。`favorite_delay_ms`（0 到 60000）保存 Dify 在已确认面试点、求职者索要定位时，从地址文字发出到位置卡的计划间隔。空标题清除绑定和间隔。管理员调用 `POST /api/v1/agent/chat`（`dry` 或 `preview`）或 `POST /api/v1/dify/preview`（`dry`）询问面试定位时，可读取 `favorite_location_preview`。返回 `needs_point`、`not_configured`、`position_disabled` 或 `windows_unavailable`。Dify 命中已配置点时还返回 `trigger` 与 `after_address_delay_ms`。预览不下发发送任务，收藏名称保持独立于模型输入。
+
+管理员的 `GET/PUT /api/v1/agent-flow` 支持在节点 `parts` 中保存 `favorite_location`、所属岗位面试点名称 `interview_point`、本条开始前等待 `delay_before_ms` 及完成后间隔 `delay_ms`。消息顺序以 `parts` 顺序为准。位置卡仍待 Windows 接入，因此当前设备流程 `GET /api/v1/agent/flow` 和旧开场兼容序列会过滤该动作。启用的流程节点须保留至少一条可执行消息，不含其他内容的位置卡节点可保存为停用草稿。
 
 ## 微信账号列表的回复来源
 

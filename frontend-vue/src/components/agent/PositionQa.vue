@@ -6,6 +6,7 @@
     <el-button :disabled="!positionId || !question.trim()" :loading="busy" @click="preview(true)">生成模拟回答</el-button>
     <el-alert v-if="error" :title="error" type="error" :closable="false" />
     <div v-if="answer" class="qa-answer" role="status">{{ answer }}</div>
+    <el-alert v-if="locationNotice" class="qa-answer" title="位置卡预览" :description="locationNotice" type="info" :closable="false" show-icon />
     <template v-if="evidence"><p>已读取 {{ knowledge.length }} 条适用问答；这表示回答可参考这些内容，不代表每条均被本次命中。</p>
       <dl><template v-for="(value,key) in facts" :key="key"><dt>{{ factLabels[String(key)] || '岗位补充资料' }}</dt><dd>{{ value }}</dd></template></dl>
       <div v-for="item in knowledge" :key="item.id" class="qa-faq"><b>{{ item.question }}</b><p>{{ item.answer }}</p></div>
@@ -15,11 +16,13 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { agentApi } from '../../api/agent'
+import { describeFavoriteLocation } from './favorite-location-preview'
 const props = defineProps<{positionId:number}>()
 const factLabels:Record<string,string>={city:'城市',factory_name:'招聘项目',job_title:'岗位',wage_text:'工资',hours_text:'工作时间',age_text:'年龄要求',welfare_text:'吃住与福利',place:'工作地点',interview_address:'面试地址',interview_time:'面试时间',basic_requirements:'招聘要求',height_text:'身高要求',job_content:'工作内容',cert_text:'证件要求'}
 const question=ref(''),busy=ref(false),error=ref(''),answer=ref(''),evidence=ref<Record<string,any>|null>(null)
 const facts=computed(()=>evidence.value?.facts || {})
 const knowledge=computed<Array<{id:number;question:string;answer:string}>>(()=>evidence.value?.knowledge || [])
+const locationNotice=computed(()=>describeFavoriteLocation(evidence.value?.favorite_location_preview))
 watch(()=>props.positionId,()=>{evidence.value=null;answer.value='';error.value=''})
 async function preview(generate:boolean) {
   busy.value=true;error.value='';answer.value='';evidence.value=null
