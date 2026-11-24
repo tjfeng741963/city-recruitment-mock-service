@@ -239,6 +239,7 @@ REPORT_FIRST_WINDOW = 24 * 3600              # 首次没有游标时只补最近
 _last_error = ""
 # 上一次"因掉线暂停发送"的日志时间，避免每轮刷屏
 _last_block_log = 0.0
+_last_contact_scan_error_at = 0.0
 
 # ── 桥接心跳（Node 桥 4222，与主心跳同一周期、同一线程触发）──────────────────
 # 桥只认 online/offline/scanning。映射要保守：只有确认 online 才报 online，
@@ -365,7 +366,7 @@ def log(msg: str, *, level: str | None = None, scope: str | None = None, **field
 
 def wal_signature(data_dir: Path) -> tuple:
     sig = []
-    for name in ("message.db", "message.db-wal", "session.db", "session.db-wal"):
+    for name in ("message.db", "message.db-wal", "session.db", "session.db-wal", "user.db", "user.db-wal"):
         p = data_dir / name
         try:
             st = p.stat()
@@ -373,6 +374,13 @@ def wal_signature(data_dir: Path) -> tuple:
         except OSError:
             sig.append((name, 0, 0))
     return tuple(sig)
+
+
+def refresh_store(store: Store) -> None:
+    """Do not acknowledge a new signature while any database is still stale."""
+    result = store.refresh()
+    if isinstance(result, dict) and result.get("failed", 0):
+        raise RuntimeError("企微数据库刷新未完成，保留原变化签名，下轮重试")
 
 
 def is_system_conv(conv_id: str, name: str = "") -> bool:
@@ -1221,31 +1229,86 @@ def match_target(m: dict, target: str) -> bool:
 
 
 def scan_added_contacts(store: Store, cfg: dict) -> int:
-    """把已加入通讯录、但还没有入站消息的目标联系人登记为欢迎触发。
+    """Welcome newly observed WeChat contacts without requiring inbound text.
 
-    企微在「加好友后对方不说话」时只更新 user.db，不一定马上写
-    conversation_table/message_table。只扫描消息会漏掉这个场景，因此按联系人
-    名称和 target 做一次幂等登记。target=all 时刻意跳过，避免升级后给所有历史
-    联系人批量发送欢迎语；指定 target 的测试/单账号配置才允许触发。
+    The first readable external-contact snapshot is baseline only.
+    Explicit target mode retains its existing operator-selected welcome path.
+    Never use the mixed corporate address book for unsolicited all-contact scans.
     """
+    global _last_contact_scan_error_at
     target = str(cfg.get("target") or "all")
-    if target == "all":
-        return 0
     try:
-        contacts = store.contacts()
         self_id = str(store.self_id() or "")
-        if not self_id:
+        if self_id in ("", "unknown"):
             return 0
         sessions = {str(row.get("id") or "") for row in store.sessions(with_names=False)}
+        search_contacts = store.contacts()
+        contacts = search_contacts if target != "all" else {}
     except Exception as exc:  # noqa: BLE001 - 联系人读取失败不影响消息扫描
         log(f"[加好友] 联系人读取失败（忽略）：{type(exc).__name__}: {exc}", level="warning")
         return 0
 
+    external = None
+    con = None
+    try:
+        if not (Path(store.data_dir) / "user.db").is_file():
+            raise RuntimeError("当前账号通讯录源文件不存在")
+        con = store._conn("user.db")
+        if con is None:
+            raise RuntimeError("通讯录缓存不可用")
+        # This is the same external WeChat table supported by Store.contacts().
+        # A missing/unsupported table is not an authoritative empty snapshot.
+        external = {str(row[0]): str(row[1] or "").strip() for row in con.execute(
+            "SELECT wxid,name FROM wechat_contactV1 WHERE wxid IS NOT NULL",
+        ) if str(row[0]) and str(row[0]) != self_id}
+    except Exception as exc:  # explicit targets can still use their established path
+        if target == "all":
+            if time.monotonic() - _last_contact_scan_error_at >= 60:
+                _last_contact_scan_error_at = time.monotonic()
+                log(f"[加好友] 普通微信联系人读取失败，未更新基线：{type(exc).__name__}", level="warning")
+            return 0
+    finally:
+        if con is not None:
+            con.close()
+
+    account_key = f"{Path(store.data_dir).resolve()}:{self_id}" if external is not None else ""
+    observations = {}
+    if external is not None:
+        initialized, observations = rlog.observe_contacts(account_key, list(external))
+        if initialized:
+            log(f"[加好友] 已建立普通微信联系人基线（{len(external)} 人），不补发历史欢迎语", scope="flow")
+        if target == "all":
+            contacts = {contact_id: external[contact_id] for contact_id in observations if contact_id in external}
+
+    # Dify deliberately owns its opening; don't leave empty Agent triggers to
+    # be replayed when the operator later switches the account back to Agent.
+    provider = getattr(_brain, "reply_provider", "agent")
+    if provider not in ("agent", "dify"):
+        # Brain starts without an acknowledged provider. Keep observations
+        # pending until reply-mode sync establishes who owns the opening.
+        return 0
+    mode_status = getattr(_brain, "reply_mode_status", {})
+    if isinstance(mode_status, dict) and mode_status.get("phase") in ("waiting", "applying"):
+        return 0
+    if provider == "dify":
+        for contact_id in observations:
+            rlog.resolve_contact_welcome(account_key, contact_id)
+        return 0
+
     greeted = _load_greeted()
+    name_ids: dict[str, set[str]] = {}
+    for contact_id, name in {**search_contacts, **(external or {})}.items():
+        normalized = str(name or "").strip().casefold()
+        if normalized:
+            name_ids.setdefault(normalized, set()).add(str(contact_id))
     added = 0
     for contact_id, name in contacts.items():
         contact_id, name = str(contact_id or ""), str(name or "").strip()
         if not contact_id or contact_id == self_id or not name:
+            continue
+        if len(name_ids.get(name.casefold(), ())) > 1:
+            # The frozen sender searches by display name. A post-send ID check
+            # is too late to make an ambiguous name safe; keep this observation.
             continue
         # 已有会话直接沿用数据库中的真实 id；尚未产生消息的新单聊按当前
         # 企微版本的实际写法先用 S:<self>_<contact>，发送后仍会回读校验。
@@ -1253,10 +1316,14 @@ def scan_added_contacts(store: Store, cfg: dict) -> int:
         ordered_id = next((value for value in candidates if value in sessions), candidates[0])
         candidate = {"conv_id": ordered_id, "conv_name": name}
         if not match_target(candidate, target):
+            if contact_id in observations:
+                rlog.resolve_contact_welcome(account_key, contact_id)
             continue
         # Different客户端版本可能把单聊成员顺序写反；已有会话优先沿用实际 id。
         conv_id = candidate["conv_id"]
-        if is_system_conv(conv_id, name) or not _is_first_contact(conv_id, greeted):
+        if is_system_conv(conv_id, name) or any(not _is_first_contact(value, greeted) for value in candidates):
+            if contact_id in observations:
+                rlog.resolve_contact_welcome(account_key, contact_id)
             continue
         trigger = {
             "id": f"contact-added:{conv_id}",
@@ -1264,11 +1331,21 @@ def scan_added_contacts(store: Store, cfg: dict) -> int:
             "conv_name": name,
             "text": "",
             "type": 1011,
-            "time": int(time.time()),
+            "time": int(observations.get(contact_id, time.time())),
         }
-        if rlog.record_incoming(trigger):
+        registered = (rlog.resolve_contact_welcome(account_key, contact_id, trigger)
+                      if contact_id in observations else rlog.record_incoming(trigger))
+        if registered:
             added += 1
             log(f"[加好友] 发现目标联系人 {name}，登记欢迎流程", scope="flow")
+    # Even with an explicit target, consume additions outside that scope so a
+    # later scope expansion does not welcome a backlog of old contacts.
+    if target != "all":
+        for contact_id in observations:
+            if not any(match_target(
+                {"conv_id": cid, "conv_name": external.get(contact_id, "")}, target
+            ) for cid in (f"S:{self_id}_{contact_id}", f"S:{contact_id}_{self_id}")):
+                rlog.resolve_contact_welcome(account_key, contact_id)
     return added
 
 
@@ -1677,6 +1754,75 @@ def _send_dify_media(store: Store, cid: str, step: dict, log_fn) -> tuple[str, s
     return "sent", str(detail)
 
 
+def _media_outbound_snapshot(store: Store, cid: str, kind: str) -> set[str] | None:
+    try:
+        me = store.self_id()
+        if not isinstance(me, str) or me in ("", "unknown"):
+            return None
+        con = store._conn("message.db")
+        if con is None:
+            return None
+        kinds = (3, 13) if kind == "image" else (43, 49)
+        with closing(con):
+            return {str(row[0]) for row in con.execute(
+                "SELECT message_id FROM message_table WHERE conversation_id=? AND sender_id=? "
+                "AND content_type IN (?,?) ORDER BY send_time DESC,message_id DESC LIMIT 100",
+                (cid, me, *kinds),
+            )}
+    except Exception:
+        return None
+
+
+def _send_agent_media(store: Store, cid: str, name: str, kind: str, log_fn, *, route: str) -> tuple[str, str]:
+    before = _media_outbound_snapshot(store, cid, kind)
+    if before is None:
+        return "failed", "媒体目标会话回读不可用，本次未执行媒体发送"
+    status, detail = _send_media(name, log_fn, route=route)
+    if status != "sent":
+        return status, detail
+    try:
+        refresh_store(store)
+        after = _media_outbound_snapshot(store, cid, kind)
+    except Exception:
+        after = None
+    if after is None or len(after - before) != 1:
+        return "unknown", "未回读到目标会话中唯一的新媒体消息，请人工核对，不自动重发"
+    return "sent", detail
+
+
+def _reply_source_identity() -> tuple:
+    return getattr(_brain, "reply_provider", None), getattr(_brain, "reply_mode_generation", None)
+
+
+def _sequence_block_reason(cid: str, cfg: dict, source: tuple, store: Store, name: str) -> str:
+    if cid in remote_cfg.takeover_sessions():
+        return "会话已被人工接管，停止后续介绍"
+    if cid in remote_cfg.abandoned_sessions():
+        return "客户已流失，停止后续介绍"
+    if cfg.get("_reply_mode_enabled") and not _check_reply_mode("online"):
+        return "回复来源尚未就绪，停止后续介绍"
+    if _reply_source_identity() != source:
+        return "回复来源已切换，停止旧介绍"
+    try:
+        me = store.self_id()
+        # Only actual two-member IDs can identify the counterpart. Do not
+        # guess by splitting underscores, which can occur in external IDs.
+        if isinstance(me, str) and me not in ("", "unknown") and cid.startswith("S:"):
+            members = cid[2:]
+            other = (members[len(me) + 1:] if members.startswith(me + "_") else
+                     members[:-len(me) - 1] if members.endswith("_" + me) else "")
+            if other:
+                contacts = store.contacts()
+                normalized = name.strip().casefold()
+                matches = {str(key) for key, value in contacts.items()
+                           if str(value or "").strip().casefold() == normalized}
+                if matches != {other}:
+                    return "联系人名称已变化或不能唯一搜索，停止介绍并待人工核对"
+    except Exception:
+        return "联系人搜索信息不可读，停止介绍"
+    return ""
+
+
 def _send_dify_plan(store: Store, name: str, cid: str, plan: list[dict], log_fn) -> tuple[str, str, int]:
     """Execute each server-supplied step after its delay, stopping on uncertain delivery."""
     global _last_reply_at
@@ -1714,7 +1860,7 @@ def _send_flow_part(store: Store, name: str, cid: str, part: dict, log_fn, *,
         # risking a paste into whichever chat currently has focus.
         if not part.get("target_verified"):
             return "failed", "媒体节点前必须在本轮先发送已验证落点的文本消息，待人工核对"
-        return _send_media(media, log_fn, route="node")
+        return _send_agent_media(store, cid, media, kind, log_fn, route="node")
     return "failed", "流程节点内容为空"
 
 
@@ -1738,6 +1884,7 @@ def _run_flow(store: Store, cfg: dict, cid: str, name: str, flow: dict, *, node_
         )
     state.set_phase(cid, "running")
     verified_target = False
+    source = _reply_source_identity()
     visited = set()
     backoff = 1 + min(_consecutive_send_failures, 3)
     wait = float(cfg.get("cooldown", 8)) * backoff - (time.time() - _last_reply_at)
@@ -1767,6 +1914,10 @@ def _run_flow(store: Store, cfg: dict, cid: str, name: str, flow: dict, *, node_
         parts = current.get("parts") or []
         idx = int(step_index)
         while idx < len(parts):
+            reason = _sequence_block_reason(cid, cfg, source, store, name)
+            if reason:
+                state.set_phase(cid, "held", error=reason)
+                return "held"
             part = parts[idx] if isinstance(parts[idx], dict) else {}
             if not state.claim_step(cid, key, idx, body=str(part.get("body") or ""), media_name=str(part.get("media_name") or "")):
                 prior = next((row for row in state.outbox(cid, key) if row["part_index"] == idx), {})
@@ -1783,10 +1934,15 @@ def _run_flow(store: Store, cfg: dict, cid: str, name: str, flow: dict, *, node_
                         base_url=str(cfg.get("bridge_server") or ""), token=str(cfg.get("bridge_token") or ""), log=log)
                     if not ok:
                         raise ValueError(f"媒体预取失败：{detail}")
-                _last_reply_at = time.time()
-                status, detail = _send_flow_part(store, name, cid, {**part, "target_verified": verified_target},
-                                               lambda msg: log(f"    [流程] {msg}"),
-                                               node_key=key, part_index=idx)
+                reason = (_sequence_block_reason(cid, cfg, source, store, name)
+                          if part.get("kind") in ("image", "video") else "")
+                if reason:
+                    status, detail = "failed", reason
+                else:
+                    _last_reply_at = time.time()
+                    status, detail = _send_flow_part(store, name, cid, {**part, "target_verified": verified_target},
+                                                   lambda msg: log(f"    [流程] {msg}"),
+                                                   node_key=key, part_index=idx)
             except Exception as exc:  # a crash after Enter has an unknown result
                 status, detail = "unknown", f"{type(exc).__name__}: {exc}"
             blocked = status == "blocked"
@@ -2364,11 +2520,21 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     if ores.get("ok") and ores.get("items"):
                         sent_items = 0
                         opening_uncertain = False
+                        opening_source = _reply_source_identity()
+                        opening_target_verified = False
                         for item in ores["items"]:
                             backoff = 1 + min(_consecutive_send_failures, 3)
                             wait = cfg["cooldown"] * backoff - (time.time() - _last_reply_at)
                             if wait > 0:
                                 time.sleep(wait)
+                            reason = _sequence_block_reason(cid, cfg, opening_source, store, name)
+                            if reason:
+                                if sent_items:
+                                    rlog.mark_unknown(mid, cid, reason, "开场", partial=True)
+                                else:
+                                    rlog.mark_held(mid, cid, reason, "开场")
+                                stats["blocked"] += 1
+                                return stats
                             seq, kind = int(item["seq"]), str(item["kind"])
                             fake_id = f"opening:{cid}:{seq}"
                             if kind == "text" and (item["content"] or "").strip():
@@ -2384,6 +2550,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                     message_id=mid, trace_id=trace,
                                 )
                                 if status == "sent":
+                                    opening_target_verified = True
                                     _last_error, _consecutive_send_failures = "", 0
                                     rlog.mark_sent(fake_id, cid, "开场", str(item["content"]))
                                     opening_trace = _brain.log_receipt(cid, seq, kind, "sent")
@@ -2415,6 +2582,12 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                     _brain.log_receipt(cid, seq, kind, "failed", _last_error)
                                     return stats
                             elif kind in ("image", "video") and (item["media_name"] or "").strip():
+                                if not opening_target_verified:
+                                    detail_m = "媒体开场前必须先有本轮已验证落点的文字，未执行媒体发送"
+                                    rlog.mark_held(mid, cid, detail_m, "开场")
+                                    _brain.log_receipt(cid, seq, kind, "failed", detail_m)
+                                    stats["blocked"] += 1
+                                    return stats
                                 # 真实发送媒体：先检索本地 media 目录（约束 3：本地有
                                 # 就不再下载），缺了再从 4222 媒体库拉（bridge 通道，
                                 # 设备令牌鉴权）。粘贴用上游原有 paste_media，不新增动作。
@@ -2426,14 +2599,21 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                     log=lambda s: log(f"    {s}"),
                                 )
                                 log(f"    [媒体] {item['media_name']} 预取：{pre_detail}")
+                                reason = _sequence_block_reason(cid, cfg, opening_source, store, name)
+                                if not ok_pre or reason:
+                                    detail_m = reason or f"开场媒体预取失败：{pre_detail}"
+                                    rlog.mark_unknown(mid, cid, detail_m, "开场", partial=bool(sent_items))
+                                    _brain.log_receipt(cid, seq, kind, "failed", detail_m)
+                                    stats["unknown"] += 1
+                                    return stats
                                 if not opening_claimed:
                                     if not rlog.begin_reply_attempt(mid, cid, "开场"):
                                         stats["blocked"] += 1
                                         return stats
                                     opening_claimed = True
                                 _last_reply_at = time.time()
-                                media_status, detail_m = _send_media(
-                                    item["media_name"], lambda s: log(f"    {s}"), route="opening",
+                                media_status, detail_m = _send_agent_media(
+                                    store, cid, item["media_name"], kind, lambda s: log(f"    {s}"), route="opening",
                                 )
                                 if media_status == "blocked":
                                     _last_error = detail_m[:200]
@@ -2459,6 +2639,9 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                     opening_trace = _brain.log_receipt(cid, seq, kind, "failed", detail_m)
                                     _brain.log_delivery(opening_trace, "failed", session_key=cid, detail=detail_m)
                                     log(f"    [开场 {seq}] {kind}:{item['media_name']} 发送失败：{detail_m}", level="warning")
+                                    rlog.mark_unknown(mid, cid, detail_m, "开场", partial=bool(sent_items))
+                                    stats["unknown"] += 1
+                                    return stats
                             else:
                                 # 空内容/未知类型：跳过并上报
                                 rlog.mark_skipped(fake_id, cid, f"开场项类型 {kind} 无内容")
@@ -3534,7 +3717,8 @@ def main() -> int:
         f"冷却 {cfg['cooldown']}s" + (" / DRY-RUN" if cfg["dry_run"] else ""))
 
     try:
-        store.refresh()
+        last_sig = wal_signature(store.data_dir)
+        refresh_store(store)
     except Exception as exc:  # noqa: BLE001
         detail = f"数据库初始化失败：{type(exc).__name__}: {exc}"
         write_client_state("failed", detail=detail, wecom_state=wecom_state, error=str(exc))
@@ -3605,9 +3789,10 @@ def main() -> int:
         write_client_state("ready", detail="数据库初始化完成，可处理消息", wecom_state=wecom_state)
         if reporter is not None:
             reporter.tick(wecom_state, pending_count(), force=True)
+        ready = reception_ready(wecom_state)
         scan_added_contacts(store, cfg)
         scan(store, cfg)
-        if reception_ready(wecom_state):
+        if ready:
             result = drain(store, cfg, dry=cfg["dry_run"], wecom_state=wecom_state)
             if reception_ready(wecom_state):
                 _flow_tick(store, cfg, wecom_state)
@@ -3625,15 +3810,15 @@ def main() -> int:
         return 0
 
     write_client_state("ready", detail="数据库初始化完成，可处理消息", wecom_state=wecom_state)
+    ready = reception_ready(wecom_state)
     scan_added_contacts(store, cfg)
     scan(store, cfg)
-    if reception_ready(wecom_state):
+    if ready:
         drain(store, cfg, dry=cfg["dry_run"], wecom_state=wecom_state)
         if reception_ready(wecom_state):
             _flow_tick(store, cfg, wecom_state)
     pump_safely(store, cfg, reporter, wecom_state)
     _flow_report(cfg)
-    last_sig = wal_signature(store.data_dir)
     log("开始监听（Ctrl+C 退出）")
     while True:
         try:
@@ -3686,13 +3871,14 @@ def main() -> int:
             time.sleep(cfg["interval"])
             sig = wal_signature(store.data_dir)
             if sig != last_sig:
-                store.refresh()
+                refresh_store(store)
                 last_sig = sig
+            ready = reception_ready(wecom_state)
             n = scan_added_contacts(store, cfg)
             n += scan(store, cfg)
             if n:
                 log(f"新登记 {n} 条")
-            if reception_ready(wecom_state):
+            if ready:
                 drain(store, cfg, dry=cfg["dry_run"], wecom_state=wecom_state)
                 if reception_ready(wecom_state):
                     _flow_tick(store, cfg, wecom_state)

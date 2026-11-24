@@ -14,7 +14,7 @@ from tests.agent_loader import load_autopilot
 def entry(tmp_path, monkeypatch):
     agent = load_autopilot()
     monkeypatch.setattr(agent, "ROOT", tmp_path)
-    for name in ("bootstrap", "scan", "drain", "pump_safely", "print_history"):
+    for name in ("bootstrap", "scan_added_contacts", "scan", "drain", "pump_safely", "print_history"):
         monkeypatch.setattr(agent, name, MagicMock())
     monkeypatch.setattr(agent, "_make_reporter", MagicMock(return_value=None))
     monkeypatch.setattr(agent, "detect_wecom_state", lambda: "online")
@@ -37,6 +37,14 @@ def save_config(tmp_path, **values):
     path = tmp_path / "config.json"
     path.write_text(json.dumps(values), encoding="utf-8")
     return path
+
+
+def test_reply_mode_is_synchronized_before_contact_observations_are_consumed(entry, monkeypatch):
+    calls = []
+    monkeypatch.setattr(entry, "_check_reply_mode", lambda *args: calls.append("mode") or True)
+    monkeypatch.setattr(entry, "scan_added_contacts", lambda *args: calls.append("contacts") or 0)
+    assert entry.main() == 0
+    assert calls.index("mode") < calls.index("contacts")
 
 
 @pytest.mark.parametrize("configured", [False, True])

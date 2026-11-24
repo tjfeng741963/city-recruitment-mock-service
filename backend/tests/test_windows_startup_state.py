@@ -101,5 +101,6 @@ def test_autopilot_defers_database_refresh_until_after_login_probe():
     assert "waiting_login" in src
     assert "waiting_wecom" in src
     assert "configured_data_dir(cfg, require_files=False)" in src
-    assert src.index("qr_pusher = login_qr.LoginQrPusher()") < src.index("store.refresh()")
+    main_src = src[src.index("def main()") :]
+    assert main_src.index("qr_pusher = login_qr.LoginQrPusher()") < main_src.index("refresh_store(store)")
 
