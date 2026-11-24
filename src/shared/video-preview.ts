@@ -10,7 +10,7 @@ let activeConversions = 0;
 
 export type VideoPreviewResult =
   | { data: Buffer }
-  | { status: 422 | 503; detail: string };
+  | { status: 422 | 503; detail: string; retryAfter?: number };
 
 // Key by the original file digest so aliases share a cover and replacements
 // cannot reuse an outdated frame. Keep only small JPEGs in memory.
@@ -26,7 +26,9 @@ export async function videoThumbnail(source: string, sha256: string): Promise<Vi
   }
   const pending = pendingCovers.get(sha256);
   if (pending) return pending;
-  if (pendingCovers.size >= 2) return { status: 503, detail: "封面生成繁忙，请稍后重试。" };
+  if (pendingCovers.size >= 2) {
+    return { status: 503, detail: "封面生成繁忙，请稍后重试。", retryAfter: 2 };
+  }
 
   const task = (async (): Promise<VideoPreviewResult> => {
     try {

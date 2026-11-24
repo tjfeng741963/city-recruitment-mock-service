@@ -229,7 +229,13 @@ function revokeThumbs(): void {
 }
 
 async function loadThumbs(rows: MediaRow[]): Promise<void> {
-  const visible = new Set(rows.map(thumbKey))
+  const visible = new Map<string, MediaRow[]>()
+  for (const row of rows) {
+    const key = thumbKey(row)
+    const aliases = visible.get(key)
+    if (aliases) aliases.push(row)
+    else visible.set(key, [row])
+  }
   thumbRequest?.abort()
   for (const [key, url] of thumbUrls.value) {
     if (visible.has(key)) continue
@@ -240,37 +246,53 @@ async function loadThumbs(rows: MediaRow[]): Promise<void> {
   const request = new AbortController()
   thumbRequest = request
   const { signal } = request
-  const queue = new Map(rows.map(row => [thumbKey(row), row])).values()
+  const queue = visible.entries()
   async function fetchNext(): Promise<void> {
-    for (const row of queue) {
+    for (const [key, aliases] of queue) {
       if (signal.aborted) return
-      await loadThumb(row, signal)
+      if (!thumbUrls.value.has(key)) await loadThumb(key, aliases, signal)
     }
   }
   await Promise.all([fetchNext(), fetchNext()])
 }
 
-async function loadThumb(row: MediaRow, signal: AbortSignal): Promise<void> {
-  const key = thumbKey(row)
-  if (thumbUrls.value.has(key)) return
-  for (let attempt = 0; attempt < 2 && !signal.aborted; attempt++) {
+async function loadThumb(key: string, aliases: MediaRow[], signal: AbortSignal): Promise<void> {
+  for (const row of aliases) {
+    try {
+      const data = await fetchThumb(row, signal)
+      if (!signal.aborted) thumbUrls.value.set(key, URL.createObjectURL(data))
+      return
+    } catch (error) {
+      if (signal.aborted) return
+      // Aliases may have different file paths even when the file content is identical.
+      if (!isAxiosError(error) || error.response?.status !== 404) break
+    }
+  }
+  failedThumbs.value.add(key)
+}
+
+async function fetchThumb(row: MediaRow, signal: AbortSignal): Promise<Blob> {
+  const busyDeadline = Date.now() + 10_000
+  let retriedNetworkError = false
+  while (true) {
     try {
       const { data } = await http.get<Blob>(`/api/v1/agent/media/${encodeURIComponent(row.name)}`, {
-        params: row.kind === 'video' ? { preview: 'thumbnail' } : { version: row.sha256 },
+        params: { version: row.sha256, preview: row.kind === 'video' ? 'thumbnail' : undefined },
         responseType: 'blob',
         signal,
       })
-      if (!signal.aborted) thumbUrls.value.set(key, URL.createObjectURL(data))
-      break
+      return data
     } catch (error) {
-      if (signal.aborted) return
-      const status = isAxiosError(error) ? error.response?.status : undefined
-      if (attempt === 0 && (status === undefined || status >= 500)) {
-        await new Promise(resolve => setTimeout(resolve, 500))
-      } else {
-        failedThumbs.value.add(key)
-        break
+      if (signal.aborted || !isAxiosError(error)) throw error
+      const status = error.response?.status
+      const retryAfter = Number(error.response?.headers['retry-after']) * 1000
+      if (status === 503 && retryAfter > 0 && Date.now() + retryAfter <= busyDeadline) {
+        await new Promise(resolve => setTimeout(resolve, retryAfter))
+        continue
       }
+      if (retriedNetworkError || (status !== undefined && status < 500)) throw error
+      retriedNetworkError = true
+      await new Promise(resolve => setTimeout(resolve, 500))
     }
   }
 }

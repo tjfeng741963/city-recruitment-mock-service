@@ -7,7 +7,7 @@ describe('media library preview', () => {
 
     expect(view).toMatch(/<VideoPreview v-if="previewItem\.kind === 'video'" :src="previewUrl" :name="previewItem\.name"/);
     expect(view).toMatch(/<img v-else :src="previewUrl"/);
-    expect(view).toContain("preview: 'thumbnail'");
+    expect(view).toContain("preview: row.kind === 'video' ? 'thumbnail' : undefined");
     expect(view).toMatch(/<img\s+v-if="thumbUrl\(row\)"/);
     expect(view).toContain('watch(paged,');
     expect(view).toContain('await fetchMedia(row, request.signal)');

@@ -186,7 +186,7 @@ export async function registerPositionScriptRoutes(app: FastifyInstance, db: Dat
    * 响应头带 X-Content-SHA256 让客户端校验；Content-Type 按扩展名给，
    * 客户端保存到本地时不必再猜类型。
    */
-  app.get<{ Params: { name: string }; Querystring: { preview?: string } }>("/api/v1/agent/media/:name", async (request, reply) => {
+  app.get<{ Params: { name: string }; Querystring: { preview?: string; version?: string } }>("/api/v1/agent/media/:name", async (request, reply) => {
     const compatibilityPreview = request.query.preview === "compatible";
     const thumbnail = request.query.preview === "thumbnail";
     if ((compatibilityPreview || thumbnail) && !isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
@@ -200,6 +200,9 @@ export async function registerPositionScriptRoutes(app: FastifyInstance, db: Dat
       : db.prepare("SELECT id,name,storage_path,sha256,kind FROM media_assets WHERE name=? AND status='enabled'").get(name));
     const asset = row as { id:number; name:string; storage_path:string; sha256:string; kind:MediaKind } | undefined;
     if (!asset || (alias && difyMediaName(asset)!==name)) return reply.code(404).send({ detail: "Media not found" });
+    if (request.query.version !== undefined && request.query.version !== asset.sha256) {
+      return reply.code(404).send({ detail: "Media not found" });
+    }
     const absolute = mediaAbsolutePath(asset.storage_path);
     // storage_path 来自库内，但仍做一次越界检查：迁移写错也不能读到 data 之外。
     if (!absolute) return reply.code(404).send({ detail: "Media not found" });
@@ -207,7 +210,10 @@ export async function registerPositionScriptRoutes(app: FastifyInstance, db: Dat
       if (asset.kind !== "video") return reply.code(422).send({ detail: "仅支持生成视频封面。" });
       if (!fs.existsSync(absolute)) return reply.code(404).send({ detail: "Media file missing" });
       const cover = await videoThumbnail(absolute, asset.sha256);
-      if ("status" in cover) return reply.code(cover.status).send({ detail: cover.detail });
+      if ("status" in cover) {
+        if (cover.retryAfter) reply.header("Retry-After", cover.retryAfter);
+        return reply.code(cover.status).send({ detail: cover.detail });
+      }
       return reply.header("Cache-Control", "private, no-store").type("image/jpeg").send(cover.data);
     }
     if (compatibilityPreview) {
