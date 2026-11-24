@@ -3,7 +3,6 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">问答知识库</h2>
-        <p class="page-desc">编辑通用和岗位问答；启用且通过校验的问答会进入当前岗位 AI 回复，无需重复发布。</p>
       </div>
       <div class="header-actions">
         <el-button v-if="auth.user?.role === 'admin'" @click="router.push(receptionTestHref('dify', { positionId }))">到画布测试</el-button>
@@ -18,7 +17,7 @@
 
     <PositionContext @positions="positions = $event" @validated="applyPositionContext" />
 
-    <el-alert v-if="activeTab !== 'library'" title="历史资料与治理工具；当前接待只读取通用和本岗位问答。这里的旧实体范围不代表已接入回复。" type="info" :closable="false" />
+    <el-alert v-if="activeTab !== 'library'" title="历史资料仅供查阅与治理，当前接待读取通用及本岗位问答。" type="info" :closable="false" />
     <el-tabs v-model="activeTab" class="kb-tabs">
       <el-tab-pane label="知识库" name="library">
         <div class="stats-row">

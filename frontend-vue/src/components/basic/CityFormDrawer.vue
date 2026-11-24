@@ -21,8 +21,8 @@
 
         <el-form-item v-if="mode === 'edit'" label="接待配置">
           <div class="status-line">
-            <el-tag :type="statusTagType" effect="light">{{ statusText }}</el-tag>
-            <span class="hint">有已启用的设备绑定本城的已启用岗位时，显示「已配置接待」。设备在线情况可到微信账号查看。</span>
+            <el-tag :type="statusTagType" effect="light"
+              title="绑定已启用岗位后显示已配置；联机状态见微信账号">{{ statusText }}</el-tag>
           </div>
         </el-form-item>
 
@@ -170,8 +170,4 @@ async function submit(): Promise<void> {
   flex-wrap: wrap;
 }
 
-.hint {
-  font-size: 12px;
-  color: var(--bd-text-tertiary);
-}
 </style>

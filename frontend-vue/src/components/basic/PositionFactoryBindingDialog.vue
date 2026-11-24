@@ -25,7 +25,7 @@
           </el-select>
         </el-form-item>
       </el-form>
-      <p class="hint">只能选择岗位所属城市下且已启用的工厂；清空表示取消归属。</p>
+      <p class="hint">清空后取消工厂归属。</p>
     </div>
     <template #footer>
       <el-button @click="emit('update:modelValue', false)">取消</el-button>

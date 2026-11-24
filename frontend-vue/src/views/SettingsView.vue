@@ -3,7 +3,6 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">全局设置</h2>
-        <p class="page-desc">配置公司名称、年龄要求等全局参数</p>
       </div>
       <div class="header-actions">
         <el-button :icon="Refresh" :loading="loading" @click="loadAll">刷新</el-button>
@@ -84,10 +83,7 @@
         <el-divider />
 
         <h3 class="block-title">一键同步</h3>
-        <p class="section-desc">
-          将 city-config-web 的最新配置和知识库同步到 Agent，立即生效（无需重启容器）。
-        </p>
-        <el-button type="primary" :icon="Refresh" :loading="syncing" @click="syncAgent">
+        <el-button type="primary" :icon="Refresh" :loading="syncing" @click="syncAgent" title="同步配置和知识库到 Agent">
           一键同步
         </el-button>
         <el-alert
@@ -103,11 +99,8 @@
       <!-- 数据初始化 -->
       <div class="settings-card">
         <h3 class="block-title">数据初始化</h3>
-        <p class="section-desc">
-          下载模板Excel，填写工厂和城市区域数据后导入，快速初始化账号配置。
-        </p>
         <div class="block-actions left">
-          <el-button :icon="Download" :loading="downloading" @click="downloadTemplate">
+          <el-button :icon="Download" :loading="downloading" @click="downloadTemplate" title="下载工厂和城市区域的 Excel 模板">
             下载模板
           </el-button>
           <el-upload
@@ -398,13 +391,6 @@ onMounted(loadAll)
 
 .block-actions.left {
   align-items: center;
-}
-
-.section-desc {
-  margin: 0 0 14px;
-  color: var(--bd-text-tertiary);
-  font-size: 13px;
-  line-height: 1.6;
 }
 
 .section-hint {

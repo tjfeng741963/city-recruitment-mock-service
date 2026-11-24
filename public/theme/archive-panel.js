@@ -236,10 +236,6 @@
     const groupCard = document.createElement("div");
     groupCard.className = "rk-arch-card";
     groupCard.innerHTML = `<b>设备绑定群聊（登记完成后自动推送）</b>`;
-    const gHint = document.createElement("p");
-    gHint.className = "rk-arch-hint";
-    gHint.textContent = "群聊清单由客户端从企微读取上报。选设备 → 选群聊 → 保存，登记完成自动推送。";
-    groupCard.append(gHint);
     for (const device of deviceList) {
       const row = document.createElement("div");
       row.className = "rk-arch-row";

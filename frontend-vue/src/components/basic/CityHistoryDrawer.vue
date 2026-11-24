@@ -7,7 +7,6 @@
     @open="load"
   >
     <div class="drawer-toolbar">
-      <span class="hint">每次编辑城市都会生成一条快照，可回滚到任意历史版本</span>
       <el-button :icon="Refresh" @click="load">刷新</el-button>
     </div>
 
@@ -182,11 +181,6 @@ defineExpose({ load })
   align-items: center;
   justify-content: space-between;
   margin-bottom: 12px;
-}
-
-.hint {
-  font-size: 12px;
-  color: var(--bd-text-tertiary);
 }
 
 .raw-json {

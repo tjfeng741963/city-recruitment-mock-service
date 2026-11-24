@@ -11,7 +11,6 @@
       <el-option label="系统 Agent" value="agent" />
       <el-option label="Dify 工作流" value="dify" />
     </el-select>
-    <span class="mode-scope">{{ scopeHint(status?.effective ?? currentProvider) }}</span>
 
     <div class="mode-feedback" aria-live="polite">
       <template v-if="pending && status">
@@ -71,10 +70,8 @@ const explanation = computed(() => {
 
 function label(mode: ReplyProvider) { return mode === 'dify' ? 'Dify' : '系统 Agent' }
 
-function scopeHint(mode?: ReplyProvider) {
-  if (mode === 'agent') return 'Agent 使用一个绑定岗位。'
-  if (mode === 'dify') return 'Dify 可在配置范围内接待多个岗位。'
-  return 'Agent 接待单岗，Dify 支持多岗位。'
+function scopeHint(mode: ReplyProvider) {
+  return mode === 'dify' ? 'Dify 可在配置范围内接待多个岗位。' : 'Agent 使用一个绑定岗位。'
 }
 
 function apply(next: ReplyModeStatus) {
@@ -175,7 +172,6 @@ onBeforeUnmount(() => {
 <style scoped>
 .mode-control { display: grid; gap: 5px; min-width: 0; padding-block: 3px; }
 .mode-feedback { display: grid; gap: 2px; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
-.mode-scope { color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.45; }
 .mode-feedback:empty { display: none; }
 .mode-feedback > .el-button { justify-self: start; margin-left: 0; }
 .mode-pending { color: var(--el-color-warning-dark-2); }

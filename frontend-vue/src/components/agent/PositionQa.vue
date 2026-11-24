@@ -1,6 +1,5 @@
 <template>
   <section class="position-qa">
-    <p>只生成预览，不发送给真实客户，也不推进真实流程。普通节点消息与等待分支请在流程图核对。</p>
     <el-input v-model="question" placeholder="例如：工资多少？包住吗？面试在哪里？" :disabled="busy" />
     <el-button :disabled="!positionId || !question.trim()" :loading="busy" type="primary" @click="preview(false)">查看回答依据</el-button>
     <el-button :disabled="!positionId || !question.trim()" :loading="busy" @click="preview(true)">生成模拟回答</el-button>

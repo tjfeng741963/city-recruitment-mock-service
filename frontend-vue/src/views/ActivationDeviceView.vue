@@ -3,9 +3,6 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">激活设备配置</h2>
-        <p class="page-desc">
-          每台设备一个开关：开了就按策略给这台设备下的沉淀客户发激活消息，关了立即停止
-        </p>
       </div>
       <div class="header-actions">
         <el-tooltip
@@ -41,7 +38,7 @@
         <el-table-column prop="recruiter_id" label="归属招聘员" min-width="140" />
         <el-table-column label="复聊激活" width="120">
           <template #default>
-            <el-switch :model-value="false" disabled />
+            <el-switch :model-value="false" disabled title="开启后按策略发送，关闭后停止" />
           </template>
         </el-table-column>
         <el-table-column label="今日已发" min-width="120">

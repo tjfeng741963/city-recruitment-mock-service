@@ -15,7 +15,6 @@
         </el-select>
         <span v-if="!item && positionsLoading" class="kb-sort-hint" role="status">正在加载岗位选项…</span>
         <span v-else-if="!item && !positionAvailable" class="kb-sort-hint">原岗位不可用，请重新选择适用范围。</span>
-        <span class="kb-sort-hint">工资、地址等事实在招聘岗位维护；通用回答可引用 {wage_text}。</span>
       </el-form-item>
       <el-form-item label="问题" required>
         <el-input v-model="form.question" maxlength="500" show-word-limit placeholder="例如：厂里管吃住吗？" />
@@ -28,7 +27,7 @@
           :rows="5"
           maxlength="2000"
           show-word-limit
-          placeholder="填写对外回复内容，涉及工价/厂规时请写明对应工厂或岗位"
+          placeholder="填写对外答复，通用答案可引用 {wage_text}"
         />
       </el-form-item>
 
@@ -92,12 +91,13 @@
         <el-col :span="12">
           <el-form-item label="是否启用">
             <el-switch v-model="form.enabled" active-text="启用" inactive-text="停用" />
+            <span class="kb-sort-hint">通过校验的通用或岗位问答，启用后可用于接待。</span>
           </el-form-item>
         </el-col>
         <el-col :span="12">
           <el-form-item label="排序">
             <el-input-number v-model="form.sort_order" :min="0" :max="99999" controls-position="right" />
-            <span class="kb-sort-hint">数值越大越靠前</span>
+            <span class="kb-sort-hint">数值越大，排序越靠前</span>
           </el-form-item>
         </el-col>
       </el-row>

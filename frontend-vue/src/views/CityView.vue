@@ -3,7 +3,6 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">城市</h2>
-        <p class="page-desc">管理城市与区县，打开对应的招聘岗位。</p>
       </div>
       <div class="header-actions">
         <el-dropdown trigger="click" @command="openCityTool">

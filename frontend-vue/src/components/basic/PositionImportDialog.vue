@@ -14,13 +14,14 @@
             <el-button :icon="Download" :loading="exporting" @click="exportPositions">导出岗位</el-button>
             <el-button :icon="Document" @click="downloadTemplate">下载导入模板</el-button>
           </div>
-          <p class="hint">导出为 xlsx，模板列：city_name / factory_name / position_name / address / contact_phone</p>
+          <p class="hint">Excel 导出仅含岗位索引。</p>
         </div>
         <el-divider />
         <div class="block">
           <div class="block-title">导入</div>
           <el-upload
             :auto-upload="false"
+            :disabled="!importAvailable"
             :limit="1"
             accept=".xlsx,.xls"
             :on-change="onPick"
@@ -33,16 +34,16 @@
             class="mt"
             type="primary"
             :loading="importing"
-            :disabled="!file"
+            :disabled="!importAvailable || !file"
             @click="importPositions"
           >
             开始导入
           </el-button>
+          <p v-if="!importAvailable" class="hint">暂不支持导入</p>
         </div>
       </el-tab-pane>
 
       <el-tab-pane label="鲸才岗位导入" name="jingcai">
-        <p class="hint">上传鲸才导出的岗位表格，需填写招聘员 ID（可选）。</p>
         <el-form label-width="100px">
           <el-form-item label="招聘员 ID">
             <el-input v-model="recruiterId" placeholder="留空则使用当前账号" />
@@ -50,6 +51,7 @@
         </el-form>
         <el-upload
           :auto-upload="false"
+          :disabled="!importAvailable"
           :limit="1"
           accept=".xlsx,.xls"
           :on-change="onJingcaiPick"
@@ -62,11 +64,12 @@
           class="mt"
           type="primary"
           :loading="importing"
-          :disabled="!jingcaiFile"
+          :disabled="!importAvailable || !jingcaiFile"
           @click="importJingcai"
         >
           开始导入
         </el-button>
+        <p v-if="!importAvailable" class="hint">暂不支持导入</p>
       </el-tab-pane>
 
       <el-tab-pane label="岗位节假日" name="holidays">
@@ -79,6 +82,7 @@
           <div class="block-title">导入</div>
           <el-upload
             :auto-upload="false"
+            :disabled="!importAvailable"
             :limit="1"
             accept=".xlsx,.xls"
             :on-change="onHolidayPick"
@@ -91,11 +95,12 @@
             class="mt"
             type="primary"
             :loading="importing"
-            :disabled="!holidayFile"
+            :disabled="!importAvailable || !holidayFile"
             @click="importHolidays"
           >
             开始导入
           </el-button>
+          <p v-if="!importAvailable" class="hint">暂不支持导入</p>
         </div>
       </el-tab-pane>
     </el-tabs>
@@ -120,6 +125,8 @@ const emit = defineEmits<{
   (e: 'imported'): void
 }>()
 
+// These import endpoints currently accept files without writing any records.
+const importAvailable = false
 const activeTab = ref('positions')
 const exporting = ref(false)
 const importing = ref(false)
@@ -182,7 +189,7 @@ async function downloadTemplate(): Promise<void> {
 }
 
 async function importPositions(): Promise<void> {
-  if (!file.value) return
+  if (!importAvailable || !file.value) return
   importing.value = true
   try {
     const form = new FormData()
@@ -200,7 +207,7 @@ async function importPositions(): Promise<void> {
 }
 
 async function importJingcai(): Promise<void> {
-  if (!jingcaiFile.value) return
+  if (!importAvailable || !jingcaiFile.value) return
   importing.value = true
   try {
     const form = new FormData()
@@ -231,7 +238,7 @@ async function exportHolidays(): Promise<void> {
 }
 
 async function importHolidays(): Promise<void> {
-  if (!holidayFile.value) return
+  if (!importAvailable || !holidayFile.value) return
   importing.value = true
   try {
     const form = new FormData()

@@ -105,9 +105,7 @@
     const titles = document.createElement("div");
     const h2 = document.createElement("h2");
     h2.textContent = `${city.city_name}的厂区`;
-    const sub = document.createElement("p");
-    sub.textContent = "岗位挂在这个城市的厂区下，AI 回答候选人时按厂区取岗位";
-    titles.append(h2, sub);
+    titles.append(h2);
     const close = document.createElement("button");
     close.type = "button";
     close.className = "rk-fac-close";
@@ -134,11 +132,7 @@
     form.append(input, add);
 
     const list = document.createElement("div");
-    const note = document.createElement("p");
-    note.className = "rk-fac-note";
-    note.textContent = "停用的厂区不再向候选人推荐；删除前请确认没有岗位挂在它下面。";
-
-    body.append(error, form, list, note);
+    body.append(error, form, list);
 
     let items = [];
 
@@ -179,6 +173,7 @@
         const toggle = document.createElement("button");
         toggle.type = "button";
         toggle.textContent = factory.is_active ? "停用" : "启用";
+        if (factory.is_active) toggle.title = "停用后不再推荐该厂区的岗位";
         toggle.addEventListener("click", async () => {
           try {
             await api(`/api/v1/factories/${factory.id}`, { method: "PUT", body: JSON.stringify({ is_active: !factory.is_active }) });
@@ -191,7 +186,7 @@
         remove.className = "danger";
         remove.textContent = "删除";
         remove.addEventListener("click", async () => {
-          if (!window.confirm(`删除厂区「${factory.factory_name}」？`)) return;
+          if (!window.confirm(`删除厂区「${factory.factory_name}」？请先确认没有岗位归属于该厂区。`)) return;
           try {
             await api(`/api/v1/factories/${factory.id}`, { method: "DELETE" });
             await load();

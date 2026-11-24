@@ -54,6 +54,10 @@ body {
   text-decoration: underline;
 }
 
+.page-header:has(.page-title):not(:has(.page-desc)) {
+  align-items: center;
+}
+
 .page-header .header-actions {
   display: flex;
   align-items: center;

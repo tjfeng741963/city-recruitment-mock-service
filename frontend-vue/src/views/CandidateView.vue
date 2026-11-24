@@ -3,7 +3,6 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">候选人员管理</h2>
-        <p class="page-desc">汇总全部客户对话、历史候选记录和面试登记；报名成功单独统计，不把沟通中客户算作报名。</p>
       </div>
       <div class="header-actions">
         <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
@@ -96,7 +95,7 @@
     </div>
     <div class="candidate-pagination"><el-pagination v-model:current-page="page" :page-size="pageSize" :total="total" layout="total, prev, pager, next" @current-change="load" /></div>
     <el-drawer v-model="historyVisible" :title="`对话记录 · ${historyCandidate?.nickname || historyCandidate?.name || ''}`" size="680px">
-      <p class="history-note">真实消息记录，只读查看，不会触发回复或清除未读。</p>
+      <p class="history-note">只读记录</p>
       <el-button v-if="historyMore" :loading="historyLoading" @click="loadHistory(true)">加载更早消息</el-button>
       <el-alert v-if="historyError" :title="historyError" type="error" :closable="false" />
       <el-empty v-if="!historyLoading && !historyMessages.length && !historyError" description="暂无消息记录" />

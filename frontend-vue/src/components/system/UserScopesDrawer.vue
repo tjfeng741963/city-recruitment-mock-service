@@ -8,9 +8,7 @@
     @open="load"
   >
     <div v-loading="loading">
-      <p class="drawer-desc">
-        为用户指定可访问的招聘员、城市与坐席设备。管理员默认拥有全部数据范围，这里的配置对管理员不生效。
-      </p>
+      <p v-if="user?.role === 'admin'" class="drawer-desc">管理员可访问全部数据。</p>
 
       <el-alert
         v-if="errorMessage"

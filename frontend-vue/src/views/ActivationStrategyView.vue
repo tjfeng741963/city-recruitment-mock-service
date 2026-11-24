@@ -3,12 +3,6 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">激活策略配置</h2>
-        <p class="page-desc">
-          策略决定“谁在什么时候被激活”；A 类激活消息从复聊语料库随机抽取（「语料库」菜单维护），客户回复后仍由原 Dify 对话接管
-        </p>
-        <p class="page-desc warning-desc">
-          配置按账号隔离：管理员看到的是全局默认模板（各账号未自定义时生效）；总账号保存后即生成自己账号的独立配置，此后管理员改全局模板不再影响已自定义的账号
-        </p>
       </div>
     </div>
 
@@ -21,10 +15,9 @@
               <el-time-picker
                 v-model="scheduleTime"
                 format="HH:mm"
-                placeholder="调度时间"
+                placeholder="选择队列生成时间"
                 class="time-picker"
               />
-              <div class="form-hint">每天到点扫描各策略名单，生成今日待激活队列</div>
             </div>
           </el-form-item>
 
@@ -32,19 +25,19 @@
             <div class="field-wrap">
               <el-switch v-model="autoReview" />
               <div class="form-hint">
-                开启后话术生成完毕直接进入发送队列，无需人工逐条审核；「误判捞回」策略不受此开关影响，始终需要人工审核
+                开启后直接进入发送队列。「误判捞回」仍需审核。
               </div>
             </div>
           </el-form-item>
         </div>
 
         <el-form-item>
-          <el-button type="primary" @click="saveEngine">保存引擎配置</el-button>
+          <el-button type="primary" title="管理员保存全局默认，各账号可保存自己的配置" @click="saveEngine">保存引擎配置</el-button>
         </el-form-item>
       </el-form>
     </div>
 
-    <ChartCard title="激活策略" class="strategy-list">
+    <ChartCard title="激活策略" class="strategy-list" aria-label="激活策略">
       <ApiMissing
         :api="MISSING_APIS.activationStrategies"
         hint="策略开关、触发条件、发送时段与三档推送参数均依赖该接口；表单可本地编辑，但无法读取或保存后端配置。"
@@ -72,10 +65,6 @@ function saveEngine(): void {
 .activation-strategy {
   width: 100%;
   min-width: 0;
-}
-
-.warning-desc {
-  color: #a14f00;
 }
 
 .engine-card {

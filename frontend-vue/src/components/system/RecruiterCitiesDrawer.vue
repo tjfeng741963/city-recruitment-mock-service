@@ -103,9 +103,6 @@
 
       <el-tab-pane label="服务城市" name="service">
         <div v-loading="loadingService" class="service-pane">
-          <p class="pane-desc">
-            服务城市来自 <code>GET /recruiters/:id/service-cities</code>；勾选后保存会调用批量接口新增。
-          </p>
           <el-alert
             v-if="serviceError"
             :title="serviceError"
@@ -129,7 +126,7 @@
             </el-button>
           </div>
           <p class="pane-hint">
-            说明：后端暂未提供「取消服务城市」接口，取消勾选不会提交，只提交新增项。
+            目前只能新增服务城市。
           </p>
         </div>
       </el-tab-pane>
@@ -382,12 +379,6 @@ async function saveServiceCities(): Promise<void> {
 
 .service-pane {
   padding-bottom: 8px;
-}
-
-.pane-desc {
-  margin: 0 0 12px;
-  color: var(--bd-text-tertiary);
-  font-size: 13px;
 }
 
 .pane-hint {

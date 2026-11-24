@@ -3,9 +3,6 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">复聊语料库</h2>
-        <p class="page-desc">
-          A 类激活发送时从「启用」语料中随机抽一条发给客户；客户回复后仍由原 Dify 对话接管
-        </p>
       </div>
       <div class="header-actions">
         <input
@@ -66,7 +63,7 @@
         </el-table-column>
         <el-table-column label="启用" width="90">
           <template #default="{ row }">
-            <el-switch :model-value="Boolean(row.is_active)" @change="notSupported('切换启用状态')" />
+            <el-switch :model-value="Boolean(row.is_active)" title="A 类激活从启用语料中抽取话术，客户回复后仍由原 Dify 对话接待" @change="notSupported('切换启用状态')" />
           </template>
         </el-table-column>
         <el-table-column label="使用次数" min-width="100">

@@ -33,10 +33,6 @@
 
         <div class="arch-card">
           <b>设备绑定群聊（登记完成后自动推送）</b>
-          <p class="arch-hint">
-            群聊清单由客户端从企微读取上报（企微登录后自动同步）。可以直接选，也可以手输群名——
-            发送时和发给个人一样，按群名搜索会话。
-          </p>
           <div v-for="device in devices" :key="device.id" class="arch-row">
             <span class="device-label">{{ device.device_code }}</span>
             <el-select
@@ -45,7 +41,7 @@
               filterable
               allow-create
               default-first-option
-              :placeholder="groupsLoaded ? '未绑定（可手输群名）' : '加载中…'"
+              :placeholder="groupsLoaded ? '选择或输入群名' : '加载中…'"
               @change="(value: string) => bindGroup(device, value)"
             >
               <el-option label="未绑定" value="" />
@@ -132,7 +128,7 @@
           <div class="followup-head">
             <div>
               <h2 id="followup-title">AI 跟进分析</h2>
-              <p class="followup-source">根据近期对话生成，仅供跟进参考。</p>
+              <p v-if="currentFollowup?.summary" class="followup-source">来源：近期对话</p>
             </div>
             <el-button
               v-if="selected.has_conversation"

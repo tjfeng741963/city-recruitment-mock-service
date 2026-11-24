@@ -206,11 +206,11 @@
               :rows="2"
               resize="none"
               placeholder="输入消息，Ctrl+Enter 发送"
+              aria-label="输入消息，Ctrl+Enter 发送，Enter 换行"
               @keydown.ctrl.enter.prevent="send"
               @keydown.meta.enter.prevent="send"
             />
             <div class="input-foot">
-              <span class="muted input-tip">Ctrl+Enter 发送 · Enter 换行</span>
               <el-button type="primary" :loading="sending" :disabled="!draft.trim()" @click="send">
                 发送
               </el-button>
@@ -1095,10 +1095,6 @@ onBeforeUnmount(() => {
   justify-content: flex-end;
   gap: 10px;
   margin-top: 6px;
-}
-
-.input-tip {
-  font-size: 11px;
 }
 
 @media (max-width: 1180px) {

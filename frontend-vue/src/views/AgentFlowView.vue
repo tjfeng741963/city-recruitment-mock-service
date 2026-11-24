@@ -6,7 +6,6 @@
       </el-button>
       <div class="page-heading">
         <h2 class="page-title">话术流程 <el-tag effect="plain" type="primary">系统 Agent</el-tag></h2>
-        <p class="page-desc">编排消息顺序、发送间隔和等待条件。</p>
       </div>
       <div class="header-actions">
         <el-button v-if="viewMode === 'edit'" type="primary" :icon="Check"
@@ -57,7 +56,6 @@
 
     <div v-if="savedFlow && !loading" class="runtime-status-bar">
       <span><strong>绑定设备</strong>：{{ boundDevices.length ? boundDevices.map(device => device.device_code).join('、') : devicesAvailable ? '未绑定设备，当前无人执行该岗位' : '设备列表读取失败，绑定状态未知' }}</span>
-      <span>{{ savedFlow.status === 'enabled' ? '系统 Agent 的新客户使用已保存节点，在途会话保留原快照' : '节点图停用，系统 Agent 的新客户走旧开场' }}</span>
       <span class="field-note">系统 Agent 保存路径：{{ savedFlow.status === 'enabled' ? '节点流程' : '旧开场' }}；保存版本 {{ savedFlow.status === 'enabled' ? `v${savedFlow.version}` : openingVersion ? openingVersion.slice(0, 10) : '未知' }}</span>
       <el-button link type="primary" @click="runtimeDetails = !runtimeDetails">{{ runtimeDetails ? '收起运行说明' : '查看运行说明与状态' }}</el-button>
     </div>
@@ -65,17 +63,15 @@
     <div v-if="boundDevices.length && savedFlow && !loading" class="config-sync-status">
       <div v-for="device in boundDevices" :key="device.device_code" class="config-sync-row">
         <strong>{{ device.device_code }}</strong>
-        <el-tag size="small" :type="syncView(device.device_code).state === 'synced' ? 'success' : syncView(device.device_code).state === 'blocked' ? 'danger' : 'info'">{{ syncView(device.device_code).label }}</el-tag>
+        <el-tag size="small" :title="syncView(device.device_code).detail" :type="syncView(device.device_code).state === 'synced' ? 'success' : syncView(device.device_code).state === 'blocked' ? 'danger' : 'info'">{{ syncView(device.device_code).label }}</el-tag>
         <span>安装版本 {{ clientSync[device.device_code]?.client_commit?.slice(0, 8) || '未上报' }} · 拉取时间 {{ formatTime(syncView(device.device_code).time) }}</span>
-        <el-tooltip :content="syncView(device.device_code).detail"><span class="field-note">配置拉取不等于发送或送达</span></el-tooltip>
       </div>
     </div>
 
     <div v-if="viewMode === 'runtime' && savedFlow && !loading" class="runtime-media-summary">
       <span>固定{{ savedFlow.status === 'enabled' ? '节点' : '开场' }}：{{ fixedMediaCounts.images }} 张图片、{{ fixedMediaCounts.videos }} 个视频</span>
-      <span>AI 按需可选：{{ aiMediaBranches.filter(item => item.kind === 'image').length }} 张图片、{{ aiMediaBranches.filter(item => item.kind === 'video').length }} 个视频</span>
+      <span>按需素材：{{ aiMediaBranches.filter(item => item.kind === 'image').length }} 张图片、{{ aiMediaBranches.filter(item => item.kind === 'video').length }} 个视频</span>
       <span v-if="!aiContextAvailable" class="field-note">AI 素材上下文读取失败，按需分支未知</span>
-      <span v-else-if="!fixedMediaCounts.images && aiMediaBranches.some(item => item.kind === 'image')" class="field-note">当前没有固定图片步骤；下方图片属于 AI 按需分支，不会每次开场都发。</span>
     </div>
 
     <div v-if="runtimeDetails && savedFlow" class="runtime-details">
@@ -83,7 +79,7 @@
       <p v-if="isDirty">编辑器有未保存修改；实际执行路径仍使用上次保存的 v{{ savedFlow.version }}。</p>
       <p v-if="contentMatches">节点内容与旧开场逐条一致；等待方式仍以节点连接为准，内容一致不代表发送节奏一致。</p>
       <p v-else>节点流程与旧开场内容不同。启用时走节点流程，停用时新客户走旧开场；已有会话保留自己的流程快照。</p>
-      <p>图片视频：先查本地文件，缺失再从服务器预取，由 Windows 发送。节点流程中，媒体必须在本轮已成功发送文本并确认目标之后执行。</p>
+      <p>节点流程会在本轮文本确认发到目标会话后发送素材。按需素材随答复选择。</p>
       <div v-for="device in boundDevices" :key="device.device_code" class="device-evidence">
         <strong>{{ device.device_code }}</strong> · 最后心跳 {{ formatTime(device.last_online) }}
         <template v-if="mirrorErrors.includes(device.device_code)"> · 状态汇总读取失败</template>
@@ -92,7 +88,7 @@
           v{{ row.flow_version }} · {{ row.node_key }} · {{ phaseLabel(row.phase) }} · {{ row.count }} 个会话 · {{ formatTime(row.updated_at) }}
         </div>
       </div>
-      <p class="field-note">状态上报不是送达回执；客户端已安装版本、企微实际在线和最终客户收信需分别核验。本页不会重置、重发或领取客户消息。</p>
+      <p class="field-note">配置拉取和状态上报不是送达回执。</p>
     </div>
 
     <el-alert v-if="pageError && !conflict" class="page-alert" type="error" :title="pageError" show-icon :closable="false" />
@@ -162,7 +158,6 @@
             <el-button :icon="CircleClose" :disabled="!canAddEnd" @click="addEnd">添加结束</el-button>
             <el-button :icon="Connection" :disabled="!canAddEdge" @click="addKeywordEdge">添加关键词连接</el-button>
             <el-button :icon="Delete" :disabled="!selectedNode || selectedNode.node_key === flow.entry_key" @click="removeSelectedNode">删除节点</el-button>
-            <span class="graph-action-note">拖动节点调整布局；点击节点或连线编辑属性</span>
           </div>
 
           <div class="flow-workspace">
@@ -178,7 +173,6 @@
               @move-node="moveNode"
             />
 
-            <div class="canvas-footnote">{{ viewMode === 'runtime' ? '只读运行路径：开始与 AI 为说明阶段，不会存入节点配置。点节点在右侧查看完整消息和执行条件。' : '编辑中的节点图；拖动与参数修改保存后才影响新会话。' }}</div>
             </div>
 
             <div class="inspector-resizer" role="separator" aria-label="调整右侧编辑栏宽度" aria-orientation="vertical"
@@ -285,7 +279,7 @@
                         />
                       </el-select>
                       <FlowMediaPreview v-if="part.kind !== 'text' && part.media_name" :name="part.media_name" :kind="part.kind" />
-                      <el-form-item label="发送后间隔（秒）" class="compact-item">
+                      <el-form-item label="发送后间隔（秒）" class="compact-item" title="最后一条的间隔在进入下一节点前执行">
                         <el-input-number
                           :model-value="millisecondsToSeconds(part.delay_ms)"
                           :min="0"
@@ -293,7 +287,6 @@
                           controls-position="right"
                           @update:model-value="(value: number | undefined) => setPartDelay(part, value)"
                         />
-                        <div class="field-note">本条完成后的实际等待；最后一条也用于进入下一节点前等待。</div>
                       </el-form-item>
                     </div>
                   </template>
@@ -1149,7 +1142,6 @@ onBeforeUnmount(() => { loadSequence += 1; if(evidenceTimer)clearInterval(eviden
 .is-fullscreen .page-header { flex-shrink: 0; margin-bottom: 10px; gap: 12px; }
 .page-heading { flex: 1; min-width: 0; }
 .is-fullscreen .page-header .page-title { font-size: 20px; }
-.is-fullscreen .page-desc { margin: 3px 0 0; }
 .is-fullscreen .flow-toolbar { flex-shrink: 0; margin-bottom: 8px; }
 .runtime-status-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; flex-shrink: 0; padding: 6px 4px 10px; font-size: 12px; color: var(--el-text-color-regular); }
 .runtime-status-bar .el-button { margin-left: auto; }
@@ -1168,7 +1160,6 @@ onBeforeUnmount(() => { loadSequence += 1; if(evidenceTimer)clearInterval(eviden
 .canvas-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px 16px; flex-wrap: wrap; flex-shrink: 0; padding: 10px 12px; margin-bottom: 10px; border: 1px solid var(--el-border-color-lighter); border-radius: 8px; background: var(--el-bg-color); }
 .canvas-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
 .canvas-actions .el-button { margin-left: 0; }
-.canvas-footnote { flex-shrink: 0; padding: 8px 4px 0; font-size: 11px; line-height: 1.5; color: var(--el-text-color-secondary); }
 .inspector-resizer { width: 8px; cursor: col-resize; touch-action: none; display: flex; justify-content: center; }
 .inspector-resizer::after { content: ''; width: 2px; height: 48px; margin-top: 40px; border-radius: 2px; background: var(--el-border-color); }
 .inspector-resizer:hover::after,.inspector-resizer:focus-visible::after { background: var(--el-color-primary); }
@@ -1177,14 +1168,13 @@ onBeforeUnmount(() => { loadSequence += 1; if(evidenceTimer)clearInterval(eviden
 .empty-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .flow-toolbar { min-height: 52px; margin-bottom: 12px; padding: 8px 12px; border: 1px solid var(--bd-border, #e8ecf3); border-radius: 6px; background: var(--el-bg-color, #fff); }
 .position-select { width: min(360px, 100%); }
-.flow-version,.graph-action-note { color: var(--bd-text-tertiary, #7b8494); font-size: 12px; }
+.flow-version { color: var(--bd-text-tertiary, #7b8494); font-size: 12px; }
 .toolbar-spacer { flex: 1; }
 .dirty-hint { color: var(--el-color-warning); font-size: 12px; }
 .page-alert { margin-bottom: 12px; }
 .page-loading,.empty-flow { min-height: 360px; padding: 28px; border: 1px solid var(--bd-border, #e8ecf3); border-radius: 6px; background: var(--el-bg-color, #fff); }
 .empty-actions { justify-content: center; }
 .graph-actions { margin-bottom: 12px; }
-.graph-action-note { margin-left: auto; }
 .flow-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 8px var(--inspector-width, 360px); align-items: stretch; gap: 4px; min-width: 0; min-height: 0; }
 .canvas-panel { min-width: 0; }
 .is-fullscreen .canvas-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -1218,7 +1208,6 @@ onBeforeUnmount(() => { loadSequence += 1; if(evidenceTimer)clearInterval(eviden
   .flow-toolbar { align-items: stretch; }
   .position-select { width: 100%; }
   .toolbar-spacer { display: none; }
-  .graph-action-note { width: 100%; margin-left: 0; }
   .page-header { align-items: flex-start; }
 }
 </style>

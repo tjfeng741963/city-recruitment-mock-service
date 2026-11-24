@@ -3,13 +3,10 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">图片与视频</h2>
-        <p class="page-desc">
-          图 / 视频发给客户用。通用素材所有岗位共用；面试地点图这类各城市不同的，绑定到具体岗位——Agent 只会发本岗位绑定的图。
-        </p>
       </div>
       <div class="header-actions">
         <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
-        <el-button type="primary" :icon="Upload" :loading="uploading" :disabled="!contextReady" @click="pickFile">
+        <el-button type="primary" :icon="Upload" :loading="uploading" :disabled="!contextReady" @click="pickFile" :title="positionId ? '上传为当前岗位素材' : '上传为所有岗位共用素材'">
           上传素材
         </el-button>
         <input

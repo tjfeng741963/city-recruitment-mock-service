@@ -3,7 +3,6 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">招聘员管理</h2>
-        <p class="page-desc">管理招聘员信息及其负责的城市配置</p>
       </div>
       <div class="header-actions">
         <el-button :icon="Refresh" @click="load">刷新</el-button>

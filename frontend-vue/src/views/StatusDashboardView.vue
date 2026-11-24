@@ -3,10 +3,9 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">{{ pageTitle }}</h2>
-        <p class="page-desc">{{ pageDescription }}</p>
       </div>
       <div class="header-actions">
-        <span class="refresh-hint">{{ lastRefreshText }}</span>
+        <span class="refresh-hint" title="每 3 分钟自动刷新">{{ lastRefreshText }}</span>
         <el-button :loading="loading" @click="refresh()">刷新</el-button>
       </div>
     </div>
@@ -185,11 +184,6 @@ let refreshTimer: number | undefined
 
 const isDeviceReport = computed(() => route.path.startsWith('/device-report'))
 const pageTitle = computed(() => (isDeviceReport.value ? '设备报表' : '监控看板'))
-const pageDescription = computed(() =>
-  isDeviceReport.value
-    ? '设备运行与消息投递情况总览，每 3 分钟自动刷新'
-    : '服务运行状态总览，每 3 分钟自动刷新',
-)
 
 const lastRefreshText = computed(() => {
   if (!lastRefresh.value) return '尚未刷新'
