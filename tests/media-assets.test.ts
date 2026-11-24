@@ -157,6 +157,23 @@ describe("media assets", () => {
     expect(String(res.headers["content-type"])).toContain("video/mp4");
   });
 
+  it("protects thumbnail requests and keeps a missing source distinct from a failed preview", async () => {
+    const name = "封面-test.mp4";
+    const created = await upload(name, "video");
+    expect(created.statusCode).toBe(200);
+    const url = `/api/v1/agent/media/${encodeURIComponent(name)}?preview=thumbnail`;
+    for (const headers of [device, svc, {}]) {
+      expect((await app.inject({ url, headers })).statusCode).toBe(403);
+    }
+    const image = await upload("非封面.png");
+    expect(image.statusCode).toBe(200);
+    expect((await app.inject({
+      url: `/api/v1/agent/media/${encodeURIComponent("非封面.png")}?preview=thumbnail`, headers: admin,
+    })).statusCode).toBe(422);
+    app.db.prepare("UPDATE media_assets SET storage_path=? WHERE name=?").run("media/missing-preview.mp4", name);
+    expect((await app.inject({ url, headers: admin })).statusCode).toBe(404);
+  });
+
   it("allows an authenticated administrator to preview media but rejects other user JWTs", async () => {
     await upload("管理员预览.png");
     const url = `/api/v1/agent/media/${encodeURIComponent("管理员预览.png")}`;
