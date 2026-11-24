@@ -60,7 +60,7 @@
               placeholder='例如：{"model": "gpt-4o-mini", "temperature": 0.3}'
               class="code-input"
             />
-            <div class="hint">留空表示不配置；保存前会校验 JSON 格式。</div>
+            <div class="hint">填写 JSON，或留空。</div>
           </el-collapse-item>
         </el-collapse>
       </el-form>

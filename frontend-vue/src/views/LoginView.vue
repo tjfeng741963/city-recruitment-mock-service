@@ -11,7 +11,6 @@
       <section class="yuanyi-login__access" aria-labelledby="yuanyi-login-title">
         <div class="yuanyi-login__content">
           <h1 id="yuanyi-login-title">登录</h1>
-          <p class="yuanyi-login__intro">使用工作账号进入招聘工作台。</p>
 
           <form class="yuanyi-login__form" novalidate @submit.prevent="handleSubmit">
             <div class="yuanyi-login__field">
@@ -276,14 +275,8 @@ async function handleSubmit(): Promise<void> {
   line-height: 1.12;
 }
 
-.yuanyi-login__intro {
-  margin: 13px 0 36px;
-  color: var(--login-muted);
-  font-size: 15px;
-  line-height: 1.6;
-}
-
 .yuanyi-login__form {
+  margin-top: 30px;
   display: grid;
   gap: 19px;
 }
@@ -484,15 +477,14 @@ async function handleSubmit(): Promise<void> {
     border-block-start: 1px solid #c7d0e165;
   }
 
-  .yuanyi-login__intro {
-    margin: 10px 0 27px;
+  .yuanyi-login__form {
+    margin-top: 24px;
   }
 }
 
 @media (max-width: 760px) and (max-height: 670px) {
   .yuanyi-login__access { padding-top: 23px; padding-bottom: 27px; }
-  .yuanyi-login__intro { margin-bottom: 22px; }
-  .yuanyi-login__form { gap: 15px; }
+  .yuanyi-login__form { margin-top: 18px; gap: 15px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

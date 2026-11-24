@@ -3,7 +3,6 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">老友管理</h2>
-        <p class="page-desc">企微端上报的老客户，AI 不自动回复，可手动放行</p>
       </div>
       <div class="header-actions">
         <el-button :icon="Refresh" :loading="loading" @click="loadDevices">刷新设备</el-button>
@@ -15,7 +14,7 @@
       type="warning"
       show-icon
       :closable="false"
-      title="后端未提供 /api/v1/agent/old-friends，页面结构已就绪"
+      title="暂无法读取老友记录"
       description="该接口当前返回 404。统计卡、筛选、表头与操作列均按旧版保留，设备筛选使用 /api/v1/agent/devices 的真实数据，不展示伪造记录。"
     />
 
@@ -77,7 +76,7 @@
         <el-table-column prop="created_at" label="创建时间" width="180" />
         <el-table-column label="操作" width="150" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary">{{ row.status === 'release' ? '设为不可聊' : '放行' }}</el-button>
+            <el-button link type="primary" :title="row.status === 'release' ? '暂停自动接待' : '允许该会话参与自动接待'">{{ row.status === 'release' ? '设为不可聊' : '放行' }}</el-button>
           </template>
         </el-table-column>
 

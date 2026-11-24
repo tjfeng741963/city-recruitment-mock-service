@@ -3,7 +3,6 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">郎职师 · 运营汇总</h2>
-        <p class="page-desc">按时间范围汇总账号运营数据</p>
       </div>
     </div>
 

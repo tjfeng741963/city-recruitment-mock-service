@@ -64,7 +64,7 @@
           <el-input v-model="form.contact" placeholder="联系人 / 电话" />
         </el-form-item>
         <el-form-item label="状态">
-          <el-switch v-model="form.is_active" active-text="启用" inactive-text="停用" />
+          <el-switch v-model="form.is_active" active-text="启用" inactive-text="停用" title="停用后不再推荐该厂区的岗位" />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -180,7 +180,7 @@ async function save(): Promise<void> {
 
 async function remove(row: Factory): Promise<void> {
   try {
-    await ElMessageBox.confirm(`确定删除厂区「${row.factory_name}」吗？该操作不可撤销。`, '删除确认', {
+    await ElMessageBox.confirm(`删除「${row.factory_name}」后无法撤销。请先确认该厂区没有关联岗位。`, '删除确认', {
       type: 'warning',
       confirmButtonText: '删除',
       cancelButtonText: '取消',

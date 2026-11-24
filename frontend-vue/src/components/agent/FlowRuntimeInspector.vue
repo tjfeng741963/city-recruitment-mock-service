@@ -12,7 +12,6 @@
           <p v-if="part.kind === 'text'" class="verbatim">{{ part.body || '未填写文本' }}</p>
           <template v-else><strong>{{ part.media_name || '未选素材' }}</strong>
             <FlowMediaPreview v-if="part.media_name" :name="part.media_name" :kind="part.kind" />
-            <p>Windows 读取素材文件后发送，媒体不会变成这段文件名文字。</p>
           </template>
         </div>
       </template>
@@ -28,7 +27,6 @@
       <p>{{ edge.runtime_label || edgeLabel(edge) }}</p>
       <p v-if="edge.trigger === 'keyword' && edge.condition_value">客户文本包含「{{ edge.condition_value }}」时匹配，优先级 {{ edge.priority || 0 }}。</p>
       <p>起点：{{ title(edge.from_key) }}</p><p>去向：{{ title(edge.to_key) }}</p>
-      <p>连线只是程序路由。实际是否发送还要满足设备在线、客户触发、当前会话快照与发送校验。</p>
     </template>
     <el-empty v-else :image-size="60" description="点击图上的阶段，看触发条件和完整消息" />
     <el-divider />

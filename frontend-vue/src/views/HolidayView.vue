@@ -3,7 +3,6 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">节假日管理</h2>
-        <p class="page-desc">维护节假日与岗位放假安排，客户咨询面试时间时会自动避开节假日</p>
       </div>
       <div class="header-actions">
         <el-button :icon="Refresh" @click="load">刷新</el-button>
@@ -127,6 +126,7 @@
             class="full"
             value-format="YYYY-MM-DD"
             placeholder="选择开始日期"
+            title="面试安排会避开启用的假期"
           />
         </el-form-item>
         <el-form-item label="结束日期" prop="end_date">

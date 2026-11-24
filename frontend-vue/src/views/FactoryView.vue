@@ -3,7 +3,6 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">厂区管理</h2>
-        <p class="page-desc">管理各城市下属厂区，支持按城市筛选与关键词搜索</p>
       </div>
       <div class="header-actions">
         <el-button :icon="Refresh" @click="load">刷新</el-button>

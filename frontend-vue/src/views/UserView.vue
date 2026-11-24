@@ -3,7 +3,6 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">用户管理</h2>
-        <p class="page-desc">管理系统用户账号（仅管理员可见）</p>
       </div>
       <div class="header-actions">
         <el-button :icon="Refresh" @click="load">刷新</el-button>

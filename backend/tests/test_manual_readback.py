@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from tests.agent_loader import AGENT_DIR, load_autopilot, load_reply_store
-from tests.test_bridge_commands import COMMAND, FakeBridge, _cfg
+from tests.test_bridge_commands import ACCOUNT_ID, COMMAND, FakeBridge, _cfg
 
 
 @pytest.fixture
@@ -45,12 +45,12 @@ def database(tmp_path, monkeypatch):
     with closing(sqlite3.connect(path)) as con, con:
         con.execute("CREATE TABLE message_table (message_id INTEGER PRIMARY KEY, conversation_id TEXT, sender_id TEXT, send_time INTEGER, content_type INTEGER, content TEXT)")
 
-    def insert(mid, *, cid=COMMAND["contact_id"], sender="owner", text=COMMAND["content"]):
+    def insert(mid, *, cid=COMMAND["contact_id"], sender=ACCOUNT_ID, text=COMMAND["content"]):
         with closing(sqlite3.connect(path)) as con, con:
             con.execute("INSERT INTO message_table VALUES (?,?,?,?,2,?)", (mid, cid, sender, mid, text))
 
     store = modules["store"].Store.__new__(modules["store"].Store)
-    store.data_dir = tmp_path / "owner" / "Data"
+    store.data_dir = tmp_path / ACCOUNT_ID / "Data"
     store.sessions = MagicMock(return_value=[{"id": COMMAND["contact_id"], "name": COMMAND["nickname"]}])
     store.refresh = MagicMock()
     yield types.SimpleNamespace(store=store, core=modules["send"], insert=insert, path=path)

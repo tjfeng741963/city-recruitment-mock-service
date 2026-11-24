@@ -354,7 +354,7 @@ def test_media_first_opening_never_pastes_into_an_unselected_chat(agent, store, 
 
 
 @pytest.mark.parametrize("failure", ["prefetch", "send"])
-def test_failed_opening_media_stops_all_later_items_and_never_marks_welcomed(agent, store, failure):
+def test_failed_opening_media_stops_later_items_without_locking_a_verified_contact(agent, store, failure):
     baseline(agent, store)
     agent._brain.opening.return_value = {"ok": True, "items": [
         {"seq": 1, "kind": "text", "content": "First", "delay_ms": 0},
@@ -367,8 +367,8 @@ def test_failed_opening_media_stops_all_later_items_and_never_marks_welcomed(age
     agent.scan_added_contacts(store, CFG)
     agent.drain(store, CFG)
     assert agent.core_send.send.call_count == 1
-    assert "S:own_new" not in agent._load_greeted()
-    assert agent.rlog.has_unconfirmed_opening("S:own_new")
+    assert "S:own_new" in agent._load_greeted()
+    assert not agent.rlog.has_unconfirmed_opening("S:own_new")
     agent.drain(store, CFG)
     assert agent.core_send.send.call_count == 1
 

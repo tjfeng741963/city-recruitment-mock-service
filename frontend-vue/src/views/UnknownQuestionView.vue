@@ -3,7 +3,6 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">未知问题管理</h2>
-        <p class="page-desc">AI 无法回答的问题，审核后一键转为知识库</p>
       </div>
       <div class="header-actions">
         <el-button :icon="Refresh" @click="load">刷新</el-button>

@@ -3,10 +3,6 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">周边城市设置</h2>
-        <p class="page-desc">
-          配置每个负责城市的周边城市（可多选）。客户在负责城市没有合适岗位时，AI
-          会推荐对应负责城市的周边城市岗位。区域列表用于把客户上报的区县关联到城市。
-        </p>
       </div>
       <div class="header-actions">
         <el-button :icon="Refresh" @click="load">刷新</el-button>
@@ -60,6 +56,7 @@
               collapse-tags
               collapse-tags-tooltip
               placeholder="选择周边城市"
+              title="本城没有合适岗位时，推荐这些城市"
             >
               <el-option
                 v-for="option in candidateCities(row)"

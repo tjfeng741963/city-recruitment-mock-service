@@ -3,7 +3,6 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">主推设置</h2>
-        <p class="page-desc">配置各城市对外展示的主推岗位（最多 {{ maxFeatured }} 个）</p>
       </div>
       <div class="header-actions">
         <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
@@ -27,16 +26,12 @@
 
     <el-alert
       v-if="permissionDenied"
-      title="主推设置仅对招聘员账号开放（当前账号无权限）"
+      title="请使用招聘员账号配置主推岗位"
       type="warning"
       show-icon
       :closable="false"
       class="page-alert"
     >
-      <p class="alert-desc">
-        后端接口 <code>GET /api/v1/recruiter-featured/cities</code> 仅允许 recruiter 角色访问。
-        请使用招聘员账号（例如 <code>local-recruiter</code>）登录后再配置主推岗位。
-      </p>
       <el-button size="small" @click="load">重新加载</el-button>
     </el-alert>
 
@@ -252,12 +247,6 @@ onMounted(load)
 
 .page-alert {
   margin-bottom: 16px;
-}
-
-.alert-desc {
-  margin: 6px 0 10px;
-  font-size: 12.5px;
-  line-height: 1.7;
 }
 
 .position-tags {

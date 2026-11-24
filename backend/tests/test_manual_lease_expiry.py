@@ -100,7 +100,6 @@ def test_lease_expires_during_read_only_snapshot(setup_agent):
     agent, clock, _ = setup_agent
     bridge = FakeBridge({**COMMAND, "lease_until": (clock[0] + 5) * 1000})
     store = _mock_store()
-    store.self_id.return_value = "owner"
 
     def snapshot(*args, **kwargs):
         clock[0] += 6
@@ -116,7 +115,6 @@ def test_valid_lease_preserves_existing_sender_and_real_id_receipt(setup_agent):
     agent, clock, _ = setup_agent
     bridge = FakeBridge({**COMMAND, "lease_until": (clock[0] + 60) * 1000})
     store = _mock_store()
-    store.self_id.return_value = "owner"
     store._conn.return_value.execute.return_value.fetchall.side_effect = [[], [(102, COMMAND["content"])]]
     agent.core_send.send.return_value = {"ok": True}
     assert agent.pump_commands(store, _cfg(), bridge=bridge) == {"claimed": 1, "sent": 1, "failed": 0}

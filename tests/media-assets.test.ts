@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import type { FastifyInstance } from "fastify";
 import { buildServer } from "../src/server.js";
 
@@ -155,6 +156,61 @@ describe("media assets", () => {
     });
     expect(res.statusCode).toBe(200);
     expect(String(res.headers["content-type"])).toContain("video/mp4");
+  });
+
+  it("protects thumbnail requests and keeps a missing source distinct from a failed preview", async () => {
+    const name = "封面-test.mp4";
+    const created = await upload(name, "video");
+    expect(created.statusCode).toBe(200);
+    const url = `/api/v1/agent/media/${encodeURIComponent(name)}?preview=thumbnail`;
+    for (const headers of [device, svc, {}]) {
+      expect((await app.inject({ url, headers })).statusCode).toBe(403);
+    }
+    const image = await upload("非封面.png");
+    expect(image.statusCode).toBe(200);
+    expect((await app.inject({
+      url: `/api/v1/agent/media/${encodeURIComponent("非封面.png")}?preview=thumbnail`, headers: admin,
+    })).statusCode).toBe(422);
+    app.db.prepare("UPDATE media_assets SET storage_path=? WHERE name=?").run("media/missing-preview.mp4", name);
+    expect((await app.inject({ url, headers: admin })).statusCode).toBe(404);
+  });
+
+  it("rejects stale content versions for both image and video thumbnail requests", async () => {
+    const image = await upload("versioned.png");
+    const video = await upload("versioned.mp4", "video");
+    expect(image.statusCode).toBe(200);
+    expect(video.statusCode).toBe(200);
+    const wrongVersion = "0".repeat(64);
+    expect((await app.inject({ url: `/api/v1/agent/media/versioned.png?version=${wrongVersion}`, headers: admin })).statusCode).toBe(404);
+    expect((await app.inject({ url: `/api/v1/agent/media/versioned.mp4?preview=thumbnail&version=${wrongVersion}`, headers: admin })).statusCode).toBe(404);
+  });
+
+  it.skipIf(spawnSync("ffmpeg", ["-version"]).status !== 0)("serves the same valid JPEG cover through two names and preserves original video bytes", async () => {
+    const fixture = path.join(mediaRoot, "thumbnail-fixture.mp4");
+    const generated = spawnSync("ffmpeg", [
+      "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=64x48:d=0.1",
+      "-c:v", "libx264", "-threads", "1", fixture,
+    ]);
+    expect(generated.stderr.toString()).toBe("");
+    expect(generated.status).toBe(0);
+    const original = fs.readFileSync(fixture);
+    const sha256 = createHash("sha256").update(original).digest("hex");
+    const names = ["封面联测", "封面联测.mp4"];
+    for (const name of names) {
+      expect((await upload(name, "video", original.toString("base64"))).statusCode).toBe(200);
+    }
+    const [first, alias] = await Promise.all(names.map(name => app.inject({
+      url: `/api/v1/agent/media/${encodeURIComponent(name)}?preview=thumbnail&version=${sha256}`,
+      headers: admin,
+    })));
+    for (const cover of [first, alias]) {
+      expect(cover.statusCode).toBe(200);
+      expect(cover.headers["content-type"]).toBe("image/jpeg");
+      expect(cover.rawPayload.subarray(0, 3).toString("hex")).toBe("ffd8ff");
+    }
+    expect(first.rawPayload.equals(alias.rawPayload)).toBe(true);
+    const download = await app.inject({ url: `/api/v1/agent/media/${encodeURIComponent(names[0])}`, headers: device });
+    expect(download.rawPayload.equals(original)).toBe(true);
   });
 
   it("allows an authenticated administrator to preview media but rejects other user JWTs", async () => {

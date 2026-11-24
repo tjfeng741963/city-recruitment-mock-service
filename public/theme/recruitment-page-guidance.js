@@ -9,21 +9,10 @@
     const style = document.createElement("style");
     style.id = STYLE_ID;
     style.textContent = `
-      .rk-recruitment-note{margin:10px 0 14px;padding:9px 12px;border-left:3px solid var(--rk-accent,#2563eb);background:var(--rk-panel-2,#f4f7fb);color:var(--rk-ink-2,#444);font-size:12px;line-height:1.65}
-      .rk-recruitment-drawer-note{margin:0 0 12px}
+      .rk-recruitment-note{margin:4px 0 0;color:var(--rk-ink-2,#444);font-size:12px;line-height:1.5}
       .rk-import-disabled{opacity:.55!important;cursor:not-allowed!important}
     `;
     document.head.append(style);
-  }
-
-  function addNote(anchor, key, text, className = "", before = false) {
-    if (!anchor || document.querySelector(`[${NOTE_ATTR}="${key}"]`)) return;
-    const note = document.createElement("p");
-    note.className = `rk-recruitment-note ${className}`.trim();
-    note.setAttribute(NOTE_ATTR, key);
-    note.textContent = text;
-    if (before) anchor.parentNode.insertBefore(note, anchor);
-    else anchor.after(note);
   }
 
   function currentPage() {
@@ -33,31 +22,32 @@
 
   function adjustPositionPage() {
     if (location.pathname !== "/service-positions" || !["岗位管理","招聘岗位"].includes(currentPage())) return;
-    const header = document.querySelector(".page-header");
-    const description = document.querySelector(".page-desc");
-    const descriptionText = "编辑岗位招聘事实和 AI 接待配置；保存的岗位资料将进入回复与 QA。";
-    if (description && description.textContent !== descriptionText) description.textContent = descriptionText;
-    addNote(header, "position-facts", "岗位资料是 AI 回复依据。新岗位的空白项会带入所属城市默认值；保存后请核对岗位资料，再启用接待。", "");
-    addNote(header, "position-import", "Excel 导入暂未接入岗位数据；当前导出只包含岗位索引信息。", "");
-    for (const button of document.querySelectorAll("button, .el-button")) {
+    // This fallback only handles the legacy bundle's dialog. The Vue source
+    // declares its disabled state directly.
+    const dialog = [...document.querySelectorAll(".el-dialog")].find((item) =>
+      item.querySelector(".el-dialog__title")?.textContent.trim() === "导入 / 导出",
+    );
+    if (!dialog) return;
+    for (const button of dialog.querySelectorAll("button")) {
       if (button.textContent.trim() !== "开始导入") continue;
       button.disabled = true;
       button.classList.add("rk-import-disabled");
-      button.title = "岗位导入暂不可用，文件不会写入岗位数据";
+      button.title = "暂不支持导入；导出仅含岗位索引";
       button.setAttribute("aria-disabled", "true");
+      if (button.parentElement && !button.parentElement.querySelector(`[${NOTE_ATTR}]`)) {
+        const note = document.createElement("p");
+        note.className = "rk-recruitment-note";
+        note.setAttribute(NOTE_ATTR, "import");
+        note.textContent = "暂不支持导入";
+        button.after(note);
+      }
     }
   }
 
   function adjustDrawers() {
     for (const drawer of document.querySelectorAll(".el-drawer")) {
       const heading = drawer.querySelector(".el-drawer__header");
-      const body = drawer.querySelector(".el-drawer__body");
-      if (!heading || !body) continue;
-      const title = heading.textContent.trim();
-      if (/^(添加|编辑|复制)岗位/.test(title)) {
-        if (body.firstElementChild) addNote(body.firstElementChild, "position-drawer-" + title, "字段旁的标签说明适用的回复线路。可在接待测试中核对两条线路的实际取值。", "rk-recruitment-drawer-note", true);
-        if (title === "添加岗位") bindCityTemplate(drawer);
-      }
+      if (heading?.textContent.trim() === "添加岗位") bindCityTemplate(drawer);
     }
   }
 
@@ -75,8 +65,18 @@
       item.querySelector(".el-form-item__label")?.textContent.trim() === "所属城市",
     );
     const select = cityItem?.querySelector(".el-select__placeholder");
-    const note = drawer.querySelector(`[${NOTE_ATTR}="position-drawer-添加岗位"]`);
-    if (!select || !note) return;
+    if (!select) return;
+    const showResult = (text) => {
+      let note = drawer.querySelector(`[${NOTE_ATTR}="city-defaults"]`);
+      if (!note && cityItem.after) {
+        note = document.createElement("p");
+        note.className = "rk-recruitment-note";
+        note.setAttribute(NOTE_ATTR, "city-defaults");
+        note.setAttribute("role", "status");
+        cityItem.after(note);
+      }
+      if (note) note.textContent = text;
+    };
     let lastCity = "";
     let requestId = 0;
 
@@ -124,12 +124,10 @@
           input.dataset.rkCityTemplateValue = value;
           if (value) filled++;
         }
-        note.textContent = filled
-          ? `已从「${cityName}」带入 ${filled} 项默认资料；只填空白项，核对后保存，岗位保存后成为 AI 回复依据。`
-          : `「${cityName}」没有可带入的默认资料；请填写岗位事实后保存。`;
+        showResult(filled ? `已带入 ${filled} 项城市默认资料` : "暂无可带入的城市资料");
       } catch {
         if (currentRequest === requestId && drawer.isConnected) {
-          note.textContent = `「${cityName}」模板读取失败；可继续手动填写。保存时空白项仍会使用城市模板默认值，保存后请核对。`;
+          showResult("城市资料读取失败，可手动填写");
         }
       }
     };

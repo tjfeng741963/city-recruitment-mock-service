@@ -7,7 +7,6 @@
     @update:model-value="(v: boolean) => emit('update:modelValue', v)"
     @open="reset"
   >
-    <p class="hint">客户上报的区县会归到该城市；输入后回车可新增区域。</p>
     <el-select
       v-model="local"
       class="full"
@@ -16,7 +15,7 @@
       allow-create
       default-first-option
       :reserve-keyword="false"
-      placeholder="如：福田区、罗湖区"
+      placeholder="输入区县，按回车添加"
     >
       <el-option v-for="item in local" :key="item" :label="item" :value="item" />
     </el-select>

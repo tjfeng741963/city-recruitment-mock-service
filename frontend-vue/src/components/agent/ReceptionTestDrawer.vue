@@ -8,12 +8,12 @@
           :label="[position.city_name, position.position_name].filter(Boolean).join(' · ')" />
       </el-select>
 
+      <div class="hint">仅生成模拟回答，不发给客户。</div>
       <el-tabs v-model="engine" aria-label="测试引擎">
         <el-tab-pane label="系统 Agent" name="agent">
           <PositionQa v-if="visible && engine === 'agent'" :key="testPosition || 0" :position-id="testPosition || 0" />
         </el-tab-pane>
         <el-tab-pane label="Dify 工作流" name="dify">
-          <p class="hint">模拟对话使用当前岗位资料和适用问答。流程节点在 Dify 后台维护。</p>
           <form class="test-form" @submit.prevent="preview(true)">
             <label for="dify-question">求职者问题</label>
             <el-input id="dify-question" v-model="question" type="textarea" :rows="3" maxlength="2000"
@@ -42,7 +42,6 @@
 
       <details :open="!!initialDevice" class="account-settings">
         <summary>账号回复来源</summary>
-        <p class="hint">在微信账号列表的「回复来源」列切换正式接待模式。</p>
         <el-select v-model="deviceCode" aria-label="选择微信账号" placeholder="选择微信账号"
           filterable clearable :loading="accountsLoading">
           <el-option v-for="device in devices" :key="device.id" :value="device.device_code"

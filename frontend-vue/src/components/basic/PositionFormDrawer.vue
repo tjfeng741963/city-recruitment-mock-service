@@ -25,6 +25,7 @@
                 >
                   <el-option v-for="city in cities" :key="city.id" :label="city.city_name" :value="city.id" />
                 </el-select>
+                <span v-if="mode === 'create' && form.city_id" class="tab-tip">保存时，空白项沿用城市默认资料。</span>
               </el-form-item>
             </div>
 
@@ -95,7 +96,7 @@
               <el-tag effect="plain" type="primary">系统 Agent</el-tag>
               <span>读取本岗位资料。</span>
               <el-tag effect="plain" type="warning">Dify 工作流</el-tag>
-              <span>下次回复优先读取已保存的岗位资料，空白项沿用城市资料。</span>
+              <span>岗位优先，空白沿用城市资料。</span>
             </div>
             <div v-if="cityOverrides.length" class="line-legend">
               <el-tag effect="plain" type="warning">Dify 城市默认值</el-tag>
@@ -173,7 +174,6 @@
                 <span>面试点</span>
                 <el-button type="primary" plain @click="form.interview_points.push({ name: '', address: '', interview_time: '', checkin_guide: '' })">新增面试点</el-button>
               </div>
-              <p class="tab-tip">不同线路去不同地点时，每条线路添加一个面试点，例如「地铁 1 号线面试点」。正式预约需要详细地址。</p>
               <div v-for="(point, index) in form.interview_points" :key="index" class="point-card">
                 <div class="point-heading">
                   <strong>{{ point.name.trim() || '新面试点' }}</strong>
@@ -185,19 +185,17 @@
                     <el-input v-model="point.name" placeholder="如：地铁 1 号线面试点" />
                   </el-form-item>
                   <el-form-item label="详细地址">
-                    <el-input v-model="point.address" placeholder="如：兴业路 8 号东门" />
+                    <el-input v-model="point.address" placeholder="预约需填详细地址，如兴业路 8 号东门" />
                   </el-form-item>
                 </div>
                 <el-form-item label="本点面试时间（可选）">
-                  <el-input v-model="point.interview_time" placeholder="如：周一至周五 11:00、14:00" />
-                  <span class="tab-tip point-time-tip">请用 24 小时制，支持单个时间或时段。留空沿用默认日程。</span>
+                  <el-input v-model="point.interview_time" placeholder="如 11:00 或 14:00–16:00，留空用默认日程" />
                 </el-form-item>
                 <el-form-item label="本点到场指引（可选）">
                   <el-input v-model="point.checkin_guide" type="textarea" :rows="2"
-                    placeholder="如：从东门进入，到二楼 224 室登记" />
+                    placeholder="填写该点的入口、楼层或房间" />
                 </el-form-item>
               </div>
-              <p v-if="form.interview_points.length" class="tab-tip">岗位资料里的通知模板适合放共用说明。不同点的入口、楼层和房间请填在各自的到场指引。</p>
             </section>
             <el-form-item label="岗位图片地址">
               <el-input v-model="form.image_url" placeholder="https://..." />
@@ -625,7 +623,6 @@ async function submit(): Promise<void> {
 .point-heading { display: flex; justify-content: space-between; align-items: center; }
 .point-card { border: 1px solid var(--el-border-color); border-radius: 8px; padding: 12px 16px; margin-bottom: 12px; }
 .point-card .point-heading { margin-bottom: 10px; }
-.point-time-tip { margin: 2px 0 0; }
 .point-card :deep(.el-form-item:last-child) { margin-bottom: 0; }
 .point-fields { display: grid; grid-template-columns: 1fr 1.5fr; gap: 0 16px; }
 @media (max-width: 640px) { .point-fields { grid-template-columns: 1fr; } }

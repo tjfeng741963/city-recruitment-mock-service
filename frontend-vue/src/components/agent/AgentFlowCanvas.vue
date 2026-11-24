@@ -93,7 +93,7 @@
         </div>
       </div>
     </div>
-    <div class="canvas-hint">拖动空白平移 · Ctrl / ⌘ + 滚轮缩放 · {{ readonly ? '点击节点查看执行说明' : '拖动节点调整位置，点击节点或连线编辑' }}</div>
+    <div class="canvas-hint">拖动空白处平移 · Ctrl / ⌘ + 滚轮缩放</div>
   </section>
 </template>
 

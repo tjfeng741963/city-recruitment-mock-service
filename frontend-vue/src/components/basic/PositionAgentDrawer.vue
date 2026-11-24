@@ -14,17 +14,9 @@
     <el-alert v-if="loadError" :title="loadError" type="error" :closable="false" show-icon />
     <el-tabs v-else v-model="tab">
       <el-tab-pane label="人设" name="persona">
-        <el-alert
-          class="persona-note"
-          type="info"
-          show-icon
-          :closable="false"
-          title="人设设定系统 Agent 的身份、语气和回复要求"
-          description="工资、地点和面试时间从岗位资料读取。这里填写怎样和候选人沟通。"
-        />
         <div class="field">
           <div class="field-label">
-            <span>人设正文</span>
+            <span title="填写身份、语气与要求。工资、地址等由岗位资料提供。">人设正文</span>
             <span class="char-count">{{ persona.length }} 字</span>
           </div>
           <el-input
@@ -47,8 +39,7 @@
           <el-button size="small" :disabled="openingBusy" class="pill-btn" @click="startAdd('text')">+ 文本</el-button>
           <el-button size="small" :disabled="openingBusy" class="pill-btn" @click="startAdd('image')">+ 图片</el-button>
           <el-button size="small" :disabled="openingBusy" class="pill-btn" @click="startAdd('video')">+ 视频</el-button>
-          <span class="opening-hint" v-if="embedded">先填消息正文。旧版开场使用这里保存的内容。使用节点流程的岗位，请在画布选入文字、编排顺序并保存。</span>
-          <span class="opening-hint" v-else>旧版开场按此顺序发送。启用的节点流程以画布保存的顺序为准。</span>
+          <span class="opening-hint">旧开场按此顺序发送，节点流程以画布为准。</span>
         </div>
 
         <el-dialog
@@ -567,10 +558,6 @@ defineExpose({ hasPendingChanges: () => personaDirty.value || draft.value !== nu
 .head-sub {
   font-size: 12px;
   color: var(--bd-text-tertiary, #8a94a6);
-}
-
-.persona-note {
-  margin-bottom: 12px;
 }
 
 .field-label {

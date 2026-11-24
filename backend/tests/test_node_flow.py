@@ -117,17 +117,23 @@ def test_existing_contacts_stay_in_normal_chat(agent, monkeypatch):
     assert agent._flow_state.get("S:customer") is None
 
 
-def test_legacy_first_contact_does_not_call_chat_after_opening(agent):
+def test_legacy_first_contact_passes_the_customer_text_to_chat_after_opening(agent):
     agent._brain.flow.return_value = {"nodes": [], "version": 0}
     agent._brain.opening.return_value = {"ok": True, "items": [
         {"seq": 1, "kind": "text", "content": "旧开场介绍", "media_name": "", "delay_ms": 2000}
     ]}
+    def generate(hint, cid, **kwargs):
+        assert agent.core_send.send.call_args.args[2] == "旧开场介绍"
+        return {"ok": True, "reply": "这是答疑"}
+
+    agent._brain.chat.side_effect = generate
     start(agent)
-    agent._brain.chat.assert_not_called()
-    assert agent.core_send.send.call_args.args[2] == "旧开场介绍"
+    agent._brain.chat.assert_called_once_with("你好", "S:customer", sent_summary=None)
+    agent._brain.chat.reset_mock(side_effect=True)
     incoming(agent, 2, "工资多少")
     agent.drain(MagicMock(), CFG)
-    agent._brain.chat.assert_called_once()
+    agent._brain.chat.assert_called_once_with("工资多少", "S:customer", sent_summary=None)
+    assert agent.core_send.send.call_args.args[2] == "这是答疑"
 
 
 def test_verified_legacy_opening_clears_the_previous_send_error(agent):
@@ -163,7 +169,7 @@ def test_hidden_window_keeps_opening_pending_until_the_window_recovers(agent):
 
 
 @pytest.mark.parametrize("kind", ["image", "video"])
-def test_window_change_between_opening_parts_preserves_partial_send(agent, kind):
+def test_window_change_after_verified_opening_text_stops_remaining_parts(agent, kind):
     agent._brain.flow.return_value = {"nodes": [], "version": 0}
     agent._brain.opening.return_value = {"ok": True, "items": [
         {"seq": 1, "kind": "text", "content": "欢迎", "delay_ms": 0},
@@ -173,12 +179,14 @@ def test_window_change_between_opening_parts_preserves_partial_send(agent, kind)
     agent.desktop_send_ready.side_effect = [(True, ""), (True, ""), (False, "企微窗口不可用")]
 
     incoming(agent)
-    assert agent.drain(MagicMock(), CFG)["unknown"] == 1
+    assert agent.drain(MagicMock(), CFG)["skipped"] == 1
     rows = {row["message_id"]: row for row in agent.rlog.recent()}
-    assert rows["1"]["status"] == "unknown"
+    assert rows["1"]["status"] == "skipped"
+    assert not agent.rlog.has_unconfirmed_opening("S:customer")
     assert [call.args[3] for call in agent._brain.log_receipt.call_args_list] == ["sent", "failed"]
     agent.core_send.send.assert_called_once()
     agent.core_send.paste_media.assert_not_called()
+    agent._brain.chat.assert_not_called()
 
 
 def test_unconfirmed_legacy_opening_holds_even_when_another_message_arrives(agent):
@@ -215,7 +223,7 @@ def test_revoked_legacy_opening_holds_without_falling_back_to_ai(agent):
     assert agent.rlog.recent()[0]["status"] == "held"
 
 
-def test_legacy_opening_initial_sync_pending_does_not_fall_back_to_ai(agent):
+def test_legacy_opening_initial_sync_pending_waits_before_opening_and_chat(agent):
     agent._brain.flow.return_value = {"nodes": [], "version": 0}
     agent._brain.opening.return_value = {"ok": False, "pending": True, "items": [], "detail": "配置尚未成功同步"}
     incoming(agent)
@@ -230,9 +238,8 @@ def test_legacy_opening_initial_sync_pending_does_not_fall_back_to_ai(agent):
 
     agent.drain(MagicMock(), CFG)
 
-    agent._brain.chat.assert_not_called()
-    agent.core_send.send.assert_called_once()
-    assert agent.core_send.send.call_args.args[2] == "配置同步后的欢迎"
+    agent._brain.chat.assert_called_once_with("你好", "S:customer", sent_summary=None)
+    assert agent.core_send.send.call_args_list[0].args[2] == "配置同步后的欢迎"
 
 
 def test_flow_initial_sync_pending_never_falls_back_to_legacy_or_ai(agent):

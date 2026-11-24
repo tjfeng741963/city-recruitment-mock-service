@@ -3,7 +3,6 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">激活看板</h2>
-        <p class="page-desc">复聊激活整体运行情况，包含发送、回复、沉淀人群与策略效果</p>
       </div>
       <div class="header-actions">
         <el-tooltip

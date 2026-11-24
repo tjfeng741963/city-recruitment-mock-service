@@ -3,7 +3,6 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">微信账号</h2>
-        <p class="page-desc">连接企业微信，选择接待岗位和 AI 工作流，设置报名通知群</p>
       </div>
       <div class="header-actions">
         <el-button :icon="Refresh" :loading="loading" @click="load()">刷新</el-button>
@@ -83,11 +82,10 @@
         <el-table-column label="客户端标识" min-width="150">
           <template #default="{ row }">
             <div class="device-code">{{ row.device_code || '-' }}</div>
-            <span v-if="isWebTestDevice(row)" class="muted">仅网页测试</span>
-            <el-button v-else-if="!isOnline(row)" link type="primary" size="small" @click="openQr(row)">
+            <el-button v-if="!isWebTestDevice(row) && !isOnline(row)" link type="primary" size="small" @click="openQr(row)">
               扫码登录
             </el-button>
-            <el-button v-else link type="success" size="small" class="online-mark" @click="openQr(row)" title="查看企微登录状态">客户端已连接</el-button>
+            <el-button v-else-if="!isWebTestDevice(row)" link type="success" size="small" class="online-mark" @click="openQr(row)" title="查看企微登录状态">客户端已连接</el-button>
           </template>
         </el-table-column>
 
@@ -186,7 +184,6 @@
           原绑定为「{{ positionName(receptionPreviousPositionId) }}」，保存后将替换为所选岗位。
         </div>
       </el-alert>
-      <el-alert v-else title="先选择接待岗位，再配置对应工作流。客户端连接状态和消息收发可在各自页面核对。" type="info" :closable="false" class="load-error" />
       <el-form label-width="110px">
         <el-form-item label="客户端标识" required>
           <div class="code-row">
@@ -234,7 +231,7 @@
             filterable
             clearable
             :disabled="Boolean(receptionPosition)"
-            placeholder="请选择设备实际使用的岗位"
+            :placeholder="form.provider === 'dify' ? '选择初始接待岗位' : '选择一个接待岗位'"
             style="width: 100%"
           >
             <el-option
@@ -246,9 +243,6 @@
           </el-select>
           <div v-if="receptionFactoryConflict" class="form-hint" role="alert">
             此岗位所属工厂不在当前绑定范围内。请在上方加入该工厂，或返回上一步换一个账号。
-          </div>
-          <div v-else-if="!receptionPosition" class="form-hint">
-            {{ form.provider === 'dify' ? 'Dify 可按所选工厂推荐多个岗位。默认岗位用于开始接待。' : '系统 Agent 使用这里选择的一个岗位。' }}
           </div>
         </el-form-item>
         <el-form-item label="报名通知群">

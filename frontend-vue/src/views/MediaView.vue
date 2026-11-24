@@ -3,13 +3,10 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">图片与视频</h2>
-        <p class="page-desc">
-          图 / 视频发给客户用。通用素材所有岗位共用；面试地点图这类各城市不同的，绑定到具体岗位——Agent 只会发本岗位绑定的图。
-        </p>
       </div>
       <div class="header-actions">
         <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
-        <el-button type="primary" :icon="Upload" :loading="uploading" :disabled="!contextReady" @click="pickFile">
+        <el-button type="primary" :icon="Upload" :loading="uploading" :disabled="!contextReady" @click="pickFile" :title="positionId ? '上传为当前岗位素材' : '上传为所有岗位共用素材'">
           上传素材
         </el-button>
         <input
@@ -72,11 +69,12 @@
             <div class="media-cell">
               <div class="media-thumb" :class="row.kind">
                 <img
-                  v-if="row.kind === 'image' && thumbUrls[row.id]"
-                  :src="thumbUrls[row.id]"
+                  v-if="thumbUrl(row)"
+                  :src="thumbUrl(row)"
                   :alt="row.name"
+                  @error="dropThumb(row)"
                 />
-                <el-icon v-else><Picture v-if="row.kind === 'image'" /><VideoCamera v-else /></el-icon>
+                <el-icon v-else :title="failedThumbs.has(thumbKey(row)) ? '缩略图暂不可用，可打开预览或刷新重试' : undefined"><Picture v-if="row.kind === 'image'" /><VideoCamera v-else /></el-icon>
               </div>
               <div class="media-meta">
                 <div class="media-name">{{ row.name }}</div>
@@ -149,6 +147,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { isAxiosError } from 'axios'
 import PositionContext from '../components/agent/PositionContext.vue'
 import VideoPreview from '../components/agent/VideoPreview.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -203,26 +202,99 @@ async function fetchMedia(row: MediaRow, signal?: AbortSignal): Promise<Blob> {
   return data
 }
 
-const thumbUrls = ref<Record<number, string>>({})
-const thumbLoading = ref<Record<number, boolean>>({})
+const thumbUrls = ref(new Map<string, string>())
+const failedThumbs = ref(new Set<string>())
+let thumbRequest: AbortController | undefined
 
-async function loadThumb(row: MediaRow): Promise<void> {
-  if (thumbUrls.value[row.id] || thumbLoading.value[row.id]) return
-  thumbLoading.value[row.id] = true
-  try {
-    const data = await fetchMedia(row)
-    if (disposed) return
-    thumbUrls.value = { ...thumbUrls.value, [row.id]: URL.createObjectURL(data) }
-  } catch {
-    /* 拉不到就保持占位图标 */
-  } finally {
-    thumbLoading.value[row.id] = false
-  }
+function thumbKey(row: MediaRow): string {
+  return `${row.kind}:${row.sha256}`
+}
+
+function thumbUrl(row: MediaRow): string | undefined {
+  return thumbUrls.value.get(thumbKey(row))
+}
+
+function dropThumb(row: MediaRow): void {
+  const url = thumbUrl(row)
+  if (url) URL.revokeObjectURL(url)
+  thumbUrls.value.delete(thumbKey(row))
+  failedThumbs.value.add(thumbKey(row))
 }
 
 function revokeThumbs(): void {
-  for (const url of Object.values(thumbUrls.value)) URL.revokeObjectURL(url)
-  thumbUrls.value = {}
+  thumbRequest?.abort()
+  for (const url of thumbUrls.value.values()) URL.revokeObjectURL(url)
+  thumbUrls.value.clear()
+  failedThumbs.value.clear()
+}
+
+async function loadThumbs(rows: MediaRow[]): Promise<void> {
+  const visible = new Map<string, MediaRow[]>()
+  for (const row of rows) {
+    const key = thumbKey(row)
+    const aliases = visible.get(key)
+    if (aliases) aliases.push(row)
+    else visible.set(key, [row])
+  }
+  thumbRequest?.abort()
+  for (const [key, url] of thumbUrls.value) {
+    if (visible.has(key)) continue
+    URL.revokeObjectURL(url)
+    thumbUrls.value.delete(key)
+  }
+  failedThumbs.value.clear()
+  const request = new AbortController()
+  thumbRequest = request
+  const { signal } = request
+  const queue = visible.entries()
+  async function fetchNext(): Promise<void> {
+    for (const [key, aliases] of queue) {
+      if (signal.aborted) return
+      if (!thumbUrls.value.has(key)) await loadThumb(key, aliases, signal)
+    }
+  }
+  await Promise.all([fetchNext(), fetchNext()])
+}
+
+async function loadThumb(key: string, aliases: MediaRow[], signal: AbortSignal): Promise<void> {
+  for (const row of aliases) {
+    try {
+      const data = await fetchThumb(row, signal)
+      if (!signal.aborted) thumbUrls.value.set(key, URL.createObjectURL(data))
+      return
+    } catch (error) {
+      if (signal.aborted) return
+      // Aliases may have different file paths even when the file content is identical.
+      if (!isAxiosError(error) || error.response?.status !== 404) break
+    }
+  }
+  failedThumbs.value.add(key)
+}
+
+async function fetchThumb(row: MediaRow, signal: AbortSignal): Promise<Blob> {
+  const busyDeadline = Date.now() + 10_000
+  let retriedNetworkError = false
+  while (true) {
+    try {
+      const { data } = await http.get<Blob>(`/api/v1/agent/media/${encodeURIComponent(row.name)}`, {
+        params: { version: row.sha256, preview: row.kind === 'video' ? 'thumbnail' : undefined },
+        responseType: 'blob',
+        signal,
+      })
+      return data
+    } catch (error) {
+      if (signal.aborted || !isAxiosError(error)) throw error
+      const status = error.response?.status
+      const retryAfter = Number(error.response?.headers['retry-after']) * 1000
+      if (status === 503 && retryAfter > 0 && Date.now() + retryAfter <= busyDeadline) {
+        await new Promise(resolve => setTimeout(resolve, retryAfter))
+        continue
+      }
+      if (retriedNetworkError || (status !== undefined && status < 500)) throw error
+      retriedNetworkError = true
+      await new Promise(resolve => setTimeout(resolve, 500))
+    }
+  }
 }
 
 onBeforeUnmount(() => {
@@ -251,6 +323,7 @@ const paged = computed(() => {
   const start = (page.value - 1) * pageSize.value
   return filtered.value.slice(start, start + pageSize.value)
 })
+watch(paged, rows => { void loadThumbs(rows) })
 
 
 // 筛选变化时回到第 1 页，避免停在空页
@@ -264,16 +337,8 @@ async function load(): Promise<void> {
     const { data } = await http.get<PageResult<MediaRow>>('/api/v1/media', {
       params: { page: 1, page_size: 500 },
     })
+    if (disposed) return
     items.value = data.items || []
-    loading.value = false
-    // 列表只下载图片缩略图，视频等打开预览时再加载。
-    const images = items.value.filter(row => row.kind === 'image')
-    const batch = 4
-    for (let index = 0; index < images.length && !disposed; index += batch) {
-      images.slice(index, index + batch).forEach(row => void loadThumb(row))
-      await new Promise(resolve => setTimeout(resolve, 120))
-    }
-    return
   } catch (error: any) {
     ElMessage.error(error?.response?.data?.detail || '素材列表加载失败')
   } finally {

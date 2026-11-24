@@ -2,12 +2,14 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 describe('media library preview', () => {
-  it('renders videos in a player and loads them only when previewed', () => {
+  it('renders covers in the list and fetches full video only when previewed', () => {
     const view = readFileSync('frontend-vue/src/views/MediaView.vue', 'utf8');
 
     expect(view).toMatch(/<VideoPreview v-if="previewItem\.kind === 'video'" :src="previewUrl" :name="previewItem\.name"/);
     expect(view).toMatch(/<img v-else :src="previewUrl"/);
-    expect(view).toContain("items.value.filter(row => row.kind === 'image')");
+    expect(view).toContain("preview: row.kind === 'video' ? 'thumbnail' : undefined");
+    expect(view).toMatch(/<img\s+v-if="thumbUrl\(row\)"/);
+    expect(view).toContain('watch(paged,');
     expect(view).toContain('await fetchMedia(row, request.signal)');
   });
 

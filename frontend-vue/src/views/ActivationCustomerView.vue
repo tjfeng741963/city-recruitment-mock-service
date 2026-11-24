@@ -3,9 +3,6 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">激活名单</h2>
-        <p class="page-desc">
-          待审核记录需人工确认后才会发送；未处理的记录会一直保留，不会被自动清掉；已处理/已回复的可按入单日期回查
-        </p>
       </div>
     </div>
 
@@ -41,7 +38,7 @@
 
     <div class="batch-bar">
       <span class="selected-count">已选 0 条</span>
-      <el-button size="small" type="primary" disabled>批量审核通过</el-button>
+      <el-button size="small" type="primary" disabled title="待审核记录需确认后才发送">批量审核通过</el-button>
       <el-button size="small" type="success" disabled>批量发送</el-button>
       <el-button size="small" disabled>批量跳过</el-button>
       <el-button size="small" type="warning" plain disabled>批量冷冻</el-button>

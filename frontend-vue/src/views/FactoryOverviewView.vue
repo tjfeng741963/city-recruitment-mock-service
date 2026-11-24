@@ -3,7 +3,6 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">工厂配置总览</h2>
-        <p class="page-desc">只读聚合视图：工厂 → 岗位数 / 设备 / 城市，用于快速核对配置完整度</p>
       </div>
       <div class="header-actions">
         <el-button :icon="Refresh" @click="load">刷新</el-button>
