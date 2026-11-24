@@ -14,7 +14,7 @@ from tests.agent_loader import load_autopilot
 def entry(tmp_path, monkeypatch):
     agent = load_autopilot()
     monkeypatch.setattr(agent, "ROOT", tmp_path)
-    for name in ("bootstrap", "scan", "drain", "pump_safely", "print_history"):
+    for name in ("bootstrap", "scan_added_contacts", "scan", "drain", "pump_safely", "print_history"):
         monkeypatch.setattr(agent, name, MagicMock())
     monkeypatch.setattr(agent, "_make_reporter", MagicMock(return_value=None))
     monkeypatch.setattr(agent, "detect_wecom_state", lambda: "online")

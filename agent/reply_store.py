@@ -111,6 +111,17 @@ CREATE TABLE IF NOT EXISTS reply_recoveries (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_active_reply_recovery
     ON reply_recoveries(conv_id,message_id) WHERE finished_at IS NULL;
+CREATE TABLE IF NOT EXISTS contact_baselines (
+    account_key TEXT PRIMARY KEY,
+    initialized_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS observed_contacts (
+    account_key TEXT NOT NULL,
+    contact_id TEXT NOT NULL,
+    first_seen_at REAL NOT NULL,
+    welcome_pending INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(account_key,contact_id)
+);
 """
 )
 
@@ -218,28 +229,61 @@ def init() -> None:
         con.close()
 
 
+def _record_incoming(con: sqlite3.Connection, m: dict) -> bool:
+    cur = con.execute(
+        """INSERT OR IGNORE INTO reply_log
+           (message_id, conv_id, conv_name, in_text, in_type, msg_time, status,
+            created_at, attempts, trace_id, last_step)
+           VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?, 'created')""",
+        (str(m.get("id")), m.get("conv_id") or "", m.get("conv_name") or "",
+         (m.get("text") or "")[:500], int(m.get("type") or 0), int(m.get("time") or 0),
+         time.time(), f"tr_{uuid.uuid4().hex[:12]}"),
+    )
+    return cur.rowcount > 0
+
+
+def observe_contacts(account_key: str, contact_ids: list[str]) -> tuple[bool, dict[str, float]]:
+    """Persist an account's first snapshot without welcoming historical contacts.
+
+    Keep removed contacts and not-yet-named additions across restarts. A partial
+    snapshot must never reset the baseline or turn returning old contacts new.
+    """
+    now = time.time()
+    with _welcome_conn() as con:
+        con.execute("BEGIN IMMEDIATE")
+        initialized = con.execute(
+            "SELECT 1 FROM contact_baselines WHERE account_key=?", (account_key,),
+        ).fetchone() is not None
+        con.executemany(
+            "INSERT OR IGNORE INTO observed_contacts VALUES (?,?,?,?)",
+            [(account_key, contact_id, now, int(initialized)) for contact_id in contact_ids],
+        )
+        con.execute("INSERT OR IGNORE INTO contact_baselines VALUES (?,?)", (account_key, now))
+        pending = {row["contact_id"]: float(row["first_seen_at"]) for row in con.execute(
+            "SELECT contact_id,first_seen_at FROM observed_contacts WHERE account_key=? AND welcome_pending=1",
+            (account_key,),
+        )}
+    return not initialized, pending
+
+
+def resolve_contact_welcome(account_key: str, contact_id: str, trigger: dict | None = None) -> bool:
+    """Consume a new-contact observation and enqueue its trigger atomically."""
+    with _welcome_conn() as con:
+        con.execute("BEGIN IMMEDIATE")
+        changed = con.execute(
+            "UPDATE observed_contacts SET welcome_pending=0 "
+            "WHERE account_key=? AND contact_id=? AND welcome_pending=1", (account_key, contact_id),
+        ).rowcount
+        return bool(changed and trigger is not None and _record_incoming(con, trigger))
+
+
 def record_incoming(m: dict) -> bool:
     """登记一条对方发来的消息。已存在则返回 False（幂等）。"""
     con = _conn()
     try:
-        cur = con.execute(
-            """INSERT OR IGNORE INTO reply_log
-               (message_id, conv_id, conv_name, in_text, in_type, msg_time, status,
-                created_at, attempts, trace_id, last_step)
-               VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?, 'created')""",
-            (
-                str(m.get("id")),
-                m.get("conv_id") or "",
-                m.get("conv_name") or "",
-                (m.get("text") or "")[:500],
-                int(m.get("type") or 0),
-                int(m.get("time") or 0),
-                time.time(),
-                f"tr_{uuid.uuid4().hex[:12]}",
-            ),
-        )
+        added = _record_incoming(con, m)
         con.commit()
-        return cur.rowcount > 0
+        return added
     finally:
         con.close()
 

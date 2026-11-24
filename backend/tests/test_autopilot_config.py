@@ -61,6 +61,7 @@ def test_main_keeps_file_dry_run_without_cli_flag(tmp_path, monkeypatch):
     captured = []
     monkeypatch.setattr(autopilot, "bootstrap", lambda store, cfg: captured.append(cfg))
     monkeypatch.setattr(autopilot, "scan", lambda *args: 0)
+    monkeypatch.setattr(autopilot, "scan_added_contacts", lambda *args: 0)
     monkeypatch.setattr(autopilot, "drain", lambda store, cfg, **kw: {"dry": kw["dry"]})
     monkeypatch.setattr(autopilot, "pump_safely", lambda *args: None)
     monkeypatch.setattr(autopilot, "_make_reporter", lambda *args: None)

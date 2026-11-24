@@ -239,6 +239,7 @@ REPORT_FIRST_WINDOW = 24 * 3600              # 首次没有游标时只补最近
 _last_error = ""
 # 上一次"因掉线暂停发送"的日志时间，避免每轮刷屏
 _last_block_log = 0.0
+_last_contact_scan_error_at = 0.0
 
 # ── 桥接心跳（Node 桥 4222，与主心跳同一周期、同一线程触发）──────────────────
 # 桥只认 online/offline/scanning。映射要保守：只有确认 online 才报 online，
@@ -365,7 +366,7 @@ def log(msg: str, *, level: str | None = None, scope: str | None = None, **field
 
 def wal_signature(data_dir: Path) -> tuple:
     sig = []
-    for name in ("message.db", "message.db-wal", "session.db", "session.db-wal"):
+    for name in ("message.db", "message.db-wal", "session.db", "session.db-wal", "user.db", "user.db-wal"):
         p = data_dir / name
         try:
             st = p.stat()
@@ -373,6 +374,13 @@ def wal_signature(data_dir: Path) -> tuple:
         except OSError:
             sig.append((name, 0, 0))
     return tuple(sig)
+
+
+def refresh_store(store: Store) -> None:
+    """Do not acknowledge a new signature while any database is still stale."""
+    result = store.refresh()
+    if isinstance(result, dict) and result.get("failed", 0):
+        raise RuntimeError("企微数据库刷新未完成，保留原变化签名，下轮重试")
 
 
 def is_system_conv(conv_id: str, name: str = "") -> bool:
@@ -1221,24 +1229,66 @@ def match_target(m: dict, target: str) -> bool:
 
 
 def scan_added_contacts(store: Store, cfg: dict) -> int:
-    """把已加入通讯录、但还没有入站消息的目标联系人登记为欢迎触发。
+    """Welcome newly observed WeChat contacts without requiring inbound text.
 
-    企微在「加好友后对方不说话」时只更新 user.db，不一定马上写
-    conversation_table/message_table。只扫描消息会漏掉这个场景，因此按联系人
-    名称和 target 做一次幂等登记。target=all 时刻意跳过，避免升级后给所有历史
-    联系人批量发送欢迎语；指定 target 的测试/单账号配置才允许触发。
+    The first complete, readable external-contact snapshot is baseline only.
+    Explicit target mode retains its existing operator-selected welcome path.
+    Never use the mixed corporate address book for unsolicited all-contact scans.
     """
+    global _last_contact_scan_error_at
     target = str(cfg.get("target") or "all")
-    if target == "all":
-        return 0
     try:
-        contacts = store.contacts()
         self_id = str(store.self_id() or "")
         if not self_id:
             return 0
         sessions = {str(row.get("id") or "") for row in store.sessions(with_names=False)}
+        contacts = store.contacts() if target != "all" else {}
     except Exception as exc:  # noqa: BLE001 - 联系人读取失败不影响消息扫描
         log(f"[加好友] 联系人读取失败（忽略）：{type(exc).__name__}: {exc}", level="warning")
+        return 0
+
+    external = None
+    con = None
+    try:
+        if not (Path(store.data_dir) / "user.db").is_file():
+            raise RuntimeError("当前账号通讯录源文件不存在")
+        con = store._conn("user.db")
+        if con is None:
+            raise RuntimeError("通讯录缓存不可用")
+        # This is the same external WeChat table supported by Store.contacts().
+        # A missing/unsupported table is not an authoritative empty snapshot.
+        external = {str(row[0]): str(row[1] or "").strip() for row in con.execute(
+            "SELECT wxid,name FROM wechat_contactV1 WHERE wxid IS NOT NULL",
+        ) if str(row[0]) and str(row[0]) != self_id}
+    except Exception as exc:  # explicit targets can still use their established path
+        if target == "all":
+            if time.monotonic() - _last_contact_scan_error_at >= 60:
+                _last_contact_scan_error_at = time.monotonic()
+                log(f"[加好友] 普通微信联系人读取失败，未更新基线：{type(exc).__name__}", level="warning")
+            return 0
+    finally:
+        if con is not None:
+            con.close()
+
+    account_key = f"{Path(store.data_dir).resolve()}:{self_id}" if external is not None else ""
+    observations = {}
+    if external is not None:
+        initialized, observations = rlog.observe_contacts(account_key, list(external))
+        if initialized:
+            log(f"[加好友] 已建立普通微信联系人基线（{len(external)} 人），不补发历史欢迎语", scope="flow")
+        if target == "all":
+            contacts = {contact_id: external[contact_id] for contact_id in observations if contact_id in external}
+
+    # Dify deliberately owns its opening; don't leave empty Agent triggers to
+    # be replayed when the operator later switches the account back to Agent.
+    provider = getattr(_brain, "reply_provider", "agent")
+    if provider not in ("agent", "dify"):
+        # Brain starts without an acknowledged provider. Keep observations
+        # pending until reply-mode sync establishes who owns the opening.
+        return 0
+    if provider == "dify":
+        for contact_id in observations:
+            rlog.resolve_contact_welcome(account_key, contact_id)
         return 0
 
     greeted = _load_greeted()
@@ -1253,10 +1303,14 @@ def scan_added_contacts(store: Store, cfg: dict) -> int:
         ordered_id = next((value for value in candidates if value in sessions), candidates[0])
         candidate = {"conv_id": ordered_id, "conv_name": name}
         if not match_target(candidate, target):
+            if contact_id in observations:
+                rlog.resolve_contact_welcome(account_key, contact_id)
             continue
         # Different客户端版本可能把单聊成员顺序写反；已有会话优先沿用实际 id。
         conv_id = candidate["conv_id"]
-        if is_system_conv(conv_id, name) or not _is_first_contact(conv_id, greeted):
+        if is_system_conv(conv_id, name) or any(not _is_first_contact(value, greeted) for value in candidates):
+            if contact_id in observations:
+                rlog.resolve_contact_welcome(account_key, contact_id)
             continue
         trigger = {
             "id": f"contact-added:{conv_id}",
@@ -1264,11 +1318,21 @@ def scan_added_contacts(store: Store, cfg: dict) -> int:
             "conv_name": name,
             "text": "",
             "type": 1011,
-            "time": int(time.time()),
+            "time": int(observations.get(contact_id, time.time())),
         }
-        if rlog.record_incoming(trigger):
+        registered = (rlog.resolve_contact_welcome(account_key, contact_id, trigger)
+                      if contact_id in observations else rlog.record_incoming(trigger))
+        if registered:
             added += 1
             log(f"[加好友] 发现目标联系人 {name}，登记欢迎流程", scope="flow")
+    # Even with an explicit target, consume additions outside that scope so a
+    # later scope expansion does not welcome a backlog of old contacts.
+    if target != "all":
+        for contact_id in observations:
+            if not any(match_target(
+                {"conv_id": cid, "conv_name": external.get(contact_id, "")}, target
+            ) for cid in (f"S:{self_id}_{contact_id}", f"S:{contact_id}_{self_id}")):
+                rlog.resolve_contact_welcome(account_key, contact_id)
     return added
 
 
@@ -3534,7 +3598,8 @@ def main() -> int:
         f"冷却 {cfg['cooldown']}s" + (" / DRY-RUN" if cfg["dry_run"] else ""))
 
     try:
-        store.refresh()
+        last_sig = wal_signature(store.data_dir)
+        refresh_store(store)
     except Exception as exc:  # noqa: BLE001
         detail = f"数据库初始化失败：{type(exc).__name__}: {exc}"
         write_client_state("failed", detail=detail, wecom_state=wecom_state, error=str(exc))
@@ -3633,7 +3698,6 @@ def main() -> int:
             _flow_tick(store, cfg, wecom_state)
     pump_safely(store, cfg, reporter, wecom_state)
     _flow_report(cfg)
-    last_sig = wal_signature(store.data_dir)
     log("开始监听（Ctrl+C 退出）")
     while True:
         try:
@@ -3686,7 +3750,7 @@ def main() -> int:
             time.sleep(cfg["interval"])
             sig = wal_signature(store.data_dir)
             if sig != last_sig:
-                store.refresh()
+                refresh_store(store)
                 last_sig = sig
             n = scan_added_contacts(store, cfg)
             n += scan(store, cfg)
