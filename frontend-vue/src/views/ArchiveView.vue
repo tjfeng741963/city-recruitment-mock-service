@@ -677,12 +677,6 @@ onMounted(async () => {
   }
 }
 
-@container (min-width: 660px) {
-  .arch-kv {
-    grid-template-columns: repeat(2, 84px minmax(0, 1fr));
-  }
-}
-
 .card-head :deep(.el-button.is-link) {
   padding: 0 !important;
   height: auto;
@@ -783,6 +777,12 @@ onMounted(async () => {
   row-gap: 9px;
   column-gap: 10px;
   font-size: 12.5px;
+}
+
+@container (min-width: 660px) {
+  .arch-kv {
+    grid-template-columns: repeat(2, 84px minmax(0, 1fr));
+  }
 }
 
 .arch-kv .k {
