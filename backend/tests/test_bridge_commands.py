@@ -66,11 +66,12 @@ class FakeBridge:
         return {"ok": True}
 
 
+ACCOUNT_ID = "1688858186855249"
 COMMAND = {
     "id": "cmd-0001",
     "device_code": "pc-office-01",
     "customer_id": 700004,
-    "contact_id": "S:1688858186855249_7881299918302353",
+    "contact_id": f"S:{ACCOUNT_ID}_7881299918302353",
     "nickname": "青冥",
     "content": "你好，这边是人工客服",
     "status": "claimed",
@@ -82,7 +83,8 @@ COMMAND = {
 def _mock_store(name: str = "青冥"):
     """真实 Store 的替身：会话列表里有一个可发送的客户会话。"""
     store = MagicMock()
-    store.sessions.return_value = [{"name": name, "id": "S:1688858186855249_7881299918302353"}]
+    store.self_id.return_value = ACCOUNT_ID
+    store.sessions.return_value = [{"name": name, "id": COMMAND["contact_id"]}]
     return store
 
 
@@ -101,7 +103,6 @@ def _cfg(**over):
 def test_manual_receipt_correlates_only_one_new_confirmed_database_message(new_ids, confirmed, status, expected):
     autopilot = _load_autopilot()
     store = _mock_store()
-    store.self_id.return_value = "owner"
     old = (101, COMMAND["content"])
     query = store._conn.return_value.execute
     query.return_value.fetchall.side_effect = [[old], [old, *((mid, COMMAND["content"]) for mid in new_ids)]]
@@ -113,7 +114,7 @@ def test_manual_receipt_correlates_only_one_new_confirmed_database_message(new_i
         "claimed": 1, "sent": int(status == "succeeded"), "failed": int(status == "unknown"),
     }
     assert bridge.receipts[-1][2:] == (status, expected)
-    assert all(call.args[1] == (COMMAND["contact_id"], "owner") for call in query.call_args_list)
+    assert all(call.args[1] == (COMMAND["contact_id"], ACCOUNT_ID) for call in query.call_args_list)
     store.refresh.assert_not_called()
 
 
@@ -132,7 +133,6 @@ def test_claim_sends_with_keyboard_and_reports_success(monkeypatch, capsys):
     monkeypatch.setattr(autopilot, "core_send", types.SimpleNamespace(send=fake_send))
     bridge = FakeBridge(command=dict(COMMAND))
     store = _mock_store()
-    store.self_id.return_value = "owner"
     store._conn.return_value.execute.return_value.fetchall.side_effect = [[], [(102, COMMAND["content"])]]
 
     stats = autopilot.pump_commands(store, _cfg(cooldown=0.0), bridge=bridge, wecom_state="online")
@@ -157,7 +157,6 @@ def test_window_blocked_after_manual_text_keeps_partial_delivery_for_review(monk
     autopilot.core_send.send.return_value = {"ok": True, "conversation_id": COMMAND["contact_id"]}
     bridge = FakeBridge(command=dict(COMMAND))
     store = _mock_store()
-    store.self_id.return_value = "owner"
     store._conn.return_value.execute.return_value.fetchall.side_effect = [[], [(102, COMMAND["content"])]]
 
     assert autopilot.pump_commands(store, _cfg(), bridge=bridge, wecom_state="online")["failed"] == 1
@@ -272,16 +271,30 @@ def test_claim_is_throttled(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# 6b. 盲发护栏：系统会话 / 不在会话列表的名字，一律不碰键鼠
+# 6b. 盲发护栏：跨账号、系统会话或找不到联系人的指令不触发发送
 # --------------------------------------------------------------------------- #
+def test_refuses_conversation_from_another_login(capsys):
+    autopilot = _load_autopilot()
+    store = _mock_store()
+    store.self_id.return_value = "1688858186855299"
+    bridge = FakeBridge(command=dict(COMMAND))
+
+    assert autopilot.pump_commands(store, _cfg(), bridge=bridge, wecom_state="online") == {
+        "claimed": 1, "sent": 0, "failed": 1,
+    }
+    autopilot.core_send.send.assert_not_called()
+    autopilot.core_send.paste_media.assert_not_called()
+    assert bridge.receipts == [("cmd-0001", "lease-abc", "failed", "")]
+    assert "目标会话属于账号" in capsys.readouterr().out
+
+
 def test_refuses_system_conversation(monkeypatch, capsys):
     autopilot = _load_autopilot()
     _reset(autopilot)
     called: list = []
     monkeypatch.setattr(autopilot, "core_send", types.SimpleNamespace(send=lambda *a, **kw: called.append(1) or {"ok": True}))
     bridge = FakeBridge(command={**COMMAND, "nickname": "我的客服"})
-    store = MagicMock()
-    store.sessions.return_value = [{"name": "我的客服", "id": "S:0_1"}]
+    store = _mock_store("我的客服")
 
     stats = autopilot.pump_commands(store, _cfg(), bridge=bridge, wecom_state="online")
 
@@ -297,8 +310,7 @@ def test_refuses_name_missing_from_wecom_sessions(monkeypatch, capsys):
     called: list = []
     monkeypatch.setattr(autopilot, "core_send", types.SimpleNamespace(send=lambda *a, **kw: called.append(1) or {"ok": True}))
     bridge = FakeBridge(command={**COMMAND, "nickname": "查无此人"})
-    store = MagicMock()
-    store.sessions.return_value = [{"name": "青冥", "id": "S:0_1"}]
+    store = _mock_store()
 
     stats = autopilot.pump_commands(store, _cfg(), bridge=bridge, wecom_state="online")
 
