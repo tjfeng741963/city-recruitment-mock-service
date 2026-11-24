@@ -507,6 +507,8 @@ interface DeviceForm {
 const formVisible = ref(false)
 const saving = ref(false)
 const editingId = ref<number | null>(null)
+// 打开「接待设置」时记下当时的岗位，保存时用来判断是否真的换了岗位
+const originalPositionId = ref<number | null>(null)
 
 /** 与 theme/device-code.js 同规则：AG- 前缀 + 6 位大写字母数字（crypto 随机） */
 function generateDeviceCode(): string {
@@ -538,6 +540,7 @@ function emptyForm(): DeviceForm {
 function resetForm(): void {
   Object.assign(form, emptyForm())
   editingId.value = null
+  originalPositionId.value = null
 }
 
 function returnToReception(resume = true): void {
@@ -557,6 +560,7 @@ function openCreate(): void {
 
 function openEdit(row: AgentDeviceItem): void {
   editingId.value = row.id
+  originalPositionId.value = row.position_id ? Number(row.position_id) : null
   Object.assign(form, {
     provider: row.reply_provider === 'dify' ? 'dify' : 'agent',
     device_code: row.device_code || '',
@@ -615,6 +619,23 @@ async function saveDevice(): Promise<void> {
     ElMessage.warning('请输入客户端标识')
     return
   }
+  // 换岗位等于换业务：历史对话不再沿用旧岗位的话术，所以要先说清楚再动手
+  const nextPositionId = form.position_id ? Number(form.position_id) : null
+  const positionChanged = editingId.value !== null
+    && nextPositionId !== null
+    && nextPositionId !== originalPositionId.value
+  if (positionChanged) {
+    try {
+      await ElMessageBox.confirm(
+        `切换接待岗位后，该账号所有会话会标记为已读，之后只按「${positionName(nextPositionId)}」的岗位信息回复。` +
+        '企微里的历史聊天不会删除，也不影响客户看到的记录。',
+        '切换接待岗位',
+        { type: 'warning', confirmButtonText: '切换并标记已读', cancelButtonText: '取消' },
+      )
+    } catch {
+      return
+    }
+  }
   saving.value = true
   const payload: Record<string, unknown> = {
     device_code: form.device_code.trim(),
@@ -629,7 +650,17 @@ async function saveDevice(): Promise<void> {
   try {
     if (editingId.value) {
       await devicesApi.update(editingId.value, payload)
-      ElMessage.success('接待设置已保存。实际收发请在对话管理核对。')
+      if (positionChanged) {
+        // 岗位已换：把所有会话的未读清零，作为「新的开始」
+        const cleared = await devicesApi.clearUnread(editingId.value).then(() => true).catch(() => false)
+        ElMessage.success(
+          cleared
+            ? '接待岗位已切换，全部会话已标记已读，之后按新岗位信息回复。'
+            : '接待岗位已切换，但标记已读失败，请到对话管理手动清一次未读。',
+        )
+      } else {
+        ElMessage.success('接待设置已保存。实际收发请在对话管理核对。')
+      }
     } else {
       await devicesApi.create(payload)
       ElMessage.success('账号配置已创建，还需连接云电脑客户端并登录企业微信')
