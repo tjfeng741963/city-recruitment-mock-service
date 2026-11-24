@@ -136,8 +136,7 @@
       <div class="preview-body" aria-live="polite">
         <el-empty v-if="previewError" :description="previewError" />
         <template v-else-if="previewItem && previewUrl">
-          <video v-if="previewItem.kind === 'video'" :src="previewUrl" controls playsinline
-            @error="previewError = '无法播放此视频，请检查文件或编码。'" />
+          <VideoPreview v-if="previewItem.kind === 'video'" :src="previewUrl" :name="previewItem.name" />
           <img v-else :src="previewUrl" :alt="previewItem.name"
             @error="previewError = '无法显示此图片，请检查文件。'" />
         </template>
@@ -151,6 +150,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import PositionContext from '../components/agent/PositionContext.vue'
+import VideoPreview from '../components/agent/VideoPreview.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Picture, Refresh, Search, Upload, VideoCamera } from '@element-plus/icons-vue'
 import http from '../api/http'
@@ -443,8 +443,7 @@ onMounted(async () => {
   overflow: auto;
 }
 
-.preview-body img,
-.preview-body video {
+.preview-body img {
   max-width: 100%;
   max-height: 65vh;
   object-fit: contain;
