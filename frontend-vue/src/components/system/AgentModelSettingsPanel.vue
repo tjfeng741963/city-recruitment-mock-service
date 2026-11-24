@@ -7,7 +7,11 @@
       <span v-if="!active.key_configured">尚未配置 Key</span>
     </p>
     <el-alert v-if="!secure" type="warning" :closable="false" show-icon
-      title="请通过 HTTPS 或本机安全转发打开本页，再填写 API Key。" />
+      title="请通过 HTTPS 打开设置，再填写 API Key。">
+      <el-link v-if="active?.settings_https_url" :href="active.settings_https_url" type="primary">
+        打开 HTTPS 设置
+      </el-link>
+    </el-alert>
     <el-form label-width="110px" label-position="left" :disabled="!secure || !!busy || !active" class="model-form">
       <el-form-item label="模型 API URL" for="agent-model-url">
         <el-input id="agent-model-url" v-model="baseUrl" placeholder="https://api.example.com/v1" maxlength="512" />

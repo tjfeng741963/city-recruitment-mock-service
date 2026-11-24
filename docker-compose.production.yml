@@ -11,6 +11,7 @@ services:
       REA_HOST: 0.0.0.0
       REA_PORT: 4222
       REA_AGENT_SETTINGS_PORT: 14222
+      REA_AGENT_SETTINGS_HTTPS_ORIGIN: https://119.91.113.100
       REA_DATABASE_PATH: /data/app.sqlite
       # 前端用 public/ 下的 Vue 版本（旧界面 + theme/ 注入层）。
       # 2026-11-14 客户明确要求：要旧版布局样式，功能保持现状。
@@ -55,6 +56,27 @@ services:
       options:
         max-size: 10m
         max-file: "3"
+
+  web-https:
+    image: caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
+    restart: unless-stopped
+    network_mode: host
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    volumes:
+      - ./deploy/server/Caddyfile.recruitment:/etc/caddy/Caddyfile:ro
+      - web-https-data:/data
+      - web-https-config:/config
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
 
   api:
     build:
@@ -110,6 +132,8 @@ networks:
     name: postgres_default
 
 volumes:
+  web-https-data:
+  web-https-config:
   kb-token:
     driver: local
   # Python 侧 /app/data（install_id）。命名卷而非 tmpfs：值必须跨重启不变。
