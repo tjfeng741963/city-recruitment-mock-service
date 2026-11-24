@@ -6,12 +6,10 @@ function source(path: string): string {
 }
 
 describe('visible action labels', () => {
-  it('keeps the current position page identifiable and preserves position links', () => {
+  it('uses the sidebar as the single navigation for AI reception pages', () => {
     const context = source('components/agent/PositionContext.vue');
-    expect(context).toContain('<nav class="position-links" aria-label="岗位接待页面">');
-    expect(context).toContain(':to="positionLink(link.path, selected)"');
-    expect(context).toContain('aria-current="page"');
-    expect(context).toContain('{{ link.label }}');
+    expect(context).not.toMatch(/RouterLink|position-links/);
+    expect(source('layouts/MainLayout.vue')).toContain(':route="menuTarget(item.path)"');
   });
 
   it.each([

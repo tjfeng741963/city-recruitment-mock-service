@@ -7,12 +7,14 @@
     @update:model-value="close"
   >
     <el-form ref="formRef" :model="form" label-width="96px" @submit.prevent>
-      <el-form-item label="适用范围">
-        <el-select v-model="form.scope" :disabled="!!item">
-          <el-option label="所有岗位通用" value="global" />
-          <el-option :label="positionName ? `仅用于：${positionName}` : '当前岗位专属（先选岗位）'" value="position" :disabled="!positionId" />
-          <el-option v-if="item && !['global','position'].includes(item.scope_level)" :label="`原范围：${item.scope_level}`" :value="item.scope_level" />
+      <el-form-item label="适用范围" :required="!item">
+        <span v-if="item" class="w-full">{{ existingScopeLabel }}</span>
+        <el-select v-else v-model="form.applicability" class="w-full" filterable placeholder="选择通用或搜索岗位">
+          <el-option label="所有岗位通用" :value="0" />
+          <el-option v-for="position in positions" :key="position.id" :label="positionOptionLabel(position)" :value="position.id" />
         </el-select>
+        <span v-if="!item && positionsLoading" class="kb-sort-hint" role="status">正在加载岗位选项…</span>
+        <span v-else-if="!item && !positionAvailable" class="kb-sort-hint">原岗位不可用，请重新选择适用范围。</span>
         <span class="kb-sort-hint">工资、地址等事实在招聘岗位维护；通用回答可引用 {wage_text}。</span>
       </el-form-item>
       <el-form-item label="问题" required>
@@ -116,19 +118,22 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { Employer, KnowledgeDraft, KnowledgeItem, LocationNode, Vertical } from '../../api/knowledge'
+import type { ServicePosition } from '../../api/types'
+import { positionOptionLabel } from '../../utils/position-context'
 
 const props = withDefaults(
   defineProps<{
     modelValue: boolean
     positionId?: number
-    positionName?: string
+    positions?: ServicePosition[]
+    positionsLoading?: boolean
     item?: KnowledgeItem | null
     verticals: Vertical[]
     locations: LocationNode[]
     employers: Employer[]
     submitting?: boolean
   }>(),
-  { item: null, submitting: false },
+  { item: null, positions: () => [], submitting: false },
 )
 
 const emit = defineEmits<{
@@ -138,9 +143,8 @@ const emit = defineEmits<{
 
 const formRef = ref()
 const keywordInput = ref('')
-const originalScope = ref('')
 const form = reactive({
-  scope: 'global',
+  applicability: 0,
   question: '',
   answer: '',
   keywords: [] as string[],
@@ -153,6 +157,14 @@ const form = reactive({
 
 const cityOptions = computed(() => props.locations.filter((item) => item.level === 'city'))
 const verticalOptions = computed(() => props.verticals.filter((item) => item.status !== 'disabled'))
+const positionAvailable = computed(() => !form.applicability || props.positions.some(position => position.id === form.applicability))
+const existingScopeLabel = computed(() => {
+  const item = props.item
+  if (!item || item.scope_level === 'global') return '所有岗位通用'
+  if (item.scope_level !== 'position') return `原范围：${item.scope_level}`
+  const position = props.positions.find(option => option.id === item.scope_position_id)
+  return position ? positionOptionLabel(position) : item.scope_position_id ? `岗位 #${item.scope_position_id}` : '原岗位'
+})
 const employerOptions = computed(() => {
   if (!form.vertical_id) return props.employers
   return props.employers.filter((item) => item.vertical_id === form.vertical_id)
@@ -160,7 +172,9 @@ const employerOptions = computed(() => {
 
 function reset(): void {
   const item = props.item
-  form.scope = item?.scope_level || (props.positionId ? 'position' : 'global')
+  form.applicability = props.positionId && (props.positionsLoading || props.positions.some(position => position.id === props.positionId))
+    ? props.positionId
+    : 0
   form.question = item?.question ?? ''
   form.answer = item?.answer ?? ''
   form.keywords = [...(item?.keywords ?? [])]
@@ -169,7 +183,6 @@ function reset(): void {
   form.employer_id = item?.scope_level === 'employer' ? item.scope_employer_id : null
   form.enabled = item?.status !== 'disabled'
   form.sort_order = item?.sort_order ?? 0
-  originalScope.value = item?.scope_level ?? ''
   keywordInput.value = ''
 }
 
@@ -222,7 +235,8 @@ function onEmployerChange(): void {
 }
 
 function buildDraft(): KnowledgeDraft {
-  const scopeLevel = props.item?.scope_level || form.scope
+  const selectedPositionId = props.item ? props.item.scope_position_id : form.applicability || null
+  const scopeLevel = props.item?.scope_level ?? (selectedPositionId ? 'position' : 'global')
   return {
     question: form.question.trim(),
     answer: form.answer.trim(),
@@ -230,7 +244,7 @@ function buildDraft(): KnowledgeDraft {
     vertical_id: form.vertical_id,
     scope_level: scopeLevel,
     scope_location_id: scopeLevel === 'city' ? form.city_id : null,
-    scope_position_id: scopeLevel === 'position' ? (props.item?.scope_position_id ?? props.positionId ?? null) : null,
+    scope_position_id: scopeLevel === 'position' ? selectedPositionId : null,
     scope_employer_id: scopeLevel === 'employer' ? form.employer_id : null,
     status: form.enabled ? 'enabled' : 'disabled',
     sort_order: form.sort_order ?? 0,
@@ -239,6 +253,10 @@ function buildDraft(): KnowledgeDraft {
 
 function confirm(): void {
   addKeyword()
+  if (!props.item && !positionAvailable.value) {
+    ElMessage.warning(props.positionsLoading ? '岗位选项正在加载，请稍候' : '请重新选择适用范围')
+    return
+  }
   if (!form.question.trim()) {
     ElMessage.warning('请填写问题')
     return

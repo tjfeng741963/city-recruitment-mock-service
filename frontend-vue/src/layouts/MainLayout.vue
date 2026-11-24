@@ -71,6 +71,7 @@ const router = useRouter()
 const auth = useAuthStore()
 const navigation = computed(() => navigationForRole(auth.user?.role || 'customer'))
 const pendingMenu = ref('')
+const positionPages = ['/recruitment-flow', '/knowledge', '/media']
 let navigationAttempt = 0
 function groupIcon(key: string): string {
   return ({operations:'ChatDotRound',basic:'Briefcase',knowledge:'ChatLineRound',system:'Tools'} as Record<string,string>)[key] || 'Grid'
@@ -80,8 +81,8 @@ function itemIcon(path: string): string {
 }
 function menuTarget(path: string): string {
   if (path === route.path) return route.fullPath
-  if (path !== '/recruitment-flow') return path
-  const currentPosition = route.path === '/knowledge' || route.path === '/media'
+  if (!positionPages.includes(path)) return path
+  const currentPosition = positionPages.includes(route.path)
     ? Number(route.query.position_id)
     : 0
   const id = Number.isSafeInteger(currentPosition) && currentPosition > 0

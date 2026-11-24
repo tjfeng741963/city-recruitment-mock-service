@@ -12,11 +12,11 @@
         <el-button v-if="false" :icon="Clock" @click="historyVisible = true">发布历史</el-button>
         <el-button :icon="Upload" disabled title="旧导入不能完整保留岗位作用范围，完善前请使用新增问答">导入（待完善）</el-button>
         <el-button :icon="Download" :disabled="!items.length" @click="handleExport">导出</el-button>
-        <el-button type="primary" :icon="Plus" :disabled="!contextReady" @click="openCreate">新增知识</el-button>
+        <el-button type="primary" :icon="Plus" @click="openCreate">新增知识</el-button>
       </div>
     </div>
 
-    <PositionContext @validated="applyPositionContext" />
+    <PositionContext @positions="positions = $event" @validated="applyPositionContext" />
 
     <el-alert v-if="activeTab !== 'library'" title="历史资料与治理工具；当前接待只读取通用和本岗位问答。这里的旧实体范围不代表已接入回复。" type="info" :closable="false" />
     <el-tabs v-model="activeTab" class="kb-tabs">
@@ -214,6 +214,8 @@
       <el-tab-pane label="问答检查" name="faq" lazy>
         <FaqGovernancePanel
           ref="faqPanelRef"
+          :positions="positions"
+          :positions-loading="positionsLoading"
           :verticals="verticals"
           :locations="locations"
           :employers="employers"
@@ -225,7 +227,8 @@
       v-model="dialogVisible"
       :item="editing"
       :position-id="positionId"
-      :position-name="positionName"
+      :positions="positions"
+      :positions-loading="positionsLoading"
       :verticals="verticals"
       :locations="locations"
       :employers="employers"
@@ -253,7 +256,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import PositionContext from '../components/agent/PositionContext.vue'
-import { positionsApi } from '../api/core'
+import type { ServicePosition } from '../api/types'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Clock, Download, Files, Plus, Promotion, Refresh, Search, Upload } from '@element-plus/icons-vue'
 import {
@@ -289,15 +292,16 @@ import KbDeviceBinding from '../components/kb/KbDeviceBinding.vue'
 const router = useRouter()
 const route = useRoute()
 const auth = useAuthStore()
-const contextReady = ref(false)
+const positions = ref<ServicePosition[]>([])
+const positionsLoading = ref(true)
 const positionId = ref(Number(route.query.position_id) || 0)
 
 function applyPositionContext(id: number): void {
   positionId.value = Math.max(id, 0)
-  contextReady.value = id >= 0
+  positionsLoading.value = false
 }
 
-const positionName = ref('')
+const positionName = computed(() => positions.value.find(position => position.id === positionId.value)?.position_name)
 const activeTab = ref('library')
 const items = ref<KnowledgeItem[]>([])
 const loading = ref(false)
@@ -388,13 +392,9 @@ async function loadOptions(): Promise<void> {
   }
 }
 
-watch(positionId, async id => {
+watch(positionId, () => {
   page.value = 1
-  positionName.value = ''
-  if (id) {
-    try { const {data} = await positionsApi.get(id); positionName.value = data.position_name } catch { /* selector displays failure */ }
-  }
-}, { immediate: true })
+})
 
 async function load(): Promise<void> {
   loading.value = true
@@ -448,7 +448,11 @@ async function save(draft: KnowledgeDraft): Promise<void> {
       ElMessage.success('知识已更新')
     } else {
       await createKnowledgeItem(draft)
-      ElMessage.success('知识已新增')
+      const otherPosition = draft.scope_level === 'position' && positionId.value > 0 && draft.scope_position_id !== positionId.value
+      const target = positions.value.find(position => position.id === draft.scope_position_id)
+      ElMessage.success(otherPosition && target
+        ? `已新增至「${target.position_name}」，当前列表仍按原岗位筛选`
+        : '知识已新增')
     }
     dialogVisible.value = false
     await load()

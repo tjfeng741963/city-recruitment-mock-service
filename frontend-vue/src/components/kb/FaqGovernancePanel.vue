@@ -134,6 +134,8 @@
     <KnowledgeFormDialog
       v-model="dialogVisible"
       :item="editing"
+      :positions="positions"
+      :positions-loading="positionsLoading"
       :verticals="verticals"
       :locations="locations"
       :employers="employers"
@@ -164,12 +166,15 @@ import {
   type Vertical,
 } from '../../api/knowledge'
 import { formatDateTime } from '../../utils/format'
+import type { ServicePosition } from '../../api/types'
 import KnowledgeFormDialog from './KnowledgeFormDialog.vue'
 
 const props = defineProps<{
   verticals: Vertical[]
   locations: LocationNode[]
   employers: Employer[]
+  positions: ServicePosition[]
+  positionsLoading: boolean
 }>()
 
 const loading = ref(false)
