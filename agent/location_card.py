@@ -57,17 +57,25 @@ _HEADER_PREFIX = "22 serialization::archive 19 0 0 1 0 "
 _GMEM_MOVEABLE = 0x0002
 _CLIP_FORMAT = "WeWork Message"
 
-_user32 = ctypes.WinDLL("user32", use_last_error=True)
-_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-_user32.SetClipboardData.argtypes = [wt.UINT, wt.HANDLE]
-_user32.SetClipboardData.restype = wt.HANDLE
-_user32.RegisterClipboardFormatW.argtypes = [ctypes.c_wchar_p]
-_user32.RegisterClipboardFormatW.restype = wt.UINT
-_kernel32.GlobalAlloc.restype = wt.HGLOBAL
-_kernel32.GlobalAlloc.argtypes = [wt.UINT, ctypes.c_size_t]
-_kernel32.GlobalLock.restype = ctypes.c_void_p
-_kernel32.GlobalLock.argtypes = [wt.HGLOBAL]
-_kernel32.GlobalUnlock.argtypes = [wt.HGLOBAL]
+_user32 = None
+_kernel32 = None
+try:
+    # 非 Windows（CI 的 ubuntu runner）没有 WinDLL：模块要能导入，
+    # build_card 是纯字节运算，照样可以在 Linux 上跑测试；只有 send_card 需要窗口。
+    _user32 = ctypes.WinDLL("user32", use_last_error=True)
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _user32.SetClipboardData.argtypes = [wt.UINT, wt.HANDLE]
+    _user32.SetClipboardData.restype = wt.HANDLE
+    _user32.RegisterClipboardFormatW.argtypes = [ctypes.c_wchar_p]
+    _user32.RegisterClipboardFormatW.restype = wt.UINT
+    _kernel32.GlobalAlloc.restype = wt.HGLOBAL
+    _kernel32.GlobalAlloc.argtypes = [wt.UINT, ctypes.c_size_t]
+    _kernel32.GlobalLock.restype = ctypes.c_void_p
+    _kernel32.GlobalLock.argtypes = [wt.HGLOBAL]
+    _kernel32.GlobalUnlock.argtypes = [wt.HGLOBAL]
+except (AttributeError, OSError):  # pragma: no cover - 只在非 Windows 触发
+    _user32 = None
+    _kernel32 = None
 
 
 def _varint(value: int) -> bytes:
@@ -99,6 +107,8 @@ def build_card(lng: float, lat: float, address: str, name: str) -> bytes:
 
 def _set_clipboard(blob: bytes) -> bool:
     """写 WeWork Message 自定义格式。必须先 OpenClipboard，否则 SetClipboardData 静默失败。"""
+    if _user32 is None or _kernel32 is None:
+        return False
     opened = False
     for _ in range(6):
         if _user32.OpenClipboard(0):

@@ -448,8 +448,13 @@ def test_search_identity_is_checked_again_after_contact_trigger_is_queued(agent,
     assert agent.scan_added_contacts(store, CFG) == 1
     add(store, "old" if change == "duplicate" else "new", "Original name" if change == "duplicate" else "Changed name")
     agent.drain(store, CFG)
-    agent.core_send.send.assert_not_called()
-    assert "S:own_new" not in agent._load_greeted()
+    if change == "duplicate":
+        # 同名撞车仍然拦：搜索框分不清两个人，宁可停下等人工
+        agent.core_send.send.assert_not_called()
+        assert "S:own_new" not in agent._load_greeted()
+    else:
+        # 客户改昵称不再拦（2026-11-25）：会话 ID 没变，靠发后回读校验落点
+        agent.core_send.send.assert_called()
 
 
 def test_external_contact_sharing_employee_name_is_not_searched_ambiguously(agent, store):

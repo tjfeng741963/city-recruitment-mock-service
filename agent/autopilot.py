@@ -1809,6 +1809,35 @@ def _reply_source_identity() -> tuple:
     return getattr(_brain, "reply_provider", None), getattr(_brain, "reply_mode_generation", None)
 
 
+def _same_name_ids(store: Store, table: str, id_col: str, normalized: str) -> set[str] | None:
+    """某张联系人表里显示名等于 normalized 的 id 集合；表读不到返回 None。
+
+    为什么要分表：同一个人会在 user_table（企微侧）和 wechat_contactV1（微信侧）
+    各存一份，名字完全一样。store.contacts() 把两张表合起来，于是「一个人」看起来
+    像「两个同名客户」，守卫就误拦（Garbo_C 就是：企微 id 7881301055908323 +
+    微信 wxid ozynqsk… 同名）。真撞车要分表看，不能看合并结果。
+    """
+    try:
+        con = store._conn("user.db")
+    except Exception:  # noqa: BLE001
+        return None
+    if con is None:
+        return None
+    try:
+        return {
+            str(row[0])
+            for row in con.execute("select %s,name from %s" % (id_col, table))
+            if str(row[1] or "").strip().casefold() == normalized
+        }
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        try:
+            con.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _sequence_block_reason(cid: str, cfg: dict, source: tuple, store: Store, name: str) -> str:
     if cid in remote_cfg.takeover_sessions():
         return "会话已被人工接管，停止后续介绍"
@@ -1829,10 +1858,31 @@ def _sequence_block_reason(cid: str, cfg: dict, source: tuple, store: Store, nam
             if other:
                 contacts = store.contacts()
                 normalized = name.strip().casefold()
-                matches = {str(key) for key, value in contacts.items()
-                           if str(value or "").strip().casefold() == normalized}
-                if matches != {other}:
-                    return "联系人名称已变化或不能唯一搜索，停止介绍并待人工核对"
+                same_name = {str(key) for key, value in contacts.items()
+                             if str(value or "").strip().casefold() == normalized}
+                # 2026-11-25 放宽：原来要求「同名联系人集合恰好等于对方」，名字带 emoji、
+                # 客户改昵称、同一个人在两表各存一份都会误判成「不能唯一搜索」，
+                # 把客户挡在门外（Garbo_C 那条就是这样丢的）。
+                # 现在只看**企微联系人表里的真撞车**：同名的企微联系人超过一个才拦，
+                # 改名/emoji/微信侧影子记录都不再拦；落点安全由发送侧的 expect_id +
+                # 发后回读数据库兜底（真发错了会记 unknown 并停下）。
+                corp_same = _same_name_ids(store, "user_table", "id", normalized)
+                wx_same = _same_name_ids(store, "wechat_contactV1", "wxid", normalized)
+                if corp_same is None:
+                    # 读不到表就退回合并口径（宁可保守）
+                    if len(same_name) > 1:
+                        return "同名联系人不止一个，停止介绍并待人工核对"
+                elif other in corp_same:
+                    # 会话的对方就在企微联系人里：只有企微侧真有两个同名才拦，
+                    # 微信侧的影子记录（同一个人）不算
+                    if len(corp_same) > 1:
+                        return "同名联系人不止一个，停止介绍并待人工核对"
+                elif wx_same is None:
+                    if len(same_name) > 1:
+                        return "同名联系人不止一个，停止介绍并待人工核对"
+                elif len(wx_same) > 1:
+                    # 对方不在企微表里（纯微信联系人）：微信侧同名超过一个才拦
+                    return "同名联系人不止一个，停止介绍并待人工核对"
     except Exception:
         return "联系人搜索信息不可读，停止介绍"
     return ""
