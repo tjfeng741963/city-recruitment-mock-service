@@ -338,6 +338,22 @@ export class DeviceBridgeStore {
   command(id: string): BridgeCommand | null {
     return this.db.prepare("SELECT * FROM bridge_commands WHERE id=?").get(id) as unknown as BridgeCommand ?? null;
   }
+
+  /** 给客户设置备注（2026-11-25）。
+   *
+   * 走同一条指令队列，客户端领到后按 kind=set_remark 执行界面操作，
+   * 与消息发送串行，不会抢焦点。payload 里带 name/remark，
+   * conversation_id 用于回读校验（从 S:自己_对方 里取对方 id）。
+   */
+  enqueueSetRemark(code: string, payload: Record<string, unknown>): BridgeCommand {
+    if (!this.enabled(code)) throw new BridgeError("Enabled device not found", 404);
+    const id = randomUUID();
+    this.db.prepare(
+      `INSERT INTO bridge_commands(id,device_code,customer_id,contact_id,content,idempotency_key,kind,created_at)
+       VALUES (?,?,0,'',?,?, 'set_remark',?)`,
+    ).run(id, code, JSON.stringify(payload), `set-remark:${id}`, this.now());
+    return this.command(id)!;
+  }
   /** 设备上报的群聊清单整体替换（device_group_chats 表）。 */
   saveGroups(code: string, groups: Array<{ conv_id: string; name: string }>): number {
     // 空清单不覆盖（2026-11-23）：客户端企微登出时读不到会话，会拿空数组上报。

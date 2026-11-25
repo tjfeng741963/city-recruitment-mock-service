@@ -429,10 +429,47 @@ export function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync, noti
     },
   );
 
+  /**
+   * 给客户设置备注（2026-11-25）。
+   *
+   * 同名撞车时搜索框分不清是哪个人，最稳的办法是给客户设一个唯一备注。
+   * 这里只负责入队 kind=set_remark，真正的界面操作由客户端在**同一条指令泵**
+   * 里执行（和发消息串行，不抢焦点），执行完回读本地库确认再回执。
+   */
+  app.post<{ Params: { code: string }; Body: Record<string, unknown> }>(
+    "/api/v1/agent/devices/:code/remark",
+    async (request, reply) => {
+      const code = String(request.params.code);
+      if (!canAccessDevice(getUserScope(db, request.auth!), code)) {
+        return reply.code(403).send({ detail: "Device scope required" });
+      }
+      if (!bridgeStore.enabled(code)) return reply.code(404).send({ detail: "设备不存在或已停用" });
+      const body = request.body ?? {};
+      const name = String(body.name ?? "").trim();
+      const remark = String(body.remark ?? "").trim();
+      if (!name) return reply.code(422).send({ detail: "缺少客户名，无法定位" });
+      if (!remark) return reply.code(422).send({ detail: "备注不能为空" });
+      if (remark.length > 32) return reply.code(422).send({ detail: "备注最多 32 个字" });
+      const bridge = bridgeStore.status(code);
+      const fresh = Boolean(bridge?.heartbeat_at && Date.now() - Number(bridge.heartbeat_at) <= 60_000);
+      if (!fresh) return reply.code(409).send({ detail: "客户端心跳已超过 60 秒，指令发不出去；请确认 Win 上客户端已启动" });
+      try {
+        const command = bridgeStore.enqueueSetRemark(code, {
+          name,
+          remark,
+          conversation_id: String(body.conversation_id ?? ""),
+          user_id: String(body.user_id ?? ""),
+        });
+        return { queued: true, command_id: command.id };
+      } catch (error) {
+        return reply.code(500).send({ detail: `指令入队失败：${(error as Error).message}` });
+      }
+    },
+  );
+
   // 网页提交，目标设备凭桥接令牌领取一次。验证码只在内存中短暂保留。
   app.post<{ Params: { code: string }; Body: Record<string, unknown> }>(
-    "/api/v1/agent/devices/:code/verify-code",
-    async (request, reply) => {
+    "/api/v1/agent/devices/:code/verify-code",    async (request, reply) => {
       const code = String(request.params.code);
       if (!canAccessDevice(getUserScope(db, request.auth!), code)) {
         return reply.code(403).send({ detail: "Device scope required" });
