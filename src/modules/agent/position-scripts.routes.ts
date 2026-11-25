@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { isProfileTokenValid } from "./profile.routes.js";
-import { compatibleVideoPreview, videoThumbnail } from "../../shared/video-preview.js";
+import { compatibleVideoPreview, imageThumbnail, videoThumbnail } from "../../shared/video-preview.js";
 import {
   DIFY_MEDIA_NAME,
   difyMediaName,
@@ -207,9 +207,14 @@ export async function registerPositionScriptRoutes(app: FastifyInstance, db: Dat
     // storage_path 来自库内，但仍做一次越界检查：迁移写错也不能读到 data 之外。
     if (!absolute) return reply.code(404).send({ detail: "Media not found" });
     if (thumbnail) {
-      if (asset.kind !== "video") return reply.code(422).send({ detail: "仅支持生成视频封面。" });
+      // 列表预览专用：图片和视频都只回缩略图，**发送永远走不带 preview 的地址拿原图**。
+      // 之前图片不支持 preview=thumbnail，前端列表只能整张原图拉进浏览器
+      // （实测有 1080×22415、5.4MB 的面试点图）。
+      if (asset.kind !== "video" && asset.kind !== "image") return reply.code(422).send({ detail: "仅支持图片和视频生成缩略图。" });
       if (!fs.existsSync(absolute)) return reply.code(404).send({ detail: "Media file missing" });
-      const cover = await videoThumbnail(absolute, asset.sha256);
+      const cover = asset.kind === "video"
+        ? await videoThumbnail(absolute, asset.sha256)
+        : await imageThumbnail(absolute, asset.sha256);
       if ("status" in cover) {
         if (cover.retryAfter) reply.header("Retry-After", cover.retryAfter);
         return reply.code(cover.status).send({ detail: cover.detail });

@@ -166,11 +166,24 @@ describe("media assets", () => {
     for (const headers of [device, svc, {}]) {
       expect((await app.inject({ url, headers })).statusCode).toBe(403);
     }
+    // 图片也支持缩略图（列表预览用）：有 ffmpeg 回 JPEG，没有则明确 503，
+    // 两种情况都不能影响不带 preview 的原图下载。
     const image = await upload("非封面.png");
     expect(image.statusCode).toBe(200);
-    expect((await app.inject({
+    const imageThumb = await app.inject({
       url: `/api/v1/agent/media/${encodeURIComponent("非封面.png")}?preview=thumbnail`, headers: admin,
-    })).statusCode).toBe(422);
+    });
+    if (spawnSync("ffmpeg", ["-version"]).status === 0) {
+      expect(imageThumb.statusCode).toBe(200);
+      expect(imageThumb.headers["content-type"]).toBe("image/jpeg");
+      expect(imageThumb.rawPayload.subarray(0, 3).toString("hex")).toBe("ffd8ff");
+    } else {
+      expect(imageThumb.statusCode).toBe(503);
+    }
+    const original = await app.inject({
+      url: `/api/v1/agent/media/${encodeURIComponent("非封面.png")}`, headers: admin,
+    });
+    expect(original.rawPayload.equals(PNG_BUFFER)).toBe(true);
     app.db.prepare("UPDATE media_assets SET storage_path=? WHERE name=?").run("media/missing-preview.mp4", name);
     expect((await app.inject({ url, headers: admin })).statusCode).toBe(404);
   });
@@ -212,6 +225,43 @@ describe("media assets", () => {
     const download = await app.inject({ url: `/api/v1/agent/media/${encodeURIComponent(names[0])}`, headers: device });
     expect(download.rawPayload.equals(original)).toBe(true);
   });
+
+  it.skipIf(spawnSync("ffmpeg", ["-version"]).status !== 0 || spawnSync("ffprobe", ["-version"]).status !== 0)(
+    "gives the list a no-upscale thumbnail while sending still gets the original image",
+    async () => {
+      // 现场问题：面试地点.png 只有 78×132，列表里被 cover 裁成色块看不出来，
+      // 而原图下载必须一字节不变——发送链路只认不带 preview 的地址。
+      const fixture = path.join(mediaRoot, "tiny-source.png");
+      const generated = spawnSync("ffmpeg", [
+        "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=78x132:d=0.1",
+        "-frames:v", "1", fixture,
+      ]);
+      expect(generated.status).toBe(0);
+      const original = fs.readFileSync(fixture);
+      const sha256 = createHash("sha256").update(original).digest("hex");
+      expect((await upload("面试地点-小图.png", "image", original.toString("base64"))).statusCode).toBe(200);
+
+      const thumb = await app.inject({
+        url: `/api/v1/agent/media/${encodeURIComponent("面试地点-小图.png")}?preview=thumbnail&version=${sha256}`,
+        headers: admin,
+      });
+      expect(thumb.statusCode).toBe(200);
+      expect(thumb.headers["content-type"]).toBe("image/jpeg");
+      const thumbPath = path.join(mediaRoot, "thumb-check.jpg");
+      fs.writeFileSync(thumbPath, thumb.rawPayload);
+      const probe = spawnSync("ffprobe", [
+        "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", thumbPath,
+      ]);
+      expect(probe.stdout.toString().trim()).toBe("78,132");
+
+      const download = await app.inject({
+        url: `/api/v1/agent/media/${encodeURIComponent("面试地点-小图.png")}`, headers: device,
+      });
+      expect(download.statusCode).toBe(200);
+      expect(download.headers["content-type"]).toBe("image/png");
+      expect(download.rawPayload.equals(original)).toBe(true);
+    },
+  );
 
   it("allows an authenticated administrator to preview media but rejects other user JWTs", async () => {
     await upload("管理员预览.png");

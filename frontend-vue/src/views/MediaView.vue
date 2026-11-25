@@ -276,8 +276,10 @@ async function fetchThumb(row: MediaRow, signal: AbortSignal): Promise<Blob> {
   let retriedNetworkError = false
   while (true) {
     try {
+      // 列表只用缩略图：图片也走 preview=thumbnail，别把 5MB 原图拉进浏览器。
+      // 发送链路不受影响——客户端下载的是不带 preview 的原图。
       const { data } = await http.get<Blob>(`/api/v1/agent/media/${encodeURIComponent(row.name)}`, {
-        params: { version: row.sha256, preview: row.kind === 'video' ? 'thumbnail' : undefined },
+        params: { version: row.sha256, preview: 'thumbnail' },
         responseType: 'blob',
         signal,
       })
@@ -484,6 +486,12 @@ onMounted(async () => {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+/* 图片按真实比例装进框里（不裁切）：78×132 的废图、20 倍高的长图
+   在列表里一眼就能看出来，不会被 cover 裁成一张看不出问题的色块。 */
+.media-thumb.image img {
+  object-fit: contain;
 }
 
 .media-name {
