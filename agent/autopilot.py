@@ -130,6 +130,7 @@ import reply_store as rlog  # noqa: E402
 import client as agent_client  # noqa: E402
 import register as agent_register  # noqa: E402
 import remote_config as remote_cfg  # noqa: E402
+import favorite_sync  # noqa: E402
 import flow_state as flow_state_mod  # noqa: E402
 
 # 剪贴板兼容 + 长消息解析 + 进会话后点输入框。
@@ -687,6 +688,7 @@ class Reporter:
         self._bridge_account = ""
         self._bridge_paged = False
         self._bridge_quarantined = 0
+        self._favorite_last = 0.0
         # 首次没有游标时，只把最近 24 小时当作"新增"，避免把历史全灌一遍
         self._baseline = int(self._state.get("baseline_ts") or 0) or int(
             time.time() - REPORT_FIRST_WINDOW
@@ -745,6 +747,26 @@ class Reporter:
             except Exception as exc:
                 self._bridge_capture_error = True
                 log(f"[桥接] 读取消息快照失败：{type(exc).__name__}", level="warning")
+            if time.time() - self._favorite_last >= 300:
+                self._favorite_last = time.time()
+                try:
+                    snapshot_id, complete, favorites = favorite_sync.collect(self.store)
+                    if snapshot_id:
+                        sync_items = []
+                        for item in favorites:
+                            raw = dict(item)
+                            card_b64 = raw.pop("data_base64", "")
+                            if card_b64:
+                                try:
+                                    card = self.bridge.upload_location_card(card_b64, self._bridge_account, str(raw.get("favorite_id") or ""))
+                                    raw["location_card_sha"] = str(card.get("sha256") or "")
+                                except Exception as exc:
+                                    log(f"[收藏] 位置卡上报失败（保留元数据）：{type(exc).__name__}", level="warning")
+                            sync_items.append(raw)
+                        batch["favorite_sync"] = {"account_id": self._bridge_account, "snapshot_id": snapshot_id,
+                                                   "complete": complete, "items": sync_items}
+                except Exception as exc:
+                    log(f"[收藏] 读取失败（不清理服务端收藏）：{type(exc).__name__}", level="warning")
         heartbeat = {
             "wecom_state": wecom_state,
             "queue_size": int(queue_size),
@@ -933,6 +955,16 @@ class Reporter:
             self._send_groups()
         except Exception as exc:  # noqa: BLE001
             log(f"[群聊] 异常（忽略）：{agent_client.describe_error(exc)}")
+        favorite = batch.get("favorite_sync")
+        if isinstance(favorite, dict):
+            try:
+                self.bridge.sync_location_favorites(
+                    str(favorite.get("account_id") or ""), str(favorite.get("snapshot_id") or ""),
+                    bool(favorite.get("complete")), list(favorite.get("items") or []),
+                )
+                log(f"[收藏] 已同步 {len(favorite.get('items') or [])} 条，完整={bool(favorite.get('complete'))}")
+            except Exception as exc:
+                log(f"[收藏] 同步失败（下轮重试）：{type(exc).__name__}", level="warning")
         # 远端配置：每个心跳周期比对一次 version，变了重拉并热更运行参数
         try:
             if self.remote_config is not None:

@@ -263,6 +263,20 @@ class BridgeClient:
         code = quote(self.device_code, safe="")
         return self._request("DELETE", f"/api/v1/bridge/devices/{code}/login-qr")
 
+    def sync_location_favorites(self, account_id: str, snapshot_id: str, complete: bool, items: list[dict]) -> dict:
+        """上报当前企微账号收藏快照；不完整结果由服务端保留旧条目。"""
+        return self._request(
+            "POST", "/api/v1/agent/location-favorites/sync",
+            {"account_id": (account_id or "")[:128], "snapshot_id": (snapshot_id or "")[:120],
+             "complete": bool(complete), "items": items[:500]},
+        )
+
+    def upload_location_card(self, data_base64: str, account_id: str = "", favorite_id: str = "") -> dict:
+        return self._request(
+            "POST", "/api/v1/agent/location-card",
+            {"data_base64": data_base64, "account_id": account_id[:128], "favorite_id": favorite_id[:200]},
+        )
+
 
 def describe_error(exc: Exception) -> str:
     if isinstance(exc, urllib.error.HTTPError):
