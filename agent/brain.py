@@ -37,6 +37,7 @@ class Brain:
     """4222 Agent 客户端：开场队列 + 受控对话。"""
 
     mode = "agent"
+    location_steps = 1
 
     def __init__(
         self,
@@ -122,7 +123,8 @@ class Brain:
             cached = self._opening if kind == "opening" else self._flow
             if summary["state"] == "blocked":
                 return {"ok": False, "blocked": True, "items": [], "nodes": [], "edges": [],
-                        "detail": "设备鉴权失效", "position_id": summary["position_id"], "version": summary["version"]}
+                        "detail": "设备鉴权失效" if summary["error"] == "auth" else str((cached or {}).get("detail") or "配置不可执行"),
+                        "position_id": summary["position_id"], "version": summary["version"]}
             if cached is None:
                 return {"ok": False, "pending": True, "items": [], "nodes": [], "edges": [], "version": 0,
                         "detail": "配置尚未成功同步"}
@@ -138,7 +140,8 @@ class Brain:
             if cached.get("base_url") != self.base_url or cached.get("device_code") != self.device_code:
                 return
             data = cached.get("flow")
-            if not isinstance(data, dict):
+            # Older caches may have silently omitted location steps.
+            if not isinstance(data, dict) or (not data.get("blocked") and data.get("location_steps") != 1):
                 return
             summary = cached.get("sync") or {}
             with self._state_lock:
@@ -148,7 +151,7 @@ class Brain:
                         "version": int(data.get("version") or 0), "status": "enabled" if data.get("status") == "enabled" else "disabled",
                         "synced_at": summary.get("synced_at"),
                         "state": "blocked" if data.get("blocked") or summary.get("state") == "blocked" else "stale",
-                        "error": "auth" if data.get("blocked") or summary.get("state") == "blocked" else "cache"})
+                        "error": str(summary.get("error") or "invalid_response") if data.get("blocked") or summary.get("state") == "blocked" else "cache"})
         except (OSError, ValueError, AttributeError, TypeError):
             pass
 
@@ -171,7 +174,10 @@ class Brain:
                     self._opening_checked_at = now
                 self._sync[kind]["checked_at"] = self._utc_now()
             try:
-                data = self._get(f"/api/v1/agent/{kind}", {"device_code": self.device_code}, timeout=self._config_timeout)
+                params = {"device_code": self.device_code}
+                if kind == "flow":
+                    params["location_steps"] = "1"
+                data = self._get(f"/api/v1/agent/{kind}", params, timeout=self._config_timeout)
                 if not isinstance(data, dict):
                     raise ValueError("invalid config response")
                 stamp = self._utc_now()
@@ -190,7 +196,7 @@ class Brain:
                         "detail": str(data.get("detail") or ("" if items else "岗位没有配置开场"))}
                     summary = {"position_id": position_id, "version": version, "synced_at": stamp}
                 else:
-                    if not isinstance(data.get("nodes"), list):
+                    if data.get("location_steps") != 1 or not isinstance(data.get("nodes"), list):
                         raise ValueError("invalid flow nodes")
                     result = deepcopy(data)
                     result["synced_at"] = stamp
@@ -201,13 +207,14 @@ class Brain:
                         self._opening = result
                     else:
                         self._flow = result
-                    self._sync[kind].update({**summary, "state": "synced", "error": ""})
+                    self._sync[kind].update({**summary, "state": "blocked" if data.get("blocked") else "synced",
+                                             "error": "invalid_response" if data.get("blocked") else ""})
                 if kind == "flow":
                     try:
                         self._flow_cache_path.parent.mkdir(parents=True, exist_ok=True)
                         tmp = self._flow_cache_path.with_suffix(".tmp")
                         tmp.write_text(json.dumps({"base_url": self.base_url, "device_code": self.device_code,
-                            "flow": result, "sync": summary}, ensure_ascii=False), encoding="utf-8")
+                            "flow": result, "sync": self.sync_status()["flow"]}, ensure_ascii=False), encoding="utf-8")
                         tmp.replace(self._flow_cache_path)
                     except OSError:
                         with self._state_lock:
@@ -219,7 +226,7 @@ class Brain:
                     cached = self._opening if kind == "opening" else self._flow
                     prior = self._sync[kind]["state"]
                     self._sync[kind].update({"state": "blocked" if error == "auth" or prior == "blocked" else "stale" if cached is not None else "error",
-                                            "error": "auth" if prior == "blocked" else error})
+                                            "error": self._sync[kind]["error"] if prior == "blocked" and error != "auth" else error})
                 if kind == "flow" and error == "auth":
                     # Do not let an offline restart revive a previously revoked
                     # device from its last successful on-disk configuration.
@@ -243,7 +250,7 @@ class Brain:
         opening_ok = self._refresh_config("opening", force=True)
         flow = self._config_snapshot("flow")
         opening = self._config_snapshot("opening")
-        return (flow_ok and opening_ok and flow.get("provider", "agent") == provider
+        return (flow_ok and opening_ok and not flow.get("blocked") and not opening.get("blocked") and flow.get("provider", "agent") == provider
                 and flow.get("reply_mode_id", "") == generation and opening.get("provider", "agent") == provider)
 
     def sync_reply_mode(self, online: bool, *, can_prepare: bool = True, desktop: bool = True) -> bool:

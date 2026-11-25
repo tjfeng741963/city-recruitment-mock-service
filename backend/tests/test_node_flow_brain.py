@@ -84,7 +84,7 @@ def test_opening_revocation_blocks_cached_messages_and_recovers_only_after_succe
 
 def test_flow_summary_uses_successful_config_version_and_network_failure_is_stale(tmp_path):
     client = Brain("https://flow.test", "pc", "test-only", flow_cache_path=tmp_path / "cache.json")
-    use_transport(client, lambda _: httpx.Response(200, json={"position_id": 25, "version": 7, "status": "enabled", "nodes": [{"node_key": "intro"}], "edges": []}))
+    use_transport(client, lambda _: httpx.Response(200, json={"position_id": 25, "version": 7, "status": "enabled", "location_steps": 1, "nodes": [{"node_key": "intro"}], "edges": []}))
     client.flow()
     assert client.sync_status()["flow"]["version"] == 7
     def offline(request):
@@ -104,7 +104,7 @@ def test_config_sync_refreshes_both_configs_in_background_and_posts_sanitized_su
     def handler(request):
         requests.append(request)
         if request.url.path.endswith('/flow'):
-            return httpx.Response(200, json={"position_id": 25, "version": 7, "status": "enabled", "nodes": [{"parts": [{"body": "private text"}]}]})
+            return httpx.Response(200, json={"position_id": 25, "version": 7, "status": "enabled", "location_steps": 1, "nodes": [{"parts": [{"body": "private text"}]}]})
         if request.url.path.endswith('/opening'):
             return httpx.Response(200, json={"position_id": 25, "opening_version": "a" * 64, "items": [{"content": "private opening"}]})
         return httpx.Response(200, json={"ok": True})
@@ -157,7 +157,7 @@ def test_sender_reads_cached_snapshot_without_waiting_for_reporter_refresh(tmp_p
 def test_flow_revocation_remains_blocked_across_restart_until_success(tmp_path):
     path = tmp_path / "cache.json"
     client = Brain("https://flow.test", "pc", "test-only", flow_cache_path=path)
-    use_transport(client, lambda _: httpx.Response(200, json={"position_id": 25, "version": 7, "status": "enabled", "nodes": [{"node_key": "intro"}]}))
+    use_transport(client, lambda _: httpx.Response(200, json={"position_id": 25, "version": 7, "status": "enabled", "location_steps": 1, "nodes": [{"node_key": "intro"}]}))
     client.flow()
     use_transport(client, lambda _: httpx.Response(403))
     assert client.flow(force=True)["blocked"]
@@ -175,7 +175,7 @@ def test_flow_revocation_remains_blocked_across_restart_until_success(tmp_path):
 def test_flow_cache_persists_is_scoped_and_refreshes_disabled_flow(tmp_path):
     path = tmp_path / "flow.remote.json"
     client = Brain("https://flow.test", "pc", "test-only", flow_cache_path=path)
-    replies = [{"version": 1, "nodes": [{"node_key": "intro"}]}, {"version": 2, "status": "disabled", "nodes": []}]
+    replies = [{"version": 1, "location_steps": 1, "nodes": [{"node_key": "intro"}]}, {"version": 2, "status": "disabled", "location_steps": 1, "nodes": []}]
     calls = []
     def handler(request):
         calls.append(request)
@@ -205,7 +205,7 @@ def test_flow_cache_persists_is_scoped_and_refreshes_disabled_flow(tmp_path):
 
 def test_revoked_device_does_not_use_cached_flow_and_empty_summary_is_sent(tmp_path):
     path = tmp_path / "flow.remote.json"
-    path.write_text(json.dumps({"base_url":"https://flow.test", "device_code":"pc", "flow":{"version":1,"nodes":[{}]}}))
+    path.write_text(json.dumps({"base_url":"https://flow.test", "device_code":"pc", "flow":{"version":1,"location_steps": 1, "nodes":[{}]}}))
     client = Brain("https://flow.test", "pc", "test-only", flow_cache_path=path)
     client._client.close()
     client._client = httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(403)))
@@ -226,11 +226,11 @@ def test_reply_mode_waits_for_matching_configuration_before_acknowledging(tmp_pa
     applying = {"id": "revision-1", "phase": "applying", "effective": "agent", "target": "dify"}
     replies = [
         ("/api/v1/bridge/devices/pc/reply-mode", applying),
-        ("/api/v1/agent/flow", {"nodes": [], "provider": "agent", "reply_mode_id": "revision-1"}),
+        ("/api/v1/agent/flow", {"location_steps": 1, "nodes": [], "provider": "agent", "reply_mode_id": "revision-1"}),
         ("/api/v1/agent/opening", {"items": [], "provider": "dify"}),
         ("/api/v1/bridge/devices/pc/reply-mode", applying),
         ("/api/v1/bridge/devices/pc/reply-mode", applying),
-        ("/api/v1/agent/flow", {"nodes": [], "provider": "dify", "reply_mode_id": "revision-1"}),
+        ("/api/v1/agent/flow", {"location_steps": 1, "nodes": [], "provider": "dify", "reply_mode_id": "revision-1"}),
         ("/api/v1/agent/opening", {"items": [], "provider": "dify"}),
         ("/api/v1/bridge/devices/pc/reply-mode", {**applying, "phase": "completed", "effective": "dify"}),
     ]
@@ -250,3 +250,46 @@ def test_reply_mode_waits_for_matching_configuration_before_acknowledging(tmp_pa
     assert sent[-1]["id"] == "revision-1"
     assert brain.reply_mode_generation == "revision-1"
     assert not replies
+
+
+def test_location_capability_is_advertised_and_old_server_or_cache_cannot_skip_cards(tmp_path):
+    path = tmp_path / "flow.json"
+    path.write_text(json.dumps({"base_url": "https://flow.test", "device_code": "pc",
+                                "flow": {"version": 7, "nodes": [{"node_key": "intro"}]}}))
+    client = Brain("https://flow.test", "pc", "fixture", flow_cache_path=path)
+    requests = []
+    def old_server(request):
+        requests.append(request)
+        return httpx.Response(200, json={"version": 7, "nodes": [{"node_key": "intro"}]})
+    use_transport(client, old_server)
+    assert client.flow()["pending"]
+    assert requests[0].url.params["location_steps"] == "1"
+    def offline(request):
+        raise httpx.ConnectError("offline", request=request)
+    use_transport(client, offline)
+    assert client.flow(force=True)["pending"]
+    use_transport(client, lambda _: httpx.Response(200, json={"location_steps": 1, "version": 8, "nodes": [{"node_key": "intro"}]}))
+    assert client.flow(force=True)["version"] == 8
+    client.close()
+
+
+def test_invalid_location_snapshot_remains_blocked_after_offline_restart_and_not_ready(tmp_path):
+    path = tmp_path / "flow.json"
+    client = Brain("https://flow.test", "pc", "fixture", flow_cache_path=path)
+    def handler(request):
+        if request.url.path.endswith("/flow"):
+            return httpx.Response(200, json={"location_steps": 1, "blocked": True, "detail": "请重新保存面试点",
+                                            "provider": "agent", "reply_mode_id": "revision", "nodes": [], "edges": []})
+        return httpx.Response(200, json={"items": [], "provider": "agent"})
+    use_transport(client, handler)
+    assert client._apply_reply_mode("agent", "revision") is False
+    assert client.flow()["detail"] == "请重新保存面试点"
+    assert client.sync_status()["flow"]["state"] == "blocked"
+    client.close()
+    restarted = Brain("https://flow.test", "pc", "fixture", flow_cache_path=path)
+    def offline(request):
+        raise httpx.ConnectError("offline", request=request)
+    use_transport(restarted, offline)
+    assert restarted.flow()["blocked"]
+    assert restarted.flow()["detail"] == "请重新保存面试点"
+    restarted.close()

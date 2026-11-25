@@ -74,7 +74,7 @@ describe("招聘流程图入口接线", () => {
 
   it("prevents selecting cached location options while refreshing or after a read failure", () => {
     const page = read("frontend-vue/src/views/AgentFlowView.vue");
-    expect(page).toMatch(/<el-option v-for="point in locationPoints"[^>]*:disabled="locationPointsLoading \|\| Boolean\(locationPointsError\)"/);
+    expect(page).toMatch(/<el-option v-for="\(point, pointIndex\) in locationPoints"[^>]*:disabled="point.disabled \|\| locationPointsLoading \|\| Boolean\(locationPointsError\)"/);
     expect(page).toContain(':no-data-text="locationPointsError ||');
   });
 
