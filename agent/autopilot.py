@@ -148,6 +148,7 @@ compat.apply_input_focus_retry()
 from wecom_io_core import send as core_send  # noqa: E402
 from wecom_io_core.store import Store, find_data_dir, _pb_text, direction_of  # noqa: E402
 import location_card  # noqa: E402  # 原生位置卡：按坐标生成并粘贴发送
+import remark as remark_ui  # noqa: E402  # 给客户设置备注（同名撞车时用）
 
 # 企微自带的应用/系统会话，前缀命中就不回复
 SYSTEM_PREFIXES = (
@@ -3283,12 +3284,41 @@ def pump_commands(
         stats["sent" if ok else "failed"] += 1
         return stats
 
+    # ── 设置客户备注指令（2026-11-25）──────────────────────────────────
+    # 同名撞车时运营在网页上点「设置备注」→ 服务端写 kind=set_remark →
+    # 这里在**同一条指令泵**里执行（和发消息串行，不会抢焦点）。
+    # 动作只有「点击 / 快捷键 / 粘贴」三类，执行完回读本地库确认真的写进去了。
+    if str(command.get("kind") or "message") == "set_remark":
+        try:
+            payload = json.loads(content or "{}")
+        except Exception:  # noqa: BLE001
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        conv_id = str(payload.get("conversation_id") or "")
+        user_id = str(payload.get("user_id") or "")
+        if not user_id and conv_id.startswith("S:"):
+            members = conv_id[2:]
+            user_id = members.split("_")[-1] if "_" in members else ""
+        ok, detail = remark_ui.set_remark(
+            str(payload.get("name") or name or ""),
+            str(payload.get("remark") or ""),
+            log=mlog,
+            user_id=user_id,
+        )
+        try:
+            bridge.receipt(cmd_id, lease, "succeeded" if ok else "failed", "", detail)
+        except Exception as exc:  # noqa: BLE001
+            mlog(f"[指令] 设置备注回执失败：{agent_client.describe_error(exc)}", level="warning")
+        mlog(f"[指令] 设置备注：{detail}", level="info" if ok else "warning")
+        stats["sent" if ok else "failed"] += 1
+        return stats
+
     if refresh_only:
         # 旧服务端不认 only 参数时会把消息指令发过来：未登录不能发，
         # 也不能回执（回执会把它标成失败）。不回执，等 60 秒租约自然回收。
         mlog("[指令] 当前企微窗口不可用于发送，等待消息指令租约回收", level="warning")
         return stats
-
 
     try:
         if not rlog.begin_manual_command(bridge.base_url, bridge.device_code, cmd_id, lease):
