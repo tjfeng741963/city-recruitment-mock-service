@@ -31,6 +31,26 @@
         />
       </el-form-item>
 
+      <el-form-item v-if="selectedScope === 'position' || form.media.length" label="随答案发送">
+        <div class="faq-media w-full">
+          <el-select v-for="kind in mediaKinds" :key="kind.key"
+            :model-value="selectedMedia(kind.key)" :aria-label="kind.label" :placeholder="kind.label"
+            filterable clearable :loading="mediaLoading" @change="(value: string | undefined) => setMedia(kind.key, value)">
+            <el-option v-for="asset in availableMedia(kind.key)" :key="asset.reference"
+              :label="asset.name" :value="asset.reference" />
+          </el-select>
+          <p v-if="mediaError" class="kb-sort-hint" role="status">{{ mediaError }}</p>
+          <p v-else-if="missingMedia.length" class="kb-sort-hint" role="status">有素材已失效或不适用当前岗位，请移除或重新选择。</p>
+          <div v-for="reference in missingMedia" :key="reference" class="faq-media-missing">
+            <span>素材 #{{ reference.split(':')[1] }}</span>
+            <el-button link type="danger" @click="removeMedia(reference)">移除</el-button>
+          </div>
+          <router-link v-if="selectedScope === 'position'" :to="{ path: '/media', query: selectedPositionId ? { position_id: selectedPositionId } : {} }"
+            target="_blank" rel="noopener" @click="refreshOnReturn = true">管理图片与视频（新标签页）</router-link>
+          <p class="kb-sort-hint">图片（JPG 或 PNG）和视频（MP4）可各选一个。接待测试可预览发送顺序，企微自动发送素材待验证。</p>
+        </div>
+      </el-form-item>
+
       <el-form-item label="关键词">
         <div class="kb-tag-input">
           <el-tag
@@ -115,11 +135,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { Employer, KnowledgeDraft, KnowledgeItem, LocationNode, Vertical } from '../../api/knowledge'
 import type { ServicePosition } from '../../api/types'
 import { positionOptionLabel } from '../../utils/position-context'
+import { mediaApi } from '../../api/core'
 
 const props = withDefaults(
   defineProps<{
@@ -149,6 +170,7 @@ const form = reactive({
   question: '',
   answer: '',
   keywords: [] as string[],
+  media: [] as string[],
   vertical_id: null as number | null,
   city_id: null as number | null,
   employer_id: null as number | null,
@@ -164,6 +186,56 @@ const legacyScope = computed(() => {
   return source && !['global', 'position'].includes(source.scope_level) ? source.scope_level : null
 })
 const fixedScope = computed(() => Boolean(props.item || legacyScope.value))
+const selectedPositionId = computed(() => props.item ? props.item.scope_position_id : form.applicability || null)
+const selectedScope = computed(() => props.item?.scope_level ?? legacyScope.value ?? (selectedPositionId.value ? 'position' : 'global'))
+const mediaKinds = [{ key: 'image', label: '选择图片' }, { key: 'video', label: '选择视频' }] as const
+type MediaKind = typeof mediaKinds[number]['key']
+const mediaAssets = ref<Array<{ reference: string; name: string; kind: MediaKind; positionId: number }>>([])
+const mediaLoading = ref(false)
+const mediaError = ref('')
+const refreshOnReturn = ref(false)
+function availableMedia(kind: MediaKind) {
+  return selectedScope.value === 'position'
+    ? mediaAssets.value.filter(asset => asset.kind === kind && (!asset.positionId || asset.positionId === selectedPositionId.value))
+    : []
+}
+function selectedMedia(kind: MediaKind): string | undefined {
+  return availableMedia(kind).find(asset => form.media.includes(asset.reference))?.reference
+}
+const missingMedia = computed(() => mediaLoading.value || mediaError.value ? [] : form.media.filter(reference =>
+  !mediaKinds.some(kind => selectedMedia(kind.key) === reference)))
+
+function removeMedia(reference: string): void {
+  form.media = form.media.filter(item => item !== reference)
+}
+function setMedia(kind: MediaKind, value: string | undefined): void {
+  const previous = selectedMedia(kind)
+  if (previous) removeMedia(previous)
+  if (value) form.media.push(value)
+}
+async function loadMedia(): Promise<void> {
+  if (mediaLoading.value) return
+  mediaLoading.value = true
+  mediaError.value = ''
+  try {
+    const { data } = await mediaApi.list()
+    mediaAssets.value = (data.items || []).flatMap(row => row.supports_faq === true && (row.kind === 'image' || row.kind === 'video')
+      ? [{ reference: `asset:${row.id}:${row.sha256}`, name: String(row.name), kind: row.kind, positionId: Number(row.position_id) }]
+      : [])
+  } catch {
+    mediaError.value = '素材加载失败，关闭后重新打开可重试。'
+  } finally {
+    mediaLoading.value = false
+  }
+}
+function refreshMedia(): void {
+  if (props.modelValue && refreshOnReturn.value) {
+    refreshOnReturn.value = false
+    void loadMedia()
+  }
+}
+onMounted(() => window.addEventListener('focus', refreshMedia))
+onBeforeUnmount(() => window.removeEventListener('focus', refreshMedia))
 const existingScopeLabel = computed(() => {
   const item = props.item ?? props.copySource
   if (!item || item.scope_level === 'global') return '所有岗位通用'
@@ -187,6 +259,7 @@ function reset(): void {
   form.question = item?.question ?? ''
   form.answer = item?.answer ?? ''
   form.keywords = [...(item?.keywords ?? [])]
+  form.media = (item?.media ?? []).filter(value => value.startsWith('asset:'))
   form.vertical_id = item?.vertical_id ?? null
   form.city_id = item?.scope_level === 'city' ? item.scope_location_id : null
   form.employer_id = item?.scope_level === 'employer' ? item.scope_employer_id : null
@@ -198,7 +271,10 @@ function reset(): void {
 watch(
   () => [props.modelValue, props.item, props.copySource] as const,
   ([visible]) => {
-    if (visible) reset()
+    if (visible) {
+      reset()
+      void loadMedia()
+    }
   },
   { immediate: true },
 )
@@ -250,6 +326,7 @@ function buildDraft(): KnowledgeDraft {
     question: form.question.trim(),
     answer: form.answer.trim(),
     keywords: [...form.keywords],
+    media: [...(props.item?.media ?? []).filter(value => !value.startsWith('asset:')), ...form.media],
     vertical_id: form.vertical_id,
     scope_level: scopeLevel,
     scope_location_id: scopeLevel === 'city' ? form.city_id : null,
@@ -264,6 +341,10 @@ function confirm(): void {
   addKeyword()
   if (!fixedScope.value && !positionAvailable.value) {
     ElMessage.warning(props.positionsLoading ? '岗位选项正在加载，请稍候' : '请重新选择适用范围')
+    return
+  }
+  if (form.media.length && (mediaLoading.value || mediaError.value || missingMedia.value.length)) {
+    ElMessage.warning('请先核对随答案发送的图片和视频')
     return
   }
   if (!form.question.trim()) {
@@ -323,6 +404,10 @@ function confirm(): void {
 .w-full {
   width: 100%;
 }
+
+.faq-media { display: grid; gap: 8px; }
+.faq-media .kb-sort-hint { margin: 0; line-height: 1.5; }
+.faq-media-missing { display: flex; align-items: center; gap: 8px; }
 
 .dialog-footer {
   display: flex;

@@ -37,6 +37,27 @@ describe("Dify second reply route", () => {
     bridge.heartbeat(code,"online","test-account");return result;
   };
   const chat=(session="S:test",text="工资多少？",headers=device)=>app.inject({method:"POST",url:"/api/v1/agent/chat",headers,payload:{device_code:code,session_key:session,text}});
+  it("adds bound media only when Chatflow adopts the scoped FAQ instead of bypassing its answer", async () => {
+    const sha = "c".repeat(64);
+    const asset = app.db.prepare("INSERT INTO media_assets(name,kind,storage_path,sha256,bytes,status,position_id) VALUES (?,?,?,?,1,'enabled',?) RETURNING id")
+      .get("现场.mp4", "video", "c.mp4", sha, position) as { id: number };
+    const create = await app.inject({ method:"POST", url:"/api/v1/kb-faqs", headers:admin, payload:{
+      question:"实拍现场是什么样", answer:"这里是现场实拍。", keywords:["现场实拍"], scope_level:"position",
+      scope_position_id:position, media:[`asset:${asset.id}:${sha}`],
+    } });
+    expect(create.statusCode).toBe(201);
+    let answer = "这里是现场实拍。";
+    const model = vi.fn(async () => new Response(JSON.stringify({answer,conversation_id:"faq-fixture"})));
+    vi.stubGlobal("fetch", model);
+    const preview = () => app.inject({method:"POST",url:"/api/v1/dify/preview",headers:admin,payload:{
+      position_id:position,text:"现场实拍",session_key:"dify-preview:faq-fixture",
+    }});
+    expect((await preview()).json()).toMatchObject({ok:true,reply:{faq:{id:create.json().id},
+      messages:[{type:"text",content:"这里是现场实拍。"},{type:"video",content:"视频 · 现场.mp4"}]}});
+    answer = "请先确认你想看的地点。";
+    expect((await preview()).json().reply).not.toHaveProperty("faq");
+    expect(model).toHaveBeenCalledTimes(2);
+  });
   it("issues ordered subway invitations and waits for the candidate before offering times", async () => {
     const dir = mkdtempSync(join(tmpdir(), "dify-invitation-"));
     vi.stubEnv("REA_MEDIA_DIR", dir);

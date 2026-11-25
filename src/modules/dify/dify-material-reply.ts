@@ -56,7 +56,7 @@ export function clearMaterialFollowup(db: DatabaseSync, identity: string) {
   db.prepare("DELETE FROM dify_material_followup WHERE identity=?").run(identity);
 }
 
-export function configuredMaterialReply(db:DatabaseSync,positionId:number,query:string,context:Context,identity?:string):Message[] | undefined {
+export function configuredMaterialReply(db:DatabaseSync,positionId:number,query:string,context:Context,identity?:string,preferFaq=false):Message[] | undefined {
   const question=query.normalize("NFKC").trim();
   const now = Date.now();
   const pending = identity ? db.prepare(`DELETE FROM dify_material_followup WHERE identity=?
@@ -99,6 +99,7 @@ export function configuredMaterialReply(db:DatabaseSync,positionId:number,query:
     return [text("这个岗位有多个面试点，请从岗位面试安排中选一个。可以回复「查看面试安排」。")];
   }
   if (topic==="interview" && !point?.address) return [text("面试地址暂未公布。")];
+  if (preferFaq && topic !== "interview") return;
 
   const kinds:MediaKind[]=[];
   if ((topic!=="interview" || points.length===1) && (requestsMap || kind==="image" || kind==="both")) kinds.push("image");

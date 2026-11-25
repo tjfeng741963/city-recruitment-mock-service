@@ -15,7 +15,7 @@ export function positionKnowledge(db: DatabaseSync, positionId: number, facts: R
   const result: PositionKnowledge[] = [];
   const seen = new Set<string>();
   for (const row of rows) {
-    if (faqIssues(db, row).length) continue;
+    if (faqIssues(db, row).some(issue => !issue.code.startsWith("faq_media_"))) continue;
     let missing = false;
     const answer = String(row.answer || '').replace(/\{([^{}\n]+)\}/g, (_match, key: string) => {
       const value = facts[aliases[key] || key];

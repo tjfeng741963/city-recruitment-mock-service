@@ -71,6 +71,36 @@ describe("agent chat routes", () => {
     expect(body.llm.configured).toBe(false);
   });
 
+  it("only plans images and video when the model adopts the unique matched FAQ", async () => {
+    process.env.AGENT_LLM_API_KEY = "fixture-only";
+    const sha = "b".repeat(64);
+    const insert = app.db.prepare("INSERT INTO media_assets(name,kind,storage_path,sha256,bytes,status,position_id) VALUES (?,?,?,?,1,'enabled',?) RETURNING id");
+    const video = insert.get("现场.mp4", "video", "b.mp4", sha, positionId) as { id: number };
+    const picture = insert.get("现场.png", "image", "b.png", sha, 0) as { id: number };
+    const answer = "请看现场实拍。";
+    const faq = await app.inject({ method: "POST", url: "/api/v1/kb-faqs", headers: admin, payload: {
+      question: "现场什么样？", answer, keywords: ["实拍"], media: [`asset:${video.id}:${sha}`, `asset:${picture.id}:${sha}`],
+      scope_level: "position", scope_position_id: positionId,
+    } });
+    expect(faq.statusCode).toBe(201);
+    let modelAnswer = answer;
+    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ model: "deepseek-chat", choices: [{ message: {
+      content: JSON.stringify({ messages: [{ type: "text", content: modelAnswer }] }),
+    } }] })));
+    try {
+      const preview = async () => (await app.inject({ method: "POST", url: "/api/v1/agent/chat", headers: admin,
+        payload: { position_id: positionId, text: "实拍", preview: true } })).json();
+      const adopted = await preview();
+      expect(adopted.reply.faq).toMatchObject({ id: faq.json().id });
+      expect(adopted.reply.messages.map((message: { type: string }) => message.type)).toEqual(["text", "image", "video"]);
+      modelAnswer = "请先确认你想看的地点。";
+      expect((await preview()).reply).not.toHaveProperty("faq");
+      modelAnswer = answer;
+      app.db.prepare("UPDATE media_assets SET status='disabled' WHERE id=?").run(video.id);
+      expect((await preview()).reply.messages).toEqual([{ type:"text", content:answer }]);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it("city defaults are copied once to new position facts read by the agent", async () => {
     const city = await app.inject({
       method: "POST",

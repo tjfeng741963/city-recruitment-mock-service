@@ -320,7 +320,7 @@ HTTP 仍是 200——调用方按 `ok` 判断，不要按状态码。模型输�
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |---|---|---|---|
-| GET | `/api/v1/media` | admin | 素材库列表 |
+| GET | `/api/v1/media` | admin | 素材库列表。条目的 `supports_faq` 标明该格式能否绑定到岗位问答 |
 | POST | `/api/v1/media` | admin | 上传，body `{name,kind,data_base64}`，单文件 ≤ 20MB |
 | DELETE | `/api/v1/media/:id` | admin | 删记录（文件按 sha 复用，不删文件） |
 | GET | `/api/v1/agent/media/:name` | admin JWT、设备令牌或服务令牌 | 默认返回原文件与校验和。仅管理员可传 `?preview=compatible` 生成 H.264/AAC MP4，或传 `?preview=thumbnail` 生成缩略图（视频取首帧、图片等比缩小且**只缩不放**，均返回 JPEG）。可用 `version` 指定预期的原文件 SHA-256，不匹配时返回 404。封面生成繁忙时返回 503 与 `Retry-After`。 |
@@ -354,6 +354,8 @@ HTTP 仍是 200——调用方按 `ok` 判断，不要按状态码。模型输�
 | GET / POST | `/api/v1/employers`，`/api/v1/employers/:id` | 招工方 |
 | GET / POST | `/api/v1/kb-faqs`，`/api/v1/kb-faqs/:id` | 场景问答 |
 | GET | `/api/v1/kb-faqs/audit` | 问答治理检查 |
+
+岗位级问答可在 `media` 内保存素材引用 `asset:<id>:<sha256>`。每条最多一张 JPG/PNG 图、一个 MP4 视频，素材须启用且属于该岗位或通用池。历史标记继续读写。素材删除、停用、替换或改绑后，问答检查报告异常，答疑仍可读取该条文字。Windows 在 `POST /api/v1/agent/chat` 传 `faq_media: true` 和 `ordered_reply: true` 声明可识别问答素材计划。采用带素材的问答时，`reply.faq` 标明来源，`reply.messages` 与 `reply.delays_before_ms` 描述文字、图片、视频的计划顺序。画布显示的是模拟结果。当前设备只执行并回读文字，图片和视频记录为待核验发送前的目标会话。
 | GET | `/api/v1/kb-templates`，`/api/v1/kb-templates/:code` | 模板包 |
 | POST | `/api/v1/kb-templates/:code/import` | 导入模板包 |
 | POST | `/api/v1/kb-publish/preview` | 发布预览 |

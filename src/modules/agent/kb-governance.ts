@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { faqMediaIssues } from "./faq-media.js";
 
 type Json = Record<string, unknown>;
 export interface KbIssue { code: string; detail: string }
@@ -102,7 +103,7 @@ export function normalizeFaq(body: Json, current: Json = {}): Json {
 }
 
 export function faqIssues(db: DatabaseSync, row: Json): KbIssue[] {
-  const issues = sharedFaqIssues(row);
+  const issues = [...sharedFaqIssues(row), ...faqMediaIssues(db, row)];
   const active = row.status === "enabled";
   const vertical = row.vertical_id ? db.prepare("SELECT id,status FROM vertical WHERE tenant_id=1 AND id=?").get(Number(row.vertical_id)) : undefined;
   if (row.vertical_id && (!vertical || vertical.status === "deleted" || (active && vertical.status !== "enabled"))) {
