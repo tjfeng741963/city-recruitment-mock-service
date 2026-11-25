@@ -1,20 +1,20 @@
 <template>
   <el-dialog
     :model-value="modelValue"
-    :title="item ? '编辑知识' : '新增知识'"
+    :title="item ? '编辑知识' : copySource ? '复制为新问答' : '新增知识'"
     width="720px"
     destroy-on-close
     @update:model-value="close"
   >
     <el-form ref="formRef" :model="form" label-width="96px" @submit.prevent>
-      <el-form-item label="适用范围" :required="!item">
-        <span v-if="item" class="w-full">{{ existingScopeLabel }}</span>
+      <el-form-item label="适用范围" :required="!fixedScope">
+        <span v-if="fixedScope" class="w-full">{{ existingScopeLabel }}</span>
         <el-select v-else v-model="form.applicability" class="w-full" filterable placeholder="选择通用或搜索岗位">
           <el-option label="所有岗位通用" :value="0" />
           <el-option v-for="position in positions" :key="position.id" :label="positionOptionLabel(position)" :value="position.id" />
         </el-select>
-        <span v-if="!item && positionsLoading" class="kb-sort-hint" role="status">正在加载岗位选项…</span>
-        <span v-else-if="!item && !positionAvailable" class="kb-sort-hint">原岗位不可用，请重新选择适用范围。</span>
+        <span v-if="!fixedScope && positionsLoading" class="kb-sort-hint" role="status">正在加载岗位选项…</span>
+        <span v-else-if="!fixedScope && !positionAvailable" class="kb-sort-hint">请选择有效的适用范围。</span>
       </el-form-item>
       <el-form-item label="问题" required>
         <el-input v-model="form.question" maxlength="500" show-word-limit placeholder="例如：厂里管吃住吗？" />
@@ -54,7 +54,7 @@
         </div>
       </el-form-item>
 
-      <el-row v-if="item && !['global','position'].includes(item.scope_level)" :gutter="12">
+      <el-row v-if="legacyScope || copySource" :gutter="12">
         <el-col :span="12">
           <el-form-item label="分类">
             <el-select v-model="form.vertical_id" clearable placeholder="全部分类" class="w-full" @change="onVerticalChange">
@@ -67,7 +67,7 @@
             </el-select>
           </el-form-item>
         </el-col>
-        <el-col :span="12">
+        <el-col v-if="legacyScope" :span="12">
           <el-form-item label="城市">
             <el-select v-model="form.city_id" clearable filterable placeholder="不限城市" class="w-full">
               <el-option v-for="city in cityOptions" :key="city.id" :label="city.name" :value="city.id" />
@@ -76,7 +76,7 @@
         </el-col>
       </el-row>
 
-      <el-form-item v-if="item && !['global','position'].includes(item.scope_level)" label="雇主">
+      <el-form-item v-if="legacyScope" label="雇主">
         <el-select v-model="form.employer_id" clearable filterable placeholder="不限雇主" class="w-full" @change="onEmployerChange">
           <el-option
             v-for="employer in employerOptions"
@@ -107,7 +107,7 @@
       <div class="dialog-footer">
         <el-button @click="close(false)">取消</el-button>
         <el-button type="primary" :loading="submitting" @click="confirm">
-          {{ item ? '保存' : '新增' }}
+          {{ item ? '保存' : copySource ? '保存新问答' : '新增' }}
         </el-button>
       </div>
     </template>
@@ -128,6 +128,7 @@ const props = withDefaults(
     positions?: ServicePosition[]
     positionsLoading?: boolean
     item?: KnowledgeItem | null
+    copySource?: KnowledgeItem | null
     verticals: Vertical[]
     locations: LocationNode[]
     employers: Employer[]
@@ -144,7 +145,7 @@ const emit = defineEmits<{
 const formRef = ref()
 const keywordInput = ref('')
 const form = reactive({
-  applicability: 0,
+  applicability: 0 as number | undefined,
   question: '',
   answer: '',
   keywords: [] as string[],
@@ -157,9 +158,14 @@ const form = reactive({
 
 const cityOptions = computed(() => props.locations.filter((item) => item.level === 'city'))
 const verticalOptions = computed(() => props.verticals.filter((item) => item.status !== 'disabled'))
-const positionAvailable = computed(() => !form.applicability || props.positions.some(position => position.id === form.applicability))
+const positionAvailable = computed(() => form.applicability === 0 || props.positions.some(position => position.id === form.applicability))
+const legacyScope = computed(() => {
+  const source = props.item ?? props.copySource
+  return source && !['global', 'position'].includes(source.scope_level) ? source.scope_level : null
+})
+const fixedScope = computed(() => Boolean(props.item || legacyScope.value))
 const existingScopeLabel = computed(() => {
-  const item = props.item
+  const item = props.item ?? props.copySource
   if (!item || item.scope_level === 'global') return '所有岗位通用'
   if (item.scope_level !== 'position') return `原范围：${item.scope_level}`
   const position = props.positions.find(option => option.id === item.scope_position_id)
@@ -171,23 +177,26 @@ const employerOptions = computed(() => {
 })
 
 function reset(): void {
-  const item = props.item
-  form.applicability = props.positionId && (props.positionsLoading || props.positions.some(position => position.id === props.positionId))
+  const item = props.item ?? props.copySource
+  const defaultPosition = props.positionId && (props.positionsLoading || props.positions.some(position => position.id === props.positionId))
     ? props.positionId
     : 0
+  form.applicability = props.copySource
+    ? props.copySource.scope_level === 'position' ? props.copySource.scope_position_id || undefined : 0
+    : defaultPosition
   form.question = item?.question ?? ''
   form.answer = item?.answer ?? ''
   form.keywords = [...(item?.keywords ?? [])]
   form.vertical_id = item?.vertical_id ?? null
   form.city_id = item?.scope_level === 'city' ? item.scope_location_id : null
   form.employer_id = item?.scope_level === 'employer' ? item.scope_employer_id : null
-  form.enabled = item?.status !== 'disabled'
+  form.enabled = !props.copySource && item?.status !== 'disabled'
   form.sort_order = item?.sort_order ?? 0
   keywordInput.value = ''
 }
 
 watch(
-  () => [props.modelValue, props.item] as const,
+  () => [props.modelValue, props.item, props.copySource] as const,
   ([visible]) => {
     if (visible) reset()
   },
@@ -236,7 +245,7 @@ function onEmployerChange(): void {
 
 function buildDraft(): KnowledgeDraft {
   const selectedPositionId = props.item ? props.item.scope_position_id : form.applicability || null
-  const scopeLevel = props.item?.scope_level ?? (selectedPositionId ? 'position' : 'global')
+  const scopeLevel = props.item?.scope_level ?? legacyScope.value ?? (selectedPositionId ? 'position' : 'global')
   return {
     question: form.question.trim(),
     answer: form.answer.trim(),
@@ -253,7 +262,7 @@ function buildDraft(): KnowledgeDraft {
 
 function confirm(): void {
   addKeyword()
-  if (!props.item && !positionAvailable.value) {
+  if (!fixedScope.value && !positionAvailable.value) {
     ElMessage.warning(props.positionsLoading ? '岗位选项正在加载，请稍候' : '请重新选择适用范围')
     return
   }

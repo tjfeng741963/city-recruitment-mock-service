@@ -175,9 +175,10 @@
                 <span class="muted">{{ formatDateTime(row.updated_at) }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="140" fixed="right">
+            <el-table-column label="操作" width="160" fixed="right">
               <template #default="{ row }">
                 <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
+                <el-button link type="primary" @click="openCopy(row)">复制</el-button>
                 <el-button link type="danger" @click="remove(row)">删除</el-button>
               </template>
             </el-table-column>
@@ -225,6 +226,7 @@
     <KnowledgeFormDialog
       v-model="dialogVisible"
       :item="editing"
+      :copy-source="copySource"
       :position-id="positionId"
       :positions="positions"
       :positions-loading="positionsLoading"
@@ -326,6 +328,7 @@ const batchTotal = ref(0)
 const dialogVisible = ref(false)
 const submitting = ref(false)
 const editing = ref<KnowledgeItem | null>(null)
+const copySource = ref<KnowledgeItem | null>(null)
 
 const publishVisible = ref(false)
 const historyVisible = ref(false)
@@ -422,24 +425,33 @@ function onSelectionChange(rows: KnowledgeItem[]): void {
 }
 
 function openCreate(): void {
+  copySource.value = null
   editing.value = null
   dialogVisible.value = true
 }
 
 async function openEdit(row: KnowledgeItem): Promise<void> {
+  copySource.value = null
   editing.value = row
   dialogVisible.value = true
   if (row.source === 'knowledge' && !row.answer) {
     try {
       const full = await getKnowledgeItem(row.id, row.source)
-      if (full) editing.value = { ...row, ...full }
+      if (full && editing.value === row && dialogVisible.value) editing.value = { ...row, ...full }
     } catch {
       // 详情接口不可用时保留列表行，至少能改问题/状态
     }
   }
 }
 
+function openCopy(row: KnowledgeItem): void {
+  editing.value = null
+  copySource.value = row
+  dialogVisible.value = true
+}
+
 async function save(draft: KnowledgeDraft): Promise<void> {
+  if (submitting.value) return
   submitting.value = true
   try {
     if (editing.value) {
