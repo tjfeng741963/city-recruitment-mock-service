@@ -234,6 +234,8 @@ _last_claim_at = 0.0
 # 指令泵自检日志节流：登录态下领不到刷新指令时，5 分钟记一行，
 # 让「网页点了刷新、客户端到底有没有来领」这件事在日志里能查。
 _last_pump_log_at = 0.0
+_last_ghost_cleanup_at = 0.0
+_last_ghost_cleanup_at = 0.0
 # 泵入口探针节流（60 秒一行，pump_safely 用）
 _last_pump_entry_at = 0.0
 _last_receipt_retry_at = 0.0
@@ -1852,6 +1854,86 @@ def _same_name_ids(store: Store, table: str, id_col: str, normalized: str) -> se
             pass
 
 
+def _hide_ghost_windows() -> int:
+    """隐藏「可见但整块纯黑」的 WeWorkWindow——企微切换账号留下的残留实例。
+
+    2026-11-25 现场：两个 WeWorkWindow 同时可见，旧实例 1180×694 但 PrintWindow
+    亮度 0.0（纯黑），盖在真窗口 1044×694（亮度 227）上面。后果是所有按屏幕坐标
+    的点击都打在黑窗口上，表现为「窗口明明开着却发不出去 / 设备注点不动」。
+    只隐藏不杀进程（可逆），且只在存在 ≥2 个窗口时动手，避免把唯一窗口也藏了。
+    """
+    hidden = 0
+    try:
+        import ctypes
+        from ctypes import wintypes as wt
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        found: list[tuple[int, int, int]] = []
+
+        @ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+        def _cb(hwnd, _):
+            buf = ctypes.create_unicode_buffer(64)
+            user32.GetClassNameW(hwnd, buf, 64)
+            if buf.value == "WeWorkWindow" and user32.IsWindowVisible(hwnd):
+                rect = wt.RECT()
+                user32.GetWindowRect(hwnd, ctypes.byref(rect))
+                w, h = rect.right - rect.left, rect.bottom - rect.top
+                if w > 400 and h > 300:
+                    found.append((hwnd, w, h))
+            return True
+
+        user32.EnumWindows(_cb, None)
+        if len(found) < 2:
+            return 0
+        for hwnd, w, h in found:
+            if not win._renders_content(hwnd, w, h):
+                user32.ShowWindow(hwnd, 0)  # SW_HIDE
+                hidden += 1
+    except Exception:  # noqa: BLE001
+        return hidden
+    return hidden
+
+
+def _hide_ghost_windows() -> int:
+    """隐藏「可见但整块纯黑」的 WeWorkWindow——企微切换账号留下的残留实例。
+
+    2026-11-25 现场：两个 WeWorkWindow 同时可见，旧实例 1180×694 但 PrintWindow
+    亮度 0.0（纯黑），盖在真窗口 1044×694（亮度 227）上面。后果是所有按屏幕坐标
+    的点击都打在黑窗口上，表现为「窗口明明开着却发不出去 / 设备注点不动」。
+    只隐藏不杀进程（可逆），且只在存在 ≥2 个窗口时动手，避免把唯一窗口也藏了。
+    """
+    hidden = 0
+    try:
+        import ctypes
+        from ctypes import wintypes as wt
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        found: list[tuple[int, int, int]] = []
+
+        @ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+        def _cb(hwnd, _):
+            buf = ctypes.create_unicode_buffer(64)
+            user32.GetClassNameW(hwnd, buf, 64)
+            if buf.value == "WeWorkWindow" and user32.IsWindowVisible(hwnd):
+                rect = wt.RECT()
+                user32.GetWindowRect(hwnd, ctypes.byref(rect))
+                w, h = rect.right - rect.left, rect.bottom - rect.top
+                if w > 400 and h > 300:
+                    found.append((hwnd, w, h))
+            return True
+
+        user32.EnumWindows(_cb, None)
+        if len(found) < 2:
+            return 0
+        for hwnd, w, h in found:
+            if not win._renders_content(hwnd, w, h):
+                user32.ShowWindow(hwnd, 0)  # SW_HIDE
+                hidden += 1
+    except Exception:  # noqa: BLE001
+        return hidden
+    return hidden
+
+
 def _sequence_block_reason(cid: str, cfg: dict, source: tuple, store: Store, name: str) -> str:
     if cid in remote_cfg.takeover_sessions():
         return "会话已被人工接管，停止后续介绍"
@@ -3221,7 +3303,7 @@ def pump_commands(
     所以发送前必须确认目标名在企微会话列表里且不是系统会话；
     发送后再回读解密库，落点不是该 contact_id 就回执 unknown，待人工核对。
     """
-    global _last_reply_at, _last_error, _last_claim_at, _last_pump_log_at
+    global _last_reply_at, _last_error, _last_claim_at, _last_pump_log_at, _last_ghost_cleanup_at, _last_ghost_cleanup_at
     stats = {"claimed": 0, "sent": 0, "failed": 0}
 
     if dry or cfg.get("dry_run") or bridge is None or not getattr(bridge, "enabled", False):
@@ -3245,6 +3327,20 @@ def pump_commands(
     # 5 分钟一条自检：确认指令泵在跑、领的是哪一类、领到没有。
     # 排查「网页点了刷新没反应」时先看这一行，能立刻区分
     # 「客户端没来领」和「领到了但执行失败」。
+    # 每 10 分钟清一次残留黑窗口：不清理的话点击会打在黑窗口上（2026-11-25）
+    if now - _last_ghost_cleanup_at >= 600:
+        _last_ghost_cleanup_at = now
+        hidden = _hide_ghost_windows()
+        if hidden:
+            log(f"[窗口] 已隐藏 {hidden} 个纯黑的残留企微窗口（切换账号遗留）",
+                level="warning", scope="manual")
+    # 每 10 分钟清一次残留黑窗口：不清理的话点击会打在黑窗口上（2026-11-25）
+    if now - _last_ghost_cleanup_at >= 600:
+        _last_ghost_cleanup_at = now
+        hidden = _hide_ghost_windows()
+        if hidden:
+            log(f"[窗口] 已隐藏 {hidden} 个纯黑的残留企微窗口（切换账号遗留）",
+                level="warning", scope="manual")
     if now - _last_pump_log_at >= 300:
         _last_pump_log_at = now
         log(f"[指令] 泵运行中：wecom={wecom_state} 只领刷新={refresh_only} "
