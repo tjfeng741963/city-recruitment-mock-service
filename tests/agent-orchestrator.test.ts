@@ -172,3 +172,20 @@ describe("guessCustomerName", () => {
     expect(guessCustomerName("多少钱一个月")).toBe("");
   });
 });
+
+describe("fact order rule", () => {
+  it("tells the model to keep the fact-card order in a single reply", () => {
+    const { messages } = buildOrchestration({
+      persona: "招聘顾问",
+      facts: { job_title: "地铁安检员", wage_text: "150/班", hours_text: "早班6:00-15:00" },
+      history: [],
+      input: "什么岗位，几点上班",
+    });
+    const system = messages[0].content;
+    // 2026-11-25：客户看到「时间…岗位…」会以为是另一个岗位，必须按事实卡顺序说
+    expect(system).toContain("顺序必须与「岗位事实」里的顺序一致");
+    // 事实卡本身也必须是稳定顺序：岗位在工价前、工价在班次前
+    expect(system.indexOf("岗位（job_title）")).toBeLessThan(system.indexOf("工价（wage_text）"));
+    expect(system.indexOf("工价（wage_text）")).toBeLessThan(system.indexOf("班次（hours_text）"));
+  });
+});
