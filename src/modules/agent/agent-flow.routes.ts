@@ -4,7 +4,9 @@ import type { DatabaseSync } from "node:sqlite";
 import { DeviceBridgeStore } from "../messaging/device-bridge.js";
 import { devicePositionId } from "../../shared/device-factories.js";
 import { deviceReplyProvider } from "../dify/dify-reply.js";
-import { interviewLocation, resolveInterviewLocation, type InterviewLocation } from "../../shared/interview-location.js";
+import { favoritePointTitles } from "../../shared/favorite-location.js";
+import { flowLocationLabel, flowLocationOptions, WORK_LOCATION_KEY } from "../../shared/flow-location.js";
+import { interviewLocation, type InterviewLocation } from "../../shared/interview-location.js";
 
 const NODE_TYPES = new Set(["text", "image", "video", "followup", "branch", "end"]);
 const EDGE_TRIGGERS = new Set(["default", "any_reply", "timeout", "keyword", "giveup"]);
@@ -12,7 +14,7 @@ const PHASES = new Set(["idle", "running", "awaiting", "followup_due", "followup
 const PART_KINDS = new Set(["text", "image", "video", "favorite_location"]);
 
 type Json = Record<string, unknown>;
-type FlowPart = { kind: string; body: string; media_name: string; delay_ms: number; interview_point?: string; delay_before_ms?: number; location?: InterviewLocation };
+type FlowPart = { kind: string; body: string; media_name: string; delay_ms: number; interview_point?: string; delay_before_ms?: number; location?: InterviewLocation; location_link_enabled?: true };
 type FlowNode = {
   node_key: string; node_type: string; title: string; body: string; media_name: string;
   parts: FlowPart[]; delay_ms: number; await_reply: boolean; wait_minutes: number;
@@ -212,7 +214,7 @@ function jsonObject(raw: unknown): Json {
   return value;
 }
 
-export function readFlow(db: DatabaseSync, positionId: number) {
+export function readFlow(db: DatabaseSync, positionId: number, executableOnly = false) {
   const flow = db.prepare("SELECT * FROM agent_flow WHERE position_id=?").get(positionId) as Record<string, unknown> | undefined;
   if (!flow) return { position_id: positionId, version: 0, status: "disabled", entry_key: "", canvas: {}, nodes: [], edges: [] };
   const nodes = db.prepare("SELECT * FROM agent_flow_node WHERE flow_id=? ORDER BY id").all(Number(flow.id)) as Array<Record<string, unknown>>;
@@ -225,7 +227,8 @@ export function readFlow(db: DatabaseSync, positionId: number) {
     canvas: { viewport: jsonObject(flow.canvas_json).viewport ?? {} },
     nodes: nodes.map((node) => ({
       node_key: node.node_key, node_type: node.node_type, title: node.title, body: node.body,
-      media_name: node.media_name, parts: parseArray(node.parts_json), delay_ms: node.delay_ms,
+      media_name: node.media_name, parts: parseArray(node.parts_json).filter(part =>
+        !executableOnly || parseObject(part).kind !== "favorite_location"), delay_ms: node.delay_ms,
       await_reply: Boolean(node.await_reply), wait_minutes: node.wait_minutes, max_times: node.max_times,
       x: node.x, y: node.y, status: node.status,
     })),
@@ -238,7 +241,7 @@ export function readFlow(db: DatabaseSync, positionId: number) {
 
 /** Explicit legacy compatibility mode; never change the default opening list. */
 export function firstFlowSegment(db: DatabaseSync, positionId: number) {
-  const flow = readFlow(db, positionId);
+  const flow = readFlow(db, positionId, true);
   if (flow.status !== "enabled") return [];
   const parts: FlowPart[] = [];
   const visited = new Set<string>();
@@ -251,8 +254,6 @@ export function firstFlowSegment(db: DatabaseSync, positionId: number) {
     if (node.await_reply) break;
     key = str(flow.edges.find(edge => edge.from_key === key && edge.trigger === "default")?.to_key);
   }
-  // This legacy contract has no capability negotiation or durable card steps.
-  if (parts.some(part => part.kind === "favorite_location")) return [];
   return parts.map((part, index) => ({seq:index + 1,kind:part.kind,content:part.body,media_name:part.media_name,delay_ms:part.delay_ms}));
 }
 
@@ -365,7 +366,7 @@ export async function registerAgentFlowRoutes(app: FastifyInstance, db: Database
     return readFlow(db, id);
   });
 
-  app.get<{ Querystring: { device_code?: string; location_steps?: string } }>("/api/v1/agent/flow", async (request, reply) => {
+  app.get<{ Querystring: { device_code?: string; location_links?: string } }>("/api/v1/agent/flow", async (request, reply) => {
     const code = str(request.query.device_code).trim();
     if (!deviceAllowed(request, code)) return reply.code(403).send({ detail: "Device token or scope invalid" });
     const mode = replyModeRow(db, code);
@@ -375,20 +376,27 @@ export async function registerAgentFlowRoutes(app: FastifyInstance, db: Database
     if (!db.prepare("SELECT 1 FROM service_positions WHERE id=? AND status='enabled'").get(positionId)) {
       return { position_id: positionId, location_steps: 1, reply_mode_id, version: 0, nodes: [], edges: [], status: "disabled" };
     }
-    const result = readFlow(db, positionId);
-    const locationParts = result.nodes.filter(node => node.status !== "disabled")
-      .flatMap(node => node.parts).filter(part => parseObject(part).kind === "favorite_location");
-    if (result.status === "enabled" && locationParts.length) {
-      const detail = request.query.location_steps !== "1" ? "流程含位置卡，请更新 Windows 客户端"
-        : locationParts.some(part => {
-          const saved = parseObject(part);
-          const card = interviewLocation(saved.location);
-          return !card || card.name !== saved.interview_point;
-        }) ? "位置卡缺少已保存地点快照，请在画布重新选择面试点并保存" : "";
-      if (detail) return { ...result, location_steps: 1, reply_mode_id, blocked: true, detail, nodes: [], edges: [] };
-    }
+    const withLocations = request.query.location_links === "1";
+    const result = readFlow(db, positionId, !withLocations);
     // 停用只阻止新会话；在途会话使用本地持久化快照。
-    return { ...result, location_steps: 1, ...(result.status === "enabled" ? {} : { nodes: [], edges: [] }), reply_mode_id };
+    if (result.status !== "enabled") return { ...result, location_steps: 1, nodes: [], edges: [], reply_mode_id };
+    if (withLocations) {
+      result.nodes = result.nodes.map(node => ({
+        ...node,
+        parts: node.parts.flatMap(raw => {
+          const part = parseObject(raw);
+          if (part.kind !== "favorite_location") return [raw];
+          if (part.location_link_enabled !== true) return [];
+          const location = interviewLocation(part.location);
+          const body = location
+            ? `${location.name}：${location.address}\n导航：https://uri.amap.com/marker?position=${location.lng},${location.lat}`
+            : "";
+          return [{ kind: part.kind, body, media_name: "", interview_point: part.interview_point,
+            delay_before_ms: part.delay_before_ms, delay_ms: part.delay_ms }];
+        }),
+      }));
+    }
+    return { ...result, location_steps: 1, reply_mode_id };
   });
 
   app.post<{ Body: Json }>("/api/v1/agent-flow/migrate", async (request, reply) => {
@@ -423,14 +431,28 @@ export async function registerAgentFlowRoutes(app: FastifyInstance, db: Database
       validateGraph(nodes, edges, entryKey);
       // Drafts preserve historical content for review; activation enforces facts.
       if (body.status !== "disabled") validateNumbers(db, positionId, nodes);
-      const points = jsonObject(position.data_json).interview_points;
+      const positionData = jsonObject(position.data_json);
+      const points = favoritePointTitles(positionData.interview_points);
+      const locations = flowLocationOptions(positionData);
       for (const node of nodes) {
-        const pending = node.parts.filter(part => part.kind === "favorite_location");
-        for (const part of pending) {
-          const location = resolveInterviewLocation(points, part.interview_point || "");
-          if (!location) throw new Error(`面试点「${part.interview_point}」需有唯一名称、详细地址和有效经纬度`);
-          // Never accept coordinates supplied in a flow part from the caller.
+        const active = body.status !== "disabled" && node.status !== "disabled";
+        if (active && node.parts.length && node.parts.every(part => part.kind === "favorite_location")) {
+          throw new Error(`「${node.title || node.node_key}」还需要一条文字、图片或视频，避免旧版 Windows 在未发消息时等待回复`);
+        }
+        for (const part of node.parts) {
+          if (part.kind !== "favorite_location") continue;
+          const pointKey = part.interview_point ?? "";
+          if (pointKey !== WORK_LOCATION_KEY && points.filter(point => point.name === pointKey).length !== 1) {
+            throw new Error(`面试点「${pointKey}」不存在或名称重复`);
+          }
+          if (!active) continue;
+          const saved = locations.find(point => point.key === pointKey);
+          if (!saved) {
+            throw new Error(`「${flowLocationLabel(pointKey)}」需要详细地址及有效经纬度`);
+          }
+          const { key: _key, ...location } = saved;
           part.location = location;
+          part.location_link_enabled = true;
         }
         for (const part of node.parts.filter(item => item.kind === "image" || item.kind === "video")) {
           const asset = db.prepare("SELECT kind,position_id FROM media_assets WHERE name=? AND status='enabled'").get(part.media_name) as {kind:string;position_id:number}|undefined;

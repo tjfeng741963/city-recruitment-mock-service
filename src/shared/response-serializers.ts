@@ -127,6 +127,9 @@ export function serializeServicePosition(row: Row): Row {
   if (typeof source.work_address === "string") {
     result.work_address = source.work_address;
     result.interview_address = fact("interview_address");
+    if (typeof source.work_coordinates === "string" && source.work_coordinates.trim()) {
+      result.work_coordinates = source.work_coordinates.trim();
+    }
   }
   const sections = result.base_sections && typeof result.base_sections === "object" ? result.base_sections as Row : {};
   // 网页允许新增语义字段；读回时保留它们，否则保存后再次编辑就会丢失。

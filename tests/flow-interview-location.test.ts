@@ -51,26 +51,29 @@ describe("完整地点步骤的保存与设备下发", () => {
     const saved=await app.inject({method:"PUT",url:"/api/v1/agent-flow",headers:admin,payload:graph()});
     expect(saved.statusCode,saved.body).toBe(200);
     expect(saved.json().nodes[0].parts[1].location).toEqual(card);
-    const response=await app.inject({url:"/api/v1/agent/flow?device_code=local-device-001&location_steps=1",headers:device});
+    const response=await app.inject({url:"/api/v1/agent/flow?device_code=local-device-001&location_links=1",headers:device});
     expect(response.json().blocked).toBeUndefined();
     expect(response.json().nodes[0].parts.map((p: {kind:string})=>p.kind)).toEqual(["text","favorite_location","text"]);
-    expect(response.json().nodes[0].parts[1]).toMatchObject({location:card,delay_before_ms:3500,delay_ms:2000});
+    expect(response.json().nodes[0].parts[1]).toMatchObject({
+      body:`${card.name}：${card.address}\n导航：https://uri.amap.com/marker?position=${card.lng},${card.lat}`,
+      delay_before_ms:3500,delay_ms:2000,
+    });
+    expect(response.json().nodes[0].parts[1]).not.toHaveProperty("location");
   });
   it("修改岗位坐标不会修改已保存流程，重新保存才采用新地点",async()=>{
     await app.inject({method:"PUT",url:`/api/v1/service-positions/${id}`,headers:admin,payload:{interview_points:[{...card,lng:114}]}});
-    let flow=await app.inject({url:"/api/v1/agent/flow?device_code=local-device-001&location_steps=1",headers:device});
-    expect(flow.json().nodes[0].parts[1].location.lng).toBe(card.lng);
+    let flow=await app.inject({url:"/api/v1/agent/flow?device_code=local-device-001&location_links=1",headers:device});
+    expect(flow.json().nodes[0].parts[1].body).toContain(`position=${card.lng},${card.lat}`);
     await app.inject({method:"PUT",url:"/api/v1/agent-flow",headers:admin,payload:graph()});
-    flow=await app.inject({url:"/api/v1/agent/flow?device_code=local-device-001&location_steps=1",headers:device});
-    expect(flow.json().nodes[0].parts[1].location.lng).toBe(114);
+    flow=await app.inject({url:"/api/v1/agent/flow?device_code=local-device-001&location_links=1",headers:device});
+    expect(flow.json().nodes[0].parts[1].body).toContain(`position=114,${card.lat}`);
   });
-  it("旧客户端、无快照旧配置不静默删掉卡片步骤",async()=>{
-    const old=await app.inject({url:"/api/v1/agent/flow?device_code=local-device-001",headers:device});
-    expect(old.json()).toMatchObject({blocked:true,nodes:[],edges:[]});
+  it("原生卡客户端继续执行普通消息，已启用导航但快照缺失时新版不发送",async()=>{
+    const old=await app.inject({url:"/api/v1/agent/flow?device_code=local-device-001&location_steps=1",headers:device});
+    expect(old.json().nodes[0].parts.map((p: {kind:string})=>p.kind)).toEqual(["text","text"]);
     app.db.prepare("UPDATE agent_flow_node SET parts_json=json_remove(parts_json,'$[1].location')").run();
-    const missing=await app.inject({url:"/api/v1/agent/flow?device_code=local-device-001&location_steps=1",headers:device});
-    expect(missing.json()).toMatchObject({blocked:true,nodes:[]});
-    expect(missing.json().detail).toContain("重新选择");
+    const missing=await app.inject({url:"/api/v1/agent/flow?device_code=local-device-001&location_links=1",headers:device});
+    expect(missing.json().nodes[0].parts[1]).toMatchObject({kind:"favorite_location",body:""});
   });
   it("引用另一岗位点或缺坐标的点，保存失败",async()=>{
     const graphOther=graph(); graphOther.nodes[0].parts[1].interview_point="另一岗位的点";

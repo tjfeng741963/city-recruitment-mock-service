@@ -74,6 +74,49 @@ def test_first_contact_and_reply_each_have_one_output_without_chat(agent):
     agent._brain.chat.assert_not_called()
 
 
+@pytest.mark.parametrize("result", ["sent", "unknown", "taken_over"])
+def test_location_link_waits_and_uses_expected_text_recipient(agent, monkeypatch, result):
+    address = "南门面试点：南路1号\n导航：https://uri.amap.com/marker?position=113.39,23.11"
+    flow = json.loads(json.dumps(FLOW))
+    flow["nodes"][0]["parts"] = [
+        {"kind": "favorite_location", "body": address, "delay_before_ms": 3500, "delay_ms": 700},
+        {"kind": "text", "body": "到了联系我", "delay_ms": 0},
+    ]
+    events = []
+    takeover = set()
+
+    def sleep(seconds):
+        events.append(seconds)
+        if seconds == 3.5 and result == "taken_over":
+            takeover.add("S:customer")
+
+    monkeypatch.setattr(agent.time, "sleep", sleep)
+    monkeypatch.setattr(agent.remote_cfg, "takeover_sessions", lambda: takeover)
+    def send_text(store, name, cid, body, **kwargs):
+        assert name == "Customer" and cid == "S:customer"
+        events.append(body)
+        return ("unknown", "未回读到发送结果", "") if result == "unknown" else ("sent", "已回读", "")
+
+    sender = MagicMock(side_effect=send_text)
+    monkeypatch.setattr(agent, "_send_text", sender)
+    agent._flow_state.upsert("S:customer", device_code="pc", position_id=1, flow_version=1,
+                            node_key="qualify", phase="running", conv_name="Customer", snapshot_json=json.dumps(flow))
+
+    phase = agent._run_flow(MagicMock(), CFG, "S:customer", "Customer", flow, node_key="qualify")
+    outbox = agent._flow_state.outbox("S:customer", "qualify")
+    if result == "sent":
+        assert phase == "awaiting"
+        assert [row["status"] for row in outbox] == ["sent", "sent"]
+        assert events.index(3.5) < events.index(address) < events.index(0.7) < events.index("到了联系我")
+    elif result == "taken_over":
+        assert phase == "held"
+        sender.assert_not_called()
+    else:
+        assert phase == "held"
+        assert [row["status"] for row in outbox] == ["unknown"]
+        sender.assert_called_once()
+
+
 def test_system_event_does_not_open_gate_and_completed_flow_does_not_replay_opening(agent):
     start(agent)
     incoming(agent, 2, "")

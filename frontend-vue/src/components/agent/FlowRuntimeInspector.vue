@@ -8,11 +8,11 @@
       <template v-if="node.parts?.length">
         <h4>{{ node.node_type === 'system_media' ? 'AI 可选素材 · 按需发送' : '此步骤配置的发送内容' }}</h4>
         <div v-for="(part, index) in node.parts" :key="index" class="message-preview">
-          <span class="message-kind">第 {{ index + 1 }} 条 · {{ part.kind === 'favorite_location' ? '企微位置卡' : part.kind === 'text' ? '文本' : part.kind === 'video' ? '视频' : '图片' }}</span>
+          <span class="message-kind">第 {{ index + 1 }} 条 · {{ part.kind === 'favorite_location' ? '地址＋导航链接' : part.kind === 'text' ? '文本' : part.kind === 'video' ? '视频' : '图片' }}</span>
           <p v-if="part.kind === 'text'" class="verbatim">{{ part.body || '未填写文本' }}</p>
           <template v-else-if="part.kind === 'favorite_location'">
-            <strong>{{ part.interview_point || '未选面试点' }}</strong>
-            <p>已配置，当前 Windows 会跳过此步。</p>
+            <strong>{{ flowLocationLabel(part.interview_point || '未选地点') }}</strong>
+            <p>{{ part.location_link_enabled ? '新版 Windows 执行，发送结果以会话回执为准。' : '此条尚未启用。核对地点后，启用并保存流程。' }}</p>
           </template>
           <template v-else><strong>{{ part.media_name || '未选素材' }}</strong>
             <FlowMediaPreview v-if="part.media_name" :name="part.media_name" :kind="part.kind" />
@@ -42,6 +42,7 @@
 import { computed } from 'vue'
 import type { AgentFlow, AgentFlowEdge, AgentFlowNode } from '../../api/agent'
 import { describeRuntimeNode } from './flow-runtime'
+import { flowLocationLabel } from '../../../../src/shared/flow-location'
 import FlowMediaPreview from './FlowMediaPreview.vue'
 const props = defineProps<{ graph: AgentFlow; node: AgentFlowNode | null; edge: AgentFlowEdge | null; legacy: boolean }>()
 defineEmits<{

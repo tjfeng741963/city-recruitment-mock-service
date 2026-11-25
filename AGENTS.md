@@ -52,6 +52,7 @@ npx vitest run --testTimeout=20000
 
 ## 推代码规则
 
+- 本项目已确认的改动，完成发布检查后直接推送到 `main` 并跟进部署。用户另有发布安排时，按当次要求执行。
 - **只提交自己改的文件**，用 `git add <具体路径>`，禁止 `git add .` / `git add -A`。工作区里常有别人或别的会话的未提交改动。
 - 提交信息用 Conventional Commits：`feat: …` / `fix: …` / `refactor: …` / `test: …` / `docs: …` / `chore: …`，描述可以用中文。
 - 改动较大或不确定时，推到新分支开 PR，等 PR 检查变绿再合并；小改动可以直接推 `main`，但推了就会上线。

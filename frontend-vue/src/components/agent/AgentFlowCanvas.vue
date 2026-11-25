@@ -102,6 +102,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { FullScreen, Minus, Plus } from '@element-plus/icons-vue'
 import type { AgentFlow, AgentFlowEdge, AgentFlowNode } from '../../api/agent'
 import { dragFlowPoint } from '../basic/flow-graph'
+import { flowLocationLabel } from '../../../../src/shared/flow-location'
 import FlowMediaPreview from './FlowMediaPreview.vue'
 import { fitCanvasZoom, panCanvasScroll, zoomCanvasAt } from './canvas-navigation'
 
@@ -256,7 +257,7 @@ function triggerLabel(trigger: string): string {
 }
 
 function nodeTypeLabel(nodeType: string): string {
-  if (nodeType === 'favorite_location') return '企微位置卡'
+  if (nodeType === 'favorite_location') return '地址＋导航链接'
   return labels[nodeType] || nodeType
 }
 
@@ -277,7 +278,7 @@ function nodeSummary(node: AgentFlowNode): string {
   const parts = Array.isArray(node.parts) ? node.parts : []
   const preview = parts.map((part) => {
     if (part.kind === 'text') return part.body
-    if (part.kind === 'favorite_location') return `${part.interview_point || '未选面试点'}（位置卡）`
+    if (part.kind === 'favorite_location') return `${flowLocationLabel(part.interview_point || '未选地点')}（导航）`
     return part.media_name ? `${nodeTypeLabel(part.kind)}：${part.media_name}` : '未选素材'
   })
     .filter(Boolean)

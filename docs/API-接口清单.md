@@ -69,7 +69,7 @@ Key 由服务端加密保存，接口响应只显示是否配置。同一地址�
 
 `favorite_title` 是企微收藏位置卡的完整名称，支持最多 100 个字符的单行文字。`favorite_delay_ms`（0 到 60000）保存 Dify 在已确认面试点、求职者索要定位时，从地址文字发出到位置卡的计划间隔。空标题清除绑定和间隔。管理员调用 `POST /api/v1/agent/chat`（`dry` 或 `preview`）或 `POST /api/v1/dify/preview`（`dry`）询问面试定位时，可读取 `favorite_location_preview`。返回 `needs_point`、`not_configured`、`position_disabled` 或 `windows_unavailable`。Dify 命中已配置点时还返回 `trigger` 与 `after_address_delay_ms`。预览不下发发送任务，收藏名称保持独立于模型输入。
 
-管理员的 `GET/PUT /api/v1/agent-flow` 支持节点 `parts` 的 `favorite_location`、当前岗位面试点名称 `interview_point`、发送前等待 `delay_before_ms` 和完成后间隔 `delay_ms`。服务端从该岗位面试点的唯一名称、详细地址、有效 `lng/lat` 生成 `location` 快照，忽略调用方自行提供的坐标；不再要求 `favorite_title`。设备读取 `GET /api/v1/agent/flow?device_code=:code&location_steps=1` 取得完整有序步骤；响应同样返回 `location_steps:1`，新客户端拒绝无此标记的旧响应/普通缓存。启用流程含位置步骤而客户端未声明能力，或旧流程缺少地点快照时返回 `blocked=true` 与空节点，禁止静默跳过；需更新客户端或重新选择地点并保存。旧开场兼容序列遇到位置步骤不提供有缺项的序列。客户端发卡须本轮先有确认目标的文字，之后按新出站位置消息的 ID、会话和坐标/地址/名称核验，未知结果停止不自动重播。
+管理员的 `GET/PUT /api/v1/agent-flow` 在节点 `parts` 中用历史类型 `favorite_location` 保存地址和导航链接步骤。地点标识 `interview_point` 取面试点名称，或用 `@work_address` 指向岗位工作地点。发送前等待用 `delay_before_ms`，发完后间隔用 `delay_ms`，顺序以 `parts` 为准。面试点须有详细地址及独立的经纬度。工作地点读取 `work_address` 和仅用于工作地点的 `work_coordinates`（纬度,经度）。新版 Windows 通过 `GET /api/v1/agent/flow?device_code=:code&location_links=1` 获取已启用的位置步骤，`body` 包含地址和导航链接，使用现有文字发送及回读链路。地点资料失效时返回空 `body`，客户端暂停并报告原因。旧占位步骤在流程启用并重新保存前继续跳过。旧客户端请求与旧开场兼容序列过滤该类型。若回滚客户端，在途会话的快照可能保留此步骤，旧客户端会暂停以待人工核对。
 
 ## 微信账号列表的回复来源
 

@@ -12,7 +12,7 @@ const submitScript = ts.transpileModule(drawer.slice(start, end), {
 
 function setup(mode: "edit" | "create" | "copy") {
   const emit = vi.fn();
-  const form = { interview_points: [], position_name: "已修改的岗位" };
+  const form = { interview_points: [], position_name: "已修改的岗位", work_coordinates: "" };
   const data = { id: 7, ...form };
   const update = vi.fn(async () => ({ data }));
   const create = vi.fn();

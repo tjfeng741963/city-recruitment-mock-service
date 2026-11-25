@@ -23,7 +23,7 @@ describe("岗位收藏位置卡与接待预览", () => {
     const city = await server.inject({ method: "POST", url: "/api/v1/cities", headers, payload: { city_name: "验收市" } });
     cityId = city.json().id;
     const position = await server.inject({ method: "POST", url: "/api/v1/service-positions", headers, payload: {
-      city_id: cityId, position_name: "验收岗位", interview_points: [
+      city_id: cityId, position_name: "验收岗位", work_address: "园区西门岗", work_coordinates: "23.11,113.39", coordinates: "21,110", interview_points: [
         { name: "南门面试点", address: "南路1号", lng: 113.39114, lat: 23.117692, favorite_title: "  广汽本田龙华店  ", favorite_delay_ms: 2500 },
         { name: "北门面试点", address: "北路2号" },
       ],
@@ -72,7 +72,7 @@ describe("岗位收藏位置卡与接待预览", () => {
     }
   });
 
-  it("保存画布的位置卡顺序和可信地点快照，旧客户端阻断而非跳过", async () => {
+  it("保存画布的位置卡顺序和等待时间，旧客户端仍只收到可执行的消息", async () => {
     const paired = await server.inject({ method: "POST", url: "/api/v1/bridge/devices/local-device-001/pair", headers });
     expect(paired.statusCode).toBe(200);
     server.db.prepare("UPDATE agent_devices SET data_json=json_set(data_json,'$.position_id',?,'$.agent_position_id',?) WHERE json_extract(data_json,'$.device_code')=?")
@@ -94,21 +94,42 @@ describe("岗位收藏位置卡与接待预览", () => {
     const runtime = await server.inject({ url: "/api/v1/agent/flow?device_code=local-device-001", headers: {
       authorization: `Bearer ${paired.json().device_token}`,
     } });
-    expect(runtime.json()).toMatchObject({ blocked: true, nodes: [] });
-    const capable = await server.inject({ url: "/api/v1/agent/flow?device_code=local-device-001&location_steps=1", headers: {
+    expect(runtime.json().nodes[0].parts).toMatchObject([flow.nodes[0].parts[0], flow.nodes[0].parts[2]]);
+    const capableUrl = "/api/v1/agent/flow?device_code=local-device-001&location_links=1";
+    const capable = await server.inject({ url: capableUrl, headers: {
       authorization: `Bearer ${paired.json().device_token}`,
     } });
-    expect(capable.json().nodes[0].parts).toMatchObject(flow.nodes[0].parts);
-    expect(capable.json().nodes[0].parts[1].location).toEqual({name:"南门面试点",address:"南路1号",lng:113.39114,lat:23.117692});
+    expect(capable.json().nodes[0].parts).toMatchObject([
+      flow.nodes[0].parts[0],
+      { ...flow.nodes[0].parts[1], body: "南门面试点：南路1号\n导航：https://uri.amap.com/marker?position=113.39114,23.117692" },
+      flow.nodes[0].parts[2],
+    ]);
+
+    const workPoint = { ...flow.nodes[0].parts[1], interview_point: "@work_address" };
+    const workFlow = { ...flow, nodes: [{ ...flow.nodes[0], parts: [flow.nodes[0].parts[0], workPoint] }] };
+    expect((await server.inject({ ...request, payload: workFlow })).statusCode).toBe(200);
+    const workRuntime = await server.inject({ url: capableUrl, headers: {
+      authorization: `Bearer ${paired.json().device_token}`,
+    } });
+    expect(workRuntime.json().nodes[0].parts[1]).toMatchObject({
+      ...workPoint, body: "岗位工作地点：园区西门岗\n导航：https://uri.amap.com/marker?position=113.39,23.11",
+    });
+    const storedNode = server.db.prepare("SELECT id,parts_json FROM agent_flow_node WHERE node_key='send_info' ORDER BY id DESC LIMIT 1")
+      .get() as { id: number; parts_json: string };
+    const legacyParts = JSON.parse(storedNode.parts_json);
+    delete legacyParts[1].location_link_enabled;
+    server.db.prepare("UPDATE agent_flow_node SET parts_json=? WHERE id=?").run(JSON.stringify(legacyParts), storedNode.id);
+    const legacyRuntime = await server.inject({ url: capableUrl, headers: {
+      authorization: `Bearer ${paired.json().device_token}`,
+    } });
+    expect(legacyRuntime.json().nodes[0].parts).toMatchObject([flow.nodes[0].parts[0]]);
 
     for (const point of ["北门面试点", "另一岗位面试点"]) {
       const parts = [flow.nodes[0].parts[0], { ...flow.nodes[0].parts[1], interview_point: point }];
       expect((await server.inject({ ...request, payload: { ...flow, nodes: [{ ...flow.nodes[0], parts }] } })).statusCode).toBe(422);
     }
     const onlyLocation = { ...flow, nodes: [{ ...flow.nodes[0], parts: [flow.nodes[0].parts[1]] }] };
-    // A media-only segment is preserved; the client still requires this run's
-    // verified text target and holds it if entered without that prerequisite.
-    expect((await server.inject({ ...request, payload: onlyLocation })).statusCode).toBe(200);
+    expect((await server.inject({ ...request, payload: onlyLocation })).statusCode).toBe(422);
     expect((await server.inject({ ...request, payload: { ...onlyLocation, status: "disabled" } })).statusCode).toBe(200);
   });
 

@@ -37,7 +37,6 @@ import json
 import math
 import os
 import re
-import struct
 import subprocess
 import sys
 import threading
@@ -1566,10 +1565,7 @@ def _flow_for_row(row: dict | None, fallback: dict | None) -> dict | None:
             try:
                 snapshot = json.loads(raw) if isinstance(raw, str) else raw
                 if isinstance(snapshot, dict) and snapshot.get("nodes"):
-                    if (_is_prior_flow(snapshot) or
-                            (getattr(_brain, "location_steps", None) == 1 and snapshot.get("location_steps") != 1)):
-                        # Pre-upgrade snapshots may have already lost card steps.
-                        # Hold them for review; never replace an in-flight flow.
+                    if _is_prior_flow(snapshot):
                         return None
                     return snapshot
             except (TypeError, ValueError):
@@ -1942,81 +1938,6 @@ def _location_value(card: object) -> dict | None:
         return None
 
 
-def _location_snapshot(store: Store, cid: str, account_id: str) -> dict[str, bytes] | None:
-    try:
-        me = store.self_id()
-        if not isinstance(me, str) or me in ("", "unknown") or me != account_id:
-            return None
-        con = store._conn("message.db")
-        if con is None:
-            return None
-        with closing(con):
-            return {str(row[0]): bytes(row[1]) for row in con.execute(
-                "SELECT message_id,content FROM message_table WHERE conversation_id=? AND sender_id=? "
-                "AND content_type=6 ORDER BY send_time DESC,message_id DESC LIMIT 100", (cid, me),
-            )}
-    except Exception:
-        return None
-
-
-def _location_matches(content: bytes, card: dict) -> bool:
-    """Read the known location protobuf fields; never accept a generic media row."""
-    try:
-        if content[0] != 9 or content[9] != 17:
-            return False
-        lng = struct.unpack_from("<d", content, 1)[0]
-        lat = struct.unpack_from("<d", content, 10)[0]
-        if not (abs(lng - card["lng"]) < 1e-7 and abs(lat - card["lat"]) < 1e-7):
-            return False
-        offset = 18
-        labels = []
-        for tag in (26, 34):
-            if content[offset] != tag:
-                return False
-            offset += 1
-            length = shift = 0
-            while True:
-                value = content[offset]
-                offset += 1
-                length |= (value & 127) << shift
-                if not value & 128:
-                    break
-                shift += 7
-                if shift > 28:
-                    return False
-            if offset + length > len(content):
-                return False
-            labels.append(content[offset:offset + length].decode("utf-8"))
-            offset += length
-        return labels == [card["address"], card["name"]]
-    except (IndexError, struct.error, UnicodeError):
-        return False
-
-
-def _send_flow_location(store: Store, cid: str, raw: object, log_fn, *, account_id: str) -> tuple[str, str]:
-    card = _location_value(raw)
-    if not card:
-        return "failed", "位置卡缺少有效地点快照，请重新配置"
-    before = _location_snapshot(store, cid, account_id)
-    if before is None:
-        return "failed", "位置卡发送前无法读取目标会话，本次未发卡"
-    ready, detail = desktop_send_ready("node-location")
-    if not ready:
-        return "blocked", detail
-    try:
-        ok, detail = location_card.send_card(card["lng"], card["lat"], card["address"], card["name"], log=log_fn)
-        if not ok:
-            return "unknown", str(detail)
-        refresh_store(store)
-        after = _location_snapshot(store, cid, account_id)
-        new = [content for mid, content in (after or {}).items() if mid not in before]
-        if after is not None and len(new) == 1 and _location_matches(new[0], card):
-            return "sent", "目标会话位置卡已回读确认"
-    except Exception:
-        pass
-    return "unknown", "位置卡执行结果未确认，请人工核对，不自动重发"
-
-
 def _send_flow_part(store: Store, name: str, cid: str, part: dict, log_fn, *,
                     node_key: str, part_index: int) -> tuple[str, str]:
     """Send one flow part through the existing guarded core sender."""
@@ -2024,10 +1945,9 @@ def _send_flow_part(store: Store, name: str, cid: str, part: dict, log_fn, *,
     body = str(part.get("body") or "").strip()
     media = str(part.get("media_name") or "").strip()
     if kind == "favorite_location":
-        if not part.get("target_verified"):
-            return "failed", "位置卡前必须在本轮先有已确认目标的文字消息"
-        return _send_flow_location(store, cid, part.get("location"), log_fn, account_id=part.get("target_account") or "")
-    if kind == "text" and body:
+        if not body:
+            return "failed", "地点缺少有效地址或坐标，导航消息未发送"
+    if kind in ("text", "favorite_location") and body:
         status, detail, _ = _send_text(store, name, cid, body, route="node", log_fn=log_fn,
                                        node_key=node_key, part=part_index + 1)
         return status, detail
@@ -2062,7 +1982,6 @@ def _run_flow(store: Store, cfg: dict, cid: str, name: str, flow: dict, *, node_
         )
     state.set_phase(cid, "running")
     verified_target = False
-    verified_account = ""
     source = _reply_source_identity()
     visited = set()
     backoff = 1 + min(_consecutive_send_failures, 3)
@@ -2098,9 +2017,13 @@ def _run_flow(store: Store, cfg: dict, cid: str, name: str, flow: dict, *, node_
                 state.set_phase(cid, "held", error=reason)
                 return "held"
             part = parts[idx] if isinstance(parts[idx], dict) else {}
-            recorded_body = (json.dumps(part.get("location"), ensure_ascii=False)
-                             if part.get("kind") == "favorite_location" else str(part.get("body") or ""))
-            if not state.claim_step(cid, key, idx, body=recorded_body, media_name=str(part.get("media_name") or "")):
+            if part.get("kind") == "favorite_location" and not part.get("body"):
+                # A flow started by the previous client can still have a native
+                # card snapshot. Continue using the same location as a link.
+                point = _location_value(part.get("location"))
+                if point:
+                    part = {**part, "body": f"{point['name']}：{point['address']}\n导航：https://uri.amap.com/marker?position={point['lng']},{point['lat']}"}
+            if not state.claim_step(cid, key, idx, body=str(part.get("body") or ""), media_name=str(part.get("media_name") or "")):
                 prior = next((row for row in state.outbox(cid, key) if row["part_index"] == idx), {})
                 if prior.get("status") != "sent":
                     state.set_phase(cid, "held", error="当前条目未确认送达，不自动跳过或重发")
@@ -2112,7 +2035,7 @@ def _run_flow(store: Store, cfg: dict, cid: str, name: str, flow: dict, *, node_
                 if part.get("kind") == "favorite_location":
                     delay = part.get("delay_before_ms", 0)
                     if isinstance(delay, bool) or not isinstance(delay, (int, float)) or not 0 <= delay <= 60_000:
-                        raise ValueError("位置卡等待时间无效")
+                        raise ValueError("地点等待时间无效")
                     if delay:
                         time.sleep(delay / 1000)
                 if part.get("kind") in ("image", "video"):
@@ -2127,7 +2050,7 @@ def _run_flow(store: Store, cfg: dict, cid: str, name: str, flow: dict, *, node_
                     status, detail = "failed", reason
                 else:
                     _last_reply_at = time.time()
-                    status, detail = _send_flow_part(store, name, cid, {**part, "target_verified": verified_target, "target_account": verified_account},
+                    status, detail = _send_flow_part(store, name, cid, {**part, "target_verified": verified_target},
                                                    lambda msg: log(f"    [流程] {msg}"),
                                                    node_key=key, part_index=idx)
             except Exception as exc:  # a crash after Enter has an unknown result
@@ -2146,9 +2069,8 @@ def _run_flow(store: Store, cfg: dict, cid: str, name: str, flow: dict, *, node_
                     _consecutive_send_failures += 1
                 log(f"[流程] {name} 暂停：{detail}", level="warning", scope="flow")
                 return "held"
-            if part.get("kind", "text") == "text":
+            if part.get("kind", "text") in ("text", "favorite_location"):
                 verified_target = True
-                verified_account = store.self_id()
             _last_error, _consecutive_send_failures = "", 0
             idx += 1
             state.set_step(cid, key, idx)

@@ -275,6 +275,7 @@ export const oldFriendsApi = {
 /** ---------- 开场白 / 人设 / 聊天 ---------- */
 export interface AgentFlowPart {
   kind: 'text' | 'image' | 'video' | 'favorite_location' | string
+  location_link_enabled?: boolean
   body?: string
   media_name?: string
   interview_point?: string

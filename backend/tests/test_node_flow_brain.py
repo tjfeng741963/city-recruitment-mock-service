@@ -96,6 +96,20 @@ def test_flow_summary_uses_successful_config_version_and_network_failure_is_stal
     client.close()
 
 
+def test_flow_requests_and_keeps_location_link_payload(tmp_path):
+    client = Brain("https://flow.test", "pc", "test-only", flow_cache_path=tmp_path / "cache.json")
+    part = {"kind": "favorite_location", "delay_before_ms": 3500,
+            "body": "正门：南路1号\n导航：https://uri.amap.com/marker?position=113.39,23.11"}
+
+    def handler(request):
+        assert request.url.params["location_links"] == "1"
+        return httpx.Response(200, json={"version": 1, "location_steps": 1, "nodes": [{"parts": [part]}]})
+
+    use_transport(client, handler)
+    assert client.flow()["nodes"][0]["parts"] == [part]
+    client.close()
+
+
 def test_config_sync_refreshes_both_configs_in_background_and_posts_sanitized_summaries(tmp_path, monkeypatch):
     now = [100.0]
     monkeypatch.setattr('brain.time.monotonic', lambda: now[0])

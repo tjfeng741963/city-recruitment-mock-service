@@ -237,7 +237,7 @@
                           <el-option label="文本" value="text" />
                           <el-option label="图片" value="image" />
                           <el-option label="视频" value="video" />
-                          <el-option label="企微位置卡" value="favorite_location" />
+                          <el-option label="地址＋导航链接" value="favorite_location" />
                         </el-select>
                         <el-button v-if="!isFollowup(selectedNode) && selectedNode.parts!.length > 1" link
                           :disabled="index === 0" @click="movePart(selectedNode!, index, -1)">上移</el-button>
@@ -269,24 +269,24 @@
                         placeholder="输入此节点发送给客户的内容"
                       />
                       <template v-else-if="part.kind === 'favorite_location'">
-                        <el-form-item label="发送哪个面试点" class="compact-item">
+                        <el-form-item label="发送哪个地点" class="compact-item">
                           <el-select v-model="part.interview_point" class="full-width" filterable
-                            placeholder="选择面试点"
-                            :loading="locationPointsLoading" loading-text="正在读取面试点…"
-                            :no-data-text="locationPointsError || '该岗位暂无面试点'"
+                            placeholder="选择已填写地址和经纬度的地点"
+                            :loading="locationPointsLoading" loading-text="正在读取地点…"
+                            :no-data-text="locationPointsError || '该岗位暂无填写地址和经纬度的地点'"
                             @visible-change="refreshLocationPoints">
-                            <el-option v-for="(point, pointIndex) in locationPoints" :key="`${point.name}-${pointIndex}`" :value="point.name"
-                              :label="`${point.name} · ${point.title}`"
-                              :disabled="point.disabled || locationPointsLoading || Boolean(locationPointsError)" />
+                            <el-option v-for="point in locationPoints" :key="point.key" :value="point.key"
+                              :label="`${point.name} · ${point.address}`"
+                              :disabled="locationPointsLoading || Boolean(locationPointsError)" />
                           </el-select>
                           <div v-if="locationPointsError" class="field-note" role="status">{{ locationPointsError }}</div>
-                          <div v-else-if="!locationPointsLoading && !locationPoints.length" class="field-note">请在该岗位「面试与门店」添加面试点、地址和经纬度，保存后再展开。</div>
-                          <div v-else-if="!locationPointsLoading && part.interview_point && !locationPoints.some(point => point.name === part.interview_point && !point.disabled)" class="field-note">该面试点已变更或资料不全，请核对后重新选择。</div>
+                          <div v-else-if="!locationPointsLoading && !locationPoints.length" class="field-note">请到该岗位的「面试与门店」填写面试点或工作地点的地址和经纬度，再展开此处。</div>
+                          <div v-else-if="!locationPointsLoading && part.interview_point && !locationPoints.some(point => point.key === part.interview_point)" class="field-note">该地点已变更或缺少地址、经纬度，请核对岗位资料。</div>
                         </el-form-item>
                         <el-form-item label="轮到本条后等待（秒）" class="compact-item">
                           <el-input-number :model-value="(part.delay_before_ms ?? 0) / 1000" :min="0" :max="60" :step="0.5" :precision="1"
                             controls-position="right" @update:model-value="(value: number | undefined) => part.delay_before_ms = Math.round((value ?? 0) * 1000)" />
-                          <div class="field-note">按顺序发送；前面须先有文字确认目标会话。需要更新 Windows 客户端。</div>
+                          <div class="field-note">新版 Windows 按列表顺序发送。请在同一节点保留一条文字、图片或视频，以兼容旧客户端。</div>
                         </el-form-item>
                       </template>
                       <el-select
@@ -416,7 +416,7 @@ import FlowRuntimeInspector from '../components/agent/FlowRuntimeInspector.vue'
 import FlowMediaPreview from '../components/agent/FlowMediaPreview.vue'
 import { activeOpenings, buildAiMediaBranches, buildRuntimeFlow, compareOpeningContents, describeRuntimeNode, type LegacyOpening } from '../components/agent/flow-runtime'
 import { availableFlowMedia, normalizeFlowMediaOptions, type FlowMediaOption } from '../components/agent/flow-media-options'
-import { locationPointOptions } from '../components/agent/favorite-location-preview'
+import { flowLocationOptions } from '../../../src/shared/flow-location'
 import { agentApi, devicesApi, type AgentDeviceItem, type AgentFlow, type AgentFlowEdge, type AgentFlowNode, type AgentFlowPart, type FlowStateSummary } from '../api/agent'
 import { mediaApi, positionsApi } from '../api/core'
 import type { ServicePosition } from '../api/types'
@@ -489,7 +489,7 @@ const evidenceNow = ref(Date.now())
 const agentDrawerVisible = ref(false)
 const agentDrawerTab = ref<'persona' | 'opening'>('opening')
 const currentPosition = computed(() => positions.value.find(item => item.id === positionId.value) || null)
-const locationPoints = computed(() => locationPointOptions(currentPosition.value?.interview_points))
+const locationPoints = computed(() => flowLocationOptions(currentPosition.value))
 const locationPointsLoading = ref(false)
 const locationPointsError = ref('')
 let evidenceTimer: ReturnType<typeof setInterval> | undefined
@@ -653,7 +653,7 @@ async function refreshLocationPoints(visible: boolean): Promise<void> {
       positions.value = positions.value.map(position => position.id === id ? data : position)
     }
   } catch {
-    if (isCurrent()) locationPointsError.value = '面试点读取失败，请收起下拉框后重新展开。'
+    if (isCurrent()) locationPointsError.value = '地点读取失败，请收起下拉框后重新展开。'
   } finally {
     if (sequence === loadSequence) locationPointsLoading.value = false
   }

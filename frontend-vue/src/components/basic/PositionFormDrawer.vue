@@ -151,6 +151,9 @@
               <el-form-item label="岗位地址坐标">
                 <el-input v-model="form.coordinates" placeholder="纬度,经度" />
               </el-form-item>
+              <el-form-item label="工作地点导航坐标">
+                <el-input v-model="form.work_coordinates" placeholder="如 23.117692,113.39114（纬度,经度）" />
+              </el-form-item>
             </div>
             <el-form-item>
               <template #label>
@@ -187,16 +190,17 @@
                   <el-form-item label="详细地址">
                     <el-input v-model="point.address" placeholder="预约需填详细地址，如兴业路 8 号东门" />
                   </el-form-item>
-                  <el-form-item label="位置卡经度">
+                  <el-form-item label="经度">
                     <el-input v-model="point.lng" placeholder="如 113.39114" />
                   </el-form-item>
-                  <el-form-item label="位置卡纬度">
+                  <el-form-item label="纬度">
                     <el-input v-model="point.lat" placeholder="如 23.117692" />
                   </el-form-item>
                 </div>
+                <p class="tab-tip point-time-tip">发送导航链接需要详细地址和经纬度。</p>
                 <el-form-item label="企微收藏名称（可选）">
                   <el-input v-model="point.favorite_title" maxlength="100" placeholder="填写位置卡在企业微信收藏里显示的完整名称" />
-                  <span class="tab-tip point-time-tip">保留旧收藏名称；画布位置卡使用上面的地址和坐标，无需收藏。</span>
+                  <span class="tab-tip point-time-tip">供接待测试核对收藏名称。</span>
                 </el-form-item>
                 <el-form-item v-if="point.favorite_title.trim()" label="Dify · 地址文字后等待（秒）">
                   <el-input-number v-model="point.favorite_delay_seconds" :min="0" :max="60" :step="0.5" :precision="1" controls-position="right" />
@@ -260,6 +264,7 @@ import type { FormInstance, FormRules } from 'element-plus'
 import { citiesApi, factoriesApi, positionsApi, apiErrorMessage } from '../../api/core'
 import type { City, Factory, ServicePosition } from '../../api/core'
 import { toArray } from '../../utils/format'
+import { validFlowCoordinates } from '../../../../src/shared/flow-location'
 
 type Mode = 'create' | 'edit' | 'copy'
 
@@ -358,6 +363,7 @@ const form = reactive({
   work_address: '',
   interview_address: '',
   coordinates: '',
+  work_coordinates: '',
   image_url: '',
   store_name: '',
   store_address: '',
@@ -443,6 +449,7 @@ function fill(source: ServicePosition): void {
   form.work_address = typeof source.work_address === 'string' ? source.work_address : legacyAddress
   form.interview_address = typeof source.interview_address === 'string' ? source.interview_address : legacyAddress
   form.coordinates = String(source.coordinates ?? '')
+  form.work_coordinates = String(source.work_coordinates ?? '')
   form.image_url = String(source.image_url ?? '')
   form.store_name = String(source.store_name ?? '')
   form.store_address = String(source.store_address ?? '')
@@ -456,8 +463,8 @@ function fill(source: ServicePosition): void {
       return [{
         name: point.name,
         address: typeof point.address === 'string' ? point.address : '',
-        lng: point.lng === undefined || point.lng === null ? '' : String(point.lng),
-        lat: point.lat === undefined || point.lat === null ? '' : String(point.lat),
+        lng: String(point.lng ?? ''),
+        lat: String(point.lat ?? ''),
         interview_time: typeof point.interview_time === 'string' ? point.interview_time : '',
         checkin_guide: typeof point.checkin_guide === 'string' ? point.checkin_guide : '',
         favorite_title: typeof point.favorite_title === 'string' ? point.favorite_title : '',
@@ -504,6 +511,7 @@ async function reset(): Promise<void> {
   form.work_address = ''
   form.interview_address = ''
   form.coordinates = ''
+  form.work_coordinates = ''
   form.image_url = ''
   form.store_name = ''
   form.store_address = ''
@@ -573,6 +581,7 @@ function buildPayload(): Record<string, unknown> {
     work_address: form.work_address.trim(),
     interview_address: form.interview_address.trim(),
     coordinates: form.coordinates,
+    work_coordinates: form.work_coordinates.trim(),
     image_url: form.image_url,
     store_name: form.store_name,
     store_address: form.store_address,
@@ -584,11 +593,15 @@ function buildPayload(): Record<string, unknown> {
       const interview_time = point.interview_time.trim()
       const checkin_guide = point.checkin_guide.trim()
       const favorite_title = point.favorite_title.trim()
-      if (typeof point.original === 'string' && point.original === name && !address && !point.lng.trim() && !point.lat.trim() && !interview_time && !checkin_guide && !favorite_title) return point.original
+      const hasCoordinates = Boolean(point.lng.trim() && point.lat.trim())
+      if (typeof point.original === 'string' && point.original === name && !address && !hasCoordinates && !interview_time && !checkin_guide && !favorite_title) return point.original
       const previous = point.original && typeof point.original === 'object' ? point.original : {}
       const favorite_delay_ms = favorite_title ? Math.round((point.favorite_delay_seconds || 0) * 1000) : 0
-      return { ...previous, name, address, lng: point.lng.trim() ? Number(point.lng) : null,
-        lat: point.lat.trim() ? Number(point.lat) : null, interview_time, checkin_guide, favorite_title, favorite_delay_ms }
+      const result: Record<string, unknown> = { ...previous, name, address, interview_time, checkin_guide, favorite_title, favorite_delay_ms }
+      delete result.lng
+      delete result.lat
+      if (hasCoordinates) Object.assign(result, { lng: Number(point.lng), lat: Number(point.lat) })
+      return result
     }),
     base_sections: { ...form.sections },
     base_section_labels: labelMap,
@@ -609,14 +622,22 @@ async function submit(): Promise<void> {
     ElMessage.warning('请为每个面试点填写不同的名称。')
     return
   }
-  if (form.interview_points.some(point => {
-    const lng = point.lng.trim(), lat = point.lat.trim()
-    return (lng || lat) && (!lng || !lat || !Number.isFinite(Number(lng)) || !Number.isFinite(Number(lat))
-      || !Number(lng) || !Number(lat) || Math.abs(Number(lng)) > 180 || Math.abs(Number(lat)) > 90)
-  })) {
+  const invalidPoint = form.interview_points.find(point =>
+    (point.lng.trim() || point.lat.trim()) && !validFlowCoordinates(Number(point.lng), Number(point.lat)))
+  if (invalidPoint) {
     activeTab.value = 'interview'
-    ElMessage.warning('请填写完整有效的经纬度；经度范围 ±180，纬度范围 ±90。')
+    ElMessage.warning(`请为「${invalidPoint.name}」填写有效的经度和纬度，或清空两项。`)
     return
+  }
+  const workCoordinates = form.work_coordinates.trim()
+  if (workCoordinates) {
+    const coordinates = workCoordinates.split(/[,，]/)
+    const [lat, lng] = coordinates.map(Number)
+    if (coordinates.length !== 2 || !validFlowCoordinates(lng, lat)) {
+      activeTab.value = 'interview'
+      ElMessage.warning('请按「纬度,经度」填写有效的工作地点导航坐标，或清空该项。')
+      return
+    }
   }
   const valid = await formRef.value.validate().catch(() => false)
   if (!valid || saving.value) return

@@ -177,6 +177,7 @@ class Brain:
                 params = {"device_code": self.device_code}
                 if kind == "flow":
                     params["location_steps"] = "1"
+                    params["location_links"] = "1"
                 data = self._get(f"/api/v1/agent/{kind}", params, timeout=self._config_timeout)
                 if not isinstance(data, dict):
                     raise ValueError("invalid config response")
