@@ -6,6 +6,7 @@ import { difyContext, difyContextConflict, difyInput } from "./dify-context.js";
 import { clearMaterialFollowup, configuredMaterialReply, type DifyMessage } from "./dify-material-reply.js";
 import { DeviceBridgeStore } from "../messaging/device-bridge.js";
 import { devicePositionId } from "../../shared/device-factories.js";
+import { previewFavoriteLocation } from "../../shared/favorite-location.js";
 import { canAccessCity, getUserScope } from "../../auth/user-scopes.js";
 import { beginReplyMode, replyModePending, replyModeRow, replyModeView } from "./reply-mode-transition.js";
 import { recruitmentPositionAvailable, recruitmentTurn, selectedRecruitmentPosition } from "./dify-recruitment.js";
@@ -88,7 +89,12 @@ export function registerReplyProviderRoutes(app: FastifyInstance, db: DatabaseSy
     if(!Number.isSafeInteger(positionId)||positionId<=0||!input||input.length>2000)return reply.code(422).send({detail:"position_id and text (max 2000) required"});
     const session=typeof req.body.session_key==='string'?req.body.session_key.trim():'';
     if((req.body.dry!==true||session)&&!/^dify-preview:[A-Za-z0-9-]{1,80}$/.test(session))return reply.code(422).send({detail:"preview session_key must start with dify-preview:"});
-    return generateDifyReply(db,{deviceCode:`preview-admin-${req.auth.id}`,positionId,sessionKey:session,text:input,dry:req.body.dry===true,preview:true});
+    const result = await generateDifyReply(db,{deviceCode:`preview-admin-${req.auth.id}`,positionId,sessionKey:session,text:input,dry:req.body.dry===true,preview:true});
+    if (!result.ok || !("position_id" in result)) return result;
+    const row = db.prepare("SELECT status,data_json FROM service_positions WHERE id=?").get(result.position_id) as
+      { status: string; data_json: string } | undefined;
+    const location = row && previewFavoriteLocation(input, object(row.data_json).interview_points, row.status === "enabled", "dify");
+    return location ? { ...result, favorite_location_preview: location } : result;
   });
   const store = new DeviceBridgeStore(db);
   const currentMode = (code: string) => replyModeView(db, code, deviceReplyProvider(db, code));

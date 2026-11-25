@@ -14,6 +14,7 @@ import { activeAgentModel, agentModelStatus } from "./agent-model-settings.js";
 import { deviceReplyProvider, generateDifyReply, hasDifyDeviceToken, ownsReplyDevice } from "../dify/dify-reply.js";
 import { difyGroupNotificationState } from "../dify/dify-group-notification.js";
 import { normalizeInterviewPoints, normalizePositionFacts } from "../../shared/position-facts.js";
+import { previewFavoriteLocation } from "../../shared/favorite-location.js";
 import { positionKnowledge } from './position-knowledge.js';
 import { listExecutionTraces, newExecutionTraceId, writeExecutionTrace } from "./execution-trace.js";
 import { updateExecutionTraceDelivery } from "./execution-trace.js";
@@ -808,6 +809,8 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
     if (row.status !== "enabled" && body.dry !== true && body.preview !== true) {
       return reply.code(409).send({ detail: "该岗位已停用，不能生成真实回复" });
     }
+    const favoriteLocation = isAdmin(request) && (body.dry === true || body.preview === true)
+      ? previewFavoriteLocation(input, safeJson(row.data_json).interview_points, row.status === "enabled") : undefined;
 
     // ── 会话记忆在服务端（2026-11-17）──────────────────────────
     // 传 session_key 时，全量上下文存 agent_session 表，客户端只报
@@ -907,6 +910,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         facts,
         persona,
         position_id: positionId,
+        ...(favoriteLocation && { favorite_location_preview: favoriteLocation }),
         scripts: scripts.map((script) => ({ id: script.id, title: script.title })),
       };
     }
@@ -1000,6 +1004,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       if (body.preview === true) return {
         ok: true, preview: true, reply: replyPayload, facts, knowledge,
         model: result.model, usage: result.usage, latency_ms: result.latency_ms,
+        ...(favoriteLocation && { favorite_location_preview: favoriteLocation }),
       };
 
       // 信任模式：不做代码级护栏，模型按 prompt 约束引用话术原文（2026-11-17）。

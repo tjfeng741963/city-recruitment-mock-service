@@ -3,6 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { parsePagination } from "../../shared/pagination.js";
 import { serializeCity, serializeFactory, serializeServicePosition } from "../../shared/response-serializers.js";
 import { applyCityDefaultsToPosition, normalizePositionFacts } from "../../shared/position-facts.js";
+import { prepareFavoriteTitles } from "../../shared/favorite-location.js";
 import { parseDeviceData, resolveDevicePosition } from "../../shared/device-factories.js";
 import { replyModeRow } from "../dify/reply-mode-transition.js";
 import { canAccessCity, cityConstraint, getUserScope, type UserScope } from "../../auth/user-scopes.js";
@@ -230,6 +231,8 @@ export async function registerCoreRoutes(app: FastifyInstance, db: DatabaseSync)
     const cityRow = db.prepare("SELECT city_name,data_json FROM cities WHERE id=?").get(cityId) as { city_name: string; data_json: string } | undefined;
     const cityData = cityRow ? JSON.parse(cityRow.data_json || "{}") as Record<string, unknown> : {};
     const positionData = normalizePositionFacts(applyCityDefaultsToPosition({ ...cityData, city_name: cityRow?.city_name ?? "" }, request.body ?? {}));
+    const favoriteError = prepareFavoriteTitles(positionData);
+    if (favoriteError) return reply.code(422).send({ detail: favoriteError });
     const status = positionData.is_active === false ? "disabled" : "enabled";
     const row = db.prepare("INSERT INTO service_positions(position_name,factory_id,city_id,status,data_json) VALUES (?,?,?,?,?) RETURNING *")
       .get(String(positionData.position_name ?? positionData.name ?? "本地岗位"), typeof positionData.factory_id === "number" ? positionData.factory_id : null, cityId, status, JSON.stringify(positionData)) as Record<string, unknown>;
@@ -244,6 +247,11 @@ export async function registerCoreRoutes(app: FastifyInstance, db: DatabaseSync)
     if (denyCityWrite(scopeFor(request.auth!), cityId, reply)) return reply;
     const name = body.position_name ?? body.name;
     const positionData = normalizePositionFacts(mergePositionData(current.data_json, body));
+    const nested = body.data_json;
+    const updatesPoints = Object.hasOwn(body, "interview_points")
+      || (nested !== null && typeof nested === "object" && Object.hasOwn(nested, "interview_points"));
+    const favoriteError = updatesPoints ? prepareFavoriteTitles(positionData) : undefined;
+    if (favoriteError) return reply.code(422).send({ detail: favoriteError });
     const status = typeof body.is_active === "boolean" ? (body.is_active ? "enabled" : "disabled")
       : typeof body.status === "string" ? body.status : null;
     const result = db.prepare("UPDATE service_positions SET position_name=COALESCE(?,position_name),factory_id=COALESCE(?,factory_id),city_id=COALESCE(?,city_id),status=COALESCE(?,status),data_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(

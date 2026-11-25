@@ -172,7 +172,7 @@
             <section class="interview-points" aria-label="面试点">
               <div class="section-title point-heading">
                 <span>面试点</span>
-                <el-button type="primary" plain @click="form.interview_points.push({ name: '', address: '', interview_time: '', checkin_guide: '' })">新增面试点</el-button>
+                <el-button type="primary" plain @click="form.interview_points.push({ name: '', address: '', interview_time: '', checkin_guide: '', favorite_title: '', favorite_delay_seconds: 0 })">新增面试点</el-button>
               </div>
               <div v-for="(point, index) in form.interview_points" :key="index" class="point-card">
                 <div class="point-heading">
@@ -188,6 +188,14 @@
                     <el-input v-model="point.address" placeholder="预约需填详细地址，如兴业路 8 号东门" />
                   </el-form-item>
                 </div>
+                <el-form-item label="企微收藏名称（可选）">
+                  <el-input v-model="point.favorite_title" maxlength="100" placeholder="填写位置卡在企业微信收藏里显示的完整名称" />
+                  <span class="tab-tip point-time-tip">保存后可以在话术流程的「接待测试」核对选点。Windows 自动发送尚未启用。</span>
+                </el-form-item>
+                <el-form-item v-if="point.favorite_title.trim()" label="Dify · 地址文字后等待（秒）">
+                  <el-input-number v-model="point.favorite_delay_seconds" :min="0" :max="60" :step="0.5" :precision="1" controls-position="right" />
+                  <span class="tab-tip point-time-tip">适用于求职者明确索要面试定位且选点成功的回复。Agent 的发送位置和等待在画布节点里设置。</span>
+                </el-form-item>
                 <el-form-item label="本点面试时间（可选）">
                   <el-input v-model="point.interview_time" placeholder="如 11:00 或 14:00–16:00，留空用默认日程" />
                 </el-form-item>
@@ -350,7 +358,7 @@ const form = reactive({
   store_coordinates: '',
   interview_days: [] as string[],
   interview_points: [] as Array<{
-    name: string; address: string; interview_time: string; checkin_guide: string; original?: unknown
+    name: string; address: string; interview_time: string; checkin_guide: string; favorite_title: string; favorite_delay_seconds: number; original?: unknown
   }>,
   sections: { ...SECTION_LABELS } as Record<string, string>,
 })
@@ -436,7 +444,7 @@ function fill(source: ServicePosition): void {
   form.interview_days = readStrings(source.interview_days)
   form.interview_points = Array.isArray(source.interview_points) ? source.interview_points.flatMap(point => {
     if (typeof point === 'string' && point.trim()) {
-      return [{ name: point, address: '', interview_time: '', checkin_guide: '', original: point }]
+      return [{ name: point, address: '', interview_time: '', checkin_guide: '', favorite_title: '', favorite_delay_seconds: 0, original: point }]
     }
     if (point && typeof point.name === 'string' && point.name.trim()) {
       return [{
@@ -444,6 +452,8 @@ function fill(source: ServicePosition): void {
         address: typeof point.address === 'string' ? point.address : '',
         interview_time: typeof point.interview_time === 'string' ? point.interview_time : '',
         checkin_guide: typeof point.checkin_guide === 'string' ? point.checkin_guide : '',
+        favorite_title: typeof point.favorite_title === 'string' ? point.favorite_title : '',
+        favorite_delay_seconds: typeof point.favorite_delay_ms === 'number' ? point.favorite_delay_ms / 1000 : 0,
         original: point,
       }]
     }
@@ -565,9 +575,11 @@ function buildPayload(): Record<string, unknown> {
       const address = point.address.trim()
       const interview_time = point.interview_time.trim()
       const checkin_guide = point.checkin_guide.trim()
-      if (typeof point.original === 'string' && point.original === name && !address && !interview_time && !checkin_guide) return point.original
+      const favorite_title = point.favorite_title.trim()
+      if (typeof point.original === 'string' && point.original === name && !address && !interview_time && !checkin_guide && !favorite_title) return point.original
       const previous = point.original && typeof point.original === 'object' ? point.original : {}
-      return { ...previous, name, address, interview_time, checkin_guide }
+      const favorite_delay_ms = favorite_title ? Math.round((point.favorite_delay_seconds || 0) * 1000) : 0
+      return { ...previous, name, address, interview_time, checkin_guide, favorite_title, favorite_delay_ms }
     }),
     base_sections: { ...form.sections },
     base_section_labels: labelMap,

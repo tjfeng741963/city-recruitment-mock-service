@@ -237,7 +237,12 @@
                           <el-option label="文本" value="text" />
                           <el-option label="图片" value="image" />
                           <el-option label="视频" value="video" />
+                          <el-option label="企微位置卡" value="favorite_location" />
                         </el-select>
+                        <el-button v-if="!isFollowup(selectedNode) && selectedNode.parts!.length > 1" link
+                          :disabled="index === 0" @click="movePart(selectedNode!, index, -1)">上移</el-button>
+                        <el-button v-if="!isFollowup(selectedNode) && selectedNode.parts!.length > 1" link
+                          :disabled="index === selectedNode.parts!.length - 1" @click="movePart(selectedNode!, index, 1)">下移</el-button>
                         <el-button
                           v-if="!isFollowup(selectedNode)"
                           link
@@ -263,6 +268,22 @@
                         show-word-limit
                         placeholder="输入此节点发送给客户的内容"
                       />
+                      <template v-else-if="part.kind === 'favorite_location'">
+                        <el-form-item label="发送哪个面试点" class="compact-item">
+                          <el-select v-model="part.interview_point" class="full-width" filterable
+                            placeholder="选择已配置企微收藏名的面试点">
+                            <el-option v-for="point in locationPoints" :key="point.name" :value="point.name"
+                              :label="`${point.name} · ${point.title}`" />
+                          </el-select>
+                          <div v-if="!locationPoints.length" class="field-note">请先到招聘岗位的「面试与门店」保存收藏名称，再回这里刷新。</div>
+                          <div v-else-if="part.interview_point && !locationPoints.some(point => point.name === part.interview_point)" class="field-note">该面试点已变更或缺少收藏，需重新选择。</div>
+                        </el-form-item>
+                        <el-form-item label="轮到本条后等待（秒）" class="compact-item">
+                          <el-input-number :model-value="(part.delay_before_ms ?? 0) / 1000" :min="0" :max="60" :step="0.5" :precision="1"
+                            controls-position="right" @update:model-value="(value: number | undefined) => part.delay_before_ms = Math.round((value ?? 0) * 1000)" />
+                          <div class="field-note">按列表顺序处理。位置卡设置可保存，当前 Windows 会跳过此步。</div>
+                        </el-form-item>
+                      </template>
                       <el-select
                         v-else
                         v-model="part.media_name"
@@ -278,7 +299,7 @@
                           :value="media.name"
                         />
                       </el-select>
-                      <FlowMediaPreview v-if="part.kind !== 'text' && part.media_name" :name="part.media_name" :kind="part.kind" />
+                      <FlowMediaPreview v-if="['image', 'video'].includes(part.kind) && part.media_name" :name="part.media_name" :kind="part.kind" />
                       <el-form-item label="发送后间隔（秒）" class="compact-item" title="最后一条的间隔在进入下一节点前执行">
                         <el-input-number
                           :model-value="millisecondsToSeconds(part.delay_ms)"
@@ -390,6 +411,7 @@ import FlowRuntimeInspector from '../components/agent/FlowRuntimeInspector.vue'
 import FlowMediaPreview from '../components/agent/FlowMediaPreview.vue'
 import { activeOpenings, buildAiMediaBranches, buildRuntimeFlow, compareOpeningContents, describeRuntimeNode, type LegacyOpening } from '../components/agent/flow-runtime'
 import { availableFlowMedia, normalizeFlowMediaOptions, type FlowMediaOption } from '../components/agent/flow-media-options'
+import { locationPointOptions } from '../components/agent/favorite-location-preview'
 import { agentApi, devicesApi, type AgentDeviceItem, type AgentFlow, type AgentFlowEdge, type AgentFlowNode, type AgentFlowPart, type FlowStateSummary } from '../api/agent'
 import { mediaApi, positionsApi } from '../api/core'
 import type { ServicePosition } from '../api/types'
@@ -462,6 +484,7 @@ const evidenceNow = ref(Date.now())
 const agentDrawerVisible = ref(false)
 const agentDrawerTab = ref<'persona' | 'opening'>('opening')
 const currentPosition = computed(() => positions.value.find(item => item.id === positionId.value) || null)
+const locationPoints = computed(() => locationPointOptions(currentPosition.value?.interview_points))
 let evidenceTimer: ReturnType<typeof setInterval> | undefined
 const aiFacts = ref<Record<string, string>>({})
 const aiContextAvailable = ref(false)
@@ -558,14 +581,16 @@ async function loadFlow(id: number): Promise<void> {
   pageError.value = ''
   conflict.value = false
   try {
-    const [flowResult, personaResult, mediaResult, devicesResult, contextResult] = await Promise.all([
+    const [flowResult, personaResult, mediaResult, devicesResult, contextResult, positionResult] = await Promise.all([
       agentApi.flowGet(id),
       agentApi.personaGet(id),
       mediaApi.list({ page: 1, page_size: 1000 }).catch(() => null),
       devicesApi.list({ page: 1, page_size: 1000 }).catch(() => null),
       agentApi.context({ position_id: id }).catch(() => null),
+      positionsApi.get(id).catch(() => null),
     ])
     if (sequence !== loadSequence) return
+    if (positionResult) positions.value = positions.value.map(position => position.id === id ? positionResult.data : position)
     flow.value = normalizeFlow(flowResult.data)
     savedFlow.value = JSON.parse(JSON.stringify(flow.value))
     legacyOpenings.value = activeOpenings((personaResult.data.openings || []) as unknown as LegacyOpening[])
@@ -1066,16 +1091,22 @@ function removePart(node: AgentFlowNode, index: number): void {
   node.parts.splice(index, 1)
 }
 
+function movePart(node: AgentFlowNode, index: number, offset: number): void {
+  const parts = node.parts
+  const target = index + offset
+  if (!parts || target < 0 || target >= parts.length) return
+  const [part] = parts.splice(index, 1)
+  parts.splice(target, 0, part)
+}
+
 function setPartKind(part: AgentFlowPart, kind: string): void {
-  if (!['text', 'image', 'video'].includes(kind)) return
+  if (!['text', 'image', 'video', 'favorite_location'].includes(kind)) return
   part.kind = kind
   part.media_name = ''
-  if (kind === 'text') {
-    part.body = part.body || ''
-  } else {
-    part.media_name = part.media_name || ''
-    part.body = part.body || ''
-  }
+  if (kind !== 'favorite_location') {
+    delete part.interview_point
+    delete part.delay_before_ms
+  } else part.delay_before_ms = 0
 }
 
 function setPartDelay(part: AgentFlowPart, seconds: number | undefined): void {

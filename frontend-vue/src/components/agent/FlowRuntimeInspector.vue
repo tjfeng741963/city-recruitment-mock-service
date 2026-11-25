@@ -8,8 +8,12 @@
       <template v-if="node.parts?.length">
         <h4>{{ node.node_type === 'system_media' ? 'AI 可选素材 · 按需发送' : '此步骤配置的发送内容' }}</h4>
         <div v-for="(part, index) in node.parts" :key="index" class="message-preview">
-          <span class="message-kind">第 {{ index + 1 }} 条 · {{ part.kind === 'text' ? '文本' : part.kind === 'video' ? '视频' : '图片' }}</span>
+          <span class="message-kind">第 {{ index + 1 }} 条 · {{ part.kind === 'favorite_location' ? '企微位置卡' : part.kind === 'text' ? '文本' : part.kind === 'video' ? '视频' : '图片' }}</span>
           <p v-if="part.kind === 'text'" class="verbatim">{{ part.body || '未填写文本' }}</p>
+          <template v-else-if="part.kind === 'favorite_location'">
+            <strong>{{ part.interview_point || '未选面试点' }}</strong>
+            <p>已配置，当前 Windows 会跳过此步。</p>
+          </template>
           <template v-else><strong>{{ part.media_name || '未选素材' }}</strong>
             <FlowMediaPreview v-if="part.media_name" :name="part.media_name" :kind="part.kind" />
           </template>

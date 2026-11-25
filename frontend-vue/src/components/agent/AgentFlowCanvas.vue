@@ -256,6 +256,7 @@ function triggerLabel(trigger: string): string {
 }
 
 function nodeTypeLabel(nodeType: string): string {
+  if (nodeType === 'favorite_location') return '企微位置卡'
   return labels[nodeType] || nodeType
 }
 
@@ -274,7 +275,11 @@ function nodeSummary(node: AgentFlowNode): string {
   if (node.node_type === 'branch') return '按关键词或默认条件分流'
   if (node.node_type === 'end') return '流程到此结束'
   const parts = Array.isArray(node.parts) ? node.parts : []
-  const preview = parts.map((part) => part.kind === 'text' ? part.body : part.media_name ? `${nodeTypeLabel(part.kind)}：${part.media_name}` : '未选素材')
+  const preview = parts.map((part) => {
+    if (part.kind === 'text') return part.body
+    if (part.kind === 'favorite_location') return `${part.interview_point || '未选面试点'}（位置卡待接入）`
+    return part.media_name ? `${nodeTypeLabel(part.kind)}：${part.media_name}` : '未选素材'
+  })
     .filter(Boolean)
     .slice(0, 2)
     .join(' / ')
