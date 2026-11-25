@@ -8,8 +8,15 @@
         <h2 class="page-title">话术流程 <el-tag effect="plain" type="primary">系统 Agent</el-tag></h2>
       </div>
       <div class="header-actions">
+        <el-button v-if="viewMode === 'runtime'" type="primary"
+          :disabled="!savedFlow || loading || saving || migrating" @click="editFlow">编辑流程</el-button>
         <el-button v-if="viewMode === 'edit'" type="primary" :icon="Check"
-          :disabled="!isDirty || !flow || loading || migrating" :loading="saving" @click="saveFlow">保存流程</el-button>
+          :disabled="!isDirty || !flow || loading || migrating" :loading="saving" @click="saveFlow()">保存流程</el-button>
+        <el-button v-if="flow?.nodes.length && savedFlow" plain
+          :type="nextFlowStatus === 'enabled' ? 'success' : 'danger'"
+          :disabled="loading || saving || migrating" @click="saveFlow(nextFlowStatus)">
+          {{ nextFlowStatus === 'enabled' ? '启用流程' : '停用流程' }}
+        </el-button>
       </div>
     </div>
 
@@ -44,7 +51,6 @@
         </el-button>
         <template #dropdown>
           <el-dropdown-menu>
-            <el-dropdown-item command="flow" :disabled="!savedFlow">编辑流程</el-dropdown-item>
             <el-dropdown-item command="opening" :disabled="!savedFlow">编辑开场</el-dropdown-item>
             <el-dropdown-item command="persona" :disabled="!savedFlow">编辑人设</el-dropdown-item>
             <el-dropdown-item command="knowledge" divided>{{ positionId ? '岗位问答' : '问答知识库' }}</el-dropdown-item>
@@ -115,13 +121,6 @@
           <strong>{{ viewMode === 'runtime' ? '实际执行路径' : '流程编辑' }}</strong>
         </div>
         <div class="canvas-actions">
-          <el-switch
-            v-if="viewMode === 'edit' && flow.nodes.length"
-            :model-value="flow.status === 'enabled'"
-            active-text="新会话启用"
-            inactive-text="停用"
-            @change="(enabled: boolean) => changeFlowStatus(enabled)"
-          />
           <el-button v-if="viewMode === 'edit'" :disabled="saving || migrating" @click="showRuntime">查看执行路径</el-button>
           <el-button v-if="!fullscreen" ref="enterFullscreenButton" :icon="FullScreen" @click="enterFullscreen">
             全屏画布
@@ -129,7 +128,7 @@
         </div>
       </div>
 
-      <div id="flow-canvas-panel" class="canvas-panel">
+      <div id="flow-canvas-panel" class="canvas-panel" :inert="saving">
         <div v-if="viewMode === 'edit' && !flow.nodes.length" class="empty-flow">
           <el-empty description="该岗位还没有流程图">
             <div class="empty-actions">
@@ -430,7 +429,6 @@ import {
   changeFlowEntry,
   createBlankFlow,
   flowActivationIssues,
-  flowRequiresEnableConfirmation,
   moveFlowNode,
   newlyDisabledNodeKeys,
   normalizeFlow,
@@ -522,6 +520,7 @@ const contentMatches = computed(() => Boolean(savedFlow.value?.nodes.length && c
 const selectedNodeExplanation = computed(() => selectedNode.value && flow.value ? describeRuntimeNode(selectedNode.value, flow.value, false) : [])
 
 const isDirty = computed(() => Boolean(flow.value && JSON.stringify(flow.value) !== baseline.value))
+const nextFlowStatus = computed(() => savedFlow.value?.status === 'enabled' ? 'disabled' : 'enabled')
 const selectedNode = computed(() => flow.value?.nodes.find((node) => node.node_key === selectedNodeKey.value) ?? null)
 const selectedEdge = computed(() => {
   if (!flow.value || selectedEdgeIndex.value === null) return null
@@ -678,11 +677,13 @@ function syncView(code: string) {
   }, evidenceNow.value)
 }
 
-function openConfiguration(command: 'flow' | 'opening' | 'persona' | 'media' | 'knowledge'): void {
-  if (command === 'flow') {
-    viewMode.value = 'edit'
-    changeViewMode()
-  } else if (command === 'opening' || command === 'persona') {
+function editFlow(): void {
+  viewMode.value = 'edit'
+  changeViewMode()
+}
+
+function openConfiguration(command: 'opening' | 'persona' | 'media' | 'knowledge'): void {
+  if (command === 'opening' || command === 'persona') {
     agentDrawerTab.value = command
     agentDrawerVisible.value = true
   } else {
@@ -860,10 +861,6 @@ function createDraft(): void {
   viewMode.value = 'edit'
 }
 
-function changeFlowStatus(enabled: boolean): void {
-  if (flow.value) flow.value.status = enabled ? 'enabled' : 'disabled'
-}
-
 async function migrateOpening(): Promise<void> {
   if (!positionId.value || !flow.value || flow.value.version !== 0 || saving.value || migrating.value || loading.value) return
   const requestPosition = positionId.value
@@ -885,53 +882,60 @@ async function migrateOpening(): Promise<void> {
   }
 }
 
-async function saveFlow(): Promise<void> {
-  if (!flow.value || !isDirty.value || saving.value || loading.value || migrating.value) return
-  if (flow.value.status === 'enabled') {
-    const issues = flowActivationIssues(flow.value)
+async function saveFlow(status?: 'enabled' | 'disabled'): Promise<void> {
+  if (!flow.value || !savedFlow.value || saving.value || loading.value || migrating.value) return
+  const hasEdits = isDirty.value
+  const statusChanged = status !== undefined && status !== savedFlow.value.status
+  if (!hasEdits && !statusChanged) return
+
+  const candidate = { ...flow.value, status: status ?? flow.value.status }
+  if (candidate.status === 'enabled') {
+    const issues = flowActivationIssues(candidate)
     if (issues.length) {
       pageError.value = `启用前请修正：${issues.join('；')}`
       return
     }
   }
-  const before = baseline.value ? JSON.parse(baseline.value) as AgentFlow : null
-  const previousStatus = String(before?.status || 'disabled')
-  const skippedNodes = before ? newlyDisabledNodeKeys(before, flow.value) : []
-  if (skippedNodes.length) {
-    const titles = skippedNodes.map((key) => flow.value?.nodes.find((node) => node.node_key === key)?.title || key)
-    try {
-      await ElMessageBox.confirm(
-        `停用节点后，Windows 客户端会跳过这些节点及其超时/关键词条件，并沿主兜底连接继续：${titles.join('、')}。在途会话仍按原快照运行。`,
-        '确认停用流程节点',
-        { type: 'warning', confirmButtonText: '确认停用', cancelButtonText: '继续编辑' },
-      )
-    } catch {
-      return
-    }
-  }
-  if (flowRequiresEnableConfirmation(previousStatus, flow.value.status)) {
-    try {
-      await ElMessageBox.confirm('启用后，新客户会开始按此流程自动处理。现有会话继续使用已保存的流程快照。', '启用招聘流程', {
-        type: 'warning', confirmButtonText: '启用流程', cancelButtonText: '继续编辑',
-      })
-    } catch {
-      flow.value.status = previousStatus
-      return
-    }
-  }
+  const skippedNodes = newlyDisabledNodeKeys(savedFlow.value, candidate)
   saving.value = true
   const requestPosition = positionId.value
   const requestSequence = loadSequence
-  pageError.value = ''
-  conflict.value = false
   try {
-    const { data } = await agentApi.flowSave(flow.value)
+    if (statusChanged || skippedNodes.length) {
+      const enabling = status === 'enabled'
+      const title = statusChanged ? (enabling ? '启用流程' : '停用流程') : '确认停用流程节点'
+      const titles = skippedNodes.map(key => candidate.nodes.find(node => node.node_key === key)?.title || key)
+      const nodeEffect = titles.length ? `运行画布时会跳过「${titles.join('、')}」及其超时和关键词条件，沿兜底连接继续。` : ''
+      const effect = statusChanged
+        ? (enabling ? '新会话将按画布流程接待。' : '新会话将使用岗位开场。')
+        : ''
+      const message = `${hasEdits && statusChanged ? '当前编辑会一并保存。' : ''}${effect}${nodeEffect}进行中的会话继续按原流程运行。`
+      try {
+        await ElMessageBox.confirm(message, title, {
+          type: 'warning',
+          confirmButtonText: hasEdits && statusChanged ? (enabling ? '保存并启用' : '保存并停用') : (statusChanged ? title : '确认停用'),
+          cancelButtonText: '取消',
+        })
+      } catch {
+        return
+      }
+    }
+    if (requestPosition !== positionId.value || requestSequence !== loadSequence) return
+    pageError.value = ''
+    conflict.value = false
+    const { data } = await agentApi.flowSave(candidate)
     if (requestPosition !== positionId.value || requestSequence !== loadSequence) return
     flow.value = normalizeFlow(data)
     savedFlow.value = JSON.parse(JSON.stringify(flow.value))
     baseline.value = snapshot(flow.value)
     chooseSelection(flow.value)
-    ElMessage.success(flow.value.status === 'enabled' ? '流程已启用' : '流程已保存并保持停用')
+    if (statusChanged && viewMode.value === 'runtime') {
+      runtimeNodeKey.value = '__runtime_start'
+      runtimeEdgeIndex.value = null
+      changeViewMode()
+    }
+    ElMessage.success(statusChanged ? (flow.value.status === 'enabled' ? '流程已启用' : '流程已停用') : '流程已保存')
+    void loadClientSync(requestPosition, requestSequence)
   } catch (error: any) {
     if (Number(error?.response?.status) === 409) {
       conflict.value = true
@@ -1201,6 +1205,8 @@ onBeforeUnmount(() => { loadSequence += 1; if(evidenceTimer)clearInterval(eviden
 .flow-page.is-fullscreen { position: fixed; z-index: 1800; inset: 0; display: flex; flex-direction: column; padding: 16px 20px 12px; overflow: hidden; background: var(--el-bg-color-page, #f5f7fb); }
 .is-fullscreen .page-header { flex-shrink: 0; margin-bottom: 10px; gap: 12px; }
 .page-heading { flex: 1; min-width: 0; }
+.page-header .header-actions { flex-wrap: wrap; gap: 8px; }
+.page-header .header-actions .el-button { margin-left: 0; }
 .is-fullscreen .page-header .page-title { font-size: 20px; }
 .is-fullscreen .flow-toolbar { flex-shrink: 0; margin-bottom: 8px; }
 .runtime-status-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; flex-shrink: 0; padding: 6px 4px 10px; font-size: 12px; color: var(--el-text-color-regular); }

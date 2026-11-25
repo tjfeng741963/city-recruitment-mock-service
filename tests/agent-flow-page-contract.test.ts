@@ -49,9 +49,20 @@ describe("招聘流程图入口接线", () => {
 
     expect(page).toContain("route.query.position_id");
     expect(page).toContain("agentApi.flowGet(id)");
-    expect(page).toContain("agentApi.flowSave(flow.value)");
-    expect(page).toContain("flowRequiresEnableConfirmation");
+    expect(page).toContain("agentApi.flowSave(candidate)");
     expect(page).toContain("Number(error?.response?.status) === 409");
+  });
+
+  it("puts editing and saved-state activation in the page header", () => {
+    const page = read("frontend-vue/src/views/AgentFlowView.vue");
+    const header = page.split('<div class="flow-toolbar">')[0];
+    expect(header).toMatch(/<el-button v-if="viewMode === 'runtime'"[^>]*@click="editFlow"[^>]*>\s*编辑流程/);
+    expect(header).toContain('@click="saveFlow(nextFlowStatus)"');
+    expect(header).toContain("启用流程");
+    expect(header).toContain("停用流程");
+    expect(page).not.toContain('command="flow"');
+    expect(page).not.toContain('active-text="新会话启用"');
+    expect(page.indexOf('await ElMessageBox.confirm(message, title,')).toBeLessThan(page.indexOf('agentApi.flowSave(candidate)'));
   });
 
   it("confirms before leaving the route with unsaved edits", () => {
