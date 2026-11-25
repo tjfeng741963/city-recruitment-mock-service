@@ -92,6 +92,60 @@ def _true_rect(hwnd: int) -> tuple[int, int, int, int] | None:
         return None
 
 
+# ── SendInput 键盘注入 ─────────────────────────────────────────────
+# 企微搜索框对 keybd_event 不买账：实测 Ctrl+A 能选中（Qt 自己处理），
+# 但 Delete 和 Ctrl+V 都被吞掉，界面一动不动。SendInput 走的是系统输入队列，
+# 带扫描码和间隔，是这类自定义控件唯一稳的方式（2026-11-26）。
+_VK_CONTROL = 0x11
+_VK_A = 0x41
+_VK_V = 0x56
+_KEYEVENTF_KEYUP = 0x0002
+_INPUT_KEYBOARD = 1
+
+
+class _KEYBDINPUT(ctypes.Structure):
+    _fields_ = [("wVk", ctypes.c_ushort), ("wScan", ctypes.c_ushort), ("dwFlags", ctypes.c_ulong),
+                ("time", ctypes.c_ulong), ("dwExtraInfo", ctypes.c_void_p)]
+
+
+class _INPUT(ctypes.Structure):
+    # 64 位下 INPUT 是 40 字节：type(4) + pad(4) + KEYBDINPUT(24) + tail(8)
+    _fields_ = [("type", ctypes.c_ulong), ("_pad", ctypes.c_ulong),
+                ("ki", _KEYBDINPUT), ("_tail", ctypes.c_ubyte * 8)]
+
+
+def _send_key(vk: int, up: bool = False) -> None:
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        inp = _INPUT(type=_INPUT_KEYBOARD,
+                     ki=_KEYBDINPUT(wVk=vk, wScan=0, dwFlags=_KEYEVENTF_KEYUP if up else 0,
+                                    time=0, dwExtraInfo=None))
+        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _select_all() -> None:
+    _send_key(_VK_CONTROL)
+    time.sleep(0.04)
+    _send_key(_VK_A)
+    time.sleep(0.04)
+    _send_key(_VK_A, up=True)
+    time.sleep(0.03)
+    _send_key(_VK_CONTROL, up=True)
+    time.sleep(0.15)
+
+
+def _paste_keys() -> None:
+    _send_key(_VK_CONTROL)
+    time.sleep(0.04)
+    _send_key(_VK_V)
+    time.sleep(0.05)
+    _send_key(_VK_V, up=True)
+    time.sleep(0.03)
+    _send_key(_VK_CONTROL, up=True)
+
+
 def _paste_checked(text: str, log: Callable[[str], None]) -> bool:
     """写剪贴板 → 回读校验 → Ctrl+V。
 
@@ -111,8 +165,10 @@ def _paste_checked(text: str, log: Callable[[str], None]) -> bool:
         except Exception:  # noqa: BLE001
             current = None
         if current == text:
-            win.hotkey("ctrl", "v")
-            time.sleep(1.2 if attempt == 0 else 0.8)
+            # 选中 → 直接粘贴替换（不需要 Delete：Delete 在企微搜索框里会被吞）
+            _select_all()
+            _paste_keys()
+            time.sleep(1.0 if attempt == 0 else 0.8)
             return True
         log(f"[备注] 剪贴板回读不一致（期望 {text!r}，实际 {str(current)[:20]!r}），重试")
     return False
@@ -194,10 +250,7 @@ def set_remark(
 
         # 2) 搜索框：先清空再输入（残留会拼成 GarboGarbo 这种搜不到的词）
         _click_ratio(rect, _R_SEARCH)
-        time.sleep(0.35)
-        win.hotkey("ctrl", "a")
-        win.tap("delete")
-        time.sleep(0.2)
+        time.sleep(0.45)
         if not _paste_checked(name, log):
             return False, "剪贴板写入失败（读回内容不对），已中止，避免搜错人"
 
@@ -211,10 +264,7 @@ def set_remark(
 
         # 5) 弹窗：备注名 → 确定
         _click_dialog(rect, _R_DIALOG_REMARK_INPUT)
-        time.sleep(0.3)
-        win.hotkey("ctrl", "a")
-        win.tap("delete")
-        time.sleep(0.2)
+        time.sleep(0.4)
         if not _paste_checked(remark, log):
             return False, "备注内容没写进剪贴板，已中止"
         _click_dialog(rect, _R_DIALOG_OK)
