@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import ctypes
+import ctypes.wintypes
 import time
 from typing import Callable
 
@@ -35,14 +36,23 @@ from wecom_io_core import win
 _R_SIDEBAR_CONTACTS = (0.034, 0.576)   # 左侧「通讯录」
 _R_SEARCH = (0.278, 0.053)             # 通讯录搜索框
 _R_FIRST_RESULT = (0.259, 0.127)       # 搜索结果第一条
-_R_SET_REMARK = (0.575, 0.291)         # 资料卡「设置备注和描述」
+_R_SET_REMARK = (-0.320, 0.278)        # 资料卡「设置备注和描述」：x 贴右边缘（右侧面板固定宽度）
 _R_DIALOG_REMARK_INPUT = (0.0, -0.232)  # 弹窗内备注名输入框（相对弹窗中心）
 _R_DIALOG_OK = (-0.073, 0.291)          # 弹窗内「确定」
 
 
 def _click_ratio(rect: tuple[int, int, int, int], ratio: tuple[float, float]) -> None:
+    """ratio 为正 = 从左/上算比例；为负 = 从右/下算比例。
+
+    右侧资料面板是固定宽度（不随窗口缩放），用宽度比例定位会随窗口宽度漂移
+    （2026-11-26 实测：窗口 1044→1092 时「设置备注和描述」这一行偏了约 30px，
+    点击落在空白处，弹窗根本没打开）。所以那一行改成贴右边缘。
+    """
     left, top, width, height = rect
-    win.click(int(left + width * ratio[0]), int(top + height * ratio[1]))
+    rx, ry = ratio
+    x = left + (width * rx if rx >= 0 else width * (1 + rx))
+    y = top + (height * ry if ry >= 0 else height * (1 + ry))
+    win.click(int(x), int(y))
 
 
 def _click_dialog(rect: tuple[int, int, int, int], offset: tuple[float, float]) -> None:
@@ -68,6 +78,44 @@ def read_remark(user_id: str) -> str | None:
             con.close()
     except Exception:  # noqa: BLE001
         return None
+
+
+def _true_rect(hwnd: int) -> tuple[int, int, int, int] | None:
+    """窗口在屏幕上的真实矩形（GetWindowRect，含不可见边框）。"""
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        r = ctypes.wintypes.RECT()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(r)):
+            return None
+        return (r.left, r.top, r.right - r.left, r.bottom - r.top)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _paste_checked(text: str, log: Callable[[str], None]) -> bool:
+    """写剪贴板 → 回读校验 → Ctrl+V。
+
+    win.set_clipboard 会静默失败（OpenClipboard 被占用时），此时 Ctrl+V 粘的是
+    **上一次的残留内容**——2026-11-26 实测：要搜「青冥」，框里粘出来的是「Garbo」，
+    于是流程一直在找错的人。这里必须回读确认。
+    """
+    for attempt in range(2):
+        try:
+            win.set_clipboard(text)
+        except Exception as exc:  # noqa: BLE001
+            log(f"[备注] 写剪贴板异常：{exc}")
+            continue
+        time.sleep(0.15)
+        try:
+            current = win.get_clipboard()
+        except Exception:  # noqa: BLE001
+            current = None
+        if current == text:
+            win.hotkey("ctrl", "v")
+            time.sleep(1.2 if attempt == 0 else 0.8)
+            return True
+        log(f"[备注] 剪贴板回读不一致（期望 {text!r}，实际 {str(current)[:20]!r}），重试")
+    return False
 
 
 def _force_foreground(hwnd: int) -> bool:
@@ -128,7 +176,11 @@ def set_remark(
         # 远程桌面断开 / 窗口最小化到托盘时找不到窗口，界面自动化一律不能跑
         return False, "企微窗口不可见（远程桌面可能已断开或窗口最小化），备注未设置"
     hwnd = target["hwnd"]
-    rect = target["rect"]
+    # 注意：find_window 返回的是 DWM 扩展边界（去掉不可见边框），实测比真实窗口
+    # 小 48×46 且原点有偏移（1044×694 vs 1092×740）。点击用的是屏幕坐标，
+    # 必须用 GetWindowRect 的真实位置，否则整条流程的点击都偏出去——2026-11-26
+    # 实测：界面一动不动，搜索框里还是上一次的词。
+    rect = _true_rect(hwnd) or target["rect"]
     try:
         # 直接 ensure_foreground 常被系统拒绝，这里用 AttachThreadInput 强抢
         if not (_force_foreground(hwnd) or win.ensure_foreground(hwnd, tries=3)):
@@ -146,9 +198,8 @@ def set_remark(
         win.hotkey("ctrl", "a")
         win.tap("delete")
         time.sleep(0.2)
-        win.set_clipboard(name)
-        win.hotkey("ctrl", "v")
-        time.sleep(1.5)
+        if not _paste_checked(name, log):
+            return False, "剪贴板写入失败（读回内容不对），已中止，避免搜错人"
 
         # 3) 第一条结果
         _click_ratio(rect, _R_FIRST_RESULT)
@@ -164,9 +215,8 @@ def set_remark(
         win.hotkey("ctrl", "a")
         win.tap("delete")
         time.sleep(0.2)
-        win.set_clipboard(remark)
-        win.hotkey("ctrl", "v")
-        time.sleep(0.4)
+        if not _paste_checked(remark, log):
+            return False, "备注内容没写进剪贴板，已中止"
         _click_dialog(rect, _R_DIALOG_OK)
         time.sleep(1.2)
 
