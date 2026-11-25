@@ -91,24 +91,50 @@ function safeJson(raw: string | null | undefined): Record<string, unknown> {
 }
 
 /**
- * 客户明确要定位/导航时，用面试点坐标拼一条高德链接追加到回复末尾。
- * 企微位置卡的原生发送还没接入，这条链接客户点开就能导航，效果等价。
- * 坐标来自企微位置消息（content_type=6）里读出来的真实经纬度。
+ * 客户明确要定位/导航时，挑出要发的那个面试点。
+ *
+ * 坐标来自企微位置消息（content_type=6）里读出来的真实经纬度；面试点只在
+ * 岗位原始 data_json 里，facts 不输出 interview_points。
  */
-function buildMapLink(question: string, facts: Record<string, unknown>): string {
+function pickInterviewPoint(question: string, facts: Record<string, unknown>): Record<string, unknown> | null {
   const q = question.normalize("NFC").trim();
-  if (!/定位|导航|地图|怎么走|怎么去|在哪|地址/.test(q)) return "";
-  if (/宿舍|住宿|食堂|餐厅|工资|薪资|待遇/.test(q)) return "";
+  if (!/定位|导航|地图|怎么走|怎么去|在哪|地址/.test(q)) return null;
+  if (/宿舍|住宿|食堂|餐厅|工资|薪资|待遇/.test(q)) return null;
   const points = Array.isArray(facts.interview_points)
     ? (facts.interview_points as Array<Record<string, unknown>>)
     : [];
   const withCoord = points.filter(p => Number(p.lng) && Number(p.lat));
-  if (!withCoord.length) return "";
+  if (!withCoord.length) return null;
   const mentioned = withCoord.filter(p => q.includes(String(p.name ?? "")));
-  const point = withCoord.length === 1 ? withCoord[0] : mentioned[0];
+  return withCoord.length === 1 ? withCoord[0] : mentioned[0] ?? null;
+}
+
+/**
+ * 原生位置卡（2026-11-25）：坐标 + 地址 + 名称，客户端据此生成企微位置消息。
+ *
+ * 以前只能拼高德链接；现在客户端能直接发原生卡（见 agent/location_card.py），
+ * 所以有卡就不再加链接——两条一起发既啰嗦又容易让客户以为发重了。
+ */
+function buildLocationCard(question: string, facts: Record<string, unknown>):
+  { lng: number; lat: number; address: string; name: string } | null {
+  const point = pickInterviewPoint(question, facts);
+  if (!point) return null;
+  return {
+    lng: Number(point.lng),
+    lat: Number(point.lat),
+    address: String(point.address ?? ""),
+    name: String(point.name ?? "面试地点"),
+  };
+}
+
+/**
+ * 兜底链接：只有拿不到位置卡（没坐标）时才用。
+ * 不带 name 参数——中文名 percent-encode 后是一串 %E5%86%A0… 乱码。
+ */
+function buildMapLink(question: string, facts: Record<string, unknown>): string {
+  const point = pickInterviewPoint(question, facts);
   if (!point) return "";
-  const name = encodeURIComponent(String(point.name ?? "面试地点"));
-  return `导航：https://uri.amap.com/marker?position=${point.lng},${point.lat}&name=${name}`;
+  return `导航：https://uri.amap.com/marker?position=${point.lng},${point.lat}`;
 }
 
 function positionRow(db: DatabaseSync, positionId: number): PositionRow | undefined {
@@ -1022,22 +1048,25 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         replyPayload.messages = resolved;
       }
 
-      // 客户问定位/导航且有面试点坐标 → 在第一条文本回复末尾补一条高德链接。
-      // 位置卡原生发送尚未接入，先用链接保证客户能直接导航过去。
-      // 注意面试点只在岗位原始 data_json 里，facts 不输出 interview_points。
-      const mapLink = buildMapLink(input, safeJson(row.data_json));
-      if (mapLink) {
-        const firstText = replyPayload.messages.find(
-          (m): m is { type: string; content: string } =>
-            !!m && typeof m === "object" && (m as Record<string, unknown>).type === "text"
-            && typeof (m as Record<string, unknown>).content === "string",
-        );
-        if (firstText) firstText.content = `${firstText.content}\n${mapLink}`;
+      // 客户问定位/导航且有面试点坐标 → 交给客户端发原生位置卡（能点开导航）。
+      // 只有拿不到卡（面试点没坐标）才退回高德链接。
+      const locationCard = buildLocationCard(input, safeJson(row.data_json));
+      if (!locationCard) {
+        const mapLink = buildMapLink(input, safeJson(row.data_json));
+        if (mapLink) {
+          const firstText = replyPayload.messages.find(
+            (m): m is { type: string; content: string } =>
+              !!m && typeof m === "object" && (m as Record<string, unknown>).type === "text"
+              && typeof (m as Record<string, unknown>).content === "string",
+          );
+          if (firstText) firstText.content = `${firstText.content}\n${mapLink}`;
+        }
       }
 
       if (body.preview === true) return {
         ok: true, preview: true, reply: replyPayload, facts, knowledge,
         model: result.model, usage: result.usage, latency_ms: result.latency_ms,
+        ...(locationCard && { location_card: locationCard }),
         ...(favoriteLocation && { favorite_location_preview: favoriteLocation }),
       };
 
@@ -1198,6 +1227,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         latency_ms: result.latency_ms,
         scripts: scripts.map((script) => script.id + " " + script.title),
         messages,
+        ...(locationCard && { location_card: locationCard }),
       };
     } catch (error) {
       const failure = error as Error & { code?: string };

@@ -147,6 +147,7 @@ compat.apply_input_focus_retry()
 
 from wecom_io_core import send as core_send  # noqa: E402
 from wecom_io_core.store import Store, find_data_dir, _pb_text, direction_of  # noqa: E402
+import location_card  # noqa: E402  # 原生位置卡：按坐标生成并粘贴发送
 
 # 企微自带的应用/系统会话，前缀命中就不回复
 SYSTEM_PREFIXES = (
@@ -2515,6 +2516,8 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             if not dify_mode:
                 hint = _inbound_hint(it)
             agent_medias: list[tuple[str, str]] = []
+            # 客户问定位时服务端会带一张位置卡（坐标+地址+名称），文本发完再补发。
+            agent_card: dict | None = None
             res = {"ok": False, "detail": "Agent 未初始化"}
             opening_claimed = False
             try:
@@ -2684,6 +2687,46 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                     rlog.mark_unknown(mid, cid, detail_m, "开场")
                                     stats["unknown"] += 1
                                     return stats
+                            elif kind == "location":
+                                # 开场最后一条发原生位置卡（2026-11-25）：客户一进来
+                                # 就拿到能点开导航的地址，不用等问「发个定位」。
+                                if not opening_target_verified:
+                                    detail_c = "位置卡开场前必须先有本轮已验证落点的文字，未执行发卡"
+                                    rlog.mark_held(mid, cid, detail_c, "开场")
+                                    _brain.log_receipt(cid, seq, kind, "failed", detail_c)
+                                    stats["blocked"] += 1
+                                    return stats
+                                card = item.get("location") or {}
+                                if not (card.get("lng") and card.get("lat")):
+                                    rlog.mark_skipped(fake_id, cid, "位置卡缺少坐标")
+                                    continue
+                                if not opening_claimed:
+                                    if not rlog.begin_reply_attempt(mid, cid, "开场"):
+                                        stats["blocked"] += 1
+                                        return stats
+                                    opening_claimed = True
+                                _last_reply_at = time.time()
+                                ok_card, detail_c = location_card.send_card(
+                                    card.get("lng"), card.get("lat"),
+                                    str(card.get("address") or ""), str(card.get("name") or ""),
+                                    log=lambda s: log(f"    {s}"),
+                                )
+                                if ok_card:
+                                    rlog.mark_sent(fake_id, cid, "开场-位置卡", f"位置卡:{card.get('name')}")
+                                    opening_trace = _brain.log_receipt(cid, seq, kind, "sent")
+                                    _brain.log_delivery(opening_trace, "sent", session_key=cid, detail=detail_c)
+                                    sent_items += 1
+                                    log(f"    [开场 {seq}/{len(ores['items'])}] 位置卡已发送", scope="send")
+                                    time.sleep(max(0.0, float(item.get("delay_ms", 2000)) / 1000.0))
+                                else:
+                                    opening_uncertain = True
+                                    _brain.log_receipt(cid, seq, kind, "failed", detail_c)
+                                    log(f"    [开场 {seq}] 位置卡发送失败：{detail_c}", level="warning")
+                                    if sent_items:
+                                        break
+                                    rlog.mark_unknown(mid, cid, detail_c, "开场")
+                                    stats["unknown"] += 1
+                                    return stats
                             else:
                                 # 空内容/未知类型：跳过并上报
                                 rlog.mark_skipped(fake_id, cid, f"开场项类型 {kind} 无内容")
@@ -2721,6 +2764,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     res = _brain.chat(hint, cid, sent_summary=_flow_summary(cid) if flow is not None else None, **chat_kwargs)
                     agent_trace_id = str(res.get("trace_id") or "")
                     agent_medias = res.get("medias") or []
+                    agent_card = res.get("location_card") or None
                     dify_plan = res.get("plan") or []
                 if res.get("code") == "reply_mode_pending":
                     stats["blocked"] += 1
@@ -2934,6 +2978,23 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                         level=level, scope="media", message_id=mid, trace_id=trace)
                     if media_status == "blocked":
                         break
+
+                # 位置卡：客户问定位时服务端给出面试点坐标，文本送达后再补发原生卡。
+                # 文本已确认才发；失败只记日志，不重试（防重复、防风控）。
+                if agent_card:
+                    _last_reply_at = time.time()
+                    try:
+                        ok_card, detail_card = location_card.send_card(
+                            agent_card.get("lng"), agent_card.get("lat"),
+                            str(agent_card.get("address") or ""), str(agent_card.get("name") or ""),
+                            log=lambda s: log(f"    {s}"),
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        ok_card, detail_card = False, f"{type(exc).__name__}: {exc}"
+                    log(f"    [位置卡] {agent_card.get('name') or ''} "
+                        f"{'已发送' if ok_card else '发送失败：' + detail_card}",
+                        level="info" if ok_card else "warning",
+                        scope="media", message_id=mid, trace_id=trace)
             else:
                 rlog.mark_failed(mid, cid, detail, scene, text)
                 if _brain is not None:

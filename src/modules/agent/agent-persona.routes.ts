@@ -23,7 +23,7 @@ import { openingVersion } from "../../shared/opening-version.js";
  */
 
 const ADMIN_REQUIRED = { detail: "Admin access required" } as const;
-const KINDS = new Set(["text", "image", "video"]);
+const KINDS = new Set(["text", "image", "video", "location"]);
 const MAX_OPENINGS = 30;
 const MIN_DELAY_MS = 2000;
 const MAX_DELAY_MS = 60_000;
@@ -67,32 +67,63 @@ function serializePersona(row: PersonaRow | undefined) {
   };
 }
 
+/** 位置卡条目：content 里存的 JSON（lng/lat 必填，address/name 用于卡片显示）。 */
+type OpeningLocation = { lng: number; lat: number; address: string; name: string };
+
+function parseOpeningLocation(raw: unknown): OpeningLocation | null {
+  let value = raw;
+  if (typeof value === "string") {
+    try { value = JSON.parse(value) as unknown; } catch { return null; }
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  return {
+    lng: Number(record.lng),
+    lat: Number(record.lat),
+    address: typeof record.address === "string" ? record.address.trim() : "",
+    name: typeof record.name === "string" ? record.name.trim() : "",
+  };
+}
+
 function serializeOpening(db: DatabaseSync, row: OpeningRow) {
   const mediaName = String(row.media_name ?? "");
   // 素材配了但还没上传时也要能看见：exists=false 让前端标红，而不是静默消失。
   const exists = mediaName
     ? Boolean(db.prepare("SELECT id FROM media_assets WHERE name=? AND status='enabled'").get(mediaName))
     : false;
+  const kind = String(row.kind ?? "text");
   return {
     id: Number(row.id),
     position_id: Number(row.position_id),
     seq: Number(row.seq ?? 0),
-    kind: String(row.kind ?? "text"),
+    kind,
     content: String(row.content ?? ""),
     media_name: mediaName,
     delay_ms: Number(row.delay_ms ?? MIN_DELAY_MS),
     status: String(row.status ?? "enabled"),
     media_exists: exists,
+    // 位置卡：把 content 里的 JSON 解析出来给前端画预览，前端不必再解一次
+    ...(kind === "location" && { location: parseOpeningLocation(row.content) }),
   };
 }
 
 /** 校验一条开场的内容与素材，返回错误文案（null 表示通过）。 */
 function validateOpening(db: DatabaseSync, body: Record<string, unknown>, kind: string) {
-  if (!KINDS.has(kind)) return "kind must be one of text, image, video";
+  if (!KINDS.has(kind)) return "kind must be one of text, image, video, location";
   if (kind === "text") {
     const content = text(body.content).trim();
     if (!content) return "text 开场必须有正文";
     if (content.length > MAX_TEXT_CHARS) return `正文不能超过 ${MAX_TEXT_CHARS} 字`;
+    return null;
+  }
+  // 位置卡：content 存 {"lng","lat","address","name"}，坐标必填（没有坐标发不出卡）
+  if (kind === "location") {
+    const card = parseOpeningLocation(body.content);
+    if (!card) return "位置卡需要合法的坐标与地址";
+    if (!Number.isFinite(card.lng) || !Number.isFinite(card.lat) || !card.lng || !card.lat) {
+      return "位置卡缺少坐标，请先在面试点里填经纬度";
+    }
+    if (card.address.length > 200) return "位置卡地址不能超过 200 字";
     return null;
   }
   const mediaName = text(body.media_name).trim();

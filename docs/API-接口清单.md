@@ -314,6 +314,22 @@ HTTP 仍是 200——调用方按 `ok` 判断，不要按状态码。模型输�
 
 ---
 
+## 四之一、企微原生位置卡
+
+位置卡不是文件，而是一块剪贴板字节（`WeWork Message` 格式）。客户端发送时用
+坐标+地址+名称现场生成，不需要人工采集，所以这里只保留「人工采集上报」这条兜底通道。
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| POST | `/api/v1/agent/location-card` | 设备令牌或服务令牌 | 上报剪贴板里的位置卡字节，body `{data_base64}`，≤ 8KB；按 sha256 幂等去重，返回 `{sha256,name,address,bytes,duplicate}` |
+| GET | `/api/v1/location-cards` | admin | 已采集的位置卡列表（只回 sha/名称/地址/大小，不回字节） |
+| DELETE | `/api/v1/location-cards/:sha` | admin | 删除采错的卡（绑定的面试点变回未采集，不会崩） |
+
+设备配置 `GET /api/v1/bridge/devices/:code/config` 增加 `location_cards` 字段：
+岗位面试点绑定了卡才下发，客户端据此判断要不要在开场/问答里补发位置卡。
+
+---
+
 ## 五、知识库配置（后台页面用）
 
 这些是存量接口，`public/theme/kb-console.js` 在用。

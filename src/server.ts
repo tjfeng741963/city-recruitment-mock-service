@@ -28,6 +28,7 @@ import { registerJobRoutes } from "./modules/agent/profile.routes.js";
 import { registerKbV3Routes } from "./modules/agent/kb-v3.routes.js";
 import { registerKbPublishRoutes } from "./modules/agent/kb-publish.routes.js";
 import { registerPositionScriptRoutes } from "./modules/agent/position-scripts.routes.js";
+import { registerLocationCardRoutes } from "./modules/agent/location-card.routes.js";
 import { registerAgentPersonaRoutes } from "./modules/agent/agent-persona.routes.js";
 import { registerAgentChatRoutes } from "./modules/agent/agent-chat.routes.js";
 import { registerAgentModelSettings } from "./modules/agent/agent-model-settings.js";
@@ -58,6 +59,8 @@ const DEVICE_TOKEN_ROUTES = new Set(["heartbeat", "claim", "receipts", "inbound"
     // 媒体下载由设备 token 或 X-Profile-Token 鉴权（路由内校验），
     // 因此这里的 Bearer 不能当用户 JWT 解析，否则设备 token 会被判 401。
     "GET /api/v1/agent/media/:name",
+    // 位置卡上报：客户端用设备令牌传剪贴板字节，路由内自校验（迁移 061）。
+    "POST /api/v1/agent/location-card",
     "GET /api/v1/agent/flow",
     "GET /api/v1/agent/state",
     "POST /api/v1/agent/state",
@@ -209,6 +212,8 @@ export function buildServer() {
   registerKbPublishRoutes(app, db);
   // 岗位话术 + 媒体资源库（迁移 030/031）：后台配置 + 设备端媒体下载
   registerPositionScriptRoutes(app, db);
+  // 企微原生位置卡（迁移 061）：客户端上报剪贴板字节，后台按面试点绑定
+  registerLocationCardRoutes(app, db);
   // 岗位人设 + 开场条目（迁移 038）：一个岗位一份人设、一组有序开场
   registerAgentPersonaRoutes(app, db);
   // Agent 会话 + 调试台：开场清单、开场回执、一轮对话（人设 + 事实 + 历史）

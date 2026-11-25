@@ -39,6 +39,7 @@
           <el-button size="small" :disabled="openingBusy" class="pill-btn" @click="startAdd('text')">+ 文本</el-button>
           <el-button size="small" :disabled="openingBusy" class="pill-btn" @click="startAdd('image')">+ 图片</el-button>
           <el-button size="small" :disabled="openingBusy" class="pill-btn" @click="startAdd('video')">+ 视频</el-button>
+          <el-button size="small" :disabled="openingBusy" class="pill-btn" @click="startAdd('location')">+ 位置卡</el-button>
           <span class="opening-hint">旧开场按此顺序发送，节点流程以画布为准。</span>
         </div>
 
@@ -63,6 +64,36 @@
             :rows="5"
             placeholder="可以引用岗位字段，例如：{{factory}} 在招 {{job_title}}，工价 {{wage}}。"
           />
+          <div v-else-if="draft.kind === 'location'" class="location-edit">
+            <div class="media-row">
+              <el-select v-model="pointIndex" class="media-select" placeholder="选择面试点（自动带出坐标）">
+                <el-option
+                  v-for="(point, index) in interviewPoints"
+                  :key="index"
+                  :label="`${point.name}${point.lng && point.lat ? '' : '（缺坐标）'}`"
+                  :value="index"
+                />
+              </el-select>
+              <el-button @click="applyPoint(pointIndex)">套用</el-button>
+            </div>
+            <div class="media-row">
+              <el-input v-model="draft.location.name" placeholder="卡片标题，如：冠宇商务中心" />
+            </div>
+            <div class="media-row">
+              <el-input v-model="draft.location.address" placeholder="卡片地址，客户点开地图看到的就是它" />
+            </div>
+            <div class="media-row">
+              <el-input v-model="draft.location.lng" placeholder="经度，如 113.39114" />
+              <el-input v-model="draft.location.lat" placeholder="纬度，如 23.117692" />
+            </div>
+            <LocationCardPreview
+              :lng="draft.location.lng"
+              :lat="draft.location.lat"
+              :address="draft.location.address"
+              :name="draft.location.name"
+            />
+            <p class="opening-hint">保存后开场播到最后一条时，客户端直接发这张原生位置卡（客户点开可导航）。</p>
+          </div>
           <template v-else>
             <div class="media-row">
               <el-select v-model="draft.media_name" class="media-select" filterable placeholder="选择素材">
@@ -154,6 +185,13 @@
           </div>
           <div class="opening-body">
             <template v-if="entry.kind === 'text'">{{ entry.content }}</template>
+            <LocationCardPreview
+              v-else-if="entry.kind === 'location'"
+              :lng="entry.location?.lng"
+              :lat="entry.location?.lat"
+              :address="entry.location?.address"
+              :name="entry.location?.name"
+            />
             <template v-else>
               素材：<b>{{ entry.media_name || '未设置' }}</b>
               <span v-if="entry.content" class="opening-caption">配文：{{ entry.content }}</span>
@@ -174,14 +212,24 @@ import { agentApi } from '../../api/agent'
 import { mediaApi } from '../../api/core'
 import type { ServicePosition } from '../../api/types'
 import { drawerTabForLoad, type AgentDrawerTab } from '../agent/flow-edit-entry'
+import LocationCardPreview from '../agent/LocationCardPreview.vue'
+
+interface OpeningLocation {
+  lng: number | string
+  lat: number | string
+  address: string
+  name: string
+}
 
 interface PersonaOpening {
   id: number
-  kind: 'text' | 'image' | 'video'
+  kind: 'text' | 'image' | 'video' | 'location'
   content: string
   media_name?: string
   delay_ms: number
   seq?: number
+  /** 后端按 content 里的 JSON 解析好再给，前端不用再解一次 */
+  location?: OpeningLocation
 }
 
 interface PersonaGetResult {
@@ -197,14 +245,16 @@ interface MediaItem {
 
 interface OpeningDraft {
   id: number | null
-  kind: 'text' | 'image' | 'video'
+  kind: 'text' | 'image' | 'video' | 'location'
   content: string
   media_name: string
   delay_ms: number
   seq?: number
+  /** 只有 kind==='location' 用，其余类型留空对象（模板里直接绑定，避免可选判空） */
+  location: OpeningLocation
 }
 
-const KIND_LABEL: Record<string, string> = { text: '文本', image: '图片', video: '视频' }
+const KIND_LABEL: Record<string, string> = { text: '文本', image: '图片', video: '视频', location: '位置卡' }
 const MIN_DELAY_MS = 2000
 const MAX_BYTES = 20 * 1024 * 1024
 
@@ -298,9 +348,49 @@ async function savePersona(): Promise<void> {
   }
 }
 
-function startAdd(kind: 'text' | 'image' | 'video'): void {
+/** 岗位的面试点（位置卡直接从这里带坐标，避免手抄经纬度抄错） */
+const interviewPoints = computed(() => {
+  const raw = props.position?.interview_points
+  return Array.isArray(raw)
+    ? raw.flatMap((point) => {
+        if (!point || typeof point !== 'object') return []
+        const item = point as Record<string, unknown>
+        const name = typeof item.name === 'string' ? item.name : ''
+        if (!name) return []
+        return [{
+          name,
+          address: typeof item.address === 'string' ? item.address : '',
+          lng: Number(item.lng) || 0,
+          lat: Number(item.lat) || 0,
+        }]
+      })
+    : []
+})
+const pointIndex = ref(0)
+
+function applyPoint(index: number): void {
+  const point = interviewPoints.value[index]
+  if (!point || !draft.value?.location) return
+  draft.value.location = {
+    lng: point.lng || '',
+    lat: point.lat || '',
+    address: point.address,
+    name: point.name,
+  }
+}
+
+function startAdd(kind: 'text' | 'image' | 'video' | 'location'): void {
   void loadMedia()
-  draft.value = { id: null, kind, content: '', media_name: '', delay_ms: MIN_DELAY_MS }
+  draft.value = {
+    id: null, kind, content: '', media_name: '', delay_ms: MIN_DELAY_MS,
+    location: { lng: '', lat: '', address: '', name: '' },
+  }
+  if (kind === 'location') {
+    // 默认取第一个有坐标的面试点，运营点开就能看到地图
+    const index = Math.max(0, interviewPoints.value.findIndex(point => point.lng && point.lat))
+    pointIndex.value = index
+    applyPoint(index)
+  }
   editorVisible.value = true
 }
 
@@ -313,6 +403,13 @@ function startEdit(entry: PersonaOpening): void {
     media_name: entry.media_name || '',
     delay_ms: entry.delay_ms ?? MIN_DELAY_MS,
     seq: entry.seq,
+    location: entry.location ?? { lng: '', lat: '', address: '', name: '' },
+  }
+  if (entry.kind === 'location') {
+    const point = entry.location
+    pointIndex.value = Math.max(0, interviewPoints.value.findIndex(
+      item => point && Number(item.lng) === Number(point.lng) && Number(item.lat) === Number(point.lat),
+    ))
   }
   editorVisible.value = true
 }
@@ -425,7 +522,17 @@ async function saveDraft(): Promise<void> {
     ElMessage.warning('正文不能为空')
     return
   }
-  if (entry.kind !== 'text' && !entry.media_name) {
+  if (entry.kind === 'location') {
+    const card = entry.location
+    if (!card || !Number(card.lng) || !Number(card.lat)) {
+      ElMessage.warning('位置卡需要经纬度，先在面试点里填坐标或手填')
+      return
+    }
+    if (!String(card.address || '').trim()) {
+      ElMessage.warning('位置卡需要地址，客户点开地图看到的就是它')
+      return
+    }
+  } else if (entry.kind !== 'text' && !entry.media_name) {
     ElMessage.warning('请选择素材')
     return
   }
@@ -434,13 +541,21 @@ async function saveDraft(): Promise<void> {
   // 媒体项不再自带配文：配文拆成独立文本项，排在媒体前面。
   // 这样发送顺序是「文本 → 图片/视频」，客户先看到说明再看到素材；
   // 也避免客户端媒体分支只发素材、把配文整段丢掉（2026-11-25 实测）。
-  const caption = entry.kind !== 'text' ? entry.content.trim() : ''
+  const caption = entry.kind !== 'text' && entry.kind !== 'location' ? entry.content.trim() : ''
+  const locationContent = entry.kind === 'location' && entry.location
+    ? JSON.stringify({
+        lng: Number(entry.location.lng),
+        lat: Number(entry.location.lat),
+        address: String(entry.location.address || '').trim(),
+        name: String(entry.location.name || '').trim(),
+      })
+    : ''
   try {
     const payload = {
       position_id: positionId,
       kind: entry.kind,
-      content: caption ? '' : entry.content,
-      media_name: entry.media_name,
+      content: entry.kind === 'location' ? locationContent : (caption ? '' : entry.content),
+      media_name: entry.kind === 'location' ? '' : entry.media_name,
       delay_ms: entry.delay_ms,
     }
     if (entry.id) await agentApi.updateOpening(entry.id, payload)

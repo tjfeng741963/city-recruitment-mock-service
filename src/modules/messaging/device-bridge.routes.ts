@@ -11,6 +11,7 @@ import type { StreamNotifier } from "./stream-events.js";
 import { recordInboundMessage } from "./inbound-store.js";
 import { loadFactories, receptionFactoryIds, resolveDevicePosition } from "../../shared/device-factories.js";
 import { latestPositionScriptStamp, loadPositionScripts } from "../../shared/media-assets.js";
+import { loadPositionLocationCards } from "../../shared/location-card.js";
 
 type DeviceRequest = { Params: { code: string }; Body: Record<string, unknown> };
 const field = (body: Record<string, unknown>, key: string, max = 1000) => typeof body[key] === "string" && String(body[key]).length <= max ? String(body[key]) : "";
@@ -233,6 +234,9 @@ export function registerDeviceBridgeRoutes(
       // 岗位话术：按岗位配置一次、所有接这个岗位的设备共用（迁移 030）。
       // 与 scripts（按设备+stage+城市）并存，客户端优先用岗位话术。
       position_scripts: positionScripts,
+      // 企微原生位置卡（迁移 061）：面试点绑定了采集到的卡才下发。
+      // 客户端把它写进剪贴板再 Ctrl+V，粘出来就是能点开导航的原生卡。
+      location_cards: loadPositionLocationCards(db, agentPosition ?? 0),
     };
   });
   app.get<{ Params: { code: string } }>("/api/v1/bridge/devices/:code", async (req, reply) => {
