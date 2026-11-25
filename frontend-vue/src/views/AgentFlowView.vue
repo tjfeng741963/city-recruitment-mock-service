@@ -271,12 +271,17 @@
                       <template v-else-if="part.kind === 'favorite_location'">
                         <el-form-item label="发送哪个面试点" class="compact-item">
                           <el-select v-model="part.interview_point" class="full-width" filterable
-                            placeholder="选择已配置企微收藏名的面试点">
+                            placeholder="选择已配置企微收藏名的面试点"
+                            :loading="locationPointsLoading" loading-text="正在读取面试点…"
+                            :no-data-text="locationPointsError || '该岗位暂无配置企微收藏名称的面试点'"
+                            @visible-change="refreshLocationPoints">
                             <el-option v-for="point in locationPoints" :key="point.name" :value="point.name"
-                              :label="`${point.name} · ${point.title}`" />
+                              :label="`${point.name} · ${point.title}`"
+                              :disabled="locationPointsLoading || Boolean(locationPointsError)" />
                           </el-select>
-                          <div v-if="!locationPoints.length" class="field-note">请先到招聘岗位的「面试与门店」保存收藏名称，再回这里刷新。</div>
-                          <div v-else-if="part.interview_point && !locationPoints.some(point => point.name === part.interview_point)" class="field-note">该面试点已变更或缺少收藏，需重新选择。</div>
+                          <div v-if="locationPointsError" class="field-note" role="status">{{ locationPointsError }}</div>
+                          <div v-else-if="!locationPointsLoading && !locationPoints.length" class="field-note">请到该岗位的「面试与门店」填写面试点的企微收藏名称并保存，再展开此处。</div>
+                          <div v-else-if="!locationPointsLoading && part.interview_point && !locationPoints.some(point => point.name === part.interview_point)" class="field-note">该面试点已变更或缺少收藏，需重新选择。</div>
                         </el-form-item>
                         <el-form-item label="轮到本条后等待（秒）" class="compact-item">
                           <el-input-number :model-value="(part.delay_before_ms ?? 0) / 1000" :min="0" :max="60" :step="0.5" :precision="1"
@@ -485,6 +490,8 @@ const agentDrawerVisible = ref(false)
 const agentDrawerTab = ref<'persona' | 'opening'>('opening')
 const currentPosition = computed(() => positions.value.find(item => item.id === positionId.value) || null)
 const locationPoints = computed(() => locationPointOptions(currentPosition.value?.interview_points))
+const locationPointsLoading = ref(false)
+const locationPointsError = ref('')
 let evidenceTimer: ReturnType<typeof setInterval> | undefined
 const aiFacts = ref<Record<string, string>>({})
 const aiContextAvailable = ref(false)
@@ -577,6 +584,8 @@ async function loadPositions(): Promise<void> {
 
 async function loadFlow(id: number): Promise<void> {
   const sequence = ++loadSequence
+  locationPointsLoading.value = false
+  locationPointsError.value = ''
   loading.value = true
   pageError.value = ''
   conflict.value = false
@@ -627,6 +636,26 @@ async function loadFlow(id: number): Promise<void> {
       await nextTick()
       canvas.value?.fitToCanvas()
     }
+  }
+}
+
+async function refreshLocationPoints(visible: boolean): Promise<void> {
+  const id = positionId.value
+  if (!visible || !id || locationPointsLoading.value) return
+  const sequence = loadSequence
+  const isCurrent = () => sequence === loadSequence && positionId.value === id
+
+  locationPointsLoading.value = true
+  locationPointsError.value = ''
+  try {
+    const { data } = await positionsApi.get(id)
+    if (isCurrent()) {
+      positions.value = positions.value.map(position => position.id === id ? data : position)
+    }
+  } catch {
+    if (isCurrent()) locationPointsError.value = '面试点读取失败，请收起下拉框后重新展开。'
+  } finally {
+    if (sequence === loadSequence) locationPointsLoading.value = false
   }
 }
 

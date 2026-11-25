@@ -62,6 +62,22 @@ describe("招聘流程图入口接线", () => {
     expect(page).toContain("离开页面会丢弃尚未保存的流程修改");
   });
 
+  it("reloads only the selected position when opening the location dropdown", () => {
+    const page = read("frontend-vue/src/views/AgentFlowView.vue");
+    expect(page).toMatch(/<el-select v-model="part\.interview_point"[^>]*@visible-change="refreshLocationPoints"/);
+
+    const refresh = page.match(/async function refreshLocationPoints\([^]*?\n}/)?.[0] ?? "";
+    expect(refresh).toContain("positionsApi.get(id)");
+    expect(refresh).toContain("positions.value =");
+    expect(refresh).not.toMatch(/loadFlow\(|\bflow\.value\s*=|baseline\.value\s*=/);
+  });
+
+  it("prevents selecting cached location options while refreshing or after a read failure", () => {
+    const page = read("frontend-vue/src/views/AgentFlowView.vue");
+    expect(page).toMatch(/<el-option v-for="point in locationPoints"[^>]*:disabled="locationPointsLoading \|\| Boolean\(locationPointsError\)"/);
+    expect(page).toContain(':no-data-text="locationPointsError ||');
+  });
+
   it('provides a full-screen workspace with a keyboard-accessible resizable inspector', () => {
     const page = read('frontend-vue/src/views/AgentFlowView.vue');
     expect(page).toMatch(/<el-button v-if="fullscreen"[^>]*@click="exitFullscreen"[^>]*>\s*返回普通视图/);
