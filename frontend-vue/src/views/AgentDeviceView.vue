@@ -82,10 +82,10 @@
         <el-table-column label="客户端标识" min-width="150">
           <template #default="{ row }">
             <div class="device-code">{{ row.device_code || '-' }}</div>
-            <el-button v-if="!isWebTestDevice(row) && !isOnline(row)" link type="primary" size="small" @click="openQr(row)">
+            <el-button v-if="canOpenQr(row) && !isOnline(row)" link type="primary" size="small" @click="openQr(row)">
               扫码登录
             </el-button>
-            <el-button v-else-if="!isWebTestDevice(row)" link type="success" size="small" class="online-mark" @click="openQr(row)" title="查看企微登录状态">客户端已连接</el-button>
+            <el-button v-else-if="canOpenQr(row)" link type="success" size="small" class="online-mark" @click="openQr(row)" title="查看企微登录状态">客户端已连接</el-button>
           </template>
         </el-table-column>
 
@@ -108,9 +108,22 @@
 
         <el-table-column label="客户端连接" min-width="164">
           <template #default="{ row }">
-            <template v-if="row.windows_runtime && !isWebTestDevice(row)">
+            <template v-if="!isWebTestDevice(row) && row.cloud_assignment?.state === 'available'">
+              <el-button link type="primary" :loading="cloudRequestCode === row.device_code"
+                :disabled="cloudRequestCode !== ''" @click="requestCloudAgent(row)">联系管理员增加云上 Agent</el-button>
+            </template>
+            <template v-else-if="row.cloud_assignment?.state === 'requested'">
+              <el-tag type="warning">待管理员分配</el-tag>
+              <div v-if="canSwitchMode">
+                <el-button link type="primary" @click="openCloudAssignment(row)">分配云电脑</el-button>
+              </div>
+            </template>
+            <el-tag v-else-if="row.cloud_assignment?.state === 'assigning'" type="info">正在配对</el-tag>
+            <el-tag v-else-if="row.cloud_assignment?.state === 'waiting'" type="warning">配对超时，等待客户端恢复</el-tag>
+            <template v-else-if="row.windows_runtime && !isWebTestDevice(row)">
               <div class="queue-note">{{ row.windows_runtime.connected ? 'Win 已连接' : 'Win 心跳超时' }} · {{ row.windows_runtime.wecom_available ? '企微可用' : '企微不可用' }}</div>
-              <el-tag :type="row.windows_runtime.reply_ready ? 'success' : 'warning'" effect="light">
+              <el-tag v-if="row.cloud_assignment?.state === 'connected'" type="info" effect="light">试运行 · 暂停自动发送</el-tag>
+              <el-tag v-else :type="row.windows_runtime.reply_ready ? 'success' : 'warning'" effect="light">
                 {{ row.windows_runtime.reply_ready ? '自动回复就绪' : (runtimeReasons[row.windows_runtime.reason] || '自动回复暂停') }}
               </el-tag>
               <div v-if="row.windows_runtime.sync === 'catching_up'" class="queue-note">正在补同步 · 积压 {{ row.windows_runtime.backlog }}</div>
@@ -278,7 +291,7 @@
         </template>
         <!-- 过期时整块可点：用户第一反应就是去点那张过期的图 -->
         <div
-          v-if="qrFeedback.key === 'expired'"
+          v-if="qrFeedback.key === 'expired' && !qrCloudTrial"
           class="qr-expired-hit"
           role="button"
           tabindex="0"
@@ -292,7 +305,7 @@
           class="qr-refresh-note"
           :class="`is-${qrLastRefresh.tone}`"
         >{{ qrLastRefresh.text }}</p>
-        <div v-if="qrFeedback.key !== 'disabled'" class="qr-refresh-row">
+        <div v-if="qrFeedback.key !== 'disabled' && !qrCloudTrial" class="qr-refresh-row">
           <el-button
             :loading="qrRefreshing"
             :disabled="qrRefreshing"
@@ -301,6 +314,7 @@
           >刷新二维码</el-button>
           <span class="qr-refresh-hint">{{ qrRefreshHint }}</span>
         </div>
+        <p v-if="qrCloudTrial && qrFeedback.key === 'expired'" class="dialog-hint">请在云电脑的企微登录窗口刷新二维码，网页会自动更新。</p>
         <div v-if="canSubmitVerifyCode" class="verify-row">
           <el-input
             v-model="verifyCode"
@@ -349,6 +363,23 @@
       </div>
     </el-drawer>
 
+    <el-dialog v-model="cloudDialog" title="分配云电脑" width="480px"
+      :close-on-click-modal="!cloudSaving" :close-on-press-escape="!cloudSaving" :show-close="!cloudSaving">
+      <p>{{ cloudTarget?.name || cloudTarget?.device_name || cloudTarget?.device_code }}</p>
+      <el-alert v-if="cloudError" :title="cloudError" type="error" :closable="false" />
+      <el-select v-model="cloudMachine" placeholder="选择一台空闲云电脑" aria-label="选择一台空闲云电脑"
+        :disabled="cloudSaving" :loading="cloudLoading" style="width: 100%">
+        <el-option v-for="machine in cloudMachines" :key="machine.code" :value="machine.code"
+          :label="`${machine.name}（${machine.code}）`" />
+      </el-select>
+      <p v-if="!cloudLoading && !cloudMachines.length && !cloudError">暂无在线空闲云电脑，申请仍保留。</p>
+      <template #footer>
+        <el-button :disabled="cloudSaving || cloudLoading" @click="refreshCloudMachines">刷新</el-button>
+        <el-button type="primary" :loading="cloudSaving" :disabled="!cloudMachine || cloudLoading"
+          @click="confirmCloudAssignment">确认分配</el-button>
+      </template>
+    </el-dialog>
+
   </section>
 </template>
 
@@ -360,7 +391,7 @@ import { deviceWorkflowEntry, isWebTestDevice, deviceOnline } from '../component
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh, Search } from '@element-plus/icons-vue'
-import { devicesApi, type AgentDeviceItem, type DeviceGroup, type LoginQrResult } from '../api/agent'
+import { devicesApi, type AgentDeviceItem, type CloudAgentMachine, type DeviceGroup, type LoginQrResult } from '../api/agent'
 import { positionsApi } from '../api/core'
 import type { Factory, ServicePosition } from '../api/types'
 import { formatDateTime } from '../utils/format'
@@ -371,6 +402,67 @@ import {
 
 const auth = useAuthStore()
 const canSwitchMode = computed(() => auth.user?.role === 'admin')
+const cloudRequestCode = ref('')
+const cloudDialog = ref(false)
+const cloudTarget = ref<AgentDeviceItem>()
+const cloudMachines = ref<CloudAgentMachine[]>([])
+const cloudMachine = ref('')
+const cloudError = ref('')
+const cloudLoading = ref(false)
+const cloudSaving = ref(false)
+
+async function requestCloudAgent(row: AgentDeviceItem): Promise<void> {
+  if (!row.device_code || cloudRequestCode.value) return
+  cloudRequestCode.value = row.device_code
+  try {
+    const { data } = await devicesApi.requestCloudAgent(row.device_code)
+    if (data.state === 'requested') ElMessage.success('申请已提交，请等待管理员分配云电脑')
+    await load(true)
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.detail || '提交申请失败，请重试')
+  } finally {
+    cloudRequestCode.value = ''
+  }
+}
+
+function openCloudAssignment(row: AgentDeviceItem): void {
+  cloudTarget.value = row
+  cloudMachines.value = []
+  cloudMachine.value = ''
+  cloudDialog.value = true
+  void refreshCloudMachines()
+}
+
+async function refreshCloudMachines(): Promise<void> {
+  cloudLoading.value = true
+  cloudError.value = ''
+  try {
+    const { data } = await devicesApi.cloudAgentMachines()
+    cloudMachines.value = data.items
+    if (!data.items.some(machine => machine.code === cloudMachine.value)) cloudMachine.value = ''
+  } catch (err: any) {
+    cloudError.value = err?.response?.data?.detail || '无法读取空闲云电脑，请重试'
+  } finally {
+    cloudLoading.value = false
+  }
+}
+
+async function confirmCloudAssignment(): Promise<void> {
+  const code = cloudTarget.value?.device_code
+  if (!code || !cloudMachine.value || cloudSaving.value) return
+  cloudSaving.value = true
+  cloudError.value = ''
+  try {
+    await devicesApi.assignCloudAgent(code, cloudMachine.value)
+    cloudDialog.value = false
+    ElMessage.success('云电脑已分配，等待 Windows 完成配对')
+    await load(true)
+  } catch (err: any) {
+    cloudError.value = err?.response?.data?.detail || '分配失败，请刷新后重试'
+  } finally {
+    cloudSaving.value = false
+  }
+}
 const runtimeReasons: Record<string, string> = {
   heartbeat_timeout: '自动回复离线', loop_stalled: '回复进程无进展', wechat_login: '等待企微扫码',
   wechat_unavailable: '等待企微就绪', desktop_unavailable: '等待交互桌面', authorization: '设备鉴权失败',
@@ -428,6 +520,11 @@ watch([keyword, providerFilter, kindFilter, onlineFilter], () => {
 
 function isOnline(device: AgentDeviceItem): boolean {
   return deviceOnline(device)
+}
+
+function canOpenQr(device: AgentDeviceItem): boolean {
+  const state = device.cloud_assignment?.state
+  return !isWebTestDevice(device) && (!state || state === 'unavailable' || state === 'connected')
 }
 
 let devicePoll: ReturnType<typeof setInterval> | undefined
@@ -716,6 +813,7 @@ const qrLoading = ref(false)
 const qrResult = ref<LoginQrResult | null>(null)
 const qrError = ref('')
 const qrDevice = ref<AgentDeviceItem | null>(null)
+const qrCloudTrial = computed(() => qrDevice.value?.cloud_assignment?.state === 'connected')
 const verifyCode = ref('')
 const verifySubmitting = ref(false)
 const verificationInProgress = computed(() =>
@@ -824,7 +922,7 @@ const qrRefreshHint = computed(() => {
 
 async function requestQrRefresh(): Promise<void> {
   const code = qrDevice.value?.device_code
-  if (!code || qrRefreshing.value) return
+  if (!code || qrRefreshing.value || qrCloudTrial.value) return
   qrRefreshing.value = true
   try {
     const { data } = await devicesApi.refreshLoginQr(code)

@@ -4,6 +4,7 @@ import type { FastifyInstance } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
 import { canAccessDevice, getUserScope } from "../../auth/user-scopes.js";
 import { DeviceBridgeStore } from "./device-bridge.js";
+import { cloudAgentRuntime, hasPendingCloudAssignment, isAssignedCloudAgent, protectedMachineConnection, recordCloudAgentHeartbeat } from "../agent/cloud-agent-assignment.js";
 import { queuePendingDifyGroupNotifications } from "../dify/dify-group-notification.js";
 import { MessageEventService } from "./message-events.js";
 import { createMessageChannelProvider } from "./message-channel-provider.js";
@@ -68,6 +69,7 @@ export function registerDeviceBridgeRoutes(
     if (!DEVICE_CODE_PATTERN.test(code)) {
       return reply.code(422).send({ detail: "Invalid device_code" });
     }
+    if (hasPendingCloudAssignment(db, code)) return reply.code(409).send({ detail: "云电脑正在配对，暂不能重新生成配对凭据" });
     const existing = db.prepare("SELECT id,status FROM agent_devices WHERE json_extract(data_json,'$.device_code')=?").get(code) as { id: number; status: string } | undefined;
     if (existing) {
       if (existing.status !== "enabled") {
@@ -83,6 +85,7 @@ export function registerDeviceBridgeRoutes(
   });
   app.post<DeviceRequest>("/api/v1/bridge/devices/:code/pair", async (req, reply) => {
     if (req.auth?.role !== "admin") return reply.code(403).send({ detail: "Admin required" });
+    if (hasPendingCloudAssignment(db, req.params.code)) return reply.code(409).send({ detail: "云电脑正在配对，暂不能重新生成配对凭据" });
     return { device_code: req.params.code, device_token: store.pair(req.params.code) };
   });
   // 配置下发（契约 docs/对齐-配置分发与按设备话术.md §1）：运行参数来自
@@ -254,11 +257,16 @@ export function registerDeviceBridgeRoutes(
       if (action === "heartbeat") {
         const state = field(body, "state");
         if (!["online", "offline", "scanning"].includes(state)) return reply.code(422).send({ detail: "Invalid device state" });
+        const cloudAssigned = isAssignedCloudAgent(db, code);
+        const runtime = cloudAssigned ? cloudAgentRuntime(body.runtime, state) : body.runtime;
+        if (cloudAssigned && !protectedMachineConnection(req)) return reply.code(403).send({ detail: "云电脑心跳需要可信 HTTPS" });
+        if (cloudAssigned && !runtime) return reply.code(422).send({ detail: "缺少有效的 Windows 运行状态" });
         // 状态变化的 device_events 落表与推送都收敛在 store.heartbeat 里：
         // 只有真正变化才落一条 reason='reported' 的事件并推 device.updated。
         store.heartbeat(code, state as "online" | "offline" | "scanning", field(body, "account_id"));
-        if (body.runtime === undefined) store.clearRuntimeHealth(code);
-        else store.updateRuntimeHealth(code, body.runtime);
+        if (runtime === undefined) store.clearRuntimeHealth(code);
+        else store.updateRuntimeHealth(code, runtime);
+        if (cloudAssigned) recordCloudAgentHeartbeat(db, code, token, state);
         return { device: store.status(code) };
       }
       if (action === "claim") {

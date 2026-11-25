@@ -97,5 +97,17 @@ type logs\agent.log                 :: 自动回复日志
 
 - 开机自启用的是**计划任务（登录时触发）**，不是 Windows 服务——服务在 SYSTEM 会话，碰不到桌面键鼠。
 - 升级只覆盖代码，**保留** `backend/data/`、`backend/.env`、`agent/config.json`、`agent/reply_log.db`。
+
 - 备份就是复制 `backend/data/app.db` 和 `agent/reply_log.db`（先停进程）。
 - 改脚本时注意：`.bat` 是 UTF-8 无 BOM，**以中文结尾的行，行尾那个空格不能删**，否则 cmd 解析时会吞掉下一行。
+
+## 云上 Agent 待分配机器
+
+部署人员批量预装 Win 客户端、Python 依赖与企微。在尚无企微登录数据和回复账本的新机上启用待分配模式。在交互桌面打开企微，确认登录窗口可见并保持打开。现有接待中的机器应继续用各自的账号运行。
+
+1. 确认云电脑能用系统证书访问招聘站的 HTTPS 地址。配置生产服务端的 `REA_CLOUD_AGENT_POOL`，填需要加入空闲池的机器标识，多个用英文逗号分隔。
+2. 为每台实验或生产云电脑创建独立的桥接机器身份和令牌，将机器标识和令牌写入其 `C:\agent\config.json` 的 `device_code` 和 `bridge_token`。机器在预装阶段只运行待分配程序，普通接待客户端首次启动会使该机器退出空闲条件。
+3. 从新版客户端对应的 Git 提交取出 `deploy/client/`，用其中的 `bootstrap-client-updater.ps1` 初始化更新器及管理器。旧更新器会拒绝含 `location_card.py` 的新版 ZIP，先用新版 bootstrap 完成本地初始化，再使用客户端更新。在同一安装目录添加 `cloud-agent-pool.json`，内容为 `{"machine_code":"pool-win-03","origin":"https://recruitment.example"}`。将整个 `C:\agent` 及子目录的继承权限限制在实际运行客户端的交互账号、Administrators 与 SYSTEM，以保护配置、临时文件和凭据备份。
+4. 在该机器的交互桌面运行 `client_updater.py --cloud-agent`，或由现有 `CloudPilot` 交互登录任务启动 `client-startup.cmd`。从网页管理员选机列表核对这台机器出现。机器失去交互桌面时会从空闲列表消失，恢复后继续等待。
+
+日常运维在「微信账号」的客户原行点「分配云电脑」并确认。Win 留存 `config.before-cloud-assignment.json`，以试运行启动目标账号。页面收到有效运行心跳后，由客户在同一行扫码。若二维码过期，可在云电脑的企微登录窗口刷新。试运行期间暂停自动发送。分配超时会保留预留，部署人员可查同机 `logs/update.log` 并恢复交互桌面。任何有客户数据的云电脑重新入池前都需要履行设备退役与清理流程。
