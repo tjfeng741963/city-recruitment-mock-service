@@ -7,6 +7,9 @@ export interface InterviewPoint {
   address: string;
   interview_time?: string;
   checkin_guide?: string;
+  /** 位置卡坐标：客户问定位时拼高德链接用（从企微位置消息里读出来的真实坐标） */
+  lng?: number;
+  lat?: number;
 }
 
 export function normalizeInterviewPoints(value: unknown): InterviewPoint[] {
@@ -19,8 +22,12 @@ export function normalizeInterviewPoints(value: unknown): InterviewPoint[] {
     const address = typeof point.address === "string" ? point.address.trim() : "";
     const interviewTime = typeof point.interview_time === "string" ? point.interview_time.trim() : "";
     const checkinGuide = typeof point.checkin_guide === "string" ? point.checkin_guide.trim() : "";
+    const lng = Number(point.lng);
+    const lat = Number(point.lat);
+    const hasCoord = Number.isFinite(lng) && Number.isFinite(lat) && lng !== 0 && lat !== 0;
     return name ? [{
       name, address,
+      ...(hasCoord && { lng, lat }),
       ...(interviewTime && { interview_time: interviewTime }),
       ...(checkinGuide && { checkin_guide: checkinGuide }),
     }] : [];

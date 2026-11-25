@@ -90,6 +90,27 @@ function safeJson(raw: string | null | undefined): Record<string, unknown> {
   }
 }
 
+/**
+ * 客户明确要定位/导航时，用面试点坐标拼一条高德链接追加到回复末尾。
+ * 企微位置卡的原生发送还没接入，这条链接客户点开就能导航，效果等价。
+ * 坐标来自企微位置消息（content_type=6）里读出来的真实经纬度。
+ */
+function buildMapLink(question: string, facts: Record<string, unknown>): string {
+  const q = question.normalize("NFC").trim();
+  if (!/定位|导航|地图|怎么走|怎么去|在哪|地址/.test(q)) return "";
+  if (/宿舍|住宿|食堂|餐厅|工资|薪资|待遇/.test(q)) return "";
+  const points = Array.isArray(facts.interview_points)
+    ? (facts.interview_points as Array<Record<string, unknown>>)
+    : [];
+  const withCoord = points.filter(p => Number(p.lng) && Number(p.lat));
+  if (!withCoord.length) return "";
+  const mentioned = withCoord.filter(p => q.includes(String(p.name ?? "")));
+  const point = withCoord.length === 1 ? withCoord[0] : mentioned[0];
+  if (!point) return "";
+  const name = encodeURIComponent(String(point.name ?? "面试地点"));
+  return `导航：https://uri.amap.com/marker?position=${point.lng},${point.lat}&name=${name}`;
+}
+
 function positionRow(db: DatabaseSync, positionId: number): PositionRow | undefined {
   return db
     .prepare(
@@ -999,6 +1020,19 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
           resolved.push(message);
         }
         replyPayload.messages = resolved;
+      }
+
+      // 客户问定位/导航且有面试点坐标 → 在第一条文本回复末尾补一条高德链接。
+      // 位置卡原生发送尚未接入，先用链接保证客户能直接导航过去。
+      // 注意面试点只在岗位原始 data_json 里，facts 不输出 interview_points。
+      const mapLink = buildMapLink(input, safeJson(row.data_json));
+      if (mapLink) {
+        const firstText = replyPayload.messages.find(
+          (m): m is { type: string; content: string } =>
+            !!m && typeof m === "object" && (m as Record<string, unknown>).type === "text"
+            && typeof (m as Record<string, unknown>).content === "string",
+        );
+        if (firstText) firstText.content = `${firstText.content}\n${mapLink}`;
       }
 
       if (body.preview === true) return {
