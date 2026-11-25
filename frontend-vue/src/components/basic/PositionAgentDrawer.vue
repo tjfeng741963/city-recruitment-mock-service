@@ -76,7 +76,7 @@
               <el-button :loading="uploading" @click="pickMedia()">上传素材</el-button>
               <input ref="fileInput" type="file" class="hidden-input" :accept="acceptOf(draft.kind)" @change="onMediaFile" />
             </div>
-            <el-input v-model="draft.content" placeholder="配文（可选）" class="media-caption" />
+            <el-input v-model="draft.content" placeholder="前置文本（可选）：保存后会拆成一条独立文本，排在素材前面发送" class="media-caption" />
           </template>
           <el-form-item v-if="!embedded" label="间隔（秒）" class="delay-row">
             <el-input-number v-model="delaySeconds" :min="2" :max="120" controls-position="right" />
@@ -430,17 +430,42 @@ async function saveDraft(): Promise<void> {
     return
   }
   savingOpening.value = true
+  const positionId = props.position.id
+  // 媒体项不再自带配文：配文拆成独立文本项，排在媒体前面。
+  // 这样发送顺序是「文本 → 图片/视频」，客户先看到说明再看到素材；
+  // 也避免客户端媒体分支只发素材、把配文整段丢掉（2026-11-25 实测）。
+  const caption = entry.kind !== 'text' ? entry.content.trim() : ''
   try {
     const payload = {
-      position_id: props.position.id,
+      position_id: positionId,
       kind: entry.kind,
-      content: entry.content,
+      content: caption ? '' : entry.content,
       media_name: entry.media_name,
       delay_ms: entry.delay_ms,
     }
     if (entry.id) await agentApi.updateOpening(entry.id, payload)
     else await agentApi.createOpening(payload)
-    ElMessage.success(entry.id ? '已保存' : '已添加')
+
+    if (caption) {
+      const { data } = await agentApi.createOpening({
+        position_id: positionId,
+        kind: 'text',
+        content: caption,
+        media_name: '',
+        delay_ms: entry.delay_ms,
+      })
+      const newId = Number((data as Record<string, unknown>)?.id)
+      // 新增时文本天然排在媒体后建之前，只有编辑已有媒体项才需要挪到它前面
+      if (entry.id && newId) {
+        const { data: persona } = await agentApi.personaGet(positionId)
+        const ids = ((persona.openings || []) as unknown as PersonaOpening[]).map(item => item.id)
+        const mediaIndex = ids.indexOf(entry.id)
+        const reordered = ids.filter(id => id !== newId)
+        reordered.splice(mediaIndex < 0 ? reordered.length : mediaIndex, 0, newId)
+        await agentApi.reorderOpenings({ position_id: positionId, ids: reordered })
+      }
+    }
+    ElMessage.success(caption ? (entry.id ? '已保存，配文已拆成前置文本' : '已添加，配文已拆成前置文本') : (entry.id ? '已保存' : '已添加'))
     editorVisible.value = false
     draft.value = null
     await load()
