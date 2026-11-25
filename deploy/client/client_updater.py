@@ -29,13 +29,15 @@ MAX_ARCHIVE_BYTES = 32 * 1024 * 1024
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_TOTAL_UNCOMPRESSED_BYTES = 24 * 1024 * 1024
 MAX_FILES = 96
+CLOUD_AGENT_MARKER = "cloud-agent-pool.json"
+CLOUD_AGENT_BACKUP = "config.before-cloud-assignment.json"
 DEPENDENCY_BASELINE = {
     "agent/pyproject.toml": "a41401ea6a1ad247d13b089ed60251f43baa78a7cec654ac4d7b8cd96a879268",
     "agent/uv.lock": "8e97344942c62084d9f64f39b5a4c96d2ee2cb18be58f7bcc54a104a3b32eeef",
 }
 CLIENT_PATHS = frozenset({
     "_verify_clipboard.py", "autopilot.py", "brain.py", "client.py", "collector.py",
-    "compat.py", "echo_guard.py", "flow_state.py", "login_qr.py", "login_refresh.py", "login_watch.py",
+    "compat.py", "echo_guard.py", "flow_state.py", "location_card.py", "login_qr.py", "login_refresh.py", "login_watch.py",
     "main.py", "media_fetch.py", "register.py", "remote_config.py", "reply_store.py",
     "screenshot.py", "sender.py", "wecomcracker.py", "client_updater.py", "client-startup.cmd",
     "client_manager.py", "client_manager_service.py", "client-manager.vbs",
@@ -478,13 +480,147 @@ def _release_mutex(handle: Any) -> None:
         ctypes.windll.kernel32.CloseHandle(handle)
 
 
+def cloud_agent_config(root: Path) -> tuple[str, str] | None:
+    marker = root / CLOUD_AGENT_MARKER
+    if not marker.is_file():
+        return None
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8-sig"))
+        code = data["machine_code"]
+        origin = data["origin"]
+        parsed = urlsplit(origin)
+        if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", code) or parsed.scheme != "https"
+                or not parsed.hostname or parsed.username or parsed.password or parsed.path not in ("", "/")
+                or parsed.query or parsed.fragment or origin != origin.strip()):
+            raise ValueError("invalid pool configuration")
+        return code, origin.rstrip("/")
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        raise UpdateError("云电脑待分配配置无效，需要有效的 HTTPS 地址和机器编号。") from exc
+
+
+def _read_cloud_client_config(root: Path) -> dict:
+    try:
+        data = json.loads((root / "config.json").read_text(encoding="utf-8-sig"))
+        if not isinstance(data, dict):
+            raise ValueError("expected an object")
+        return data
+    except (OSError, ValueError) as exc:
+        raise UpdateError("云电脑客户端配置无法读取。") from exc
+
+
+def _valid_cloud_assignment_id(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f-]{36}", value) is not None
+
+
+def _require_fresh_cloud_machine(root: Path, manager) -> None:
+    status = manager.status()
+    if status["running"] or status["other_running"]:
+        raise UpdateError("这台云电脑有正在运行的客户端，请先核对。")
+    profile = os.environ.get("USERPROFILE")
+    if ((root / "reply_log.db").exists() or (root / "_decrypted" / "message.db").exists()
+            or profile and next((Path(profile) / "Documents" / "WXWork").glob("*/Data/message.db"), None)):
+        raise UpdateError("这台云电脑已有企微或回复数据，请核对后再登记为空闲机器。")
+
+
+def apply_cloud_agent_assignment(root: Path, manager, pool: tuple[str, str], assignment: object) -> bool:
+    machine, origin = pool
+    if not isinstance(assignment, dict):
+        raise UpdateError("云电脑分配响应格式无效。")
+    code, token, assignment_id = (assignment.get(key) for key in ("device_code", "bridge_token", "id"))
+    if (not isinstance(code, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", code)
+            or code == machine or not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{64}", token)
+            or not _valid_cloud_assignment_id(assignment_id)):
+        raise UpdateError("云电脑分配响应格式无效。")
+    mutex = _acquire_mutex()
+    try:
+        if (root / "logs" / "manual-stop").exists():
+            return False
+        current = _read_cloud_client_config(root)
+        if current.get("device_code") == machine:
+            _require_fresh_cloud_machine(root, manager)
+            backup = root / CLOUD_AGENT_BACKUP
+            payload = {"device_code": code, "bridge_server": origin, "bridge_token": token, "dry_run": True,
+                       "brain": {"mode": "agent"}, "cloud_assignment_id": assignment_id}
+            with tempfile.TemporaryDirectory(prefix=".cloud-assignment-", dir=root) as stage:
+                if not backup.exists():
+                    staged_backup = Path(stage) / backup.name
+                    shutil.copy2(root / "config.json", staged_backup)
+                    os.replace(staged_backup, backup)
+                file = Path(stage) / "config.json"
+                file.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+                os.replace(file, root / "config.json")
+        elif current.get("device_code") != code or current.get("cloud_assignment_id") != assignment_id:
+            raise UpdateError("这台云电脑已经有接待账号。")
+    finally:
+        _release_mutex(mutex)
+    return _start_assigned_cloud_client(manager)
+
+
+def _start_assigned_cloud_client(manager) -> bool:
+    status = manager.status()
+    if status["other_running"] or status["running"] > 1:
+        raise UpdateError("这台云电脑有其他正在运行的客户端。")
+    return bool(status["running"]) or manager.start_on_logon()
+
+
+class _NoCloudRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def wait_for_cloud_agent(root: Path, manager) -> bool:
+    from client_manager_service import require_interactive_session
+
+    pool = cloud_agent_config(root)
+    if pool is None:
+        raise UpdateError("缺少云电脑待分配配置。")
+    machine, origin = pool
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoCloudRedirect())
+    last_error = ""
+    while not (root / "logs" / "manual-stop").exists():
+        try:
+            require_interactive_session()
+            current = _read_cloud_client_config(root)
+            if current.get("device_code") != machine:
+                if not _valid_cloud_assignment_id(current.get("cloud_assignment_id")):
+                    raise UpdateError("这台云电脑已经有接待账号。")
+                return _start_assigned_cloud_client(manager)
+            _require_fresh_cloud_machine(root, manager)
+            token = current.get("bridge_token")
+            if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{64}", token):
+                raise UpdateError("云电脑凭据无效。")
+            url = f"{origin}/api/v1/bridge/devices/{machine}/cloud-assignment"
+            request = urllib.request.Request(url, method="POST", headers={"Authorization": f"Bearer {token}"})
+            with opener.open(request, timeout=8) as response:
+                result = json.loads(response.read(16384))
+            if isinstance(result, dict) and result.get("assignment") is not None:
+                return apply_cloud_agent_assignment(root, manager, pool, result["assignment"])
+            last_error = ""
+        except urllib.error.HTTPError as exc:
+            error = f"cloud agent pairing HTTP {exc.code}"
+            if error != last_error:
+                _log_event(root, error)
+                last_error = error
+        except (UpdateError, ValueError, OSError, subprocess.SubprocessError) as exc:
+            error = f"cloud agent pairing waiting: {type(exc).__name__}"
+            if error != last_error:
+                _log_event(root, error)
+                last_error = error
+        time.sleep(15)
+    return False
+
+
 def main() -> int:
     from client_manager_service import ManagerService
 
     try:
         _log_event(ROOT, "starting the installed client")
         manager = ManagerService(ROOT)
-        if "--supervise" in sys.argv[1:]:
+        supervise = "--supervise" in sys.argv[1:]
+        if "--cloud-agent" in sys.argv[1:] or (supervise and (ROOT / CLOUD_AGENT_MARKER).is_file()):
+            if wait_for_cloud_agent(ROOT, manager) and supervise:
+                manager.supervise()
+        elif supervise:
             if manager.start_on_logon():
                 manager.supervise()
         else:

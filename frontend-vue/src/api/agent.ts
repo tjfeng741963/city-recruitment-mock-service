@@ -28,6 +28,7 @@ export interface AgentDeviceFactory {
 
 export interface AgentDeviceItem extends AgentDevice {
   is_enabled?: boolean
+  cloud_assignment?: CloudAgentAssignment
   windows_runtime?: { connected: boolean; wecom_available: boolean; reply_ready: boolean; reason: string;
     sync: 'unknown' | 'current' | 'catching_up' | 'error'; backlog: number }
   bridge_state?: 'online' | 'offline' | 'scanning'
@@ -44,6 +45,12 @@ export interface AgentDeviceItem extends AgentDevice {
   created_at?: string
   device_name?: string
 }
+
+export interface CloudAgentAssignment {
+  state: 'available' | 'unavailable' | 'requested' | 'assigning' | 'waiting' | 'connected'
+}
+
+export interface CloudAgentMachine { code: string; name: string }
 
 export interface DeviceGroup {
   id?: number | string
@@ -75,6 +82,11 @@ export interface WorkflowResult {
 
 export const devicesApi = {
   list: (params: PageQuery = {}) => http.get<{ items: AgentDeviceItem[] }>('/api/v1/agent/devices', { params }),
+  requestCloudAgent: (code: string) =>
+    http.post<CloudAgentAssignment>(`/api/v1/agent/cloud-agent/${encodeURIComponent(code)}`),
+  cloudAgentMachines: () => http.get<{ items: CloudAgentMachine[] }>('/api/v1/agent/cloud-agent/machines'),
+  assignCloudAgent: (code: string, machine_code: string) =>
+    http.put<CloudAgentAssignment>(`/api/v1/agent/cloud-agent/${encodeURIComponent(code)}`, { machine_code }),
   create: (payload: Record<string, unknown>) => http.post<AgentDeviceItem>('/api/v1/agent/devices', payload),
   update: (id: number | string, payload: Record<string, unknown>) =>
     http.put<AgentDeviceItem>(`/api/v1/agent/devices/${id}`, payload),

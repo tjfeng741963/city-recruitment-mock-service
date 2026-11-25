@@ -77,6 +77,17 @@ Key 由服务端加密保存，接口响应只显示是否配置。同一地址�
 
 支持新版运行状态的设备会附带 windows_runtime，包含 connected、wecom_available、reply_ready、reason、sync、backlog。桥接心跳可上报 runtime，服务器只保存状态枚举与计数。超过 60 秒未刷新则标记离线并停止领取网页发送指令。旧客户端继续使用原心跳契约。
 
+`GET /api/v1/agent/devices` 的 `items[]` 附带 `cloud_assignment.state`，可为 `available`（可申请）、`unavailable`、`requested`、`assigning`、`waiting`（超过两分钟仍待客户端）、`connected`（本次配对收到过有效心跳）。当前是否在线以心跳状态为准。登记进空闲池的机器仅在管理员选机接口展示。
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| POST | `/api/v1/agent/cloud-agent/:code` | 为有权限查看且尚未配对的账号提交站内申请。重复提交返回当前状态。 |
+| GET | `/api/v1/agent/cloud-agent/machines` | 管理员读取已登记且在线空闲的云电脑，返回 `{items:[{code,name}]}`。 |
+| PUT | `/api/v1/agent/cloud-agent/:code` | 管理员提交 `{machine_code}`，原子预留云电脑。账号或机器已被占用时返回 409。 |
+| POST | `/api/v1/bridge/devices/:code/cloud-assignment` | 预装云电脑通过可信 HTTPS 用独立机器令牌轮询。返回 `{assignment:null}` 或当前待应用的 `{assignment:{id,device_code,bridge_token}}`。凭据仅返回给已分配的机器，响应禁止缓存。 |
+
+分配后的 Windows 心跳使用可信 HTTPS，并上报有效的 `runtime`。目标账号凭本次凭据上报 `scanning` 或 `online` 后，分配才会完成。待配对期间，常规配对或自注册试图换发目标账号及预留机器的凭据会返回 `409`。
+
 账号列表的 `position_id`、`factory_ids` 和 `factories` 按 Windows 已确认的回复来源返回。Agent 显示一个接待岗位和该岗位所属工厂，Dify 显示默认岗位和多工厂接待范围。保存接待设置时，`PUT /api/v1/agent/devices/:id` 按当前来源写入对应配置。网页提交 `expected_reply_provider`，来源已变化或正在切换时返回 409。旧账号沿用原接待岗位，Dify 的多工厂配置随切换保留。
 
 GET /api/v1/agent/devices/:code/login-qr 保留原 available 与可用图片字段。另返回 login_status，区分 logged_in、waiting_for_scan、waiting_for_qr、qr_expired、disconnected、device_disabled 和 authorization_failed。新鲜企微登录心跳可确认登录完成，超过两分钟的二维码截图不再返回。限时安全验证由操作者在 Win 的官方企业微信窗口完成。
@@ -85,7 +96,7 @@ GET /api/v1/agent/devices/:code/login-qr 保留原 available 与可用图片字�
 
 `GET /api/v1/agent/devices/:code/verify-code` 仅接受该启用设备自己的桥接令牌。返回 `{available: true, code, at}` 后立即清除验证码，未提交、已领取或已过期时返回 `{available: false}`。响应禁止缓存。网页从 `login-qr` 读取本次提交的可选状态 `verification_status`，包括 `pending`（待领取）、`received`（服务端已下发）、`expired`（两分钟内未领取）与 `unconfirmed`（下发一分钟后仍未确认登录）。登录成功沿用企微登录心跳。
 
-POST /api/v1/agent/devices/:code/login-qr/refresh 让客户端刷新登录二维码。只在设备启用且桥接状态 online 时接受，写一条 `kind=refresh_login_qr` 的指令（无正文、不关联客户）；同一设备 60 秒内重复请求只入队一条，返回 `{queued, command_id, deduped}`。客户端领到后点击企微登录窗的「刷新」，等待约 4 秒再立即截取新码上传；超过 5 分钟未领取的指令作废。该指令不受「回复就绪」门槛限制——二维码过期时本来就无法回复。
+POST /api/v1/agent/devices/:code/login-qr/refresh 让客户端刷新登录二维码。设备启用且最近 60 秒内有桥接心跳时，写一条 `kind=refresh_login_qr` 的指令（无正文、不关联客户）；同一设备 60 秒内重复请求只入队一条，返回 `{queued, command_id, deduped}`。客户端领到后点击企微登录窗的「刷新」，等待约 4 秒再立即截取新码上传；超过 5 分钟未领取的指令作废。云上 Agent 在试运行期间需在云电脑的企微窗口刷新，调用此接口会返回 `409`。
 
 账号页“工作流配置”统一进入话术流程画布。系统 Agent 按绑定的岗位打开流程，Dify 用 `/recruitment-flow?test_engine=dify&device_code=...` 打开接待测试，并选中有权访问的账号。旧 `/dify-connection` 返回 302，保留设备码和岗位参数。账号回复来源仍由专用接口读取和显式保存，模拟回复通过隔离预览接口调用。
 

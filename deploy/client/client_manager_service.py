@@ -373,6 +373,9 @@ class ManagerService:
     def _start_locked(self) -> int:
         self._require_stopped()
         require_interactive_session()
+        pool = updater.cloud_agent_config(self.root)
+        if pool and updater._read_cloud_client_config(self.root).get("device_code") == pool[0]:
+            raise updater.UpdateError("云电脑正在等待网页分配，请在微信账号页先分配接待账号。")
         for name in ("autopilot.py", "login_code.py", "pilot-hidden.vbs", "start-pilot.cmd", "config.json"):
             if not (self.root / name).is_file():
                 raise updater.UpdateError(f"启动所需文件缺失：{name}。")

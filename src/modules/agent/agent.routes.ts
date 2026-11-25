@@ -1,6 +1,7 @@
 import { replyModePending, replyModeRow } from "../dify/reply-mode-transition.js";
 import type { FastifyInstance } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
+import { cloudAgentStatus, isAssignedCloudAgent, isCloudAgentPoolMachine } from "./cloud-agent-assignment.js";
 import { difyDashboard } from "../dify/dify-context.js";
 import { serializeAgentDevice, serializeStatusDashboard } from "../../shared/response-serializers.js";
 import { canAccessDevice, deviceConstraint, getUserScope } from "../../auth/user-scopes.js";
@@ -155,11 +156,16 @@ export function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync, noti
               last_heartbeat_at: bridge.heartbeat_at > 0 ? new Date(bridge.heartbeat_at).toISOString() : null,
             });
           }
-          return { ...serialized, is_enabled: row.status === "enabled", factory_ids: factoryIds, factories: loadFactories(db, factoryIds) };
+          return { ...serialized, is_enabled: row.status === "enabled",
+            cloud_assignment: cloudAgentStatus(db, Number(row.id), String(serialized.device_code ?? ""), row.status === "enabled"),
+            factory_ids: factoryIds, factories: loadFactories(db, factoryIds) };
         })
         // 过滤参数用显式断言：展开后的对象类型不带索引签名，
         // 直接取 device_code 会报 TS2339（与运行时无关，纯粹是类型推断的坑）。
-        .filter((row) => canAccessDevice(scope, String((row as Record<string, unknown>).device_code ?? ""))),
+        .filter((row) => {
+          const code = String((row as Record<string, unknown>).device_code ?? "");
+          return !isCloudAgentPoolMachine(code) && canAccessDevice(scope, code);
+        }),
     };
   });
   app.post<{ Body: Record<string, unknown> }>("/api/v1/agent/devices", async (request, reply) => {
@@ -195,6 +201,10 @@ export function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync, noti
       return reply.code(404).send({ detail: "设备不存在" });
     }
     const body = request.body ?? {};
+    if (Object.hasOwn(body, "device_code") && body.device_code !== data.device_code &&
+        db.prepare("SELECT 1 FROM cloud_agent_assignments WHERE account_id=?").get(id)) {
+      return reply.code(409).send({ detail: "云上 Agent 申请已登记，请保留原客户端标识" });
+    }
     const merged = { ...data, ...body } as Record<string, unknown>;
     const code = String(data.device_code ?? "");
     const mode = replyModeRow(db, code);
@@ -266,6 +276,9 @@ export function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync, noti
     const row = db.prepare("SELECT data_json FROM agent_devices WHERE id=?").get(id) as { data_json: string } | undefined;
     const data = row ? JSON.parse(row.data_json || "{}") as Record<string, unknown> : {};
     if (!row || !canAccessDevice(getUserScope(db, request.auth!), String(data.device_code ?? ""))) return reply.code(404).send({ detail: "Device not found" });
+    if (db.prepare("SELECT 1 FROM cloud_agent_assignments WHERE account_id=? AND machine_code IS NOT NULL").get(id)) {
+      return reply.code(409).send({ detail: "该账号已分配云电脑，请联系管理员处理" });
+    }
     db.exec("BEGIN IMMEDIATE");
     try {
       const result = db.prepare("DELETE FROM agent_devices WHERE id=?").run(id);
@@ -399,6 +412,7 @@ export function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync, noti
         .get(code) as { status: string } | undefined;
       if (!device) return reply.code(404).send({ detail: "设备不存在" });
       if (String(device.status) !== "enabled") return reply.code(409).send({ detail: "设备已停用，启用后才能刷新二维码" });
+      if (isAssignedCloudAgent(db, code)) return reply.code(409).send({ detail: "试运行期间请在云电脑的企微登录窗口刷新二维码" });
       // 二维码过期=未登录，设备在服务端就是 offline/scanning，不能按 online 拦。
       // 只要求心跳新鲜（60 秒内），证明客户端进程和网络都活着、指令领得走。
       const bridge = bridgeStore.status(code);
