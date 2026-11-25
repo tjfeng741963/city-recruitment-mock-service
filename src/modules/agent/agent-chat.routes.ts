@@ -16,6 +16,8 @@ import { difyGroupNotificationState } from "../dify/dify-group-notification.js";
 import { normalizeInterviewPoints, normalizePositionFacts } from "../../shared/position-facts.js";
 import { previewFavoriteLocation } from "../../shared/favorite-location.js";
 import { positionKnowledge } from './position-knowledge.js';
+import { faqMediaForQuestion, normalizeFaqUtterance } from "./faq-media.js";
+import { difySendDelays } from "../dify/dify-invitation.js";
 import { listExecutionTraces, newExecutionTraceId, writeExecutionTrace } from "./execution-trace.js";
 import { updateExecutionTraceDelivery } from "./execution-trace.js";
 import {
@@ -837,7 +839,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       const admin = isAdmin(request);
       return generateDifyReply(db, { deviceCode, positionId: positionOfDevice(db, deviceCode),
         sessionKey: admin && body.dry !== true ? `admin:${request.auth?.id}:${text(body.session_key).trim().slice(0,100)}` : text(body.session_key).trim().slice(0,120),
-        text: input, dry: body.dry === true, ordered: body.ordered_reply === true,
+        text: input, dry: body.dry === true, ordered: body.ordered_reply === true, faqMedia: body.faq_media === true && body.ordered_reply === true,
         turnId: !admin && /^[A-Za-z0-9_-]{1,80}$/.test(text(body.turn_id)) ? text(body.turn_id) : undefined,
         canWriteRegistration: hasDifyDeviceToken(db,request,deviceCode) });
     }
@@ -923,7 +925,9 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
     // 编排：system(人设+今天日期+事实+话术库+规则) + 开场序列 + 全量历史 + 当前这句
     // （DeepSeek 无状态多轮拼接；上下文归服务端持有）
     const knowledge = positionKnowledge(db, positionId, facts);
-    const { messages, scripts } = buildOrchestration({ persona, facts, opening, now: nowLabel, history, input, sentSummary, knowledge });
+    const faqMatch = (body.faq_media === true && body.ordered_reply === true) || body.preview === true || body.dry === true
+      ? faqMediaForQuestion(db, positionId, input, knowledge) : undefined;
+    const { messages, scripts } = buildOrchestration({ persona, facts, opening, now: nowLabel, history, input, sentSummary, knowledge, mediaFaqAnswer: faqMatch?.answer });
     const traceId = newExecutionTraceId();
     const traceBase = {
       traceId, sessionKey, deviceCode, positionId, engine: "agent" as const,
@@ -964,6 +968,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         facts,
         persona,
         position_id: positionId,
+        ...(faqMatch && { faq_media_candidate: { id: faqMatch.faq_id, question: faqMatch.question } }),
         ...(favoriteLocation && { favorite_location_preview: favoriteLocation }),
         scripts: scripts.map((script) => ({ id: script.id, title: script.title })),
       };
@@ -1070,8 +1075,23 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         }
       }
 
+      const currentFaq = faqMatch && faqMediaForQuestion(db, positionId, input,
+        positionKnowledge(db, positionId, buildFacts(db, positionRow(db, positionId))));
+      const faqEvidence = faqMatch && currentFaq && JSON.stringify(currentFaq) === JSON.stringify(faqMatch)
+        && !locationCard && !replyPayload.handoff && !replyPayload.done
+        && !Object.values(replyPayload.capture).some(Boolean) && !Object.values(replyPayload.interview).some(Boolean)
+        && replyPayload.messages.filter(item => item.type === "text").length === 1
+        && replyPayload.messages[0]?.type === "text"
+        && normalizeFaqUtterance(replyPayload.messages[0].content || "") === normalizeFaqUtterance(faqMatch.answer)
+        ? { id: faqMatch.faq_id, question: faqMatch.question } : undefined;
+      const planned = faqEvidence && faqMatch
+        ? { messages: [...replyPayload.messages.flatMap(item => item.type === "text" ? [{ type: "text" as const, content: item.content || "" }] : []), ...faqMatch.messages.slice(1)],
+            faq: faqEvidence }
+        : undefined;
+      const orderedReply = planned && { ...replyPayload, ...planned, delays_before_ms: difySendDelays(planned.messages) };
+
       if (body.preview === true) return {
-        ok: true, preview: true, reply: replyPayload, facts, knowledge,
+        ok: true, preview: true, reply: orderedReply || replyPayload, facts, knowledge,
         model: result.model, usage: result.usage, latency_ms: result.latency_ms,
         ...(locationCard && { location_card: locationCard }),
         ...(favoriteLocation && { favorite_location_preview: favoriteLocation }),
@@ -1219,14 +1239,14 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         model: result.model,
         usage: result.usage,
         latency_ms: result.latency_ms,
-        reply: replyPayload,
+        reply: orderedReply || replyPayload,
       });
       return {
         ok: true,
         trace_id: traceId,
         evidence,
         session_key: sessionKey || null,
-        reply: replyPayload,
+        reply: orderedReply || replyPayload,
         archive: archive,
         raw: result.content,
         model: result.model,

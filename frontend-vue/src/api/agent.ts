@@ -416,7 +416,7 @@ export const agentApi = {
       error?: string
       inputs?: { position_data: string }
       favorite_location_preview?: import('../components/agent/favorite-location-preview').FavoriteLocationPreview
-      reply?: { messages: Array<{content: string}> }
+      reply?: { messages: Array<{content: string; type?: string; name?: string}>; faq?: { id: number; question: string } }
       latency_ms?: number
     }>('/api/v1/dify/preview', payload, { timeout: 40000, signal }),
   executionTraces: (params: PageQuery = {}) =>

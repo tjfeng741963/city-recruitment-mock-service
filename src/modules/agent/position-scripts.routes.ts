@@ -135,18 +135,19 @@ export async function registerPositionScriptRoutes(app: FastifyInstance, db: Dat
     if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
     // 素材库面板：带岗位绑定回显（0=通用池），岗位名 join 供下拉展示
     const rows = db.prepare(
-      `SELECT m.id, m.name, m.kind, m.sha256, m.bytes, m.position_id,
+      `SELECT m.id, m.name, m.kind, m.sha256, m.bytes, m.position_id, m.storage_path,
               p.position_name AS position_name
          FROM media_assets m
          LEFT JOIN service_positions p ON p.id = m.position_id
         WHERE m.status='enabled' ORDER BY m.id`,
-    ).all() as Array<{ id: number; name: string; kind: string; sha256: string; bytes: number; position_id: number; position_name: string | null }>;
+    ).all() as Array<{ id: number; name: string; kind: MediaKind; sha256: string; bytes: number; position_id: number; position_name: string | null; storage_path: string }>;
     return {
       items: rows.map((row) => ({
         id: Number(row.id), name: String(row.name), kind: String(row.kind),
         sha256: String(row.sha256), bytes: Number(row.bytes ?? 0),
         position_id: Number(row.position_id ?? 0),
         position_name: row.position_name ?? null,
+        supports_faq: Boolean(difyMediaName(row)),
       })),
       total: rows.length,
     };

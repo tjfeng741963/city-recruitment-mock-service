@@ -50,6 +50,7 @@ export interface KnowledgeItem {
   question: string
   answer: string
   keywords: string[]
+  media?: string[]
   status: string
   is_active: boolean
   sort_order: number
@@ -69,6 +70,7 @@ export interface KnowledgeDraft {
   question: string
   answer: string
   keywords: string[]
+  media?: string[]
   vertical_id: number | null
   scope_level: string
   scope_location_id: number | null
@@ -232,6 +234,7 @@ function mapFaqRow(row: Record<string, unknown>): KnowledgeItem {
     question: asString(row.question),
     answer: asString(row.answer),
     keywords: asStringList(row.keywords),
+    media: asStringList(row.media),
     status: asString(row.status, 'enabled'),
     is_active: asString(row.status, 'enabled') === 'enabled',
     sort_order: asNumber(row.priority ?? row.sort_order),
@@ -365,6 +368,7 @@ function toFaqPayload(draft: KnowledgeDraft): Record<string, unknown> {
     question: draft.question.trim(),
     answer: draft.answer.trim(),
     keywords: draft.keywords,
+    ...(draft.media && { media: draft.media }),
     vertical_id: draft.vertical_id,
     scope_level: draft.scope_level,
     scope_location_id: draft.scope_level === 'city' ? draft.scope_location_id : null,

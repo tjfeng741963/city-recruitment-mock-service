@@ -2004,6 +2004,18 @@ def _send_dify_plan(store: Store, name: str, cid: str, plan: list[dict], log_fn)
     return status, detail, confirmed
 
 
+def _send_faq_plan(store: Store, cfg: dict, name: str, cid: str, plan: list[dict], log_fn) -> tuple[str, str, int]:
+    """Send the FAQ text while the current media sender lacks a pre-send recipient check."""
+    reason = _sequence_block_reason(cid, cfg, _reply_source_identity(), store, name)
+    if reason:
+        return "blocked", reason, 0
+    status, detail, _ = _send_text(store, name, cid, plan[0]["content"], route="auto", log_fn=log_fn)
+    if status != "sent":
+        return status, detail, 0
+    labels = "、".join({"image": "图片", "video": "视频"}[step["type"]] for step in plan[1:])
+    return "blocked", f"文字已回读；{labels}待核验发送前的目标会话，未自动发送", 1
+
+
 def _location_value(card: object) -> dict | None:
     if not isinstance(card, dict):
         return None
@@ -2534,6 +2546,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         preview = (it["in_text"] or "").strip()[:20].replace("\n", " ") or f"[type={it['in_type']}]"
         agent_medias: list[tuple[str, str]] = []
         dify_plan: list[dict] = []
+        faq_media_plan = False
 
         if is_system_conv(cid, name):
             if not dry:
@@ -2939,6 +2952,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     agent_medias = res.get("medias") or []
                     agent_card = res.get("location_card") or None
                     dify_plan = res.get("plan") or []
+                    faq_media_plan = res.get("faq_media") is True
                 if res.get("code") == "reply_mode_pending":
                     stats["blocked"] += 1
                     break  # The server generated no reply. Keep the inbound pending.
@@ -3013,7 +3027,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
 
         # 真正按键之前先把素材补到本地：send.paste_media 只认本地文件，
         # 缺文件它只会打一行"未找到"。这里失败也不阻断，文字照发。
-        if dify_plan:
+        if dify_plan and not faq_media_plan:
             dify_media = [(step["type"], step["name"]) for step in dify_plan if step["type"] != "text"]
             ready_media = media_fetch.prefetch(dify_media, base_url=(cfg.get("bridge_server") or "").strip(),
                                                token=(cfg.get("bridge_token") or "").strip(), log=log)
@@ -3023,7 +3037,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 _last_error = detail
                 stats["blocked"] += 1
                 continue
-        else:
+        elif not dify_plan:
             _prefetch_media(parts, cfg)
 
         # 按键之前先确认剪贴板可写，避免 Ctrl+F 打开搜索框后才卡住
@@ -3054,7 +3068,11 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             # "零成本"立即打下一个会话（2026-11-16 掉登录事故的操作模式）。
             _last_reply_at = time.time()
             status, detail = "failed", "未发送"
-            if dify_plan:
+            if faq_media_plan:
+                status, detail, confirmed_parts = _send_faq_plan(
+                    store, cfg, name, cid, dify_plan, lambda msg: log(f"    {msg}", scope="send", message_id=mid, trace_id=trace),
+                )
+            elif dify_plan:
                 status, detail, confirmed_parts = _send_dify_plan(
                     store, name, cid, dify_plan, lambda msg: log(f"    {msg}", scope="send", message_id=mid, trace_id=trace),
                 )

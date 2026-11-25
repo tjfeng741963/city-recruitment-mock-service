@@ -62,3 +62,20 @@ def test_client_accepts_only_valid_server_plan(delays, valid):
     assert response["ok"] is valid
     if valid:
         assert response["plan"][1] == {"type": "video", "name": "work.mp4", "delay_ms": 5300}
+
+
+def test_faq_plan_confirms_text_and_holds_media_without_verified_recipient(monkeypatch):
+    agent = load_autopilot()
+    send_text = MagicMock(return_value=("sent", "readback", "id"))
+    send_media = MagicMock(return_value=("sent", "readback"))
+    monkeypatch.setattr(agent, "_sequence_block_reason", lambda *args: "")
+    monkeypatch.setattr(agent, "_send_text", send_text)
+    monkeypatch.setattr(agent, "_send_agent_media", send_media)
+    plan = [{"type": "text", "content": "现场图", "delay_ms": 0},
+            {"type": "image", "name": "a.png", "delay_ms": 1000},
+            {"type": "video", "name": "b.mp4", "delay_ms": 1000}]
+    status, detail, count = agent._send_faq_plan(MagicMock(), {}, "候选人", "S:contact", plan, MagicMock())
+    assert send_text.call_args.args[2] == "S:contact"
+    assert (status, count) == ("blocked", 1)
+    assert "文字已回读；图片、视频待核验" in detail
+    send_media.assert_not_called()

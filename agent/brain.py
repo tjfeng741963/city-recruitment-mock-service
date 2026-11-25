@@ -462,6 +462,7 @@ class Brain:
             "session_key": (session_key or "").strip()[:120],
             "text": (text or "")[:2000],
             "ordered_reply": True,
+            "faq_media": True,
         }
         if sent_summary is not None:
             payload["sent_summary"] = [str(item)[:500] for item in sent_summary[:50]]
@@ -484,7 +485,9 @@ class Brain:
             }
 
         reply = data.get("reply") or {}
-        if data.get("provider") == "dify" and "delays_before_ms" in reply:
+        faq = reply.get("faq")
+        is_faq = isinstance(faq, dict) and type(faq.get("id")) is int and faq["id"] > 0
+        if (data.get("provider") == "dify" or is_faq) and "delays_before_ms" in reply:
             messages = reply.get("messages")
             delays = reply["delays_before_ms"]
             plan = []
@@ -498,9 +501,12 @@ class Brain:
                         break
                     plan.append({"type": kind, key: item[key].strip(), "delay_ms": delay})
             if not valid or len(plan) != len(messages) or plan[0]["type"] != "text" or plan[0]["delay_ms"] != 0:
-                return {"ok": False, "detail": "Dify 发送计划格式无效"}
+                return {"ok": False, "detail": "有序回复的发送计划格式无效"}
+            if is_faq and [step["type"] for step in plan[1:]] not in (["image"], ["video"], ["image", "video"]):
+                return {"ok": False, "detail": "岗位问答素材顺序无效"}
             return {"ok": True, "trace_id": str(data.get("trace_id") or ""), "reply": plan[0]["content"],
-                    "plan": plan, "scene": "Dify", "detail": str(data.get("model") or "Dify")}
+                    "plan": plan, "scene": "岗位问答" if is_faq else "Dify",
+                    "faq_media": is_faq, "detail": str(data.get("model") or "Dify")}
         parts: list[str] = []
         medias: list[tuple[str, str]] = []
         for item in reply.get("messages") or []:
