@@ -411,27 +411,32 @@ def test_mode_transition_preserves_contact_until_the_effective_source_is_ready(a
 
 @pytest.mark.parametrize("kind", ["image", "video"])
 @pytest.mark.parametrize("delivery", ["confirmed", "missing", "other-chat", "ambiguous", "refresh-failed"])
-def test_agent_media_requires_unique_new_target_message_after_refresh(agent, store, kind, delivery):
+def test_agent_media_requires_unique_new_target_message_after_refresh(agent, store, kind, delivery, monkeypatch):
+    # 2026-11-25 起回读会重试（视频要等企微转码写库），测试里把等待抹掉
+    monkeypatch.setattr(agent.time, "sleep", lambda _s: None)
+    # 本版企微的真实落库类型：图片 14、视频 23（43/49/3/13 是旧版本）
+    ctype = 14 if kind == "image" else 23
     path = store.data_dir / "message.db"
     with sqlite3.connect(path) as con:
         con.execute("CREATE TABLE message_table(message_id INTEGER,conversation_id TEXT,sender_id TEXT,content_type INTEGER,send_time INTEGER)")
-        con.execute("INSERT INTO message_table VALUES(1,'S:own_new','own',?,100)", (3 if kind == "image" else 43,))
+        con.execute("INSERT INTO message_table VALUES(1,'S:own_new','own',?,100)", (ctype,))
     original = store._conn.side_effect
     store._conn.side_effect = lambda name: sqlite3.connect(path) if name == "message.db" else original(name)
     def paste(*args, **kwargs):
         if delivery not in ("missing", "refresh-failed"):
             with sqlite3.connect(path) as con:
                 con.execute("INSERT INTO message_table VALUES(2,?,'own',?,200)",
-                    ("S:own_other" if delivery == "other-chat" else "S:own_new", 3 if kind == "image" else 43))
+                    ("S:own_other" if delivery == "other-chat" else "S:own_new", ctype))
                 if delivery == "ambiguous":
-                    con.execute("INSERT INTO message_table VALUES(3,'S:own_new','own',?,200)", (3 if kind == "image" else 43,))
+                    con.execute("INSERT INTO message_table VALUES(3,'S:own_new','own',?,200)", (ctype,))
         return True, "Enter pressed"
     agent.core_send.paste_media.side_effect = paste
     if delivery == "refresh-failed":
         store.refresh.return_value = {"failed": 1}
     status, _ = agent._send_agent_media(store, "S:own_new", "asset", kind, MagicMock(), route="opening")
     assert status == ("sent" if delivery == "confirmed" else "unknown")
-    assert store.refresh.call_count == 1
+    # 确认成功刷一次就够；失败会重试到上限
+    assert store.refresh.call_count == (1 if delivery == "confirmed" else 4)
     agent.core_send.paste_media.assert_called_once()
 
 

@@ -1777,11 +1777,16 @@ def _media_outbound_snapshot(store: Store, cid: str, kind: str) -> set[str] | No
         con = store._conn("message.db")
         if con is None:
             return None
-        kinds = (3, 13) if kind == "image" else (43, 49)
+        # 2026-11-25 实测修正：本版企微把「粘贴发送的视频」落成 content_type=23
+        # （内容里直接带 `/安检.mp4` 文件名），图片落成 14。原来只查 43/49，
+        # 于是视频其实已经到达、回读却永远读不到，开场被硬生生截断在视频那一步。
+        # 老的 3/13（图片）、43/49（视频）保留，兼容别的企微版本。
+        kinds = (3, 13, 14) if kind == "image" else (23, 43, 49)
+        placeholders = ",".join("?" * len(kinds))
         with closing(con):
             return {str(row[0]) for row in con.execute(
-                "SELECT message_id FROM message_table WHERE conversation_id=? AND sender_id=? "
-                "AND content_type IN (?,?) ORDER BY send_time DESC,message_id DESC LIMIT 100",
+                f"SELECT message_id FROM message_table WHERE conversation_id=? AND sender_id=? "
+                f"AND content_type IN ({placeholders}) ORDER BY send_time DESC,message_id DESC LIMIT 100",
                 (cid, me, *kinds),
             )}
     except Exception:
@@ -1795,11 +1800,19 @@ def _send_agent_media(store: Store, cid: str, name: str, kind: str, log_fn, *, r
     status, detail = _send_media(name, log_fn, route=route)
     if status != "sent":
         return status, detail
-    try:
-        refresh_store(store)
-        after = _media_outbound_snapshot(store, cid, kind)
-    except Exception:
-        after = None
+    # 视频要等企微转码/写库，回车后不一定立刻能回读到：最多等 2 秒（4 次 × 0.5s）。
+    # 只认「恰好新增 1 条」——多出来说明有别的媒体在动，按不确定处理。
+    after = None
+    for attempt in range(4):
+        try:
+            refresh_store(store)
+            after = _media_outbound_snapshot(store, cid, kind)
+        except Exception:
+            after = None
+        if after is not None and len(after - before) == 1:
+            return "sent", detail
+        if attempt < 3:
+            time.sleep(0.5)
     if after is None or len(after - before) != 1:
         return "unknown", "未回读到目标会话中唯一的新媒体消息，请人工核对，不自动重发"
     return "sent", detail
