@@ -193,7 +193,11 @@ class Brain:
                         "synced_at": stamp, "provider": data.get("provider", "agent"),
                         "items": [{"seq": int(item.get("seq") or 0), "kind": str(item.get("kind") or "text"),
                             "content": str(item.get("content") or ""), "media_name": str(item.get("media_name") or ""),
-                            "delay_ms": int(item.get("delay_ms") if item.get("delay_ms") is not None else 2000)} for item in items],
+                            "delay_ms": int(item.get("delay_ms") if item.get("delay_ms") is not None else 2000),
+                            # 位置卡条目的坐标/地址/名称：autopilot 生成卡片要用。
+                            # 原来这里重建 item 时把 location 丢了，开场位置卡永远「缺坐标」被跳过。
+                            "location": item.get("location") if isinstance(item.get("location"), dict) else None}
+                            for item in items],
                         "detail": str(data.get("detail") or ("" if items else "岗位没有配置开场"))}
                     summary = {"position_id": position_id, "version": version, "synced_at": stamp}
                 else:

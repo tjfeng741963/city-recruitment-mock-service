@@ -185,3 +185,59 @@ describe("location cards", () => {
     expect(items.some((item) => item.kind === "location" && (item.location as Record<string, unknown>)?.name === "冠宇商务中心")).toBe(true);
   });
 });
+
+describe("opening location card reaches the client", () => {
+  let app: FastifyInstance;
+  let admin: Record<string, string>;
+  let device: Record<string, string>;
+  let positionId: number;
+
+  const card = { lng: 113.39114, lat: 23.117692, address: "广东省广州市天河区车陂路438号3栋2楼201号", name: "冠宇商务中心" };
+
+  beforeAll(async () => {
+    process.env.REA_DATABASE_PATH = ":memory:";
+    app = buildServer();
+    await app.ready();
+    const login = await app.inject({
+      method: "POST", url: "/api/v1/auth/login",
+      payload: { username: "local-admin", password: "local-demo-only" },
+    });
+    admin = { authorization: `Bearer ${login.json().access_token}` };
+    app.db.prepare("INSERT INTO agent_devices(device_name,status,data_json) VALUES ('开场位置卡设备','enabled',?)")
+      .run(JSON.stringify({ device_code: "local-device-001" }));
+    const pair = await app.inject({ method: "POST", url: "/api/v1/bridge/devices/local-device-001/pair", headers: admin });
+    device = { authorization: `Bearer ${pair.json().device_token}` };
+
+    const city = await app.inject({
+      method: "POST", url: "/api/v1/cities", headers: admin,
+      payload: { city_name: "开场下发城", interview: { time: "周一至周六", location: "测试招聘点" } },
+    });
+    const position = await app.inject({
+      method: "POST", url: "/api/v1/service-positions", headers: admin,
+      payload: { position_name: "开场下发岗位", city_id: city.json().id },
+    });
+    positionId = Number(position.json().id ?? position.json().position_id);
+    app.db.prepare("UPDATE agent_devices SET data_json=? WHERE json_extract(data_json,'$.device_code')='local-device-001'")
+      .run(JSON.stringify({ device_code: "local-device-001", position_id: positionId }));
+    await app.inject({
+      method: "POST", url: "/api/v1/agent-opening", headers: admin,
+      payload: { position_id: positionId, kind: "location", content: JSON.stringify(card), delay_ms: 2000 },
+    });
+  });
+
+  afterAll(async () => {
+    await app?.close();
+  });
+
+  it("ships location coordinates to the client, not just the raw JSON", async () => {
+    const res = await app.inject({
+      method: "GET", url: "/api/v1/agent/opening?device_code=local-device-001", headers: device,
+    });
+    expect(res.statusCode).toBe(200);
+    const items = res.json().items as Array<Record<string, unknown>>;
+    const loc = items.find((item) => item.kind === "location");
+    expect(loc).toBeTruthy();
+    // 客户端靠这四个值生成卡片；缺一个就会「缺坐标」跳过
+    expect(loc?.location).toMatchObject(card);
+  });
+});

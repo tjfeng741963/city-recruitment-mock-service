@@ -29,6 +29,7 @@ import {
 } from "./agent-orchestrator.js";
 import { devicePositionId } from "../../shared/device-factories.js";
 import { openingVersion } from "../../shared/opening-version.js";
+import { parseOpeningLocation } from "../../shared/opening-location.js";
 
 /**
  * Agent 会话接口 + 调试台的后端（迁移 038 的消费侧）。
@@ -458,10 +459,16 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       if (position && position.status !== "enabled") {
         return { position_id: positionId, persona: "", items: [], opening_version: openingVersion(positionId, []), detail: "岗位已停用" };
       }
-      const items = request.query.mode === "flow" ? firstFlowSegment(db, positionId) : openingOf(db, positionId).map((item) => ({
-        seq: Number(item.seq), kind: String(item.kind), content: String(item.content ?? ""),
-        media_name: String(item.media_name ?? ""), delay_ms: Number(item.delay_ms ?? 2000),
-      }));
+      const items = request.query.mode === "flow" ? firstFlowSegment(db, positionId) : openingOf(db, positionId).map((item) => {
+        const kind = String(item.kind);
+        const base = {
+          seq: Number(item.seq), kind, content: String(item.content ?? ""),
+          media_name: String(item.media_name ?? ""), delay_ms: Number(item.delay_ms ?? 2000),
+        };
+        // 位置卡必须把坐标一起下发，否则客户端只会看到一段 JSON 文本，
+        // 生成卡片时判「缺坐标」直接跳过（2026-11-25 实测踩过）。
+        return kind === "location" ? { ...base, location: parseOpeningLocation(item.content) } : base;
+      });
       return {
         position_id: positionId,
         persona: personaOf(db, positionId),

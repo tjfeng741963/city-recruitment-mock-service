@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
 import { openingVersion } from "../../shared/opening-version.js";
+import { parseOpeningLocation, type OpeningLocation } from "../../shared/opening-location.js";
 
 /**
  * 岗位人设 + 开场条目（迁移 038）。
@@ -68,22 +69,6 @@ function serializePersona(row: PersonaRow | undefined) {
 }
 
 /** 位置卡条目：content 里存的 JSON（lng/lat 必填，address/name 用于卡片显示）。 */
-type OpeningLocation = { lng: number; lat: number; address: string; name: string };
-
-function parseOpeningLocation(raw: unknown): OpeningLocation | null {
-  let value = raw;
-  if (typeof value === "string") {
-    try { value = JSON.parse(value) as unknown; } catch { return null; }
-  }
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const record = value as Record<string, unknown>;
-  return {
-    lng: Number(record.lng),
-    lat: Number(record.lat),
-    address: typeof record.address === "string" ? record.address.trim() : "",
-    name: typeof record.name === "string" ? record.name.trim() : "",
-  };
-}
 
 function serializeOpening(db: DatabaseSync, row: OpeningRow) {
   const mediaName = String(row.media_name ?? "");
