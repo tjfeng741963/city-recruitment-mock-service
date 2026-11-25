@@ -495,13 +495,20 @@ def merge_dify_turn(conv_id: str, current_id: str, earlier_ids: list[str], turn:
         )
 
 
-def mark_held(message_id: str, conv_id: str, reason: str) -> None:
+def mark_held(message_id: str, conv_id: str, reason: str, scene: str | None = None) -> None:
+    """把一条记录挂成 held（等人工处理）。
+
+    scene 可选：开场失败时要记成「开场」，方便后台按场景筛选。
+    2026-11-25 修：开场分支一直按 4 个参数调用，而这里只有 3 个形参，
+    导致 TypeError 把「挂起」这个动作本身也炸掉——记录卡在 pending，
+    客户既收不到回复也不会进人工队列（Garbo_C 那条就是这样丢的）。
+    """
     con = _conn()
     try:
         con.execute(
-            "UPDATE reply_log SET status='held', error=?, scene='知识库', reply_text='', "
+            "UPDATE reply_log SET status='held', error=?, scene=?, reply_text='', "
             "last_step='held', replied_at=? WHERE conv_id=? AND message_id=?",
-            (str(reason)[:500], time.time(), str(conv_id), str(message_id)),
+            (str(reason)[:500], scene or "知识库", time.time(), str(conv_id), str(message_id)),
 
         )
         con.commit()

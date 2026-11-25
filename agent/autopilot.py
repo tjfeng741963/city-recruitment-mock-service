@@ -2740,19 +2740,14 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                             rlog.mark_skipped(mid, cid, "首次接触只播开场，无正文不调用 chat")
                             stats["skipped"] += 1
                             continue
-                        # 有正文（客户第一句就是「找工作」「多少钱」这类）：开场播完后
-                        # 继续回复这一句。原来无条件 continue，客户问了一句却只收到
-                        # 岗位清单、没有针对性回应，看起来像没回（2026-11-24 确认要改）。
-                        # 注意这里**不能**标 skipped：下面的 begin_reply_attempt 只接受
-                        # pending/failed，标成 skipped 会让发送被静默跳过（实测 00:26）。
-                        log(f"[开场] {name} 开场已播完，继续回复客户这一句", scope="send", message_id=mid)
-                        # 开场发送时 begin_reply_attempt 已把这条记录置成 unknown（防重放占位），
-                        # 不复位的话下面的 begin_reply_attempt 会拒绝，回复被静默跳过。
-                        if not rlog.reopen_for_reply(mid, cid):
-                            log(f"[开场] {name} 记录无法复位为待发，本轮不回复这一句",
-                                level="warning", scope="send", message_id=mid)
-                            stats["blocked"] += 1
-                            continue
+                        # 开场播完就停：不再补一条针对首句的回复，等客户下一条消息
+                        # （2026-11-25 确认）。开场里已经包含岗位清单和位置卡，再补一条
+                        # 会连着刷屏；客户下一句再走正常问答。
+                        if not dry:
+                            rlog.mark_skipped(mid, cid, "开场已播完，等客户下一条")
+                        stats["skipped"] += 1
+                        log(f"[开场] {name} 开场已播完，等客户下一条", scope="send", message_id=mid)
+                        continue
                     else:
                         log(f"    [开场] 没取到清单（{ores.get('detail')}），直接进对话")
                 if not hint and not dry:

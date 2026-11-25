@@ -117,7 +117,7 @@ def test_existing_contacts_stay_in_normal_chat(agent, monkeypatch):
     assert agent._flow_state.get("S:customer") is None
 
 
-def test_legacy_first_contact_passes_the_customer_text_to_chat_after_opening(agent):
+def test_legacy_first_contact_waits_for_the_next_message_before_chat(agent):
     agent._brain.flow.return_value = {"nodes": [], "version": 0}
     agent._brain.opening.return_value = {"ok": True, "items": [
         {"seq": 1, "kind": "text", "content": "旧开场介绍", "media_name": "", "delay_ms": 2000}
@@ -128,7 +128,9 @@ def test_legacy_first_contact_passes_the_customer_text_to_chat_after_opening(age
 
     agent._brain.chat.side_effect = generate
     start(agent)
-    agent._brain.chat.assert_called_once_with("你好", "S:customer", sent_summary=None)
+    # 开场播完就停，等客户下一条（2026-11-25 确认：不再补一条首句回复）
+    agent._brain.chat.assert_not_called()
+    assert agent.core_send.send.call_args.args[2] == "旧开场介绍"
     agent._brain.chat.reset_mock(side_effect=True)
     incoming(agent, 2, "工资多少")
     agent.drain(MagicMock(), CFG)
@@ -238,7 +240,8 @@ def test_legacy_opening_initial_sync_pending_waits_before_opening_and_chat(agent
 
     agent.drain(MagicMock(), CFG)
 
-    agent._brain.chat.assert_called_once_with("你好", "S:customer", sent_summary=None)
+    # 开场只播清单，不补首句回复；客户下一条才进 chat
+    agent._brain.chat.assert_not_called()
     assert agent.core_send.send.call_args_list[0].args[2] == "配置同步后的欢迎"
 
 

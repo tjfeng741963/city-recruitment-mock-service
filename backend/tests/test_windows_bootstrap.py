@@ -107,6 +107,12 @@ def test_powershell_bootstrap_keeps_disabled_task_without_launch(tmp_path, dry_r
     harness.write_text(r'''
 param([string]$Bootstrap, [string]$Target, [string]$Desktop, [switch]$Dry)
 $ErrorActionPreference = 'Stop'
+# 输出统一 UTF-8：中文 Windows 默认 GBK、英文 runner 默认 cp1252，
+# 不固定编码时 json.loads 会读不出中文路径（CI 上就是这么红的）。
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+# 输出统一 UTF-8：中文 Windows 默认 GBK、英文 runner 默认 cp1252，
+# 不固定编码时 json.loads 会读不出中文路径（CI 上就是这么红的）。
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
 $tokens = $null
 $errors = $null
 [void][System.Management.Automation.Language.Parser]::ParseFile($Bootstrap, [ref]$tokens, [ref]$errors)
@@ -134,7 +140,7 @@ function Register-ScheduledTask { throw ('unexpected rollback: ' + $global:Error
     args = ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(harness), "-Bootstrap", str(BOOTSTRAP), "-Target", str(target), "-Desktop", str(desktop)]
     if dry_run:
         args.append("-Dry")
-    result = subprocess.run(args, capture_output=True, text=True, timeout=30)
+    result = subprocess.run(args, capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace")
     assert result.returncode == 0, result.stderr
     output = json.loads(result.stdout)
     assert output["WasEnabled"] is False
