@@ -278,6 +278,7 @@ export interface AgentFlowPart {
   body?: string
   media_name?: string
   interview_point?: string
+  location?: { lng: number; lat: number; name: string; address: string }
   delay_before_ms?: number
   delay_ms?: number
 }

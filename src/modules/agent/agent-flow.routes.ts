@@ -4,7 +4,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { DeviceBridgeStore } from "../messaging/device-bridge.js";
 import { devicePositionId } from "../../shared/device-factories.js";
 import { deviceReplyProvider } from "../dify/dify-reply.js";
-import { favoritePointTitles } from "../../shared/favorite-location.js";
+import { interviewLocation, resolveInterviewLocation, type InterviewLocation } from "../../shared/interview-location.js";
 
 const NODE_TYPES = new Set(["text", "image", "video", "followup", "branch", "end"]);
 const EDGE_TRIGGERS = new Set(["default", "any_reply", "timeout", "keyword", "giveup"]);
@@ -12,7 +12,7 @@ const PHASES = new Set(["idle", "running", "awaiting", "followup_due", "followup
 const PART_KINDS = new Set(["text", "image", "video", "favorite_location"]);
 
 type Json = Record<string, unknown>;
-type FlowPart = { kind: string; body: string; media_name: string; delay_ms: number; interview_point?: string; delay_before_ms?: number };
+type FlowPart = { kind: string; body: string; media_name: string; delay_ms: number; interview_point?: string; delay_before_ms?: number; location?: InterviewLocation };
 type FlowNode = {
   node_key: string; node_type: string; title: string; body: string; media_name: string;
   parts: FlowPart[]; delay_ms: number; await_reply: boolean; wait_minutes: number;
@@ -212,7 +212,7 @@ function jsonObject(raw: unknown): Json {
   return value;
 }
 
-export function readFlow(db: DatabaseSync, positionId: number, executableOnly = false) {
+export function readFlow(db: DatabaseSync, positionId: number) {
   const flow = db.prepare("SELECT * FROM agent_flow WHERE position_id=?").get(positionId) as Record<string, unknown> | undefined;
   if (!flow) return { position_id: positionId, version: 0, status: "disabled", entry_key: "", canvas: {}, nodes: [], edges: [] };
   const nodes = db.prepare("SELECT * FROM agent_flow_node WHERE flow_id=? ORDER BY id").all(Number(flow.id)) as Array<Record<string, unknown>>;
@@ -225,8 +225,7 @@ export function readFlow(db: DatabaseSync, positionId: number, executableOnly = 
     canvas: { viewport: jsonObject(flow.canvas_json).viewport ?? {} },
     nodes: nodes.map((node) => ({
       node_key: node.node_key, node_type: node.node_type, title: node.title, body: node.body,
-      media_name: node.media_name, parts: parseArray(node.parts_json).filter(part =>
-        !executableOnly || parseObject(part).kind !== "favorite_location"), delay_ms: node.delay_ms,
+      media_name: node.media_name, parts: parseArray(node.parts_json), delay_ms: node.delay_ms,
       await_reply: Boolean(node.await_reply), wait_minutes: node.wait_minutes, max_times: node.max_times,
       x: node.x, y: node.y, status: node.status,
     })),
@@ -239,7 +238,7 @@ export function readFlow(db: DatabaseSync, positionId: number, executableOnly = 
 
 /** Explicit legacy compatibility mode; never change the default opening list. */
 export function firstFlowSegment(db: DatabaseSync, positionId: number) {
-  const flow = readFlow(db, positionId, true);
+  const flow = readFlow(db, positionId);
   if (flow.status !== "enabled") return [];
   const parts: FlowPart[] = [];
   const visited = new Set<string>();
@@ -252,6 +251,8 @@ export function firstFlowSegment(db: DatabaseSync, positionId: number) {
     if (node.await_reply) break;
     key = str(flow.edges.find(edge => edge.from_key === key && edge.trigger === "default")?.to_key);
   }
+  // This legacy contract has no capability negotiation or durable card steps.
+  if (parts.some(part => part.kind === "favorite_location")) return [];
   return parts.map((part, index) => ({seq:index + 1,kind:part.kind,content:part.body,media_name:part.media_name,delay_ms:part.delay_ms}));
 }
 
@@ -364,19 +365,30 @@ export async function registerAgentFlowRoutes(app: FastifyInstance, db: Database
     return readFlow(db, id);
   });
 
-  app.get<{ Querystring: { device_code?: string } }>("/api/v1/agent/flow", async (request, reply) => {
+  app.get<{ Querystring: { device_code?: string; location_steps?: string } }>("/api/v1/agent/flow", async (request, reply) => {
     const code = str(request.query.device_code).trim();
     if (!deviceAllowed(request, code)) return reply.code(403).send({ detail: "Device token or scope invalid" });
     const mode = replyModeRow(db, code);
     const reply_mode_id = mode?.phase === "applying" && !mode.rollback ? mode.id : mode?.generation || "";
-    if (deviceReplyProvider(db, code) === "dify") return { ok: true, provider: "dify", reply_mode_id, version: 0, nodes: [], edges: [], status: "disabled" };
+    if (deviceReplyProvider(db, code) === "dify") return { ok: true, provider: "dify", location_steps: 1, reply_mode_id, version: 0, nodes: [], edges: [], status: "disabled" };
     const positionId = devicePositionId(db, code);
     if (!db.prepare("SELECT 1 FROM service_positions WHERE id=? AND status='enabled'").get(positionId)) {
-      return { position_id: positionId, reply_mode_id, version: 0, nodes: [], edges: [], status: "disabled" };
+      return { position_id: positionId, location_steps: 1, reply_mode_id, version: 0, nodes: [], edges: [], status: "disabled" };
     }
-    const result = readFlow(db, positionId, true);
+    const result = readFlow(db, positionId);
+    const locationParts = result.nodes.filter(node => node.status !== "disabled")
+      .flatMap(node => node.parts).filter(part => parseObject(part).kind === "favorite_location");
+    if (result.status === "enabled" && locationParts.length) {
+      const detail = request.query.location_steps !== "1" ? "流程含位置卡，请更新 Windows 客户端"
+        : locationParts.some(part => {
+          const saved = parseObject(part);
+          const card = interviewLocation(saved.location);
+          return !card || card.name !== saved.interview_point;
+        }) ? "位置卡缺少已保存地点快照，请在画布重新选择面试点并保存" : "";
+      if (detail) return { ...result, location_steps: 1, reply_mode_id, blocked: true, detail, nodes: [], edges: [] };
+    }
     // 停用只阻止新会话；在途会话使用本地持久化快照。
-    return { ...result, ...(result.status === "enabled" ? {} : { nodes: [], edges: [] }), reply_mode_id };
+    return { ...result, location_steps: 1, ...(result.status === "enabled" ? {} : { nodes: [], edges: [] }), reply_mode_id };
   });
 
   app.post<{ Body: Json }>("/api/v1/agent-flow/migrate", async (request, reply) => {
@@ -411,15 +423,14 @@ export async function registerAgentFlowRoutes(app: FastifyInstance, db: Database
       validateGraph(nodes, edges, entryKey);
       // Drafts preserve historical content for review; activation enforces facts.
       if (body.status !== "disabled") validateNumbers(db, positionId, nodes);
-      const points = favoritePointTitles(jsonObject(position.data_json).interview_points);
+      const points = jsonObject(position.data_json).interview_points;
       for (const node of nodes) {
         const pending = node.parts.filter(part => part.kind === "favorite_location");
-        if (body.status !== "disabled" && node.status !== "disabled" && pending.length > 0 && pending.length === node.parts.length) {
-          throw new Error(`节点「${node.title || node.node_key}」的位置卡待 Windows 支持。启用流程时，此节点需保留一条当前可执行的消息。`);
-        }
         for (const part of pending) {
-          const matches = points.filter(point => point.name === part.interview_point);
-          if (matches.length !== 1 || !matches[0].title) throw new Error(`面试点「${part.interview_point}」缺少唯一有效的企微收藏名称`);
+          const location = resolveInterviewLocation(points, part.interview_point || "");
+          if (!location) throw new Error(`面试点「${part.interview_point}」需有唯一名称、详细地址和有效经纬度`);
+          // Never accept coordinates supplied in a flow part from the caller.
+          part.location = location;
         }
         for (const part of node.parts.filter(item => item.kind === "image" || item.kind === "video")) {
           const asset = db.prepare("SELECT kind,position_id FROM media_assets WHERE name=? AND status='enabled'").get(part.media_name) as {kind:string;position_id:number}|undefined;

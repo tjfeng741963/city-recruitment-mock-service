@@ -17,13 +17,17 @@ export function describeFavoriteLocation(preview?: FavoriteLocationPreview): str
   }
 }
 
-export function locationPointOptions(value: unknown): Array<{ name: string; title: string }> {
+export function locationPointOptions(value: unknown): Array<{ name: string; title: string; disabled: boolean; reason: string }> {
   if (!Array.isArray(value)) return []
   const points = value.flatMap(point => {
     const rawName = typeof point === 'string' ? point : point?.name
     const name = typeof rawName === 'string' ? rawName.trim().normalize('NFC') : ''
-    const title = typeof point?.favorite_title === 'string' ? point.favorite_title.trim() : ''
-    return name ? [{ name, title }] : []
+    const address = typeof point?.address === 'string' ? point.address.trim() : ''
+    const coord = (raw: unknown) => (typeof raw === 'number' || typeof raw === 'string' && raw.trim()) ? Number(raw) : NaN
+    const lng = coord(point?.lng), lat = coord(point?.lat)
+    const reason = !address ? '缺详细地址' : !Number.isFinite(lng) || !Number.isFinite(lat) || !lng || !lat || Math.abs(lng) > 180 || Math.abs(lat) > 90 ? '缺有效坐标' : ''
+    return name ? [{ name, title: reason || address, disabled: Boolean(reason), reason }] : []
   })
-  return points.filter(point => point.title && points.filter(other => other.name === point.name).length === 1)
+  return points.map(point => points.filter(other => other.name === point.name).length > 1
+    ? { ...point, title: '面试点名称重复', disabled: true, reason: '面试点名称重复' } : point)
 }

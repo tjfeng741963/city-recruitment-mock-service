@@ -277,7 +277,7 @@ function nodeSummary(node: AgentFlowNode): string {
   const parts = Array.isArray(node.parts) ? node.parts : []
   const preview = parts.map((part) => {
     if (part.kind === 'text') return part.body
-    if (part.kind === 'favorite_location') return `${part.interview_point || '未选面试点'}（位置卡待接入）`
+    if (part.kind === 'favorite_location') return `${part.interview_point || '未选面试点'}（位置卡）`
     return part.media_name ? `${nodeTypeLabel(part.kind)}：${part.media_name}` : '未选素材'
   })
     .filter(Boolean)

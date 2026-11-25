@@ -172,7 +172,7 @@
             <section class="interview-points" aria-label="面试点">
               <div class="section-title point-heading">
                 <span>面试点</span>
-                <el-button type="primary" plain @click="form.interview_points.push({ name: '', address: '', interview_time: '', checkin_guide: '', favorite_title: '', favorite_delay_seconds: 0 })">新增面试点</el-button>
+                <el-button type="primary" plain @click="form.interview_points.push({ name: '', address: '', lng: '', lat: '', interview_time: '', checkin_guide: '', favorite_title: '', favorite_delay_seconds: 0 })">新增面试点</el-button>
               </div>
               <div v-for="(point, index) in form.interview_points" :key="index" class="point-card">
                 <div class="point-heading">
@@ -187,10 +187,16 @@
                   <el-form-item label="详细地址">
                     <el-input v-model="point.address" placeholder="预约需填详细地址，如兴业路 8 号东门" />
                   </el-form-item>
+                  <el-form-item label="位置卡经度">
+                    <el-input v-model="point.lng" placeholder="如 113.39114" />
+                  </el-form-item>
+                  <el-form-item label="位置卡纬度">
+                    <el-input v-model="point.lat" placeholder="如 23.117692" />
+                  </el-form-item>
                 </div>
                 <el-form-item label="企微收藏名称（可选）">
                   <el-input v-model="point.favorite_title" maxlength="100" placeholder="填写位置卡在企业微信收藏里显示的完整名称" />
-                  <span class="tab-tip point-time-tip">保存后可以在话术流程的「接待测试」核对选点。Windows 自动发送尚未启用。</span>
+                  <span class="tab-tip point-time-tip">保留旧收藏名称；画布位置卡使用上面的地址和坐标，无需收藏。</span>
                 </el-form-item>
                 <el-form-item v-if="point.favorite_title.trim()" label="Dify · 地址文字后等待（秒）">
                   <el-input-number v-model="point.favorite_delay_seconds" :min="0" :max="60" :step="0.5" :precision="1" controls-position="right" />
@@ -358,7 +364,7 @@ const form = reactive({
   store_coordinates: '',
   interview_days: [] as string[],
   interview_points: [] as Array<{
-    name: string; address: string; interview_time: string; checkin_guide: string; favorite_title: string; favorite_delay_seconds: number; original?: unknown
+    name: string; address: string; lng: string; lat: string; interview_time: string; checkin_guide: string; favorite_title: string; favorite_delay_seconds: number; original?: unknown
   }>,
   sections: { ...SECTION_LABELS } as Record<string, string>,
 })
@@ -444,12 +450,14 @@ function fill(source: ServicePosition): void {
   form.interview_days = readStrings(source.interview_days)
   form.interview_points = Array.isArray(source.interview_points) ? source.interview_points.flatMap(point => {
     if (typeof point === 'string' && point.trim()) {
-      return [{ name: point, address: '', interview_time: '', checkin_guide: '', favorite_title: '', favorite_delay_seconds: 0, original: point }]
+      return [{ name: point, address: '', lng: '', lat: '', interview_time: '', checkin_guide: '', favorite_title: '', favorite_delay_seconds: 0, original: point }]
     }
     if (point && typeof point.name === 'string' && point.name.trim()) {
       return [{
         name: point.name,
         address: typeof point.address === 'string' ? point.address : '',
+        lng: point.lng === undefined || point.lng === null ? '' : String(point.lng),
+        lat: point.lat === undefined || point.lat === null ? '' : String(point.lat),
         interview_time: typeof point.interview_time === 'string' ? point.interview_time : '',
         checkin_guide: typeof point.checkin_guide === 'string' ? point.checkin_guide : '',
         favorite_title: typeof point.favorite_title === 'string' ? point.favorite_title : '',
@@ -576,10 +584,11 @@ function buildPayload(): Record<string, unknown> {
       const interview_time = point.interview_time.trim()
       const checkin_guide = point.checkin_guide.trim()
       const favorite_title = point.favorite_title.trim()
-      if (typeof point.original === 'string' && point.original === name && !address && !interview_time && !checkin_guide && !favorite_title) return point.original
+      if (typeof point.original === 'string' && point.original === name && !address && !point.lng.trim() && !point.lat.trim() && !interview_time && !checkin_guide && !favorite_title) return point.original
       const previous = point.original && typeof point.original === 'object' ? point.original : {}
       const favorite_delay_ms = favorite_title ? Math.round((point.favorite_delay_seconds || 0) * 1000) : 0
-      return { ...previous, name, address, interview_time, checkin_guide, favorite_title, favorite_delay_ms }
+      return { ...previous, name, address, lng: point.lng.trim() ? Number(point.lng) : null,
+        lat: point.lat.trim() ? Number(point.lat) : null, interview_time, checkin_guide, favorite_title, favorite_delay_ms }
     }),
     base_sections: { ...form.sections },
     base_section_labels: labelMap,
@@ -598,6 +607,15 @@ async function submit(): Promise<void> {
   if (names.some(name => !name) || new Set(names).size !== names.length) {
     activeTab.value = 'interview'
     ElMessage.warning('请为每个面试点填写不同的名称。')
+    return
+  }
+  if (form.interview_points.some(point => {
+    const lng = point.lng.trim(), lat = point.lat.trim()
+    return (lng || lat) && (!lng || !lat || !Number.isFinite(Number(lng)) || !Number.isFinite(Number(lat))
+      || !Number(lng) || !Number(lat) || Math.abs(Number(lng)) > 180 || Math.abs(Number(lat)) > 90)
+  })) {
+    activeTab.value = 'interview'
+    ElMessage.warning('请填写完整有效的经纬度；经度范围 ±180，纬度范围 ±90。')
     return
   }
   const valid = await formRef.value.validate().catch(() => false)

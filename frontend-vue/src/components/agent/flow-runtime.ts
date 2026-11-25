@@ -149,7 +149,7 @@ export function compareOpeningContents(saved: AgentFlow, openings: LegacyOpening
     seen.add(key)
     const node = saved.nodes.find(item => item.node_key === key)
     if (!node || node.node_type === 'branch' || node.node_type === 'followup') return false
-    if (node.status !== 'disabled') configured.push(...(node.parts || []).filter(part => part.kind !== 'favorite_location'))
+    if (node.status !== 'disabled') configured.push(...(node.parts || []))
     const outgoing = saved.edges.filter(edge => edge.from_key === key)
     if (outgoing.some(edge => ['keyword', 'timeout'].includes(edge.trigger))) return false
     key = (outgoing.find(edge => edge.trigger === 'default') || outgoing.find(edge => edge.trigger === 'any_reply'))?.to_key || ''
@@ -190,7 +190,7 @@ export function describeRuntimeNode(node: AgentFlowNode, graph: AgentFlow, legac
       const seconds = Number(part.delay_ms ?? node.delay_ms ?? 2000) / 1000
       const timing = legacy ? `发送后至少间隔 ${seconds} 秒；Windows 客户端安全冷却配置可能增加额外等待，失败会增加退避。` : `完成后间隔 ${seconds} 秒。`
       if (part.kind === 'text') result.push(`第 ${index + 1} 条：发送下面的原文，确认目标会话与文本发送结果。${timing}`)
-      else if (part.kind === 'favorite_location') result.push(`第 ${index + 1} 条企微位置卡：${part.interview_point || '未选择面试点'}。按配置轮到本条后等待 ${Number(part.delay_before_ms ?? 0) / 1000} 秒。当前 Windows 会跳过此步。`)
+      else if (part.kind === 'favorite_location') result.push(`第 ${index + 1} 条企微位置卡：${part.interview_point || '未选择面试点'}。轮到本条后等待 ${Number(part.delay_before_ms ?? 0) / 1000} 秒。按已保存地点发送，前面须先有本轮确认目标的文字；需要新版 Windows 客户端。${timing}`)
       else {
         result.push(`第 ${index + 1} 条${part.kind === 'video' ? '视频' : '图片'}：先查 Windows 本地素材，缺失时从服务器预取「${part.media_name || '未选择素材'}」，再通过现有企微媒体发送动作处理。${timing}`)
         if (!legacy) result.push('媒体需要本轮先成功发送文本并确认目标会话；跨过等待闸门后会重新开始本轮校验。独立媒体节点若没有这个前提，会暂停待人工核对。')
