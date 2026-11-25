@@ -101,6 +101,38 @@ describe("location cards", () => {
     expect((await app.inject({ method: "GET", url: "/api/v1/location-cards", headers: device })).statusCode).toBe(401);
   });
 
+  it("syncs an account-scoped favorite snapshot and only reconciles complete snapshots", async () => {
+    app.db.prepare("UPDATE bridge_devices SET account_id='douh' WHERE device_code='local-device-001'").run();
+    const bytes = cardBytes("广东省广州市天河区车陂路48号3栋2楼201号", "冠宇商务中心");
+    const captured = await app.inject({
+      method: "POST", url: "/api/v1/agent/location-card", headers: device,
+      payload: { data_base64: bytes.toString("base64"), account_id: "douh", favorite_id: "fav-guanyu" },
+    });
+    const sha = captured.json().sha256 as string;
+    const first = await app.inject({
+      method: "POST", url: "/api/v1/agent/location-favorites/sync", headers: device,
+      payload: { account_id: "douh", snapshot_id: "s1", complete: false, items: [
+        { favorite_id: "fav-guanyu", kind: "location", title: "冠宇商务中心", address: "广东省广州市天河区车陂路48号", location_card_sha: sha },
+        { favorite_id: "fav-other", kind: "other", title: "一张文件" },
+      ] },
+    });
+    expect(first.statusCode).toBe(200);
+    expect(first.json().accepted).toBe(2);
+    const incomplete = await app.inject({ method: "POST", url: "/api/v1/agent/location-favorites/sync", headers: device,
+      payload: { account_id: "douh", snapshot_id: "s2", complete: false, items: [{ favorite_id: "fav-guanyu", kind: "location", title: "冠宇商务中心" }] } });
+    expect(incomplete.statusCode).toBe(200);
+    expect(app.db.prepare("SELECT COUNT(*) AS n FROM location_favorites WHERE account_id='douh'").get()).toMatchObject({ n: 2 });
+    const complete = await app.inject({ method: "POST", url: "/api/v1/agent/location-favorites/sync", headers: device,
+      payload: { account_id: "douh", snapshot_id: "s3", complete: true, items: [{ favorite_id: "fav-guanyu", kind: "location", title: "冠宇商务中心", location_card_sha: sha }] } });
+    expect(complete.statusCode).toBe(200);
+    expect(app.db.prepare("SELECT COUNT(*) AS n FROM location_favorites WHERE account_id='douh'").get()).toMatchObject({ n: 1 });
+    expect((await app.inject({ method: "POST", url: "/api/v1/agent/location-favorites/sync", headers: device,
+      payload: { account_id: "other-account", snapshot_id: "s4", complete: true, items: [] } })).statusCode).toBe(409);
+    const filtered = await app.inject({ method: "GET", url: "/api/v1/location-cards?account_id=douh", headers: admin });
+    expect(filtered.json().favorites).toHaveLength(1);
+    expect(filtered.json().favorites[0]).toMatchObject({ title: "冠宇商务中心", location_card_sha: sha });
+  });
+
   it("ships only the cards bound to the device's position", async () => {
     const bytes = cardBytes("广州市白云区机场路1号冠宇商务中心", "冠宇商务中心");
     const captured = await capture(bytes);

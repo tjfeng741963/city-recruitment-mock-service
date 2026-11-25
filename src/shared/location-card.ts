@@ -58,7 +58,7 @@ export type LocationCardPayload = { sha256: string; name: string; address: strin
  * 字节本体在 location_cards 表——这样一张卡可以被多个面试点共用，
  * 面试点数据里也不会塞进几百字节的 base64。
  */
-export function loadPositionLocationCards(db: DatabaseSync, positionId: number): LocationCardPayload[] {
+export function loadPositionLocationCards(db: DatabaseSync, positionId: number, accountId = ""): LocationCardPayload[] {
   if (!positionId) return [];
   const row = db.prepare("SELECT data_json FROM service_positions WHERE id=?").get(positionId) as
     | { data_json: string }
@@ -79,9 +79,10 @@ export function loadPositionLocationCards(db: DatabaseSync, positionId: number):
   }))];
   if (!shas.length) return [];
   const placeholders = shas.map(() => "?").join(",");
+  const accountFilter = accountId ? ` AND (account_id=? OR account_id='')` : "";
   const rows = db.prepare(
-    `SELECT sha256,name,address,blob_b64 FROM location_cards WHERE sha256 IN (${placeholders})`,
-  ).all(...shas) as Array<{ sha256: string; name: string; address: string; blob_b64: string }>;
+    `SELECT sha256,name,address,blob_b64 FROM location_cards WHERE sha256 IN (${placeholders})${accountFilter}`,
+  ).all(...(accountId ? [...shas, accountId] : shas)) as Array<{ sha256: string; name: string; address: string; blob_b64: string }>;
   return rows.map((card) => ({
     sha256: String(card.sha256),
     name: String(card.name ?? ""),

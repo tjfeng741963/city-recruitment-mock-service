@@ -12,6 +12,21 @@ import type {
 
 export type { City, CityPayload, Factory, ServicePosition, AgentDevice }
 
+export interface LocationCardOption {
+  sha256: string
+  name: string
+  address: string
+  bytes: number
+  device_code?: string
+  account_id?: string
+}
+
+export const locationCardsApi = {
+  list: (accountId?: string) => http.get<{ items: LocationCardOption[]; favorites?: Array<Record<string, unknown>> }>(
+    '/api/v1/location-cards', { params: accountId ? { account_id: accountId } : undefined },
+  ),
+}
+
 /** 城市历史快照（GET /cities/:id/history 的行结构） */
 export interface CityHistoryEntry {
   id: number

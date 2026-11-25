@@ -175,7 +175,7 @@
             <section class="interview-points" aria-label="面试点">
               <div class="section-title point-heading">
                 <span>面试点</span>
-                <el-button type="primary" plain @click="form.interview_points.push({ name: '', address: '', lng: '', lat: '', interview_time: '', checkin_guide: '', favorite_title: '', favorite_delay_seconds: 0 })">新增面试点</el-button>
+                <el-button type="primary" plain @click="form.interview_points.push({ name: '', address: '', lng: '', lat: '', interview_time: '', checkin_guide: '', favorite_title: '', favorite_delay_seconds: 0, location_card_sha: '' })">新增面试点</el-button>
               </div>
               <div v-for="(point, index) in form.interview_points" :key="index" class="point-card">
                 <div class="point-heading">
@@ -198,9 +198,15 @@
                   </el-form-item>
                 </div>
                 <p class="tab-tip point-time-tip">发送导航链接需要详细地址和经纬度。</p>
-                <el-form-item label="企微收藏名称（可选）">
-                  <el-input v-model="point.favorite_title" maxlength="100" placeholder="填写位置卡在企业微信收藏里显示的完整名称" />
-                  <span class="tab-tip point-time-tip">供接待测试核对收藏名称。</span>
+                <el-form-item label="企微收藏位置卡（可选）">
+                  <el-select v-model="point.location_card_sha" class="full" clearable filterable placeholder="选择已同步的企微收藏位置卡" @change="onLocationCardChange(point, $event)">
+                    <el-option v-for="card in locationCards" :key="card.sha256" :label="card.name || card.sha256.slice(0, 12)" :value="card.sha256">
+                      <span>{{ card.name || '未识别名称' }}</span><small v-if="card.address"> · {{ card.address }}</small><small v-if="card.account_id"> · 账号 {{ card.account_id }}</small>
+                    </el-option>
+                  </el-select>
+                  <el-input v-if="!point.location_card_sha" v-model="point.favorite_title" maxlength="100" placeholder="没有同步卡时可填写收藏名称，后续由账号核验" />
+                  <span v-if="!locationCards.length" class="tab-tip point-time-tip">当前没有已同步的企微位置卡，请先让对应企微账号同步收藏。</span>
+                  <span v-else class="tab-tip point-time-tip">只显示已采集的原生位置卡；保存后按账号下发。</span>
                 </el-form-item>
                 <el-form-item v-if="point.favorite_title.trim()" label="Dify · 地址文字后等待（秒）">
                   <el-input-number v-model="point.favorite_delay_seconds" :min="0" :max="60" :step="0.5" :precision="1" controls-position="right" />
@@ -261,8 +267,8 @@ import { useAuthStore } from '../../stores/auth'
 import PositionAgentDrawer from './PositionAgentDrawer.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
-import { citiesApi, factoriesApi, positionsApi, apiErrorMessage } from '../../api/core'
-import type { City, Factory, ServicePosition } from '../../api/core'
+import { citiesApi, factoriesApi, positionsApi, locationCardsApi, apiErrorMessage } from '../../api/core'
+import type { City, Factory, ServicePosition, LocationCardOption } from '../../api/core'
 import { toArray } from '../../utils/format'
 import { validFlowCoordinates } from '../../../../src/shared/flow-location'
 
@@ -322,6 +328,7 @@ watch(activeTab, tab => { if (tab === 'agent') agentEditorOpened.value = true })
 const formBaseline = ref('')
 const cities = ref<City[]>([])
 const factories = ref<Factory[]>([])
+const locationCards = ref<LocationCardOption[]>([])
 const base = ref<Record<string, unknown>>({})
 const original = ref<ServicePosition | null>(null)
 const editableAgentPosition = computed(() => props.mode === 'edit' ? original.value : null)
@@ -370,7 +377,7 @@ const form = reactive({
   store_coordinates: '',
   interview_days: [] as string[],
   interview_points: [] as Array<{
-    name: string; address: string; lng: string; lat: string; interview_time: string; checkin_guide: string; favorite_title: string; favorite_delay_seconds: number; original?: unknown
+    name: string; address: string; lng: string; lat: string; interview_time: string; checkin_guide: string; favorite_title: string; favorite_delay_seconds: number; location_card_sha: string; original?: unknown
   }>,
   sections: { ...SECTION_LABELS } as Record<string, string>,
 })
@@ -416,13 +423,21 @@ function readStrings(value: unknown): string[] {
 }
 
 async function loadOptions(): Promise<void> {
-  if (cities.value.length && factories.value.length) return
-  const [cityRes, factoryRes] = await Promise.all([
+  const [cityRes, factoryRes, cardRes] = await Promise.all([
     citiesApi.list({page: 1, page_size: 1000}),
     factoriesApi.list({page: 1, page_size: 1000}).catch(() => ({ data: { items: [] } })),
+    locationCardsApi.list().catch(() => ({ data: { items: [] } })),
   ])
-  cities.value = toArray<City>(cityRes.data)
-  factories.value = toArray<Factory>((factoryRes as { data: unknown }).data)
+  if (!cities.value.length) cities.value = toArray<City>(cityRes.data)
+  if (!factories.value.length) factories.value = toArray<Factory>((factoryRes as { data: unknown }).data)
+  const cardItems = (cardRes as { data?: { items?: unknown[] } }).data?.items
+  locationCards.value = Array.isArray(cardItems) ? cardItems as LocationCardOption[] : []
+}
+
+function onLocationCardChange(point: { favorite_title: string; location_card_sha: string }, value: string): void {
+  const card = locationCards.value.find(item => item.sha256 === value)
+  if (card) point.favorite_title = card.name
+  else if (!value) point.favorite_title = ''
 }
 
 function fill(source: ServicePosition): void {
@@ -457,7 +472,7 @@ function fill(source: ServicePosition): void {
   form.interview_days = readStrings(source.interview_days)
   form.interview_points = Array.isArray(source.interview_points) ? source.interview_points.flatMap(point => {
     if (typeof point === 'string' && point.trim()) {
-      return [{ name: point, address: '', lng: '', lat: '', interview_time: '', checkin_guide: '', favorite_title: '', favorite_delay_seconds: 0, original: point }]
+      return [{ name: point, address: '', lng: '', lat: '', interview_time: '', checkin_guide: '', favorite_title: '', favorite_delay_seconds: 0, location_card_sha: '', original: point }]
     }
     if (point && typeof point.name === 'string' && point.name.trim()) {
       return [{
@@ -469,6 +484,7 @@ function fill(source: ServicePosition): void {
         checkin_guide: typeof point.checkin_guide === 'string' ? point.checkin_guide : '',
         favorite_title: typeof point.favorite_title === 'string' ? point.favorite_title : '',
         favorite_delay_seconds: typeof point.favorite_delay_ms === 'number' ? point.favorite_delay_ms / 1000 : 0,
+        location_card_sha: typeof point.location_card_sha === 'string' ? point.location_card_sha : '',
         original: point,
       }]
     }
@@ -597,7 +613,8 @@ function buildPayload(): Record<string, unknown> {
       if (typeof point.original === 'string' && point.original === name && !address && !hasCoordinates && !interview_time && !checkin_guide && !favorite_title) return point.original
       const previous = point.original && typeof point.original === 'object' ? point.original : {}
       const favorite_delay_ms = favorite_title ? Math.round((point.favorite_delay_seconds || 0) * 1000) : 0
-      const result: Record<string, unknown> = { ...previous, name, address, interview_time, checkin_guide, favorite_title, favorite_delay_ms }
+      const location_card_sha = point.location_card_sha.trim()
+      const result: Record<string, unknown> = { ...previous, name, address, interview_time, checkin_guide, favorite_title, favorite_delay_ms, location_card_sha }
       delete result.lng
       delete result.lat
       if (hasCoordinates) Object.assign(result, { lng: Number(point.lng), lat: Number(point.lat) })

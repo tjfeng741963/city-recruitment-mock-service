@@ -239,7 +239,11 @@ export function registerDeviceBridgeRoutes(
       position_scripts: positionScripts,
       // 企微原生位置卡（迁移 061）：面试点绑定了采集到的卡才下发。
       // 客户端把它写进剪贴板再 Ctrl+V，粘出来就是能点开导航的原生卡。
-      location_cards: loadPositionLocationCards(db, agentPosition ?? 0),
+      location_cards: loadPositionLocationCards(
+        db,
+        agentPosition ?? 0,
+        String((db.prepare("SELECT account_id FROM bridge_devices WHERE device_code=?").get(code) as { account_id?: string } | undefined)?.account_id ?? ""),
+      ),
     };
   });
   app.get<{ Params: { code: string } }>("/api/v1/bridge/devices/:code", async (req, reply) => {

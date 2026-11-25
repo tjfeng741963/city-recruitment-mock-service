@@ -329,13 +329,13 @@ HTTP 仍是 200——调用方按 `ok` 判断，不要按状态码。模型输�
 
 ## 四之一、企微原生位置卡
 
-位置卡不是文件，而是一块剪贴板字节（`WeWork Message` 格式）。客户端发送时用
-坐标+地址+名称现场生成，不需要人工采集，所以这里只保留「人工采集上报」这条兜底通道。
+位置卡不是文件，而是一块剪贴板字节（`WeWork Message` 格式）。收藏同步保留企微账号、收藏标识和快照完整性；只有客户端上报的真实位置卡字节才允许绑定发送。
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |---|---|---|---|
-| POST | `/api/v1/agent/location-card` | 设备令牌或服务令牌 | 上报剪贴板里的位置卡字节，body `{data_base64}`，≤ 8KB；按 sha256 幂等去重，返回 `{sha256,name,address,bytes,duplicate}` |
-| GET | `/api/v1/location-cards` | admin | 已采集的位置卡列表（只回 sha/名称/地址/大小，不回字节） |
+| POST | `/api/v1/agent/location-card` | 设备令牌或服务令牌 | 上报剪贴板里的位置卡字节，body `{data_base64,account_id?,favorite_id?}`，≤ 8KB；按 sha256 幂等去重 |
+| POST | `/api/v1/agent/location-favorites/sync` | 设备令牌 | 上报当前企微账号收藏快照 `{account_id,snapshot_id,complete,items[]}`；账号必须与设备心跳账号一致，只有完整快照才清理已消失项 |
+| GET | `/api/v1/location-cards` | admin | 已采集位置卡及收藏快照元数据；可传 `account_id` 过滤（只回展示信息，不回字节） |
 | DELETE | `/api/v1/location-cards/:sha` | admin | 删除采错的卡（绑定的面试点变回未采集，不会崩） |
 
 设备配置 `GET /api/v1/bridge/devices/:code/config` 增加 `location_cards` 字段：

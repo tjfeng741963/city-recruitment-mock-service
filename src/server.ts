@@ -63,6 +63,7 @@ const DEVICE_TOKEN_ROUTES = new Set(["heartbeat", "claim", "receipts", "inbound"
     "GET /api/v1/agent/media/:name",
     // 位置卡上报：客户端用设备令牌传剪贴板字节，路由内自校验（迁移 061）。
     "POST /api/v1/agent/location-card",
+    "POST /api/v1/agent/location-favorites/sync",
     "GET /api/v1/agent/flow",
     "GET /api/v1/agent/state",
     "POST /api/v1/agent/state",
