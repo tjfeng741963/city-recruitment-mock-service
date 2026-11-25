@@ -66,16 +66,20 @@
           />
           <div v-else-if="draft.kind === 'location'" class="location-edit">
             <div class="media-row">
-              <el-select v-model="pointIndex" class="media-select" placeholder="选择面试点（自动带出坐标）">
+              <el-select v-model="pointIndex" class="media-select" placeholder="选择岗位地点"
+                :loading="pointsLoading" :no-data-text="pointsError || '该岗位暂无保存的地点，可在下方手填'"
+                @visible-change="refreshPoints">
                 <el-option
                   v-for="(point, index) in interviewPoints"
                   :key="index"
-                  :label="`${point.name}${point.lng && point.lat ? '' : '（缺坐标）'}`"
+                  :label="[point.name, point.address || '缺地址', point.lng && point.lat ? '' : '缺坐标'].filter(Boolean).join(' · ')"
+                  :disabled="pointsLoading || Boolean(pointsError)"
                   :value="index"
                 />
               </el-select>
-              <el-button @click="applyPoint(pointIndex)">套用</el-button>
+              <el-button :disabled="pointIndex === undefined || pointsLoading || Boolean(pointsError)" @click="applyPoint(pointIndex)">套用</el-button>
             </div>
+            <p v-if="pointsError" class="opening-hint" role="status">{{ pointsError }}</p>
             <div class="media-row">
               <el-input v-model="draft.location.name" placeholder="卡片标题，如：冠宇商务中心" />
             </div>
@@ -206,13 +210,15 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ElDrawer, ElMessage, ElMessageBox } from 'element-plus'
 import { agentApi } from '../../api/agent'
-import { mediaApi } from '../../api/core'
+import { mediaApi, positionsApi } from '../../api/core'
 import type { ServicePosition } from '../../api/types'
 import { drawerTabForLoad, type AgentDrawerTab } from '../agent/flow-edit-entry'
 import LocationCardPreview from '../agent/LocationCardPreview.vue'
+import { openingLocationOptions } from './opening-location-options'
+import { validFlowCoordinates } from '../../../../src/shared/flow-location'
 
 interface OpeningLocation {
   lng: number | string
@@ -348,28 +354,42 @@ async function savePersona(): Promise<void> {
   }
 }
 
-/** 岗位的面试点（位置卡直接从这里带坐标，避免手抄经纬度抄错） */
-const interviewPoints = computed(() => {
-  const raw = props.position?.interview_points
-  return Array.isArray(raw)
-    ? raw.flatMap((point) => {
-        if (!point || typeof point !== 'object') return []
-        const item = point as Record<string, unknown>
-        const name = typeof item.name === 'string' ? item.name : ''
-        if (!name) return []
-        return [{
-          name,
-          address: typeof item.address === 'string' ? item.address : '',
-          lng: Number(item.lng) || 0,
-          lat: Number(item.lat) || 0,
-        }]
-      })
-    : []
-})
-const pointIndex = ref(0)
+const pointsPosition = ref<ServicePosition | null>(null)
+const pointsLoading = ref(false)
+const pointsError = ref('')
+const interviewPoints = computed(() => openingLocationOptions(
+  pointsPosition.value?.id === props.position?.id ? pointsPosition.value : props.position,
+))
+const pointIndex = ref<number>()
+let pointLoadSequence = 0
 
-function applyPoint(index: number): void {
-  const point = interviewPoints.value[index]
+watch(() => props.position?.id, () => {
+  pointLoadSequence += 1
+  pointsPosition.value = null
+  pointIndex.value = undefined
+  pointsLoading.value = false
+  pointsError.value = ''
+}, { flush: 'sync' })
+
+async function refreshPoints(visible: boolean): Promise<void> {
+  const positionId = props.position?.id
+  if (!visible || !positionId || pointsLoading.value) return
+  const sequence = ++pointLoadSequence
+  pointIndex.value = undefined
+  pointsLoading.value = true
+  pointsError.value = ''
+  try {
+    const { data } = await positionsApi.get(positionId)
+    if (sequence === pointLoadSequence) pointsPosition.value = data
+  } catch {
+    if (sequence === pointLoadSequence) pointsError.value = '读取岗位地点失败，请重新展开下拉框。'
+  } finally {
+    if (sequence === pointLoadSequence) pointsLoading.value = false
+  }
+}
+
+function applyPoint(index: number | undefined): void {
+  const point = index === undefined ? undefined : interviewPoints.value[index]
   if (!point || !draft.value?.location) return
   draft.value.location = {
     lng: point.lng || '',
@@ -386,10 +406,8 @@ function startAdd(kind: 'text' | 'image' | 'video' | 'location'): void {
     location: { lng: '', lat: '', address: '', name: '' },
   }
   if (kind === 'location') {
-    // 默认取第一个有坐标的面试点，运营点开就能看到地图
-    const index = Math.max(0, interviewPoints.value.findIndex(point => point.lng && point.lat))
-    pointIndex.value = index
-    applyPoint(index)
+    pointIndex.value = undefined
+    pointsError.value = ''
   }
   editorVisible.value = true
 }
@@ -403,13 +421,11 @@ function startEdit(entry: PersonaOpening): void {
     media_name: entry.media_name || '',
     delay_ms: entry.delay_ms ?? MIN_DELAY_MS,
     seq: entry.seq,
-    location: entry.location ?? { lng: '', lat: '', address: '', name: '' },
+    location: entry.location ? { ...entry.location } : { lng: '', lat: '', address: '', name: '' },
   }
   if (entry.kind === 'location') {
-    const point = entry.location
-    pointIndex.value = Math.max(0, interviewPoints.value.findIndex(
-      item => point && Number(item.lng) === Number(point.lng) && Number(item.lat) === Number(point.lat),
-    ))
+    pointIndex.value = undefined
+    pointsError.value = ''
   }
   editorVisible.value = true
 }
@@ -524,7 +540,7 @@ async function saveDraft(): Promise<void> {
   }
   if (entry.kind === 'location') {
     const card = entry.location
-    if (!card || !Number(card.lng) || !Number(card.lat)) {
+    if (!card || !validFlowCoordinates(Number(card.lng), Number(card.lat))) {
       ElMessage.warning('位置卡需要经纬度，先在面试点里填坐标或手填')
       return
     }

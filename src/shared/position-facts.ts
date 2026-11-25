@@ -61,7 +61,7 @@ export function normalizePositionFacts(source: Values): Values {
   } else if (has(source, "address") || has(source, "store_address")) {
     const address = text(source.address) || text(source.store_address);
     result.place = address;
-    result.interview_address = address;
+    if (!has(source, "interview_address")) result.interview_address = address;
   }
   setFromForm("interview_time", "interview_time");
   setFromForm("basic_requirements", "requirements", sections);

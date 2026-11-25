@@ -124,9 +124,11 @@ export function serializeServicePosition(row: Row): Row {
   result.interview_days = Array.isArray(result.interview_days) ? result.interview_days : [];
   result.interview_points = Array.isArray(result.interview_points) ? result.interview_points : [];
   if (typeof row.city_id === "number") result.city_id = row.city_id;
+  if (typeof source.interview_address === "string" || typeof source.work_address === "string") {
+    result.interview_address = fact("interview_address");
+  }
   if (typeof source.work_address === "string") {
     result.work_address = source.work_address;
-    result.interview_address = fact("interview_address");
     if (typeof source.work_coordinates === "string" && source.work_coordinates.trim()) {
       result.work_coordinates = source.work_coordinates.trim();
     }
@@ -144,7 +146,10 @@ export function serializeServicePosition(row: Row): Row {
     if (!result.age_range && fact("age_text")) result.age_range = fact("age_text");
     if (!result.height_require && fact("height_text")) result.height_require = fact("height_text");
     if (!result.accommodation && fact("welfare_text")) result.accommodation = fact("welfare_text");
-    if (!result.address && fact("place")) result.address = fact("place");
+    if (!result.address && fact("place")) {
+      result.address = fact("place");
+      result.interview_address ??= "";
+    }
     if (!result.interview_time && fact("interview_time")) result.interview_time = fact("interview_time");
     if (!result.gender) {
       const age = fact("age_text");

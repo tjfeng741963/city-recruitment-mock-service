@@ -29,6 +29,8 @@
 |---|---|---|---|
 | POST | `/api/v1/auth/login` | 无 | 账号密码换 token，body `{username,password}` |
 | GET | `/api/v1/service-positions?page=1&page_size=1000` | 用户 | 岗位列表，前端用它拿岗位 id 与名称 |
+| GET | `/api/v1/service-positions/:id` | 用户 | 岗位详情。显式保存的 `interview_address` 即使没有 `work_address` 也会返回。仅为列表展示从工作地点推导 `address` 时，未设置的 `interview_address` 返回空字符串。 |
+| POST / PUT | `/api/v1/service-positions` / `/api/v1/service-positions/:id` | 用户 | 新增或更新岗位。显式面试地址 `interview_address` 优先于兼容字段 `address` 和 `store_address`。 |
 
 岗位列表和详情的 `is_active` 反映已保存的岗位启用状态，旧数据同样适用。
 
