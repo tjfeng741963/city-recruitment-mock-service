@@ -25,6 +25,7 @@
 """
 from __future__ import annotations
 
+import ctypes
 import time
 from typing import Callable
 
@@ -69,6 +70,41 @@ def read_remark(user_id: str) -> str | None:
         return None
 
 
+def _force_foreground(hwnd: int) -> bool:
+    """把窗口强行提到前台并置顶。
+
+    直接 SetForegroundWindow 经常被 Windows 拒绝（调用进程不是当前前台，
+    返回成功但窗口没上来）。这里用 SetWindowPos 置顶 + AttachThreadInput
+    把输入队列挂到前台线程上，再 SetForegroundWindow——这是不注入的前提下
+    唯一稳定的办法（2026-11-26 实测：直接调必然「抢不到前台」）。
+    """
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+    except Exception:  # noqa: BLE001
+        return False
+    SW_RESTORE = 9
+    HWND_TOP = 0
+    SWP_NOSIZE, SWP_NOMOVE, SWP_SHOWWINDOW = 0x0001, 0x0002, 0x0040
+    user32.ShowWindow(hwnd, SW_RESTORE)
+    user32.SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW)
+    fg = user32.GetForegroundWindow()
+    if fg == hwnd:
+        return True
+    cur_tid = user32.GetWindowThreadProcessId(fg, None) if fg else 0
+    tgt_tid = user32.GetWindowThreadProcessId(hwnd, None)
+    attached = False
+    if cur_tid and tgt_tid and cur_tid != tgt_tid:
+        attached = bool(user32.AttachThreadInput(cur_tid, tgt_tid, True))
+    try:
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+    finally:
+        if attached:
+            user32.AttachThreadInput(cur_tid, tgt_tid, False)
+    time.sleep(0.25)
+    return user32.GetForegroundWindow() == hwnd
+
+
 def set_remark(
     name: str,
     remark: str,
@@ -94,7 +130,8 @@ def set_remark(
     hwnd = target["hwnd"]
     rect = target["rect"]
     try:
-        if not win.ensure_foreground(hwnd, tries=4):
+        # 直接 ensure_foreground 常被系统拒绝，这里用 AttachThreadInput 强抢
+        if not (_force_foreground(hwnd) or win.ensure_foreground(hwnd, tries=3)):
             return False, "抢不到前台，设置备注中止"
         if not win.wait_visible(hwnd, timeout=8):
             return False, "企微窗口不可见，设置备注中止"
