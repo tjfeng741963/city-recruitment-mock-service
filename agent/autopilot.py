@@ -1657,6 +1657,22 @@ def _is_wecom_window_owner(pid: int) -> bool:
         kernel.CloseHandle(process)
 
 
+def _window_minimized(hwnd: int) -> bool:
+    """窗口是否最小化（最小化的窗口抢不到前台，必须先还原）。"""
+    try:
+        return bool(win.user32.IsIconic(hwnd))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _window_minimized(hwnd: int) -> bool:
+    """窗口是否最小化（最小化的窗口抢不到前台，必须先还原）。"""
+    try:
+        return bool(win.user32.IsIconic(hwnd))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def desktop_send_ready(route: str) -> tuple[bool, str]:
     """Inspect the frozen sender's current choice without activating a window."""
     hwnd = pid = 0
@@ -1668,6 +1684,16 @@ def desktop_send_ready(route: str) -> tuple[bool, str]:
             target = win.find_window()
             if not target:
                 reason = "window_missing"
+            elif _window_minimized(target["hwnd"]):
+                # 最小化的窗口抢不到前台（2026-11-26 实测：开场第 3 条就是这里挂的，
+                # 报「抢不到前台，已中止」，会话留下未确认开场，后续消息全被 hold）。
+                # 先还原再交给发送器。
+                try:
+                    win.user32.ShowWindow(target["hwnd"], 9)  # SW_RESTORE
+                    time.sleep(0.4)
+                except Exception:  # noqa: BLE001
+                    pass
+                reason = "" if not _window_minimized(target["hwnd"]) else "window_minimized"
             else:
                 hwnd = target["hwnd"]
                 gui = win.win32gui
