@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
 import { openingVersion } from "../../shared/opening-version.js";
 import { parseOpeningLocation, type OpeningLocation } from "../../shared/opening-location.js";
+import { openingUsesSharedParts, sharedOpeningParts, validatePositionOpeningUpdate } from "./shared-opening.js";
 
 /**
  * 岗位人设 + 开场条目（迁移 038）。
@@ -119,10 +120,10 @@ function validateOpening(db: DatabaseSync, body: Record<string, unknown>, kind: 
   return null;
 }
 
-function clampDelay(value: unknown): number {
+function clampDelay(value: unknown, shared = false): number {
   const raw = int(value);
-  if (!raw) return MIN_DELAY_MS;
-  return Math.min(Math.max(raw, MIN_DELAY_MS), MAX_DELAY_MS);
+  if (value === undefined || (!raw && !shared)) return MIN_DELAY_MS;
+  return Math.min(Math.max(raw, shared ? 0 : MIN_DELAY_MS), MAX_DELAY_MS);
 }
 
 function openingRevision(items: ReturnType<typeof serializeOpening>[]): string {
@@ -146,6 +147,27 @@ export async function registerAgentPersonaRoutes(app: FastifyInstance, db: Datab
       .all(positionId) as OpeningRow[];
     return rows.map((row) => serializeOpening(db, row));
   }
+
+  function openingIsStale(positionId: number, revision: unknown): boolean {
+    return Boolean(revision || openingUsesSharedParts(db, positionId)) && openingRevision(listOpenings(positionId)) !== revision;
+  }
+
+  function modifyOpening<T>(positionId: number, action: () => T): T {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const prior = sharedOpeningParts(db, positionId);
+      const result = action();
+      validatePositionOpeningUpdate(db, positionId, prior);
+      db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  const insertOpening = db.prepare(`INSERT INTO position_opening(position_id,seq,kind,content,media_name,delay_ms)
+    VALUES (?,?,?,?,?,?) RETURNING *`);
 
   // ── 读取：人设 + 开场一次给全 ──────────────────────────────────
   // 不带 position_id 时返回全量摘要，供列表页在按钮上显示「已配几条」——
@@ -205,6 +227,7 @@ export async function registerAgentPersonaRoutes(app: FastifyInstance, db: Datab
         total: openings.length,
         opening_version: openingVersion(positionId, openings),
         opening_revision: openingRevision(openings),
+        shared_opening: openingUsesSharedParts(db, positionId),
       };
     },
   );
@@ -261,8 +284,16 @@ export async function registerAgentPersonaRoutes(app: FastifyInstance, db: Datab
     }
 
     const kind = text(body.kind).trim() || "text";
+    const shared = openingUsesSharedParts(db, positionId);
+    if (openingIsStale(positionId, body.revision)) {
+      return reply.code(409).send({ detail: "开场已更新，请重新打开编辑" });
+    }
     const invalid = validateOpening(db, body, kind);
     if (invalid) return reply.code(422).send({ detail: invalid });
+    const caption = (kind === "image" || kind === "video") ? text(body.caption).trim() : "";
+    if (caption && (caption.length > MAX_TEXT_CHARS || count + 2 > MAX_OPENINGS)) {
+      return reply.code(422).send({ detail: "配文不能超过 2000 字，添加后开场不能超过 30 条" });
+    }
 
     const nextSeq = Number(
       (
@@ -271,21 +302,17 @@ export async function registerAgentPersonaRoutes(app: FastifyInstance, db: Datab
           .get(positionId) as { seq: number }
       ).seq ?? 1,
     );
-    const row = db
-      .prepare(
-        `INSERT INTO position_opening(position_id, seq, kind, content, media_name, delay_ms, status, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,'enabled',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
-         RETURNING *`,
-      )
-      .get(
-        positionId,
-        nextSeq,
-        kind,
-        text(body.content).trim(),
-        text(body.media_name).trim(),
-        clampDelay(body.delay_ms),
-      ) as OpeningRow;
-    return serializeOpening(db, row);
+    try {
+      const row = modifyOpening(positionId, () => {
+        const delay = clampDelay(body.delay_ms, shared);
+        if (caption) insertOpening.get(positionId, nextSeq, "text", caption, "", delay);
+        return insertOpening.get(positionId, nextSeq + Number(Boolean(caption)), kind,
+          text(body.content).trim(), text(body.media_name).trim(), delay) as OpeningRow;
+      });
+      return serializeOpening(db, row);
+    } catch (error) {
+      return reply.code(422).send({ detail: (error as Error).message });
+    }
   });
 
   // ── 开场：改一条 ──────────────────────────────────────────────
@@ -301,7 +328,11 @@ export async function registerAgentPersonaRoutes(app: FastifyInstance, db: Datab
       if (!current) return reply.code(404).send({ detail: "Not found" });
 
       const body = request.body ?? {};
+      if (openingIsStale(current.position_id, body.revision)) {
+        return reply.code(409).send({ detail: "开场已更新，请重新打开编辑" });
+      }
       const kind = text(body.kind).trim() || String(current.kind);
+      const shared = openingUsesSharedParts(db, current.position_id);
       const merged = {
         content: body.content === undefined ? current.content : body.content,
         media_name: body.media_name === undefined ? current.media_name : body.media_name,
@@ -313,34 +344,45 @@ export async function registerAgentPersonaRoutes(app: FastifyInstance, db: Datab
       if (!["enabled", "disabled"].includes(status)) {
         return reply.code(422).send({ detail: "status must be enabled or disabled" });
       }
+      const caption = (kind === "image" || kind === "video") ? text(body.caption).trim() : "";
+      if (caption && (caption.length > MAX_TEXT_CHARS || listOpenings(current.position_id).length >= MAX_OPENINGS)) {
+        return reply.code(422).send({ detail: "配文不能超过 2000 字，添加后开场不能超过 30 条" });
+      }
 
-      const row = db
-        .prepare(
-          `UPDATE position_opening SET
-             kind=?, content=?, media_name=?, delay_ms=?, status=?, updated_at=CURRENT_TIMESTAMP
-           WHERE id=?
-           RETURNING *`,
-        )
-        .get(
-          kind,
-          text(merged.content).trim(),
-          text(merged.media_name).trim(),
-          body.delay_ms === undefined ? Number(current.delay_ms) : clampDelay(body.delay_ms),
-          status,
-          id,
-        ) as OpeningRow;
-      return serializeOpening(db, row);
+      try {
+        const row = modifyOpening(current.position_id, () => {
+          const delay = body.delay_ms === undefined ? Number(current.delay_ms) : clampDelay(body.delay_ms, shared);
+          if (caption) {
+            db.prepare("UPDATE position_opening SET seq=seq+1 WHERE position_id=? AND (seq>? OR (seq=? AND id>=?))")
+              .run(current.position_id, current.seq, current.seq, id);
+            insertOpening.get(current.position_id, current.seq, "text", caption, "", delay);
+          }
+          return db.prepare(`UPDATE position_opening SET kind=?,content=?,media_name=?,delay_ms=?,status=?,updated_at=CURRENT_TIMESTAMP
+            WHERE id=? RETURNING *`).get(kind, text(merged.content).trim(), text(merged.media_name).trim(), delay, status, id) as OpeningRow;
+        });
+        return serializeOpening(db, row);
+      } catch (error) {
+        return reply.code(422).send({ detail: (error as Error).message });
+      }
     },
   );
 
   // ── 开场：删一条 ──────────────────────────────────────────────
-  app.delete<{ Params: { id: string } }>("/api/v1/agent-opening/:id", async (request, reply) => {
+  app.delete<{ Params: { id: string }; Querystring: { revision?: string } }>("/api/v1/agent-opening/:id", async (request, reply) => {
     if (!isAdmin(request)) return reply.code(403).send(ADMIN_REQUIRED);
     const id = int(request.params.id);
     if (id <= 0) return reply.code(404).send({ detail: "Not Found" });
-    const result = db.prepare("DELETE FROM position_opening WHERE id=?").run(id);
-    if (Number(result.changes ?? 0) === 0) return reply.code(404).send({ detail: "Not found" });
-    return { ok: true };
+    const current = db.prepare("SELECT position_id FROM position_opening WHERE id=?").get(id);
+    if (!current) return reply.code(404).send({ detail: "Not found" });
+    if (openingIsStale(Number(current.position_id), request.query.revision)) {
+      return reply.code(409).send({ detail: "开场已更新，请重新打开编辑" });
+    }
+    try {
+      modifyOpening(Number(current.position_id), () => db.prepare("DELETE FROM position_opening WHERE id=?").run(id));
+      return { ok: true };
+    } catch (error) {
+      return reply.code(422).send({ detail: (error as Error).message });
+    }
   });
 
 
@@ -357,6 +399,7 @@ export async function registerAgentPersonaRoutes(app: FastifyInstance, db: Datab
     db.exec("BEGIN IMMEDIATE");
     try {
       const items = listOpenings(positionId);
+      const prior = sharedOpeningParts(db, positionId);
       const selected = new Set<number>(ids);
       const remaining = items.filter(item => !selected.has(item.id));
       if (openingRevision(items) !== revision) {
@@ -370,11 +413,12 @@ export async function registerAgentPersonaRoutes(app: FastifyInstance, db: Datab
       db.prepare(
         "DELETE FROM position_opening WHERE position_id=? AND id IN (SELECT value FROM json_each(?))",
       ).run(positionId, JSON.stringify(ids));
+      validatePositionOpeningUpdate(db, positionId, prior);
       db.exec("COMMIT");
       return { deleted_count: ids.length, items: remaining, opening_revision: openingRevision(remaining) };
     } catch (error) {
       db.exec("ROLLBACK");
-      throw error;
+      return reply.code(422).send({ detail: (error as Error).message });
     }
   });
 
@@ -393,6 +437,9 @@ export async function registerAgentPersonaRoutes(app: FastifyInstance, db: Datab
       if (new Set(ids).size !== ids.length) {
         return reply.code(422).send({ detail: "ids 有重复项" });
       }
+      if (openingIsStale(positionId, body.revision)) {
+        return reply.code(409).send({ detail: "开场已更新，请刷新后重新排序" });
+      }
 
       const owned = new Set(
         (
@@ -405,16 +452,13 @@ export async function registerAgentPersonaRoutes(app: FastifyInstance, db: Datab
         return reply.code(422).send({ detail: "ids 包含不属于该岗位的条目" });
       }
 
-      db.exec("BEGIN");
       try {
-        const update = db.prepare(
-          "UPDATE position_opening SET seq=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-        );
-        ids.forEach((id, index) => update.run(index + 1, id));
-        db.exec("COMMIT");
+        modifyOpening(positionId, () => {
+          const update = db.prepare("UPDATE position_opening SET seq=?, updated_at=CURRENT_TIMESTAMP WHERE id=?");
+          ids.forEach((id, index) => update.run(index + 1, id));
+        });
       } catch (error) {
-        db.exec("ROLLBACK");
-        return reply.code(500).send({ detail: `重排失败：${(error as Error).message}` });
+        return reply.code(422).send({ detail: (error as Error).message });
       }
       return { items: listOpenings(positionId) };
     },

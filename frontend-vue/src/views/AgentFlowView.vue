@@ -83,7 +83,8 @@
     <div v-if="runtimeDetails && savedFlow" class="runtime-details">
       <p>这里显示按服务器配置推导的路径。没有运行客户端、企微未登录或没有客户触发时，不会自动发送。网页点击节点只查看配置。</p>
       <p v-if="isDirty">编辑器有未保存修改；实际执行路径仍使用上次保存的 v{{ savedFlow.version }}。</p>
-      <p v-if="contentMatches">节点内容与旧开场逐条一致；等待方式仍以节点连接为准，内容一致不代表发送节奏一致。</p>
+      <p v-if="savedFlow.shared_opening?.length">岗位和画布共用开场。节点连接控制等待和后续步骤。</p>
+      <p v-else-if="contentMatches">节点内容与旧开场逐条一致；等待方式仍以节点连接为准，内容一致不代表发送节奏一致。</p>
       <p v-else>节点流程与旧开场内容不同。启用时走节点流程，停用时新客户走旧开场；已有会话保留自己的流程快照。</p>
       <p>节点流程会在本轮文本确认发到目标会话后发送素材。按需素材随答复选择。</p>
       <div v-for="device in boundDevices" :key="device.device_code" class="device-evidence">
@@ -221,7 +222,7 @@
                   <template v-if="hasParts(selectedNode)">
                     <div class="inspector-subhead">
                       <span>发送内容</span>
-                      <el-button link type="primary" :disabled="isFollowup(selectedNode) || selectedNode.parts!.length >= 6" @click="appendPart(selectedNode!)">
+                      <el-button link type="primary" :disabled="isFollowup(selectedNode) || selectedNode.parts!.length >= partLimit(selectedNode)" @click="appendPart(selectedNode!)">
                         添加一条
                       </el-button>
                     </div>
@@ -236,7 +237,8 @@
                           <el-option label="文本" value="text" />
                           <el-option label="图片" value="image" />
                           <el-option label="视频" value="video" />
-                          <el-option label="地址＋导航链接" value="favorite_location" />
+                          <el-option v-if="isSharedOpeningNode(selectedNode)" label="岗位位置卡" value="location" />
+                          <el-option v-else label="地址＋导航链接" value="favorite_location" />
                         </el-select>
                         <el-button v-if="!isFollowup(selectedNode) && selectedNode.parts!.length > 1" link
                           :disabled="index === 0" @click="movePart(selectedNode!, index, -1)">上移</el-button>
@@ -246,12 +248,12 @@
                           v-if="!isFollowup(selectedNode)"
                           link
                           type="danger"
-                          :disabled="selectedNode.parts!.length <= 1"
+                          :disabled="selectedNode.parts!.length <= 1 && !isSharedOpeningNode(selectedNode)"
                           :icon="Delete"
                           @click="removePart(selectedNode!, index)"
                         >删除内容</el-button>
                       </div>
-                      <el-select v-if="part.kind === 'text' && savedOpeningTexts.length"
+                      <el-select v-if="part.kind === 'text' && savedOpeningTexts.length && !isSharedOpeningNode(selectedNode)"
                         aria-label="选用已保存开场文字" class="full-width opening-picker" filterable
                         placeholder="选用已保存开场文字" :model-value="undefined"
                         @change="(id: number) => useOpeningText(part, id)">
@@ -267,6 +269,19 @@
                         show-word-limit
                         placeholder="输入此节点发送给客户的内容"
                       />
+                      <template v-else-if="part.kind === 'location' && part.location">
+                        <el-form-item label="地点名称" class="compact-item">
+                          <el-input v-model="part.location.name" maxlength="100" />
+                        </el-form-item>
+                        <el-form-item label="地址" class="compact-item">
+                          <el-input v-model="part.location.address" maxlength="200" />
+                        </el-form-item>
+                        <el-form-item label="经度 / 纬度" class="compact-item">
+                          <el-input-number v-model="part.location.lng" aria-label="经度" :min="-180" :max="180" :controls="false" />
+                          <el-input-number v-model="part.location.lat" aria-label="纬度" :min="-90" :max="90" :controls="false" />
+                        </el-form-item>
+                        <LocationCardPreview v-bind="part.location" />
+                      </template>
                       <template v-else-if="part.kind === 'favorite_location'">
                         <el-form-item label="发送哪个地点" class="compact-item">
                           <el-select v-model="part.interview_point" class="full-width" filterable
@@ -413,6 +428,7 @@ import { ArrowDown, ArrowLeft, Check, CircleClose, Clock, Connection, Delete, Fu
 import AgentFlowCanvas from '../components/agent/AgentFlowCanvas.vue'
 import FlowRuntimeInspector from '../components/agent/FlowRuntimeInspector.vue'
 import FlowMediaPreview from '../components/agent/FlowMediaPreview.vue'
+import LocationCardPreview from '../components/agent/LocationCardPreview.vue'
 import { activeOpenings, buildAiMediaBranches, buildRuntimeFlow, compareOpeningContents, describeRuntimeNode, type LegacyOpening } from '../components/agent/flow-runtime'
 import { availableFlowMedia, normalizeFlowMediaOptions, type FlowMediaOption } from '../components/agent/flow-media-options'
 import { flowLocationOptions } from '../../../src/shared/flow-location'
@@ -709,12 +725,26 @@ function showRuntime(): void {
 async function refreshOpeningContext(): Promise<void> {
   const id=positionId.value,sequence=loadSequence
   try {
-    const [persona, context]=await Promise.all([agentApi.personaGet(id),agentApi.context({position_id:id})])
+    const [persona, context, updated]=await Promise.all([
+      agentApi.personaGet(id),agentApi.context({position_id:id}).catch(() => null),agentApi.flowGet(id),
+    ])
     if(sequence!==loadSequence || id!==positionId.value)return
     legacyOpenings.value = activeOpenings((persona.data.openings||[]) as unknown as LegacyOpening[])
     openingVersion.value = persona.data.opening_version || null
     openingsAvailable.value = legacyOpenings.value.length > 0
-    aiFacts.value = (context.data.facts||{}) as Record<string,string>
+    if (context) aiFacts.value = (context.data.facts||{}) as Record<string,string>
+    const latest = normalizeFlow(updated.data)
+    if (latest.version !== savedFlow.value?.version) {
+      const dirty = isDirty.value
+      savedFlow.value = latest
+      if (dirty) conflict.value = true
+      else {
+        const draft = JSON.parse(JSON.stringify(latest)) as AgentFlow
+        flow.value = draft
+        baseline.value = snapshot(draft)
+        if (!draft.nodes.some(node => node.node_key === selectedNodeKey.value)) chooseSelection(draft)
+      }
+    }
     void loadClientSync(id,sequence)
   } catch {
     if(sequence===loadSequence)pageError.value='开场已提交，但运行图刷新失败，请点击刷新重新核对。'
@@ -889,31 +919,52 @@ async function saveFlow(status?: 'enabled' | 'disabled'): Promise<void> {
   if (!hasEdits && !statusChanged) return
 
   const candidate = { ...flow.value, status: status ?? flow.value.status }
-  if (candidate.status === 'enabled') {
-    const issues = flowActivationIssues(candidate)
-    if (issues.length) {
-      pageError.value = `启用前请修正：${issues.join('；')}`
-      return
-    }
-  }
+  const hasSharedOpening = Boolean(candidate.shared_opening?.length)
   const skippedNodes = newlyDisabledNodeKeys(savedFlow.value, candidate)
   saving.value = true
   const requestPosition = positionId.value
   const requestSequence = loadSequence
   try {
-    if (statusChanged || skippedNodes.length) {
+    let usePositionOpening = false
+    if (!hasSharedOpening && legacyOpenings.value.length && (hasEdits || status === 'enabled')) {
+      try {
+        await ElMessageBox.confirm('将岗位开场关联到画布的开场节点。等待、分支和复聊连接会保留。',
+          '关联岗位开场', { type: 'warning', distinguishCancelAndClose: true,
+            confirmButtonText: '用岗位开场', cancelButtonText: candidate.status === 'disabled' ? '保留独立草稿' : '取消' })
+        usePositionOpening = true
+      } catch (action) {
+        if (action !== 'cancel' || candidate.status === 'enabled') return
+      }
+    }
+    if (candidate.status === 'enabled') {
+      const checkCandidate = usePositionOpening
+        ? { ...candidate, nodes: candidate.nodes.filter(node => node.node_key !== candidate.entry_key) }
+        : candidate
+      const issues = flowActivationIssues(checkCandidate)
+      if (issues.length) {
+        pageError.value = `启用前请修正：${issues.join('；')}`
+        return
+      }
+    }
+    const remainingOpeningIds = new Set(candidate.nodes.flatMap(node => node.parts?.map(part => part.opening_id) ?? []))
+    const removedOpeningCount = savedFlow.value.nodes.flatMap(node => node.parts ?? [])
+      .filter(part => part.opening_id && !remainingOpeningIds.has(part.opening_id)).length
+    if (statusChanged || skippedNodes.length || removedOpeningCount) {
       const enabling = status === 'enabled'
-      const title = statusChanged ? (enabling ? '启用流程' : '停用流程') : '确认停用流程节点'
+      const title = statusChanged ? (enabling ? '启用流程' : '停用流程')
+        : (removedOpeningCount ? '确认删除岗位开场' : '确认停用流程节点')
       const titles = skippedNodes.map(key => candidate.nodes.find(node => node.node_key === key)?.title || key)
       const nodeEffect = titles.length ? `运行画布时会跳过「${titles.join('、')}」及其超时和关键词条件，沿兜底连接继续。` : ''
       const effect = statusChanged
         ? (enabling ? '新会话将按画布流程接待。' : '新会话将使用岗位开场。')
         : ''
-      const message = `${hasEdits && statusChanged ? '当前编辑会一并保存。' : ''}${effect}${nodeEffect}进行中的会话继续按原流程运行。`
+      const removalEffect = removedOpeningCount ? `保存后，岗位开场将同时删除这 ${removedOpeningCount} 条消息。` : ''
+      const message = `${hasEdits && statusChanged ? '当前编辑会一并保存。' : ''}${effect}${nodeEffect}${removalEffect}进行中的会话继续按原流程运行。`
       try {
         await ElMessageBox.confirm(message, title, {
           type: 'warning',
-          confirmButtonText: hasEdits && statusChanged ? (enabling ? '保存并启用' : '保存并停用') : (statusChanged ? title : '确认停用'),
+          confirmButtonText: hasEdits && statusChanged ? (enabling ? '保存并启用' : '保存并停用')
+            : (statusChanged ? title : (removedOpeningCount ? '确认删除并保存' : '确认停用')),
           cancelButtonText: '取消',
         })
       } catch {
@@ -923,7 +974,10 @@ async function saveFlow(status?: 'enabled' | 'disabled'): Promise<void> {
     if (requestPosition !== positionId.value || requestSequence !== loadSequence) return
     pageError.value = ''
     conflict.value = false
-    const { data } = await agentApi.flowSave(candidate)
+    const { data } = await agentApi.flowSave(candidate, {
+      usePositionOpening, createSharedOpening: !legacyOpenings.value.length,
+      openingVersion: hasSharedOpening ? null : openingVersion.value,
+    })
     if (requestPosition !== positionId.value || requestSequence !== loadSequence) return
     flow.value = normalizeFlow(data)
     savedFlow.value = JSON.parse(JSON.stringify(flow.value))
@@ -935,7 +989,8 @@ async function saveFlow(status?: 'enabled' | 'disabled'): Promise<void> {
       changeViewMode()
     }
     ElMessage.success(statusChanged ? (flow.value.status === 'enabled' ? '流程已启用' : '流程已停用') : '流程已保存')
-    void loadClientSync(requestPosition, requestSequence)
+    if (flow.value.shared_opening?.length) void refreshOpeningContext()
+    else void loadClientSync(requestPosition, requestSequence)
   } catch (error: any) {
     if (Number(error?.response?.status) === 409) {
       conflict.value = true
@@ -1114,13 +1169,21 @@ function isFollowup(node: AgentFlowNode): boolean {
   return node.node_type === 'followup'
 }
 
+function isSharedOpeningNode(node: AgentFlowNode): boolean {
+  return flow.value?.shared_opening?.includes(node.node_key) === true
+}
+
+function partLimit(node: AgentFlowNode): number {
+  return isSharedOpeningNode(node) ? 30 : 6
+}
+
 function appendPart(node: AgentFlowNode): void {
-  if (!flow.value || !node.parts || node.parts.length >= 6 || isFollowup(node)) return
+  if (!flow.value || !node.parts || node.parts.length >= partLimit(node) || isFollowup(node)) return
   node.parts.push({ kind: 'text', body: '', media_name: '', delay_ms: 2000 })
 }
 
 function removePart(node: AgentFlowNode, index: number): void {
-  if (!flow.value || !node.parts || node.parts.length <= 1) return
+  if (!flow.value || !node.parts || (node.parts.length <= 1 && !isSharedOpeningNode(node))) return
   node.parts.splice(index, 1)
 }
 
@@ -1133,9 +1196,12 @@ function movePart(node: AgentFlowNode, index: number, offset: number): void {
 }
 
 function setPartKind(part: AgentFlowPart, kind: string): void {
-  if (!['text', 'image', 'video', 'favorite_location'].includes(kind)) return
+  if (!['text', 'image', 'video', 'favorite_location', 'location'].includes(kind)) return
+  if (part.kind === 'location') part.body = ''
   part.kind = kind
   part.media_name = ''
+  if (kind === 'location') part.location = { name: '', address: '', lng: 0, lat: 0 }
+  else delete part.location
   if (kind !== 'favorite_location') {
     delete part.interview_point
     delete part.delay_before_ms

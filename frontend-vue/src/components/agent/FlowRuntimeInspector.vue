@@ -8,12 +8,13 @@
       <template v-if="node.parts?.length">
         <h4>{{ node.node_type === 'system_media' ? 'AI 可选素材 · 按需发送' : '此步骤配置的发送内容' }}</h4>
         <div v-for="(part, index) in node.parts" :key="index" class="message-preview">
-          <span class="message-kind">第 {{ index + 1 }} 条 · {{ part.kind === 'favorite_location' ? '地址＋导航链接' : part.kind === 'text' ? '文本' : part.kind === 'video' ? '视频' : '图片' }}</span>
+          <span class="message-kind">第 {{ index + 1 }} 条 · {{ messageKind(part.kind) }}</span>
           <p v-if="part.kind === 'text'" class="verbatim">{{ part.body || '未填写文本' }}</p>
           <template v-else-if="part.kind === 'favorite_location'">
             <strong>{{ flowLocationLabel(part.interview_point || '未选地点') }}</strong>
             <p>{{ part.location_link_enabled ? '新版 Windows 执行，发送结果以会话回执为准。' : '此条尚未启用。核对地点后，启用并保存流程。' }}</p>
           </template>
+          <LocationCardPreview v-else-if="part.kind === 'location'" v-bind="part.location || {}" />
           <template v-else><strong>{{ part.media_name || '未选素材' }}</strong>
             <FlowMediaPreview v-if="part.media_name" :name="part.media_name" :kind="part.kind" />
           </template>
@@ -44,12 +45,17 @@ import type { AgentFlow, AgentFlowEdge, AgentFlowNode } from '../../api/agent'
 import { describeRuntimeNode } from './flow-runtime'
 import { flowLocationLabel } from '../../../../src/shared/flow-location'
 import FlowMediaPreview from './FlowMediaPreview.vue'
+import LocationCardPreview from './LocationCardPreview.vue'
 const props = defineProps<{ graph: AgentFlow; node: AgentFlowNode | null; edge: AgentFlowEdge | null; legacy: boolean }>()
 defineEmits<{
   (event: 'select-node', key: string): void
 }>()
 const explanations = computed(() => props.node ? describeRuntimeNode(props.node, props.graph, props.legacy) : [])
 const outgoing = computed(() => props.graph.edges.filter(edge => edge.from_key === props.node?.node_key))
+function messageKind(kind: string): string {
+  if (kind === 'location') return props.legacy ? '位置卡' : '地址＋导航链接'
+  return ({ favorite_location: '地址＋导航链接', text: '文本', video: '视频', image: '图片' } as Record<string, string>)[kind] || kind
+}
 function title(key: string): string { return props.graph.nodes.find(node => node.node_key === key)?.title || key || '结束' }
 function edgeLabel(edge: AgentFlowEdge): string {
   return ({ default: '连续执行', any_reply: '等待客户回复', timeout: '等待超时后一次复聊', keyword: `匹配关键词「${edge.condition_value || ''}」`, giveup: '旧放弃条件，当前运行器不处理' } as Record<string, string>)[edge.trigger] || edge.trigger
