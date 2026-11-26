@@ -37,8 +37,8 @@ DEPENDENCY_BASELINE = {
 }
 CLIENT_PATHS = frozenset({
     "_verify_clipboard.py", "autopilot.py", "brain.py", "client.py", "collector.py",
-    "compat.py", "echo_guard.py", "flow_state.py", "location_card.py", "login_qr.py", "login_refresh.py", "login_watch.py",
-    "main.py", "media_fetch.py", "register.py", "remote_config.py", "reply_store.py",
+    "compat.py", "echo_guard.py", "favorite_sync.py", "flow_state.py", "location_card.py", "login_qr.py", "login_refresh.py", "login_watch.py",
+    "main.py", "media_fetch.py", "register.py", "remark.py", "remote_config.py", "reply_store.py",
     "screenshot.py", "sender.py", "wecomcracker.py", "client_updater.py", "client-startup.cmd",
     "client_manager.py", "client_manager_service.py", "client-manager.vbs",
 })

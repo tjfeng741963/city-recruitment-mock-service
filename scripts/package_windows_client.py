@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import subprocess
@@ -104,6 +105,29 @@ def _assert_frozen_core(repo: Path, commit: str, pinned: dict[str, str]) -> None
             raise PackageError(f"frozen core hash mismatch: {path}")
 
 
+def _assert_updater_accepts_paths(updater: bytes, paths: set[str]) -> None:
+    # Inspect the exact updater going into the ZIP without executing it.
+    try:
+        definition = next(
+            node for node in ast.parse(updater).body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "CLIENT_PATHS" for target in node.targets)
+        )
+        initializer = definition.value
+        if not (isinstance(initializer, ast.Call) and isinstance(initializer.func, ast.Name)
+                and initializer.func.id == "frozenset" and len(initializer.args) == 1
+                and not initializer.keywords):
+            raise ValueError("unexpected CLIENT_PATHS definition")
+        allowed = ast.literal_eval(initializer.args[0])
+        if not isinstance(allowed, set) or not all(isinstance(name, str) for name in allowed):
+            raise ValueError("CLIENT_PATHS must be a set of filenames")
+    except (StopIteration, SyntaxError, TypeError, ValueError) as exc:
+        raise PackageError("could not read the bundled updater allowlist") from exc
+    rejected = paths - allowed
+    if rejected:
+        raise PackageError(f"bundled updater rejects packaged files: {sorted(rejected)}")
+
+
 def _zip_info(path: str) -> zipfile.ZipInfo:
     info = zipfile.ZipInfo(path, date_time=(2020, 1, 1, 0, 0, 0))
     info.compress_type = zipfile.ZIP_DEFLATED
@@ -145,6 +169,9 @@ def build_package(repo: Path, *, commit: str, base: str, output: Path) -> dict:
                 "content": content,
             }
         )
+
+    updater = next(item["content"] for item in files if item["path"] == "client_updater.py")
+    _assert_updater_accepts_paths(updater, {item["path"] for item in files})
 
     protected_core = {
         Path(path).name: _normalized_hash(_blob(repo, commit, path))

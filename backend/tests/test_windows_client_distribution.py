@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import runpy
 import subprocess
 import sys
 import zipfile
@@ -57,7 +58,7 @@ def make_repo(tmp_path: Path) -> tuple[Path, str]:
     write_file(repo, "agent/wecom_io_core/vendor/key_extract.py", b"SECRET_HELPER = True\n")
     write_file(repo, "agent/pyproject.toml", subprocess.check_output(['git', 'show', 'HEAD:agent/pyproject.toml'], cwd=REPO_ROOT))
     write_file(repo, "agent/uv.lock", subprocess.check_output(['git', 'show', 'HEAD:agent/uv.lock'], cwd=REPO_ROOT))
-    write_file(repo, "deploy/client/client_updater.py", b"UPDATER = 1\n")
+    write_file(repo, "deploy/client/client_updater.py", (REPO_ROOT / "deploy/client/client_updater.py").read_bytes())
     write_file(repo, "deploy/client/client-startup.cmd", b"@echo off\r\n")
     write_file(repo, "deploy/client/client_manager.py", b"MANAGER = 1\n")
     write_file(repo, "deploy/client/client_manager_service.py", b"SERVICE = 1\n")
@@ -191,3 +192,38 @@ def test_package_rejects_unclassified_new_client_modules(tmp_path):
     target = commit_change(repo, "agent/new_required_module.py", b"REQUIRED = True\n")
     with pytest.raises(PackageError, match="missing from explicit package allowlist"):
         build_package(repo, commit=target, base=base, output=tmp_path / "client.zip")
+
+
+def test_package_can_be_installed_by_its_bundled_updater(tmp_path):
+    repo, base = make_repo(tmp_path)
+    commit_change(repo, "agent/remark.py", b"REMARK = True\n")
+    target = commit_change(repo, "agent/favorite_sync.py", b"FAVORITES = True\n")
+    package = tmp_path / "client.zip"
+    result = build_package(repo, commit=target, base=base, output=package)
+    root = tmp_path / "client"
+    write_file(root, "login_code.py", b"LOGIN = True\n")
+    write_file(root, "frozen-core-sha256.json", (repo / "deploy/client/frozen-core-sha256.json").read_bytes())
+    for name in CORE_FILES:
+        write_file(root, name.removeprefix("agent/"), (repo / name).read_bytes())
+    with zipfile.ZipFile(package) as archive:
+        write_file(root, "client_updater.py", archive.read("client_updater.py"))
+    updater = runpy.run_path(str(root / "client_updater.py"))
+
+    applied = updater["apply_package"](
+        package.read_bytes(), expected_commit=target,
+        expected_sha256=result["archive_sha256"], root=root, require_manager=True,
+    )
+    assert {"remark.py", "favorite_sync.py"} <= set(applied["changed"])
+
+
+def test_packaging_rejects_files_missing_from_the_bundled_updater(tmp_path):
+    repo, base = make_repo(tmp_path)
+    commit_change(repo, "agent/remark.py", b"REMARK = True\n")
+    updater_file = "deploy/client/client_updater.py"
+    old_allowlist = (repo / updater_file).read_bytes().replace(b'"remark.py", ', b"")
+    target = commit_change(repo, updater_file, old_allowlist + b"\n# compatibility fixture\n")
+    output = tmp_path / "client.zip"
+
+    with pytest.raises(PackageError, match=r"updater rejects packaged files:.*remark.py"):
+        build_package(repo, commit=target, base=base, output=output)
+    assert not output.exists()
