@@ -70,10 +70,16 @@ def read_remark(user_id: str) -> str | None:
         if con is None:
             return None
         try:
+            # 注意：企微把备注写在 real_remarks，不是 remarks（2026-11-26 实测：
+            # 界面已显示「陈青冥」，real_remarks='陈青冥'，remarks 仍为空）。
+            # 只查 remarks 会永远判失败，把成功当失败。
             row = con.execute(
-                "select remarks from external_user_relation_v3 where user_id=?", (str(user_id),)
+                "select real_remarks, remarks from external_user_relation_v3 where user_id=?",
+                (str(user_id),),
             ).fetchone()
-            return str(row[0] or "") if row else ""
+            if not row:
+                return ""
+            return str(row[0] or row[1] or "")
         finally:
             con.close()
     except Exception:  # noqa: BLE001
