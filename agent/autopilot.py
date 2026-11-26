@@ -1077,20 +1077,28 @@ class Reporter:
         except Exception as exc:  # noqa: BLE001
             log(f"[心跳] 失败（忽略，下轮自然补）：{agent_client.describe_error(exc)}")
 
+    @staticmethod
+    def _client_commit() -> str:
+        """当前安装的客户端 git 版本；读不到返回空串。
+
+        心跳和配置同步都要用，抽出来避免两处各读一遍。空串是合法值：
+        开发环境或没装更新器的旧安装没有 .client-version.json。
+        """
+        try:
+            data = json.loads((ROOT / ".client-version.json").read_text(encoding="utf-8-sig"))
+            candidate = data.get("commit") if isinstance(data, dict) else None
+            if isinstance(candidate, str) and re.fullmatch(r"[0-9a-fA-F]{40}", candidate):
+                return candidate.lower()
+        except (OSError, ValueError, TypeError):
+            pass
+        return ""
+
     def _send_config_sync(self) -> None:
         """Background only: refresh and report configuration identity, not sessions."""
         brain = _brain
         if brain is None or not hasattr(brain, "report_config_sync"):
             return
-        commit = ""
-        try:
-            data = json.loads((ROOT / ".client-version.json").read_text(encoding="utf-8-sig"))
-            candidate = data.get("commit") if isinstance(data, dict) else None
-            if isinstance(candidate, str) and re.fullmatch(r"[0-9a-fA-F]{40}", candidate):
-                commit = candidate.lower()
-        except (OSError, ValueError, TypeError):
-            pass
-        brain.report_config_sync(commit)
+        brain.report_config_sync(self._client_commit())
 
     def _send_bridge(self, wecom_state: str) -> None:
         """向 Node 桥接（4222）报设备心跳。
@@ -1107,7 +1115,7 @@ class Reporter:
         except Exception:  # noqa: BLE001
             account_id = ""
         try:
-            bridge.heartbeat(state, account_id=account_id)
+            bridge.heartbeat(state, account_id=account_id, commit=self._client_commit())
             log(f"[桥接] {self.device_code} → {state} ok=True")
         except Exception as exc:  # noqa: BLE001
             log(f"[桥接] 失败（忽略，不影响主心跳）：{agent_client.describe_error(exc)}")

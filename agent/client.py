@@ -134,13 +134,20 @@ class BridgeClient:
             raw = resp.read().decode("utf-8", "replace")
         return json.loads(raw) if raw.strip() else {}
 
-    def heartbeat(self, state: str, account_id: str = "") -> dict:
-        """state 必须已经是桥接语义（online/offline/scanning），映射在 autopilot 做。"""
+    def heartbeat(self, state: str, account_id: str = "", commit: str = "") -> dict:
+        """state 必须已经是桥接语义（online/offline/scanning），映射在 autopilot 做。
+
+        commit 是当前安装的客户端 git 版本，服务端存下来供看板核对；
+        旧服务端会忽略这个字段，不影响心跳。
+        """
         code = quote(self.device_code, safe="")
+        payload = {"state": state or "offline", "account_id": (account_id or "")[:128]}
+        if commit:
+            payload["commit"] = commit[:64]
         return self._request(
             "POST",
             f"/api/v1/bridge/devices/{code}/heartbeat",
-            {"state": state or "offline", "account_id": (account_id or "")[:128]},
+            payload,
         )
 
     def report_recipient_binding(

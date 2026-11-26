@@ -295,7 +295,9 @@ export function registerDeviceBridgeRoutes(
         if (cloudAssigned && !runtime) return reply.code(422).send({ detail: "缺少有效的 Windows 运行状态" });
         // 状态变化的 device_events 落表与推送都收敛在 store.heartbeat 里：
         // 只有真正变化才落一条 reason='reported' 的事件并推 device.updated。
-        store.heartbeat(code, state as "online" | "offline" | "scanning", field(body, "account_id"));
+        // commit：客户端当前安装的 git 版本，用于看板上核对「这台机器跑的是不是最新发布」。
+        // 旧客户端不传，store 会保留上一次已知值，不会抹空。
+        store.heartbeat(code, state as "online" | "offline" | "scanning", field(body, "account_id"), field(body, "commit", 64));
         if (runtime === undefined) store.clearRuntimeHealth(code);
         else store.updateRuntimeHealth(code, runtime);
         if (cloudAssigned) recordCloudAgentHeartbeat(db, code, token, state);

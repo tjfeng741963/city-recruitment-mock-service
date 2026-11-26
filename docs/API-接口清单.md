@@ -75,7 +75,7 @@ Key 由服务端加密保存，接口响应只显示是否配置。同一地址�
 
 ## 微信账号列表的回复来源
 
-`GET /api/v1/agent/devices` 沿用登录鉴权及用户设备范围过滤，`items[]` 新增安全字段 `reply_provider: "agent" | "dify"`。只有配置值为 dify 时返回 dify，其余与实际运行默认一致返回 agent；不返回 Dify 密钥或连接凭据。页面用该字段展示回复来源并选择入口，不通过 GET 改变来源。已配对设备额外返回 bridge_state（online、offline 或 scanning）和 last_heartbeat_at（UTC ISO 8601 或 null）。只有启用设备在 60 秒内上报 online 时，online 和 status 才为 true。`is_enabled` 为账号的后台启用状态，供城市接待设置筛选账号。已启用的离线账号也可绑定岗位。
+`GET /api/v1/agent/devices` 沿用登录鉴权及用户设备范围过滤，`items[]` 新增安全字段 `reply_provider: "agent" | "dify"`。只有配置值为 dify 时返回 dify，其余与实际运行默认一致返回 agent；不返回 Dify 密钥或连接凭据。页面用该字段展示回复来源并选择入口，不通过 GET 改变来源。已配对设备额外返回 bridge_state（online、offline 或 scanning）和 last_heartbeat_at（UTC ISO 8601 或 null），以及 `client_commit`（客户端心跳上报的 git 版本，空串表示旧版客户端还没上报；旧客户端心跳不带该字段时保留上一次已知值，不会清空）。只有启用设备在 60 秒内上报 online 时，online 和 status 才为 true。`is_enabled` 为账号的后台启用状态，供城市接待设置筛选账号。已启用的离线账号也可绑定岗位。
 
 支持新版运行状态的设备会附带 windows_runtime，包含 connected、wecom_available、reply_ready、reason、sync、backlog。桥接心跳可上报 runtime，服务器只保存状态枚举与计数。超过 60 秒未刷新则标记离线并停止领取网页发送指令。旧客户端继续使用原心跳契约。
 

@@ -9,7 +9,7 @@ const digest = (value: string) => createHash("sha256").update(value).digest("hex
 export class BridgeError extends Error {
   constructor(message: string, readonly statusCode = 409) { super(message); }
 }
-interface BridgeDevice { device_code: string; account_id: string; state: string; heartbeat_at: number }
+interface BridgeDevice { device_code: string; account_id: string; state: string; heartbeat_at: number; client_commit: string }
 export interface BridgeCommand {
   id: string; device_code: string; customer_id: number; contact_id: string; content: string;
   status: string; lease_token: string; message_id: string; simulated: number; idempotency_key: string;
@@ -89,7 +89,7 @@ export class DeviceBridgeStore {
     return Boolean(row && timingSafeEqual(Buffer.from(row.token_hash, "hex"), Buffer.from(digest(token), "hex")));
   }
   status(code: string): BridgeDevice | null {
-    const row = this.db.prepare("SELECT device_code,account_id,state,heartbeat_at FROM bridge_devices WHERE device_code=?").get(code) as unknown as BridgeDevice | undefined;
+    const row = this.db.prepare("SELECT device_code,account_id,state,heartbeat_at,client_commit FROM bridge_devices WHERE device_code=?").get(code) as unknown as BridgeDevice | undefined;
     if (!row) return null;
     return { ...row, state: row.state === "online" && this.now() - row.heartbeat_at > 60_000 ? "offline" : row.state };
   }
@@ -134,7 +134,7 @@ export class DeviceBridgeStore {
     }
   }
 
-  heartbeat(code: string, state: "online" | "offline" | "scanning", accountId = ""): void {
+  heartbeat(code: string, state: "online" | "offline" | "scanning", accountId = "", commit = ""): void {
     const device = this.status(code);
     if (!device) throw new BridgeError("Device not paired", 404);
     if (state === "online" && !accountId) throw new BridgeError("Logged-in account id is required", 422);
@@ -148,8 +148,12 @@ export class DeviceBridgeStore {
     // status() 返回的是生效状态（超时的 online 已折算成 offline），所以这里
     // 的“变化”与路由层观察到的一致：设备重复上报同一状态时既不落流水也不推送。
     const changed = device.state !== state;
-    this.db.prepare("UPDATE bridge_devices SET state=?,heartbeat_at=?,account_id=CASE WHEN ?<>'' THEN ? ELSE account_id END WHERE device_code=?")
-      .run(state, this.now(), accountId, accountId, code);
+    // client_commit 只在客户端真的报了才覆盖：旧版客户端不带这个字段，
+    // 不能因为一次心跳就把已知版本抹成空。
+    this.db.prepare("UPDATE bridge_devices SET state=?,heartbeat_at=?,"
+      + "account_id=CASE WHEN ?<>'' THEN ? ELSE account_id END,"
+      + "client_commit=CASE WHEN ?<>'' THEN ? ELSE client_commit END WHERE device_code=?")
+      .run(state, this.now(), accountId, accountId, commit, commit, code);
     if (rebound) {
       this.db.prepare("INSERT INTO device_events(device_code,event_type,reason,created_at) VALUES (?,?,?,?)")
         .run(code, "account_rebound", `${previousAccount}->${accountId}`, new Date(this.now()).toISOString());

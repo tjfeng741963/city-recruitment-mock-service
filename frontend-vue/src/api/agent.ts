@@ -33,6 +33,8 @@ export interface AgentDeviceItem extends AgentDevice {
     sync: 'unknown' | 'current' | 'catching_up' | 'error'; backlog: number }
   bridge_state?: 'online' | 'offline' | 'scanning'
   last_heartbeat_at?: string | null
+  /** 客户端上报的安装版本（git commit）；空串表示旧版客户端还没上报 */
+  client_commit?: string
   reply_provider?: 'agent' | 'dify'
   factory_ids?: number[]
   factories?: AgentDeviceFactory[]

@@ -139,6 +139,8 @@
         <el-table-column label="最近心跳" width="180">
           <template #default="{ row }">
             <span class="muted">{{ row.last_heartbeat_at ? formatDateTime(row.last_heartbeat_at) : row.last_online ? formatDateTime(row.last_online) : '-' }}</span>
+            <div v-if="row.client_commit" class="queue-note">版本 {{ row.client_commit.slice(0, 7) }}</div>
+            <div v-else-if="isOnline(row)" class="queue-note">版本未上报</div>
           </template>
         </el-table-column>
 

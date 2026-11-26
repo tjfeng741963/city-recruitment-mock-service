@@ -36,7 +36,7 @@ class FakeBridge:
         self.calls: list[tuple[str, str]] = []
         self.exc = exc
 
-    def heartbeat(self, state: str, account_id: str = "") -> dict:
+    def heartbeat(self, state: str, account_id: str = "", commit: str = "") -> dict:
         self.calls.append((state, account_id))
         if self.exc is not None:
             raise self.exc

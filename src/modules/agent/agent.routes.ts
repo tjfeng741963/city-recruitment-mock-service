@@ -164,6 +164,8 @@ export function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync, noti
               status: online, online,
               bridge_state: fresh && row.status === "enabled" ? bridge.state : "offline",
               last_heartbeat_at: bridge.heartbeat_at > 0 ? new Date(bridge.heartbeat_at).toISOString() : null,
+              // 客户端上报的安装版本；空串表示旧版客户端还没上报
+              client_commit: bridge.client_commit ?? "",
             });
           }
           return { ...serialized, is_enabled: row.status === "enabled",
