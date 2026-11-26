@@ -22,7 +22,7 @@ echo ============================================================
 echo.
 
 rem ---------- 1. 端口 ----------
-echo [1/4] 端口 %PORT%
+echo [1/5] 端口 %PORT%
 set "BACKPID="
 for /f "tokens=5" %%P in ('netstat -ano ^| findstr /R /C:":%PORT% " ^| findstr /I "LISTEN"') do set "BACKPID=%%P"
 if defined BACKPID (
@@ -33,7 +33,7 @@ if defined BACKPID (
 echo.
 
 rem ---------- 2. python 进程 ----------
-echo [2/4] python.exe 进程 
+echo [2/5] python.exe 进程 
 set "PYCOUNT=0"
 for /f %%C in ('%SYS%\tasklist.exe /FI "IMAGENAME eq python.exe" /NH 2^>nul ^| %SYS%\find.exe /C /I "python.exe"') do set "PYCOUNT=%%C"
 echo        共 !PYCOUNT! 个（含 autopilot；0 = 两个都没跑） 
@@ -43,7 +43,7 @@ if !PYCOUNT! GTR 0 (
 echo.
 
 rem ---------- 3. 健康检查 ----------
-echo [3/4] 后端健康检查 http://127.0.0.1:%PORT%/healthz
+echo [3/5] 后端健康检查 http://127.0.0.1:%PORT%/healthz
 where curl >nul 2>&1
 if errorlevel 1 (
     echo        未找到 curl.exe，跳过（Windows 10/11 自带 curl） 
@@ -58,8 +58,18 @@ if errorlevel 1 (
 )
 echo.
 
-rem ---------- 4. 日志 ----------
-echo [4/4] 最近日志 
+rem ---------- 4. 核心文件自检 ----------
+echo [4/5] 核心文件（wecom_io_core）与冻结清单核对 
+if not exist "%ROOT%\agent\wecom_io_core" (
+    echo        未找到 %ROOT%\agent\wecom_io_core，跳过 
+) else (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0check-core.ps1" -Pins "%~dp0frozen-core-sha256.json" -Core "%ROOT%\agent\wecom_io_core"
+    if errorlevel 1 echo        核心文件被动过：启动和更新都会被拒绝，恢复方法见 README 的「核心文件排查」 
+)
+echo.
+
+rem ---------- 5. 日志 ----------
+echo [5/5] 最近日志 
 if not exist "%LOGDIR%" (
     echo        没有 logs 目录（用 start-all.bat 启动后才会生成） 
     goto :done
