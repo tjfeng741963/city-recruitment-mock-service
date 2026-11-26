@@ -1870,6 +1870,22 @@ def _recipient_key(name: str) -> str:
     return "".join(re.split(r"[\s_]+", name.casefold()))
 
 
+def _unique_direct_recipient(store: Store, name: str, cid: str) -> bool:
+    try:
+        me = store.self_id()
+        if not isinstance(me, str) or me in ("", "unknown") or not cid.startswith("S:"):
+            return False
+        members = cid[2:]
+        other = (members[len(me) + 1:] if members.startswith(me + "_") else
+                 members[:-len(me) - 1] if members.endswith("_" + me) else "")
+        key = _recipient_key(name)
+        owners = {str(contact_id) for contact_id, label in store.contacts().items()
+                  if key and _recipient_key(str(label or "")) == key}
+        return bool(other and other != me and owners == {other})
+    except Exception:
+        return False
+
+
 def _recipient_heading() -> tuple[int, bytes] | None:
     """Read the title from the selected, foreground WeCom main window."""
     from screenshot import encode_png, grab
@@ -2038,12 +2054,14 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
     guard = _recipient_guard_enabled(cid)
     if _recipient_binding_enabled and guard and not managed:
         return "blocked", _RECIPIENT_BLOCKED, ""
-    if guard:
+    if guard and _recipient_binding_enabled:
         name, report = _resolve_recipient(store, cid, binding)
         if report and managed and (not binding or report != binding["status"]):
             _queue_recipient_report(account, cid, report, binding["remark"] if binding else "")
         if not name or (binding and binding["status"] != "verified"):
             return "blocked", _RECIPIENT_BLOCKED, ""
+    elif guard and not _unique_direct_recipient(store, name, cid):
+        return "blocked", _RECIPIENT_BLOCKED, ""
     heading = None
     search_before = None
     phase = "start"
