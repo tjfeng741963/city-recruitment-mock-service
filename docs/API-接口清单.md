@@ -122,8 +122,11 @@ Agent 的下发配置带当前单岗 `position_id`（已绑定时），岗位话
 | POST | `/api/v1/agent/conversations/:id/recipient-binding?device_code=…` | 有设备权限的坐席为该会话领取唯一备注。首次或旧备注失效时生成，等核验期间重复领取返回原备注。 |
 | GET | `/api/v1/bridge/devices/:code/config` | 设备令牌读取已知登录账号的 `recipient_bindings_account_id` 和 `recipient_bindings: [{conversation_id,status,remark}]`。账号或名单变化与配置版本无关，客户端需读取每次响应。 |
 | POST | `/api/v1/bridge/devices/:code/recipient-binding` | 设备令牌上报 `{account_id,conversation_id,status,remark?}`。账号须与当前设备登录账号一致，会话须已同步。 |
+| POST | `/api/v1/agent/devices/:code/remark` | 让客户端把备注写进企微。提交 `{name,remark,conversation_id?,user_id?}`，入队 `kind=set_remark` 并返回 `{queued,command_id}`。备注最多 32 字；设备心跳超过 60 秒返回 `409`。 |
 
-状态依次为 `conflict`（发现同名，尚无备注）、`awaiting`（已生成备注，等 Win 回读）、`verified`（Win 已核验这位联系人名下的备注）、`needs_confirmation`（已核验的备注失效）。设备可上报 `conflict`、`verified` 或 `needs_confirmation`。后两项必须带准确的备注，过期结果返回 `409`。浏览器领取备注不触发企微自动改名，运营在准确会话中设置备注。未核验时网页发送被拦截，已排队消息继续由 Win 在实际发送前校验。
+状态依次为 `conflict`（发现同名，尚无备注）、`awaiting`（已生成备注，等 Win 回读）、`verified`（Win 已核验这位联系人名下的备注）、`needs_confirmation`（已核验的备注失效）。设备可上报 `conflict`、`verified` 或 `needs_confirmation`。后两项必须带准确的备注，过期结果返回 `409`。
+
+领取备注只生成备注码，不会自己改名。点「自动设备注」后服务端入队 `kind=set_remark`，Win 端点企微界面写入并回读本地库确认，成功才回执；随后配置下发、客户端比对一致才转为 `verified`。备注指令与消息共用 `bridge_commands` 队列，但不要求发送就绪——发送不可用时客户端只领 `set_remark`（`claim?only=set_remark`），不会碰消息队列。未核验时网页发送被拦截，已排队消息继续由 Win 在实际发送前校验。
 
 
 ## 二、人设与开场（后台配置）

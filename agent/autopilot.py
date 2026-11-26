@@ -3936,10 +3936,20 @@ def pump_commands(
     if now - _last_claim_at < CLAIM_INTERVAL:
         return stats
     _last_claim_at = now
-    refresh_only = wecom_state != "online" or not desktop_send_ready("health")[0]
+    # 分三种情况领指令（2026-11-26）：
+    # 1. 未登录企微 → 只能刷二维码。设置备注要操作窗口，没登录根本做不了，
+    #    领了也只会回执失败、白占 60 秒租约。
+    # 2. 已登录但发送未就绪（窗口黑掉 / 最小化 / 桌面不可用）→ 只领 set_remark。
+    #    改备注是点通讯录，remark.py 会自己抢前台并还原窗口，不依赖发送就绪；
+    #    用「发送就绪」当门槛会让备注永久卡在队列里，网页上点了没反应。
+    # 3. 正常 → 领消息，和原来一致。
+    login_blocked = wecom_state != "online"
+    send_blocked = False if login_blocked else not desktop_send_ready("health")[0]
+    refresh_only = login_blocked or send_blocked
+    only_kind = "refresh_login_qr" if login_blocked else ("set_remark" if send_blocked else "")
 
     try:
-        command = bridge.claim(only="refresh_login_qr" if refresh_only else "")
+        command = bridge.claim(only=only_kind)
     except Exception as exc:  # noqa: BLE001
         log(f"[指令] 领取失败（忽略）：{agent_client.describe_error(exc)}")
         return stats
@@ -3962,7 +3972,7 @@ def pump_commands(
                 level="warning", scope="manual")
     if now - _last_pump_log_at >= 300:
         _last_pump_log_at = now
-        log(f"[指令] 泵运行中：wecom={wecom_state} 只领刷新={refresh_only} "
+        log(f"[指令] 泵运行中：wecom={wecom_state} 领取范围={only_kind or '全部'} "
             f"本轮={'领到指令' if command else '队列为空'} "
             f"桥接={'已配置' if getattr(bridge, 'enabled', False) else '未配置'}")
     if not command:

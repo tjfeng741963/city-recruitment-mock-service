@@ -195,6 +195,15 @@ export const conversationsApi = {
     http.post<RecipientBinding>(`/api/v1/agent/conversations/${customerId}/recipient-binding`, {}, {
       params: { device_code: deviceCode },
     }),
+  /** 让客户端把备注写进企微：入队 kind=set_remark，由 Win 端点 UI 执行并回读确认 */
+  applyRecipientRemark: (
+    deviceCode: string,
+    payload: { name: string; remark: string; conversation_id?: string },
+  ) =>
+    http.post<{ queued: boolean; command_id: string }>(
+      `/api/v1/agent/devices/${encodeURIComponent(deviceCode)}/remark`,
+      payload,
+    ),
   /** 优先走会话发送口，失败回退人工回复口（两条路径后端都存在） */
   sendMessage: async (deviceCode: string, customerId: number | string, content: string) => {
     try {

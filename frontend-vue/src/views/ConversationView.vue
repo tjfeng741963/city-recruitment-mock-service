@@ -189,13 +189,23 @@
             <div>
               <strong>{{ recipientBinding.status === 'awaiting' ? '等待企微核验' : '待确认发送对象' }}</strong>
               <p v-if="recipientBinding.status === 'awaiting'">
-                在企微打开这位客户的会话，设置备注 <code>{{ recipientBinding.remark }}</code>。核验通过后会自动更新状态。
+                备注码 <code>{{ recipientBinding.remark }}</code>。点「自动设备注」由客户端写进企微，核验通过后自动更新。
               </p>
               <p v-else-if="recipientBinding.status === 'conflict'">
                 企微有同名联系人。待回复消息已保留，请确认这位客户。
               </p>
               <p v-else>企微备注已变化或无法核验。待回复消息已保留，请重新确认。</p>
             </div>
+            <el-button
+              v-if="recipientBinding.status === 'awaiting'"
+              size="small"
+              type="primary"
+              plain
+              :loading="applyingRemark"
+              @click="applyRecipientRemark"
+            >
+              自动设备注
+            </el-button>
             <el-button
               v-if="recipientBinding.status !== 'awaiting'"
               size="small"
@@ -294,6 +304,7 @@ const visibleCount = ref(50)
 const draft = ref('')
 const sending = ref(false)
 const issuingRecipient = ref(false)
+const applyingRemark = ref(false)
 const recipientBinding = computed(() => activeConversation.value?.recipient_binding)
 const recipientBlocked = computed(() => recipientBinding.value != null && recipientBinding.value.status !== 'verified')
 const takeover = ref(false)
@@ -660,6 +671,26 @@ async function confirmRecipient(): Promise<void> {
     ElMessage.error(err?.response?.data?.detail || '暂时无法生成会话备注')
   } finally {
     issuingRecipient.value = false
+  }
+}
+
+/** 让客户端把备注码写进企微备注。指令走桥接队列，客户端点 UI 执行后回读确认。 */
+async function applyRecipientRemark(): Promise<void> {
+  const conversation = activeConversation.value
+  const binding = recipientBinding.value
+  if (!conversation || !binding?.remark || applyingRemark.value) return
+  applyingRemark.value = true
+  try {
+    await conversationsApi.applyRecipientRemark(conversation.device_code, {
+      name: String(conversation.nickname || conversation.name || ''),
+      remark: binding.remark,
+      conversation_id: String(conversation.external_conversation_id || ''),
+    })
+    ElMessage.success('已下发设置备注指令，客户端执行后自动核验')
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.detail || '指令下发失败')
+  } finally {
+    applyingRemark.value = false
   }
 }
 

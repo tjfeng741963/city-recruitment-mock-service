@@ -470,9 +470,12 @@ export class DeviceBridgeStore {
     const device = this.status(code);
     if (!this.enabled(code) || replyModePending(this.db, code)) return null;
     const heartbeatFresh = Boolean(device?.heartbeat_at && this.now() - device.heartbeat_at <= 60_000);
-    // 刷新指令允许在 scanning/offline（登录态）下领取，只要心跳新鲜；
-    // 消息指令仍要求 online，与原来一致。
-    if (device?.state !== "online" && !(onlyKind === "refresh_login_qr" && heartbeatFresh)) return null;
+    // 刷新指令和备注指令允许在 offline（健康检查未通过）下领取，只要心跳新鲜：
+    // 设置备注走的是「点通讯录改备注」，跟「能不能发消息」没有关系，用发送就绪
+    // 当门槛会让它永久卡在队列里（2026-11-26：窗口黑掉时一条备注都领不出来，
+    // 网页上点了也没反应）。消息指令仍要求 online，与原来一致。
+    const offlineAllowed = onlyKind === "refresh_login_qr" || onlyKind === "set_remark";
+    if (device?.state !== "online" && !(offlineAllowed && heartbeatFresh)) return null;
     const now = this.now();
     // Dify 提醒只在正常回复态排队；登录态只领刷新指令，不碰消息队列。
     if (!onlyKind && device?.state === "online" && this.db.prepare("SELECT 1 FROM agent_devices WHERE json_extract(data_json,'$.device_code')=? AND json_extract(data_json,'$.reply_provider')='dify'").get(code)) {
@@ -543,8 +546,9 @@ export class DeviceBridgeStore {
     }
     if (!next) return null;
     // 回复就绪检查只针对「发消息」。登录二维码刷新恰恰发生在未登录、不可能
-    // reply_ready 的时候——用同一条 health 门槛会把刷新指令永久卡在队列里。
-    if (next.kind !== "refresh_login_qr") {
+    // reply_ready 的时候；设置备注也只是点通讯录改备注，不需要发送就绪。
+    // 用同一条 health 门槛会把这两类指令永久卡在队列里。
+    if (next.kind !== "refresh_login_qr" && next.kind !== "set_remark") {
       const health = this.runtimeHealth(code);
       if (health && !health.reply_ready && health.reason !== "auto_send_failed") return null;
     }
