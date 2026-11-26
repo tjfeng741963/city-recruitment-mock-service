@@ -1918,7 +1918,12 @@ def _hide_ghost_windows() -> int:
     2026-11-25 现场：两个 WeWorkWindow 同时可见，旧实例 1180×694 但 PrintWindow
     亮度 0.0（纯黑），盖在真窗口 1044×694（亮度 227）上面。后果是所有按屏幕坐标
     的点击都打在黑窗口上，表现为「窗口明明开着却发不出去 / 设备注点不动」。
-    只隐藏不杀进程（可逆），且只在存在 ≥2 个窗口时动手，避免把唯一窗口也藏了。
+    只隐藏不杀进程（可逆）。
+
+    2026-11-26 补充：只剩一个可见窗口时它自己就可能是黑的，而真窗口被切换账号
+    藏起来了（现场 hwnd=2491454 可见但亮度 0，真窗口 hwnd=2425642 隐藏、显示后
+    亮度 239）。旧实现「少于 2 个窗口就不动手」在这种状态下永远恢复不了，所以现在
+    会先把隐藏窗口逐个显示出来找一个能渲染的。
     """
     hidden = 0
     try:
@@ -1926,67 +1931,39 @@ def _hide_ghost_windows() -> int:
         from ctypes import wintypes as wt
 
         user32 = ctypes.WinDLL("user32", use_last_error=True)
-        found: list[tuple[int, int, int]] = []
+        found: list[tuple[int, int, int, bool]] = []
 
         @ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
         def _cb(hwnd, _):
             buf = ctypes.create_unicode_buffer(64)
             user32.GetClassNameW(hwnd, buf, 64)
-            if buf.value == "WeWorkWindow" and user32.IsWindowVisible(hwnd):
+            if buf.value == "WeWorkWindow":
                 rect = wt.RECT()
                 user32.GetWindowRect(hwnd, ctypes.byref(rect))
                 w, h = rect.right - rect.left, rect.bottom - rect.top
                 if w > 400 and h > 300:
-                    found.append((hwnd, w, h))
+                    found.append((hwnd, w, h, bool(user32.IsWindowVisible(hwnd))))
             return True
 
         user32.EnumWindows(_cb, None)
-        if len(found) < 2:
+        if not found:
             return 0
-        for hwnd, w, h in found:
-            if not win._renders_content(hwnd, w, h):
+        alive = {d[0] for d in found if win._renders_content(d[0], d[1], d[2])}
+        # 先把可见的黑窗口收掉，别让它们继续盖在前面
+        for hwnd, _w, _h, visible in found:
+            if visible and hwnd not in alive:
                 user32.ShowWindow(hwnd, 0)  # SW_HIDE
                 hidden += 1
-    except Exception:  # noqa: BLE001
-        return hidden
-    return hidden
-
-
-def _hide_ghost_windows() -> int:
-    """隐藏「可见但整块纯黑」的 WeWorkWindow——企微切换账号留下的残留实例。
-
-    2026-11-25 现场：两个 WeWorkWindow 同时可见，旧实例 1180×694 但 PrintWindow
-    亮度 0.0（纯黑），盖在真窗口 1044×694（亮度 227）上面。后果是所有按屏幕坐标
-    的点击都打在黑窗口上，表现为「窗口明明开着却发不出去 / 设备注点不动」。
-    只隐藏不杀进程（可逆），且只在存在 ≥2 个窗口时动手，避免把唯一窗口也藏了。
-    """
-    hidden = 0
-    try:
-        import ctypes
-        from ctypes import wintypes as wt
-
-        user32 = ctypes.WinDLL("user32", use_last_error=True)
-        found: list[tuple[int, int, int]] = []
-
-        @ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
-        def _cb(hwnd, _):
-            buf = ctypes.create_unicode_buffer(64)
-            user32.GetClassNameW(hwnd, buf, 64)
-            if buf.value == "WeWorkWindow" and user32.IsWindowVisible(hwnd):
-                rect = wt.RECT()
-                user32.GetWindowRect(hwnd, ctypes.byref(rect))
-                w, h = rect.right - rect.left, rect.bottom - rect.top
-                if w > 400 and h > 300:
-                    found.append((hwnd, w, h))
-            return True
-
-        user32.EnumWindows(_cb, None)
-        if len(found) < 2:
-            return 0
-        for hwnd, w, h in found:
-            if not win._renders_content(hwnd, w, h):
-                user32.ShowWindow(hwnd, 0)  # SW_HIDE
-                hidden += 1
+        # 一个能渲染的都没有：把隐藏窗口逐个显示出来试，找到就停
+        if not alive:
+            for hwnd, w, h, visible in found:
+                if visible:
+                    continue
+                user32.ShowWindow(hwnd, 5)  # SW_SHOW
+                time.sleep(0.6)
+                if win._renders_content(hwnd, w, h):
+                    break
+                user32.ShowWindow(hwnd, 0)
     except Exception:  # noqa: BLE001
         return hidden
     return hidden

@@ -117,6 +117,10 @@ def _send_once(
     time.sleep(0.3 if FAST_MODE else 0.5)
     log("步骤0 前台就位、窗口可见")
 
+    # 0.5 先切回「消息」页：通讯录页的 Ctrl+F 会打开联系人资料卡，没有输入框
+    win.ensure_message_tab(hwnd)
+    log("步骤0.5 已切到消息页")
+
     # 1. Ctrl+F 唤搜索
     win.hotkey("ctrl", "f")
     time.sleep(0.4 if FAST_MODE else 0.6)

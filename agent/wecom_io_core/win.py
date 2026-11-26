@@ -129,13 +129,19 @@ def find_window() -> dict | None:
     # hwnd=853446 pid=4968 隐藏、hwnd=591122 pid=6772 可见）。优先可见窗口。
     visible = [d for d in found if d["visible"]]
     pool = visible or found
-    if len(pool) > 1:
-        # 可见窗口也可能不止一个，其中会有「可见但全黑」的切换账号残留窗口，
-        # 它常常尺寸更大并盖在真窗口上。挑第一个真正在渲染的。
-        pool = sorted(pool, key=lambda d: d["rect"][2] * d["rect"][3], reverse=True)
-        for item in pool:
-            if _renders_content(item["hwnd"], item["rect"][2], item["rect"][3]):
-                return item
+    # 可见窗口里挑真正在渲染的
+    for item in sorted(pool, key=lambda d: d["rect"][2] * d["rect"][3], reverse=True):
+        if _renders_content(item["hwnd"], item["rect"][2], item["rect"][3]):
+            return item
+    # 可见的全是黑的：切换账号后真窗口常被隐藏，黑窗口反而留在前台。
+    # 把隐藏的逐个显示出来再测亮度（2026-11-26 现场：hwnd=2491454 可见但亮度 0，
+    # 真窗口 hwnd=2425642 隐藏、显示后亮度 239）。
+    hidden = [d for d in found if not d["visible"]]
+    for item in sorted(hidden, key=lambda d: d["rect"][2] * d["rect"][3], reverse=True):
+        user32.ShowWindow(item["hwnd"], win32con.SW_SHOW)
+        time.sleep(0.8)
+        if _renders_content(item["hwnd"], item["rect"][2], item["rect"][3]):
+            return item
     return max(pool, key=lambda d: d["rect"][2] * d["rect"][3])
 
 
@@ -217,6 +223,27 @@ def click(x: int, y: int) -> None:
     user32.mouse_event(0x0002, 0, 0, 0, 0)
     time.sleep(0.04)
     user32.mouse_event(0x0004, 0, 0, 0, 0)
+
+
+# 左侧导航「消息」图标相对窗口左上角的固定偏移。左侧栏宽度不随窗口缩放，
+# 菜单项从顶部顺序排列（头像 37 / 智能助理 80 / 消息 112），实测 1044x694 窗口点 (38,113) 命中。
+MESSAGE_TAB = (38, 112)
+
+
+def ensure_message_tab(hwnd: int) -> None:
+    """把企微切回「消息」页。
+
+    为什么必须做：企微的 Ctrl+F 是「当前页面内搜索」。停在通讯录页时，
+    搜客户名命中的是联系人，回车打开的是资料卡——没有聊天输入框，
+    之后 Ctrl+V 和哨兵回读全部落空，日志表现为「已回车进入会话」但
+    「输入框校验失败」（2026-11-26 现场截图确认：搜索青冥停在通讯录，
+    右侧是联系人资料卡）。点一下「消息」是幂等操作，重复点无副作用。
+    """
+    r = RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(r)):
+        return
+    click(r.left + MESSAGE_TAB[0], r.top + MESSAGE_TAB[1])
+    time.sleep(0.6)
 
 
 def ensure_foreground(hwnd: int, tries: int = 3, wait: float = 0.35) -> bool:
