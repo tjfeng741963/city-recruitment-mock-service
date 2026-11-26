@@ -13,12 +13,14 @@ import { complete, environmentModel, parseJsonObject } from "./agent-llm.js";
 import { activeAgentModel, agentModelStatus } from "./agent-model-settings.js";
 import { deviceReplyProvider, generateDifyReply, hasDifyDeviceToken, ownsReplyDevice } from "../dify/dify-reply.js";
 import { difyGroupNotificationState } from "../dify/dify-group-notification.js";
+import { difyContext } from "../dify/dify-context.js";
+import { recruitmentPositionAvailable } from "../dify/dify-recruitment.js";
 import { normalizeInterviewPoints, normalizePositionFacts } from "../../shared/position-facts.js";
 import { previewFavoriteLocation } from "../../shared/favorite-location.js";
 import { positionKnowledge } from './position-knowledge.js';
 import { faqMediaForQuestion, normalizeFaqUtterance } from "./faq-media.js";
 import { difySendDelays } from "../dify/dify-invitation.js";
-import { listExecutionTraces, newExecutionTraceId, writeExecutionTrace } from "./execution-trace.js";
+import { listExecutionTraces, newExecutionTraceId, readExecutionTrace, writeExecutionTrace } from "./execution-trace.js";
 import { updateExecutionTraceDelivery } from "./execution-trace.js";
 import {
   buildOrchestration,
@@ -834,6 +836,35 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       }
     }
     return { ok: true, session_key: deviceCode ? `manual:${deviceCode}:${sessionKey}` : sessionKey };
+  });
+
+  app.post<{ Body: Record<string, unknown> }>("/api/v1/agent/faq-media/validate", async (request, reply) => {
+    const { device_code, trace_id, session_key, name } = request.body ?? {};
+    const deviceCode = text(device_code).trim();
+    if (!hasDifyDeviceToken(db, request, deviceCode)) return reply.code(403).send(ADMIN_REQUIRED);
+    const trace = readExecutionTrace(db, text(trace_id));
+    const stale = () => reply.code(409).send({ detail: "问答素材计划已失效" });
+    if (!trace || trace.device_code !== deviceCode || trace.session_key !== session_key || trace.status !== "succeeded" ||
+        trace.engine !== deviceReplyProvider(db, deviceCode) || replyModePending(db, deviceCode) ||
+        !text(session_key).startsWith("S:") || typeof name !== "string") return stale();
+    const blocked = db.prepare("SELECT 1 FROM agent_conversations WHERE device_code=? AND external_conversation_id=? AND (takeover=1 OR recruit_status='disqualified')")
+      .get(deviceCode, text(session_key));
+    if (blocked) return stale();
+    const positionId = Number(trace.position_id);
+    const position = positionRow(db, positionId);
+    const initial = positionOfDevice(db, deviceCode);
+    if (!position || position.status !== "enabled" || (trace.engine === "agent" ? initial !== positionId :
+      !recruitmentPositionAvailable(db, deviceCode, initial, positionId, false))) return stale();
+    const planned = trace.reply as { faq?: { id?: number }; messages?: Array<{ type?: string; content?: string; name?: string }> };
+    if (!planned?.faq?.id || !Array.isArray(planned.messages) ||
+        !planned.messages.some(item => item.name === name && (item.type === "image" || item.type === "video"))) return stale();
+    const knowledge = trace.engine === "dify" ? difyContext(db, positionId)?.knowledge ?? [] :
+      positionKnowledge(db, positionId, buildFacts(db, position));
+    const current = faqMediaForQuestion(db, positionId, text(trace.request_text), knowledge);
+    if (!current || current.faq_id !== planned.faq.id ||
+        normalizeFaqUtterance(current.answer) !== normalizeFaqUtterance(text(planned.messages[0]?.content)) ||
+        !current.messages.some(item => "name" in item && item.name === name)) return stale();
+    return { ok: true };
   });
 
   // ── 一轮对话 ──────────────────────────────────────────────────

@@ -187,6 +187,7 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 | GET | `/api/v1/agent/candidates?status=&recruiter_id=&event_date=&interview_date=&page=&page_size=` | admin | 候选人员管理：由面试登记聚合出候选行 + 分页统计 |
 | GET | `/api/v1/agent/candidates/:key/messages?before_id=` | admin | 只读查看登记对应的真实对话，按精确 session_key 关联设备及客户；每页最多 200 条，不清未读、不发送 |
 | POST | `/api/v1/agent/chat` | admin/设备令牌 | 一轮对话，body `{device_code,position_id,session_key,text,dry,sent_summary?}`。设备令牌须匹配设备码，Agent 只能读取该设备绑定的岗位。管理员可按岗位独立试答。生成期间来源或岗位发生变化时，暂停旧回复并返回 `agent_binding_changed`。 |
+| POST | `/api/v1/agent/faq-media/validate` | 对应设备令牌 | 发送前复核问答素材。提交 `{device_code,trace_id,session_key,name}`，计划仍适用于该设备、会话和岗位时返回 `{ok:true}`，配置变更时返回 409。 |
 | GET | `/api/v1/agent/execution-traces?trace_id=&session_key=&device_code=&position_id=&limit=` | admin | 查询试答或正式会话的岗位、资料来源、流程版本和结果证据 |
 | POST | `/api/v1/agent/execution-traces` | admin/设备令牌 | 为客户端直接执行的流程节点创建执行记录，返回 `trace_id` |
 | POST | `/api/v1/agent/execution-traces/:trace_id/delivery` | admin/设备令牌 | 客户端回传真实发送结果：`{status,message_id,detail,device_code,session_key,node_key}` |
@@ -369,7 +370,7 @@ HTTP 仍是 200——调用方按 `ok` 判断，不要按状态码。模型输�
 | GET / POST | `/api/v1/kb-faqs`，`/api/v1/kb-faqs/:id` | 场景问答 |
 | GET | `/api/v1/kb-faqs/audit` | 问答治理检查 |
 
-岗位级问答可在 `media` 内保存素材引用 `asset:<id>:<sha256>`。每条最多一张 JPG/PNG 图、一个 MP4 视频，素材须启用且属于该岗位或通用池。历史标记继续读写。素材删除、停用、替换或改绑后，问答检查报告异常，答疑仍可读取该条文字。Windows 在 `POST /api/v1/agent/chat` 传 `faq_media: true` 和 `ordered_reply: true` 声明可识别问答素材计划。采用带素材的问答时，`reply.faq` 标明来源，`reply.messages` 与 `reply.delays_before_ms` 描述文字、图片、视频的计划顺序。画布显示的是模拟结果。当前设备只执行并回读文字，图片和视频记录为待核验发送前的目标会话。
+岗位级问答可在 `media` 内保存素材引用 `asset:<id>:<sha256>`。每条最多一张 JPG/PNG 图、一个 MP4 视频，素材须启用且属于该岗位或通用池。历史标记继续读写。素材删除、停用、替换或改绑后，问答检查报告异常，答疑仍可读取该条文字。Windows 在 `POST /api/v1/agent/chat` 传 `faq_media: true` 和 `ordered_reply: true` 声明可识别问答素材计划。采用带素材的问答时，`reply.faq` 标明来源，`reply.messages` 与 `reply.delays_before_ms` 描述文字、图片、视频的计划顺序。接待测试按该顺序显示内容预览。支持素材发送的 Windows 版本会先在单聊回读文字，再校验会话和素材文件，按计划逐条发送并回读。部分发送或回读存疑时停下并上报，整轮不会自动重发。
 | GET | `/api/v1/kb-templates`，`/api/v1/kb-templates/:code` | 模板包 |
 | POST | `/api/v1/kb-templates/:code/import` | 导入模板包 |
 | POST | `/api/v1/kb-publish/preview` | 发布预览 |

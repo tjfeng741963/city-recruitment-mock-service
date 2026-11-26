@@ -10,8 +10,8 @@
         <video v-else :src="url" muted preload="metadata" />
         <span class="preview-badge">{{ kind === 'video' ? '查看视频' : '查看图片' }}</span>
       </button>
-      <el-image v-else-if="kind === 'image'" :src="url" :alt="name" fit="contain" :preview-src-list="[url]" preview-teleported @error="error = '图片解码失败，请检查素材文件'" />
-      <VideoPreview v-else :key="url" :src="url" :name="name" />
+      <el-image v-else-if="kind === 'image'" :src="url" :alt="label || name" fit="contain" :preview-src-list="[url]" preview-teleported @error="error = '图片解码失败，请检查素材文件'" />
+      <VideoPreview v-else :key="url" :src="url" :name="name" :label="label" :version="version" />
     </template>
   </div>
 </template>
@@ -20,7 +20,7 @@
 import { onBeforeUnmount, ref, watch } from 'vue'
 import http from '../../api/http'
 import VideoPreview from './VideoPreview.vue'
-const props = defineProps<{ name: string; kind: string; compact?: boolean }>()
+const props = defineProps<{ name: string; kind: string; compact?: boolean; label?: string; version?: string }>()
 defineEmits<{ (event: 'preview'): void }>()
 const url = ref('')
 const loading = ref(false)
@@ -40,7 +40,11 @@ async function load(): Promise<void> {
   loading.value = true
   error.value = ''
   try {
-    const { data } = await http.get<Blob>(`/api/v1/agent/media/${encodeURIComponent(props.name)}`, {responseType: 'blob', signal: request.signal})
+    const { data } = await http.get<Blob>(`/api/v1/agent/media/${encodeURIComponent(props.name)}`, {
+      params: { version: props.version },
+      responseType: 'blob',
+      signal: request.signal,
+    })
     if (current !== sequence) return
     url.value = URL.createObjectURL(data)
   } catch (failure: any) {
@@ -48,13 +52,13 @@ async function load(): Promise<void> {
     error.value = failure?.response?.status === 403 ? '没有素材预览权限' : '素材预览不可用'
   } finally { if (current === sequence) loading.value = false }
 }
-watch(() => [props.name, props.kind], load, { immediate: true })
+watch(() => [props.name, props.kind, props.version], load, { immediate: true })
 onBeforeUnmount(() => { sequence += 1; clear() })
 </script>
 
 <style scoped>
-.flow-media-preview { --preview-video-height: 280px; margin: 8px 0; min-width: 0; }
-.flow-media-preview :deep(.el-image) { display: block; width: 100%; max-height: 280px; border-radius: 5px; background: var(--el-fill-color-light); }
+.flow-media-preview { --preview-video-height: var(--media-preview-height, 280px); margin: 8px 0; min-width: 0; }
+.flow-media-preview :deep(.el-image) { display: block; width: 100%; max-height: var(--media-preview-height, 280px); border-radius: 5px; background: var(--el-fill-color-light); }
 .preview-placeholder { display: grid; gap: 4px; padding: 12px 6px; color: var(--el-text-color-secondary); font-size: 12px; text-align: center; background: var(--el-fill-color-light); }
 .compact { margin: 3px 0; flex-shrink: 0; height: 42px; }
 .compact .preview-placeholder { padding: 8px; }

@@ -6,7 +6,7 @@
       v-else
       :key="playbackUrl"
       :src="playbackUrl"
-      :aria-label="`视频预览：${name}`"
+      :aria-label="label || `视频预览：${name}`"
       controls
       playsinline
       preload="metadata"
@@ -21,7 +21,7 @@ import { computed, onBeforeUnmount, ref } from 'vue'
 import { isAxiosError } from 'axios'
 import http from '../../api/http'
 
-const props = defineProps<{ src: string; name: string }>()
+const props = defineProps<{ src: string; name: string; label?: string; version?: string }>()
 const compatibleUrl = ref('')
 const playbackUrl = computed(() => compatibleUrl.value || props.src)
 const preparing = ref(false)
@@ -45,7 +45,7 @@ async function prepareCompatible(): Promise<void> {
   preparing.value = true
   try {
     const { data } = await http.get<Blob>(`/api/v1/agent/media/${encodeURIComponent(props.name)}`, {
-      params: { preview: 'compatible' },
+      params: { preview: 'compatible', version: props.version },
       responseType: 'blob',
       signal: controller.signal,
       timeout: 50_000,

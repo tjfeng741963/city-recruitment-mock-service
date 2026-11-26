@@ -35,7 +35,10 @@
             <div v-for="(turn, index) in turns" :key="index">
               <p><strong>求职者</strong> {{ turn.question }}</p>
               <p v-if="turn.faq" class="hint">采用问答 #{{ turn.faq.id }} · {{ turn.faq.question }}</p>
-              <p class="reply"><strong>Dify</strong> {{ turn.answer }}</p>
+              <div class="reply">
+                <strong>Dify</strong>
+                <ReplyMessagesPreview :messages="turn.messages" />
+              </div>
             </div>
           </div>
           <details v-if="evidence !== null" class="evidence" open>
@@ -66,6 +69,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import PositionQa from './PositionQa.vue'
+import ReplyMessagesPreview, { type ReplyPreviewMessage } from './ReplyMessagesPreview.vue'
 import { describeFavoriteLocation, locationPointOptions } from './favorite-location-preview'
 import { agentApi, devicesApi, type AgentDeviceItem } from '../../api/agent'
 import type { ServicePosition } from '../../api/types'
@@ -85,7 +89,7 @@ const testPosition = ref<number | undefined>(props.initialDevice ? undefined : p
 const question = ref('')
 const testPoint = ref<string>()
 const locationPoints = computed(() => locationPointOptions(props.positions.find(position => position.id === testPosition.value)?.interview_points))
-const turns = ref<Array<{ question: string; answer: string; faq?: { id: number; question: string } }>>([])
+const turns = ref<Array<{ question: string; messages: ReplyPreviewMessage[]; faq?: { id: number; question: string } }>>([])
 const evidence = ref<string | null>(null)
 const evidenceSummary = ref('')
 const testError = ref('')
@@ -155,7 +159,7 @@ async function preview(generate: boolean): Promise<void> {
     const { data: answer } = await agentApi.difyPreview({ position_id: position, text, session_key: session }, controller.signal)
     if (!current()) return
     if (!answer.ok || !answer.reply) throw new Error(answer.error || 'Dify 生成失败')
-    turns.value.push({ question: text, faq: answer.reply.faq, answer: answer.reply.messages.map(message => message.content).join('\n\n') })
+    turns.value.push({ question: text, faq: answer.reply.faq, messages: answer.reply.messages })
     const duration = answer.latency_ms == null ? '' : `，耗时 ${(answer.latency_ms / 1000).toFixed(1)} 秒`
     testNotice.value = `模拟回复已生成${duration}。本次为网页预览。`
   } catch (error) {

@@ -450,6 +450,17 @@ class Brain:
             log(f"    [流程状态] 上报失败：{exc}")
             return False
 
+    def authorize_faq_media(self, trace_id: str, session_key: str, name: str) -> bool:
+        if not trace_id:
+            return False
+        try:
+            return self._post("/api/v1/agent/faq-media/validate", {
+                "device_code": self.device_code, "trace_id": trace_id,
+                "session_key": session_key, "name": name,
+            }, timeout=5).get("ok") is True
+        except (httpx.HTTPError, OSError, RuntimeError, ValueError):
+            return False
+
     def chat(self, text: str, session_key: str, *, sent_summary: list[str] | None = None,
              turn_id: str = "") -> dict[str, Any]:
         """一轮对话，按服务端能力返回旧回复或有序发送计划。
