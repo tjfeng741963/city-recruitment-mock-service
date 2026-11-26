@@ -99,10 +99,24 @@ function safeJson(raw: string | null | undefined): Record<string, unknown> {
  * 坐标来自企微位置消息（content_type=6）里读出来的真实经纬度；面试点只在
  * 岗位原始 data_json 里，facts 不输出 interview_points。
  */
+/**
+ * 这句话是不是在问「怎么去 / 在哪」。
+ *
+ * 单独抽出来是为了可以脱离 LLM 单测：这条判断决定了客户问地址时能不能
+ * 收到能点开导航的原生位置卡，回归一次就多一次「只回文字没有定位」的投诉。
+ */
+export function asksForLocation(question: string): boolean {
+  const q = question.normalize("NFC").trim();
+  // 客户只要问到「怎么去 / 在哪 / 地址 / 面试地点」就补一张能点开导航的原生卡。
+  // 2026-11-26：「面试地点」这类最常问的说法原先没命中，只有「定位/地址」才发卡。
+  if (!/定位|导航|地图|怎么走|怎么去|怎么到|怎么过去|在哪|哪里|地址|面试地点|面试点|路线|坐地铁|坐车/.test(q)) return false;
+  // 问宿舍/工资时顺带提了「在哪」不算问路，别把面试卡糊上去。
+  return !/宿舍|住宿|食堂|餐厅|工资|薪资|待遇/.test(q);
+}
+
 function pickInterviewPoint(question: string, facts: Record<string, unknown>): Record<string, unknown> | null {
   const q = question.normalize("NFC").trim();
-  if (!/定位|导航|地图|怎么走|怎么去|在哪|地址/.test(q)) return null;
-  if (/宿舍|住宿|食堂|餐厅|工资|薪资|待遇/.test(q)) return null;
+  if (!asksForLocation(q)) return null;
   const points = Array.isArray(facts.interview_points)
     ? (facts.interview_points as Array<Record<string, unknown>>)
     : [];

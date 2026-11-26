@@ -506,7 +506,10 @@ class Brain:
                 return {"ok": False, "detail": "岗位问答素材顺序无效"}
             return {"ok": True, "trace_id": str(data.get("trace_id") or ""), "reply": plan[0]["content"],
                     "plan": plan, "scene": "岗位问答" if is_faq else "Dify",
-                    "faq_media": is_faq, "detail": str(data.get("model") or "Dify")}
+                    "faq_media": is_faq, "detail": str(data.get("model") or "Dify"),
+                    # 面试点坐标：客户端在文字送达后补发原生位置卡（2026-11-26）。
+                    # 少了这个键，agent_card 永远是 None，客户问「导航」也拿不到定位。
+                    "location_card": data.get("location_card") or None}
         parts: list[str] = []
         medias: list[tuple[str, str]] = []
         for item in reply.get("messages") or []:
@@ -530,6 +533,8 @@ class Brain:
             "medias": medias,
             "scene": "Agent",
             "detail": "；".join(detail_bits),
+            # 同 plan 分支：服务端给坐标就透传，客户端据此补发原生位置卡。
+            "location_card": data.get("location_card") or None,
         }
 
     def close(self) -> None:

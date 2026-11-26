@@ -2976,6 +2976,12 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                         continue
                     else:
                         log(f"    [开场] 没取到清单（{ores.get('detail')}），直接进对话")
+                # 默认值：非 Agent 模式（pick_reply）不会填这几个变量，但后面的
+                # 媒体/位置卡补发是无条件读的，先兜住再覆盖。
+                agent_medias: list = []
+                agent_card = None
+                dify_plan: list = []
+                faq_media_plan = False
                 if not hint and not dry:
                     res = {"ok": False, "detail": f"消息没有文本（type={it['in_type']}）"}
                 elif hint:
