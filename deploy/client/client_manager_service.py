@@ -288,6 +288,27 @@ class ManagerService:
             updater._log_event(self.root, f"manual update applied: commit={commit} changed={len(result['changed'])}; client not launched")
             return result
 
+    def update_or_restore(self, expected_commit: str, progress: Callable[[str], None] | None = None) -> dict:
+        """更新客户端；失败时把运行状态恢复到更新前。
+
+        2026-11-26 现场：`update` 失败后客户端停在「已停止」，只有人手写的
+        脚本在 finally 里调 start 才救回来。安装失败不应该让人失联——调用方
+        先 stop 再 update，一旦 update 抛错，这里负责把原来在跑的客户端拉起来。
+        成功时不自动启动，保持「装完由运维决定何时启动」的既有语义。
+        """
+        was_running = updater._running_autopilot()
+        try:
+            return self.update(expected_commit, progress)
+        except Exception:
+            if was_running:
+                # update 内部的锁已随异常退出释放，这里才能安全地重新加锁启动
+                try:
+                    self.start()
+                    updater._log_event(self.root, "update failed; restored the previously running client")
+                except Exception as exc:  # noqa: BLE001
+                    updater._log_event(self.root, f"update failed and restore start failed: {exc}")
+            raise
+
     def _require_stopped(self) -> None:
         if updater._running_autopilot():
             raise updater.UpdateError("自动回复进程正在运行，请先停止客户端。")

@@ -272,3 +272,53 @@ def test_supervisor_honors_manual_stop_and_limits_verified_restarts(tmp_path, mo
     monkeypatch.setattr(service, "status", lambda: current)
     assert service.supervise(wait=lambda _: None) == 0
     assert events.count("restart") == 2
+
+
+def _running_once_then_stopped():
+    """第一次询问（判断更新前是否在跑）返回 True，之后 _require_stopped 都放行。"""
+    calls = {"n": 0}
+
+    def probe():
+        calls["n"] += 1
+        return calls["n"] == 1
+
+    return probe
+
+
+def test_failed_update_restores_the_previously_running_client(tmp_path, monkeypatch):
+    module, service, events = fixture_service(tmp_path, monkeypatch)
+    starts = []
+    monkeypatch.setattr(updater, "_running_autopilot", _running_once_then_stopped())
+    monkeypatch.setattr(module.ManagerService, "start", lambda self: starts.append("start") or 1)
+    monkeypatch.setattr(updater, "fetch_release_package", lambda *a, **kw: (_ for _ in ()).throw(updater.UpdateError("HTTPS download failed")))
+
+    with pytest.raises(updater.UpdateError):
+        service.update_or_restore(COMMIT)
+
+    # 更新失败不该把在跑的客户端留在「已停止」——2026-11-26 现场就是这么失联的
+    assert starts == ["start"]
+
+
+def test_failed_update_does_not_start_a_client_that_was_already_stopped(tmp_path, monkeypatch):
+    module, service, events = fixture_service(tmp_path, monkeypatch)
+    starts = []
+    monkeypatch.setattr(updater, "_running_autopilot", lambda: False)
+    monkeypatch.setattr(module.ManagerService, "start", lambda self: starts.append("start") or 1)
+    monkeypatch.setattr(updater, "fetch_release_package", lambda *a, **kw: (_ for _ in ()).throw(updater.UpdateError("HTTPS download failed")))
+
+    with pytest.raises(updater.UpdateError):
+        service.update_or_restore(COMMIT)
+
+    assert starts == []
+
+
+def test_successful_update_keeps_the_existing_no_auto_start_contract(tmp_path, monkeypatch):
+    module, service, events = fixture_service(tmp_path, monkeypatch)
+    starts = []
+    monkeypatch.setattr(updater, "_running_autopilot", lambda: False)
+    monkeypatch.setattr(module.ManagerService, "start", lambda self: starts.append("start") or 1)
+
+    assert service.update_or_restore(COMMIT)["commit"] == COMMIT
+
+    # 装完由运维决定何时启动，保持原语义
+    assert starts == []

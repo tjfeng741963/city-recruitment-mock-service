@@ -359,7 +359,8 @@ class ManagerWindow:
         if not self.release or self.busy:
             return
         commit = self.release["commit"]
-        self._run("update", lambda: self.service.update(commit, progress=lambda text: self.events.put(("stage", text))))
+        # 用 update_or_restore：安装失败时把原来在跑的客户端恢复起来，避免停在「已停止」
+        self._run("update", lambda: self.service.update_or_restore(commit, progress=lambda text: self.events.put(("stage", text))))
 
     def import_package(self):
         if self.busy:

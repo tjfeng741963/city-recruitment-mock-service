@@ -42,6 +42,13 @@ class FixtureService:
         self.installed = commit
         return {"commit": commit, "changed": ["autopilot.py"]}
 
+    def update_or_restore(self, commit, progress):
+        # 管理器改走 update_or_restore：安装失败时由它负责把在跑的客户端拉起来
+        self.calls.append(("update_or_restore", commit))
+        progress("fixture installation")
+        self.installed = commit
+        return {"commit": commit, "changed": ["autopilot.py"]}
+
     def start(self):
         self.calls.append("start")
         self.running = 1
@@ -119,7 +126,7 @@ def test_check_and_install_never_start_sender(window):
     assert not app.install_button.instate(["disabled"])
     app.install_button.invoke()
     settle(app)
-    assert ("update", COMMIT) in service.calls
+    assert ("update_or_restore", COMMIT) in service.calls
     assert "start" not in service.calls
     assert app.current_text.get() == COMMIT
     assert "未启动" in app.message_text.get()
