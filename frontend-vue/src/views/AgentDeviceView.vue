@@ -259,10 +259,7 @@
           </div>
         </el-form-item>
         <el-form-item label="报名通知群">
-          <el-input
-            v-model="form.group_chat"
-            placeholder="面试登记通知群（可选，设备上报群名）"
-          />
+          <NotificationGroupSelect :device-code="editingId ? form.device_code : undefined" v-model="form.group_chat" />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -353,13 +350,14 @@
           :closable="false"
           class="load-error"
         />
+        <p v-if="groupSyncNote" class="muted" role="status">{{ groupSyncNote }}</p>
         <div v-if="groups.length" class="group-list">
-          <div v-for="(group, index) in groups" :key="group.id ?? group.chat_id ?? index" class="group-item">
+          <div v-for="(group, index) in groups" :key="group.conv_id ?? group.id ?? group.chat_id ?? index" class="group-item">
             <span class="group-name">{{ group.name || group.chat_id || `群聊 ${index + 1}` }}</span>
             <span v-if="group.member_count" class="muted">{{ group.member_count }} 人</span>
           </div>
         </div>
-        <el-empty v-else-if="!groupLoading" description="暂未上报群聊" />
+        <el-empty v-else-if="!groupLoading && !groupError" :description="groupSyncState === 'synced' ? '当前账号未同步到任何可命名群聊' : '等待当前账号上报群聊'" />
       </div>
     </el-drawer>
 
@@ -389,6 +387,7 @@ import { useAuthStore } from '../stores/auth'
 import ReplyModeSwitch from '../components/agent/ReplyModeSwitch.vue'
 import { deviceWorkflowEntry, isWebTestDevice, deviceOnline } from '../components/agent/device-workflow-entry'
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import NotificationGroupSelect from '../components/agent/NotificationGroupSelect.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh, Search } from '@element-plus/icons-vue'
 import { devicesApi, type AgentDeviceItem, type CloudAgentMachine, type DeviceGroup, type LoginQrResult } from '../api/agent'
@@ -1052,20 +1051,36 @@ const groupLoading = ref(false)
 const groupError = ref('')
 const groups = ref<DeviceGroup[]>([])
 const groupDevice = ref<AgentDeviceItem | null>(null)
+const groupSyncState = ref<'waiting' | 'synced' | 'stale' | 'legacy'>()
+const groupSyncedAt = ref<string | null>()
+const groupSyncNote = computed(() => {
+  if (groupLoading.value || groupError.value) return ''
+  if (groupSyncState.value === 'legacy') return '旧版客户端按最近会话上报，列表可能不完整。'
+  if (groupSyncedAt.value) {
+    const time = formatDateTime(groupSyncedAt.value)
+    return `${groupSyncState.value === 'stale' ? '显示上次结果' : '当前账号已同步'} · ${groups.value.length} 个群 · ${time}`
+  }
+  return ''
+})
 
 async function openGroups(row: AgentDeviceItem): Promise<void> {
   groupDevice.value = row
   groups.value = []
   groupError.value = ''
+  groupSyncState.value = undefined
+  groupSyncedAt.value = undefined
   groupsVisible.value = true
   groupLoading.value = true
   try {
     const { data } = await devicesApi.groups(row.device_code)
+    if (groupDevice.value?.id !== row.id) return
     groups.value = data.items || []
+    groupSyncState.value = data.sync_state
+    groupSyncedAt.value = data.synced_at
   } catch (err: any) {
-    groupError.value = err?.response?.data?.detail || '群组加载失败'
+    if (groupDevice.value?.id === row.id) groupError.value = err?.response?.data?.detail || '群组加载失败'
   } finally {
-    groupLoading.value = false
+    if (groupDevice.value?.id === row.id) groupLoading.value = false
   }
 }
 

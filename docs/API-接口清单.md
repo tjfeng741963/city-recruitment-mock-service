@@ -92,6 +92,10 @@ Key 由服务端加密保存，接口响应只显示是否配置。同一地址�
 
 账号列表的 `position_id`、`factory_ids` 和 `factories` 按 Windows 已确认的回复来源返回。Agent 显示一个接待岗位和该岗位所属工厂，Dify 显示默认岗位和多工厂接待范围。保存接待设置时，`PUT /api/v1/agent/devices/:id` 按当前来源写入对应配置。网页提交 `expected_reply_provider`，来源已变化或正在切换时返回 409。旧账号沿用原接待岗位，Dify 的多工厂配置随切换保留。
 
+报名通知群从 `GET /api/v1/agent/devices/:code/groups` 返回的已同步群中选择。群条目的 `selectable` 表示当前账号下能否唯一核对该群。更新 `group_chat` 时，空字符串解除绑定。唯一可识别的群保存为企微群会话 ID，无法核对的新值返回 422。Agent 和手动登记使用群 ID，旧群名需要从已同步群列表重新选择。入队与领取时均核对目标群，新增群通知的成功回执须对应同一群会话。领取时发现旧指令目标无法核对会显示失败，`notify_detail` 可说明原因。
+
+客户端通过 `POST /api/v1/bridge/devices/:code/groups` 上报 `{account_id, complete:true, groups:[{conv_id,name}]}`，成功读取空清单也可替换，读库失败时应跳过上报。仅接受当前已登录设备的账号，换账号后隐藏上一账号的清单。旧客户端格式兼容至首次接收账号级快照。网页群列表的 `sync_state` 为 `waiting`、`legacy`、`synced` 或 `stale`，并返回 `synced_at`。升级时已有且可唯一对应群 ID 的 Agent 配置会迁移，无法确认的旧名称保留待核对。
+
 GET /api/v1/agent/devices/:code/login-qr 保留原 available 与可用图片字段。另返回 login_status，区分 logged_in、waiting_for_scan、waiting_for_qr、qr_expired、disconnected、device_disabled 和 authorization_failed。新鲜企微登录心跳可确认登录完成，超过两分钟的二维码截图不再返回。限时安全验证由操作者在 Win 的官方企业微信窗口完成。
 
 网页通过 `POST /api/v1/agent/devices/:code/verify-code` 提交手机企微显示的验证码或按企微要求收到的短信验证码。沿用用户设备范围校验，设备必须启用。请求体为 `{code: string}`，接受 4–8 位数字并保留前导零。响应为 `{ok: true, verification_status: "pending"}`。验证码只保存在服务进程内存中，最长两分钟。
@@ -179,7 +183,7 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 | GET | `/api/v1/agent/opening?device_code=:code` | 设备令牌或服务令牌 | 按岗位读取开场，包括原生 `location` 卡的坐标和地址；显式加 `mode=flow` 只展开首个等待节点为止的消息；岗位停用时返回空清单和“岗位已停用” |
 | POST | `/api/v1/agent/opening/log` | 设备令牌或服务令牌 | 客户端逐条回执：`{session_key,device_code,position_id,seq,kind,status,error}`，返回 `trace_id` 供运营回查发送证据 |
 | GET | `/api/v1/agent/archive?session_key=:key` | admin | 查面试档案：姓名 / 电话 / 城市 / 面试日期与时段（模型 JSON 判断结果累积） |
-| GET | `/api/v1/agent/archive/list` | admin | 面试登记清单。`has_conversation` 表示精确关联到一条会话。Dify 的 `group_chat` 显示通知对应的目标。状态包括 `no-group`（未绑群）、`group-unavailable`（无法确认目标群）、`pending`、`queued`、`claimed`、`sent`、`failed`、`unknown`。核对目标群的真实设备成功回执后显示 `sent`。 |
+| GET | `/api/v1/agent/archive/list` | admin | 面试登记清单。`has_conversation` 表示精确关联到一条会话。`group_chat` 显示通知对应的目标。状态包括 `incomplete`（信息未齐）、`no-group`（未绑群）、`group-unavailable`（无法确认目标群）、`pending`、`queued`、`claimed`、`sent`、`failed`、`unknown`。真实设备成功回执后显示 `sent`。 |
 | POST | `/api/v1/agent/archive/manual` | admin | 手动新建约面试（没走 Agent 对话的客户），绑了群聊自动推送；可选 `position_id`（决定群消息里的工厂与岗位）、`remark`（备注，即群里认人的微信名称） |
 | PUT | `/api/v1/agent/archive/:key/arrival` | admin | 到达状态标记，body `{arrival_status: ""/arrived/noshow}` |
 | PUT | `/api/v1/agent/archive/:key/remark` | admin | 面试登记备注，body `{remark}`（≤64 字）。备注优先于客户企微昵称，决定群通知里姓名后面那一段；只影响之后的群通知，不重发已推送的消息 |

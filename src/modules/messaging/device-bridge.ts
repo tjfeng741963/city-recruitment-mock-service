@@ -153,6 +153,8 @@ export class DeviceBridgeStore {
     if (rebound) {
       this.db.prepare("INSERT INTO device_events(device_code,event_type,reason,created_at) VALUES (?,?,?,?)")
         .run(code, "account_rebound", `${previousAccount}->${accountId}`, new Date(this.now()).toISOString());
+      this.db.prepare("DELETE FROM device_group_chats WHERE device_code=?").run(code);
+      this.db.prepare("UPDATE device_group_snapshots SET synced_at=0 WHERE device_code=?").run(code);
     }
     if (changed) {
       // 掉线事件流水：推送节流以它为基准，重启不丢。
@@ -367,19 +369,28 @@ export class DeviceBridgeStore {
     return this.command(id)!;
   }
   /** 设备上报的群聊清单整体替换（device_group_chats 表）。 */
-  saveGroups(code: string, groups: Array<{ conv_id: string; name: string }>): number {
-    // 空清单不覆盖（2026-11-23）：客户端企微登出时读不到会话，会拿空数组上报。
-    // 整体替换语义下一次空上报就把运营绑定的群名全清掉，前端下拉直接变空，
-    // 面试登记再也推不出去。保留旧清单，等客户端真正读到群后再替换。
-    if (!groups.length) return this.listGroups(code).length;
+  saveGroups(code: string, groups: Array<{ conv_id: string; name: string }>, accountId?: string): number {
+    const device = this.status(code);
+    if (accountId !== undefined && (!accountId || device?.account_id !== accountId || device.state !== "online")) {
+      throw new BridgeError("Group snapshot does not match the current logged-in account");
+    }
+    if (accountId === undefined && this.groupSnapshot(code)) {
+      throw new BridgeError("An account-bound group snapshot is required");
+    }
+    // Older clients cannot distinguish an empty group list from a failed read.
+    if (!groups.length && accountId === undefined) return this.listGroups(code).length;
     this.db.exec("BEGIN");
     try {
       this.db.prepare("DELETE FROM device_group_chats WHERE device_code=?").run(code);
       const stamp = this.now();
+      const insert = this.db.prepare("INSERT INTO device_group_chats(device_code,conv_id,name,updated_at) VALUES (?,?,?,?)");
       for (const group of groups) {
-        this.db.prepare(
-          "INSERT INTO device_group_chats(device_code,conv_id,name,updated_at) VALUES (?,?,?,?)",
-        ).run(code, String(group.conv_id ?? "").slice(0, 200), String(group.name ?? "").slice(0, 120), stamp);
+        insert.run(code, group.conv_id, group.name, stamp);
+      }
+      if (accountId !== undefined) {
+        this.db.prepare(`INSERT INTO device_group_snapshots(device_code,account_id,synced_at) VALUES (?,?,?)
+          ON CONFLICT(device_code) DO UPDATE SET account_id=excluded.account_id,synced_at=excluded.synced_at`)
+          .run(code, accountId, stamp);
       }
       this.db.exec("COMMIT");
       return groups.length;
@@ -389,10 +400,30 @@ export class DeviceBridgeStore {
     }
   }
 
+  groupSnapshot(code: string): { account_id: string; synced_at: number } | undefined {
+    return this.db.prepare("SELECT account_id,synced_at FROM device_group_snapshots WHERE device_code=?")
+      .get(code) as { account_id: string; synced_at: number } | undefined;
+  }
+
+  groupSync(code: string) {
+    const snapshot = this.groupSnapshot(code);
+    if (!snapshot) {
+      return { sync_state: this.listGroups(code).length ? "legacy" : "waiting", synced_at: null };
+    }
+    const current = this.status(code);
+    if (!snapshot.synced_at || snapshot.account_id !== current?.account_id) {
+      return { sync_state: "waiting", synced_at: null };
+    }
+    return { sync_state: current.state === "online" && this.now() - snapshot.synced_at <= 120_000 ? "synced" : "stale",
+      synced_at: new Date(snapshot.synced_at).toISOString() };
+  }
+
   listGroups(code: string): Array<{ conv_id: string; name: string }> {
-    return this.db.prepare(
-      "SELECT conv_id, name FROM device_group_chats WHERE device_code=? ORDER BY name",
-    ).all(code) as Array<{ conv_id: string; name: string }>;
+    return this.db.prepare(`SELECT conv_id,name FROM device_group_chats g WHERE g.device_code=?
+      AND g.updated_at >= COALESCE((
+        SELECT unixepoch(created_at,'subsec')*1000 FROM device_events
+        WHERE device_code=g.device_code AND event_type='account_rebound' ORDER BY created_at DESC LIMIT 1
+      ),0) ORDER BY name`).all(code) as Array<{ conv_id: string; name: string }>;
   }
 
   private queueDueDifyReminder(code: string, account: string, now: number) {
@@ -481,6 +512,15 @@ export class DeviceBridgeStore {
             AND json_extract(d.data_json,'$.reply_provider')='dify'`)
           .get(next.id,code,device?.account_id ?? "",next.contact_id,next.customer_id);
         if (valid) break;
+      } else if (next.idempotency_key.startsWith("group-notify:")) {
+        const group = resolveDeviceInviteGroup(this.db, code, deviceInviteGroupBinding(this.db, code));
+        const switched = this.db.prepare(`SELECT 1 FROM device_events
+          WHERE device_code=? AND event_type='account_rebound' AND created_at>=? LIMIT 1`)
+          .get(code, new Date(Number(next.created_at) || 0).toISOString());
+        if (group && group.conv_id === next.contact_id && !switched) {
+          ensureGroupConversation(this.db, code, group.conv_id, group.name);
+          break;
+        }
       } else if (!next.idempotency_key.startsWith(DIFY_GROUP_NOTIFICATION_PREFIX)) {
         break;
       } else {
@@ -493,7 +533,12 @@ export class DeviceBridgeStore {
           break;
         }
       }
-      this.db.prepare("UPDATE bridge_commands SET status='failed' WHERE id=? AND status='queued'").run(next.id);
+      if (next.idempotency_key.startsWith("group-notify:")) {
+        this.db.prepare("UPDATE bridge_commands SET status='failed',error=? WHERE id=? AND status='queued'")
+          .run("通知群无法核对，消息未发送。请核对群绑定后处理这条登记。", next.id);
+      } else {
+        this.db.prepare("UPDATE bridge_commands SET status='failed' WHERE id=? AND status='queued'").run(next.id);
+      }
       next = nextQueued();
     }
     if (!next) return null;
@@ -521,7 +566,9 @@ export class DeviceBridgeStore {
     // 刷新二维码没有 message_id 可回：它不产生客户消息，回执成功不要求 message_id。
     const isRefresh = command.kind === "refresh_login_qr";
     if (status === "succeeded" && !isRefresh && !messageId.trim()) throw new BridgeError("Successful receipt requires message_id", 422);
-    if (status === "succeeded" && !simulated && !isRefresh && (command.idempotency_key.startsWith(DIFY_GROUP_NOTIFICATION_PREFIX) || isDifyReminder(command))) {
+    const groupNotice = command.idempotency_key.startsWith(DIFY_GROUP_NOTIFICATION_PREFIX)
+      || (command.idempotency_key.startsWith("group-notify:") && command.contact_id.startsWith("R:"));
+    if (status === "succeeded" && !simulated && !isRefresh && (groupNotice || isDifyReminder(command))) {
       const prefix = command.contact_id + ":";
       if (!messageId.startsWith(prefix) || !messageId.slice(prefix.length).trim()) {
         throw new BridgeError("Receipt does not match the target conversation", 422);

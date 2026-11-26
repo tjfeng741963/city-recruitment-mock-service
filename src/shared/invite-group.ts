@@ -336,8 +336,8 @@ export function ensureGroupConversation(db: DatabaseSync, deviceCode: string, co
     return existing.customer_id;
   }
   const groupCustomerId = Number((db.prepare(`SELECT MAX(value)+1 AS id FROM (
-    SELECT COALESCE(MAX(customer_id),0) value FROM agent_conversations UNION ALL
-    SELECT COALESCE(MAX(customer_id),0) FROM bridge_contacts UNION ALL SELECT 0)`)
+    SELECT COALESCE(MAX(customer_id),0) value FROM agent_conversations WHERE typeof(customer_id)='integer' UNION ALL
+    SELECT COALESCE(MAX(customer_id),0) FROM bridge_contacts WHERE typeof(customer_id)='integer' UNION ALL SELECT 0)`)
     .get() as { id: number }).id);
   db.prepare("INSERT OR IGNORE INTO bridge_contacts(device_code,contact_id,customer_id,nickname) VALUES (?,?,?,?)")
     .run(deviceCode, convId, groupCustomerId, groupName);
@@ -354,19 +354,22 @@ export function deviceInviteGroupBinding(db: DatabaseSync, deviceCode: string): 
   return String(parseDeviceData(device?.data_json).group_chat ?? "").trim();
 }
 
-export function resolveDeviceInviteGroup(db: DatabaseSync, deviceCode: string, binding: string) {
-  if (!binding.trim()) return undefined;
+export function selectableDeviceInviteGroups(db: DatabaseSync, deviceCode: string) {
   const rebound = db.prepare(`SELECT created_at FROM device_events
     WHERE device_code=? AND event_type='account_rebound' ORDER BY created_at DESC LIMIT 1`)
     .get(deviceCode) as { created_at: string } | undefined;
+  const snapshot = db.prepare(`SELECT s.account_id,s.synced_at,b.account_id AS current_account
+    FROM device_group_snapshots s LEFT JOIN bridge_devices b ON b.device_code=s.device_code WHERE s.device_code=?`)
+    .get(deviceCode) as {account_id:string;synced_at:number;current_account:string|null} | undefined;
   const reboundAt = rebound ? Date.parse(rebound.created_at) : 0;
+  if (snapshot && (snapshot.account_id !== snapshot.current_account || snapshot.synced_at < reboundAt)) return [];
   const groups = db.prepare(`SELECT DISTINCT conv_id, name FROM device_group_chats
     WHERE device_code=? AND updated_at>=? AND conv_id LIKE 'R:%' AND LENGTH(conv_id)>2 AND TRIM(name)<>''`)
     .all(deviceCode, reboundAt) as { conv_id: string; name: string }[];
   // Older clients can sync real group messages before they report their group list.
   // Those legacy observations lack an account ID, so a device that switched
   // accounts must report its current group list before sending.
-  if (!groups.length && !rebound) {
+  if (!groups.length && !rebound && !snapshot) {
     groups.push(...db.prepare(`SELECT b.contact_id AS conv_id, b.nickname AS name
       FROM bridge_contacts b WHERE b.device_code=? AND b.contact_id LIKE 'R:%'
         AND LENGTH(b.contact_id)>2 AND TRIM(b.nickname)<>''
@@ -374,13 +377,20 @@ export function resolveDeviceInviteGroup(db: DatabaseSync, deviceCode: string, b
           WHERE i.device_code=b.device_code AND substr(i.event_id,1,length(b.contact_id)+1)=b.contact_id||':')`)
       .all(deviceCode) as { conv_id: string; name: string }[]);
   }
-  const matches = groups.filter(group => binding.startsWith("R:") ? group.conv_id === binding : group.name === binding);
-  if (matches.length !== 1) return undefined;
-  const [group] = matches;
   // Windows searches by name and verifies the real group ID on readback.
-  if (groups.filter(item => item.name === group.name).length !== 1) return undefined;
   const namesake = db.prepare(`SELECT 1 FROM bridge_contacts
-    WHERE device_code=? AND nickname=? AND contact_id<>? LIMIT 1`).get(deviceCode, group.name, group.conv_id);
-  return namesake ? undefined : group;
+    WHERE device_code=? AND nickname=? AND contact_id<>? LIMIT 1`);
+  const nameCounts = new Map<string, number>();
+  for (const group of groups) nameCounts.set(group.name, (nameCounts.get(group.name) ?? 0) + 1);
+  // In an account-scoped snapshot, stale contacts from the prior account must
+  // not veto the current group. The upgraded client checks its private aliases.
+  return groups.filter(group => nameCounts.get(group.name) === 1
+    && (snapshot || !namesake.get(deviceCode, group.name, group.conv_id)));
+}
+
+export function resolveDeviceInviteGroup(db: DatabaseSync, deviceCode: string, binding: string) {
+  if (!binding.trim()) return undefined;
+  return selectableDeviceInviteGroups(db, deviceCode)
+    .find(group => binding.startsWith("R:") ? group.conv_id === binding : group.name === binding);
 }
 

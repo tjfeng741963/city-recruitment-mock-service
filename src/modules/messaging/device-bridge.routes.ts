@@ -3,7 +3,7 @@ import { authorizeProfileRequest } from "../agent/profile.routes.js";
 import type { FastifyInstance } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
 import { canAccessDevice, getUserScope } from "../../auth/user-scopes.js";
-import { DeviceBridgeStore } from "./device-bridge.js";
+import { BridgeError, DeviceBridgeStore } from "./device-bridge.js";
 import { isDirectRecipient, recipientBindings, reportRecipientBinding } from "./recipient-binding.js";
 import { cloudAgentRuntime, hasPendingCloudAssignment, isAssignedCloudAgent, protectedMachineConnection, recordCloudAgentHeartbeat } from "../agent/cloud-agent-assignment.js";
 import { queuePendingDifyGroupNotifications } from "../dify/dify-group-notification.js";
@@ -399,25 +399,39 @@ export function registerDeviceBridgeRoutes(
       return { ok: true };
     },
   );
-  // 设备群聊清单上报：autopilot 每 N 分钟从企微本地库（sessions type='群聊'）
-  // 读取群聊列表推上来，管理端「面试登记」面板下拉自选绑定群聊。
-  // 鉴权与 login-qr 同一套：设备桥接令牌。
+  // 设备桥接令牌 + 当前企微账号校验。成功读取的整份清单可以为空。
   app.post<{ Params: { code: string }; Body: Record<string, unknown> }>(
     "/api/v1/bridge/devices/:code/groups",
+    { bodyLimit: 8 * 1024 * 1024 },
     async (req, reply) => {
       const code = req.params.code;
       const token = (req.headers.authorization ?? "").replace(/^Bearer /, "");
       if (!store.authenticate(code, token)) return reply.code(401).send({ detail: "Invalid device token" });
       if (!store.enabled(code)) return reply.code(403).send({ detail: "Device disabled" });
       const body = req.body ?? {};
-      const raw = Array.isArray(body.groups) ? body.groups : [];
+      const complete = Object.hasOwn(body, "account_id") || Object.hasOwn(body, "complete");
+      const account = field(body, "account_id", 128).trim();
+      if (!complete && db.prepare("SELECT 1 FROM device_events WHERE device_code=? AND event_type='account_rebound' LIMIT 1").get(code)) {
+        return reply.code(409).send({ detail: "An account-bound group snapshot is required after switching accounts" });
+      }
+      if (complete && (!account || body.complete !== true || !Array.isArray(body.groups) || body.groups.length > 5000)) {
+        return reply.code(422).send({ detail: "Group snapshot requires an account and a complete group list" });
+      }
+      const raw = Array.isArray(body.groups) ? (complete ? body.groups : body.groups.slice(0, 300)) : [];
       const groups = raw
         .map((g) => (typeof g === "object" && g !== null ? (g as Record<string, unknown>) : {}))
-        .map((g) => ({ conv_id: String(g.conv_id ?? "").trim(), name: String(g.name ?? "").trim() }))
-        .filter((g) => g.conv_id && g.name)
-        .slice(0, 300);
-      const saved = store.saveGroups(code, groups);
-      return { ok: true, count: saved };
+        .map((g) => ({ conv_id: field(g, "conv_id", 200).trim(), name: field(g, "name", 500).trim() }))
+        .filter((g) => g.conv_id.startsWith("R:") && g.conv_id.length > 2 && g.name);
+      if (complete && (groups.length !== raw.length || new Set(groups.map(g => g.conv_id)).size !== groups.length)) {
+        return reply.code(422).send({ detail: "Invalid or duplicate group in snapshot" });
+      }
+      try {
+        const count = store.saveGroups(code, groups, complete ? account : undefined);
+        return { ok: true, count };
+      } catch (error) {
+        if (error instanceof BridgeError) return reply.code(error.statusCode).send({ detail: error.message });
+        throw error;
+      }
     },
   );
 
