@@ -34,23 +34,14 @@
         <div class="arch-card">
           <b>设备绑定群聊（登记完成后自动推送）</b>
           <div v-for="device in devices" :key="device.id" class="arch-row">
-            <span class="device-label">{{ device.device_code }}</span>
-            <el-select
-              v-model="device.group_chat"
+            <span class="device-label">{{ device.name || device.device_name || device.device_code }}</span>
+            <NotificationGroupSelect
+              :model-value="device.group_chat"
+              :device-code="device.device_code"
               class="group-select"
-              filterable
-              allow-create
-              default-first-option
-              :placeholder="groupsLoaded ? '选择或输入群名' : '加载中…'"
-              @change="(value: string) => bindGroup(device, value)"
-            >
-              <el-option label="未绑定" value="" />
-              <el-option v-for="group in groups[device.device_code] || []" :key="group" :label="group" :value="group" />
-            </el-select>
+              @update:model-value="(value: string) => bindGroup(device, value)"
+            />
           </div>
-          <p v-if="groupsLoaded && !uploadedGroupCount" class="arch-hint">
-            客户端还没上报群聊清单（企微未登录时读不到）。可以直接手输群名，登录后会同步真实清单。
-          </p>
           <div v-if="!devices.length" class="arch-empty">暂无设备</div>
         </div>
 
@@ -101,6 +92,7 @@
                 <span class="pill" :class="`pill-${statusKey(selected.notify_status).replace(/_/g, '-')}`">
                   {{ statusText(selected.notify_status) }}
                 </span>
+                <p v-if="selected.notify_detail" class="arch-hint">{{ selected.notify_detail }}</p>
               </div>
               <div class="k">更新时间</div>
               <div class="v">{{ selected.updated_at || '-' }}</div>
@@ -220,6 +212,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Aim, ChatLineRound, Flag, Suitcase } from '@element-plus/icons-vue'
 import http from '../api/http'
 import { archiveApi, type ArchiveFollowupSummary } from '../api/agent'
+import NotificationGroupSelect from '../components/agent/NotificationGroupSelect.vue'
 
 interface ArchiveItem {
   session_key: string
@@ -236,6 +229,7 @@ interface ArchiveItem {
   interview_confirmed?: boolean
   arrival_status?: string
   notify_status?: string
+  notify_detail?: string
   updated_at?: string
   has_conversation?: boolean
 }
@@ -243,6 +237,8 @@ interface ArchiveItem {
 interface DeviceRow {
   id: number
   device_code: string
+  name?: string
+  device_name?: string
   group_chat?: string
 }
 
@@ -252,12 +248,6 @@ const devices = ref<DeviceRow[]>([])
 const selected = ref<ArchiveItem | null>(null)
 const followups = reactive(new Map<string, { summary?: ArchiveFollowupSummary; loading?: boolean; error?: string }>())
 const currentFollowup = computed(() => selected.value?.has_conversation ? followups.get(selected.value.session_key) : undefined)
-const groups = ref<Record<string, string[]>>({})
-const groupsLoaded = ref(false)
-// 客户端上报的群聊总数：为 0 说明企微没登录/还没同步，页面提示可以手输群名
-const uploadedGroupCount = computed(() =>
-  Object.values(groups.value).reduce((sum, list) => sum + (list?.length || 0), 0),
-)
 const loading = ref(false)
 const saving = ref(false)
 const manualVisible = ref(false)
@@ -280,6 +270,7 @@ const STATUS_TEXT: Record<string, string> = {
   unknown: '发送结果待核对',
   no_group: '未绑群聊',
   group_unavailable: '未确认目标群',
+  not_queued: '未发送，待人工处理',
   incomplete: '信息未齐',
   pending: '待推送',
 }
@@ -314,25 +305,8 @@ async function loadDevices(): Promise<void> {
   try {
     const { data } = await http.get<{ items?: DeviceRow[] }>('/api/v1/agent/devices')
     devices.value = data.items || []
-    groupsLoaded.value = true
-    await Promise.all(devices.value.map((device) => loadGroups(device.device_code)))
   } catch {
     devices.value = []
-    groupsLoaded.value = true
-  }
-}
-
-async function loadGroups(code: string): Promise<void> {
-  try {
-    const { data } = await http.get<{ items?: Array<{ name: string }> }>(
-      `/api/v1/agent/devices/${code}/groups`,
-    )
-    groups.value = {
-      ...groups.value,
-      [code]: (data.items || []).map((g) => g.name).filter(Boolean),
-    }
-  } catch {
-    groups.value = { ...groups.value, [code]: [] }
   }
 }
 
@@ -361,7 +335,7 @@ async function bindGroup(device: DeviceRow, value: string): Promise<void> {
   device.group_chat = value
   try {
     await http.put(`/api/v1/agent/devices/${device.id}`, { group_chat: value })
-    ElMessage.success(value ? `已绑定群聊：${value}` : '已取消绑定')
+    ElMessage.success(value ? '已绑定报名通知群' : '已取消绑定')
     await load()
   } catch (error: any) {
     device.group_chat = previous
@@ -748,7 +722,8 @@ onMounted(async () => {
 }
 
 .device-label {
-  flex: 0 0 auto;
+  flex: 0 1 42%;
+  overflow-wrap: anywhere;
   font-size: 12px;
   font-weight: 600;
   color: var(--bd-text-secondary, #5f6b7a);

@@ -15,6 +15,8 @@ import { deviceReplyProvider, generateDifyReply, hasDifyDeviceToken, ownsReplyDe
 import { difyGroupNotificationState } from "../dify/dify-group-notification.js";
 import { difyContext } from "../dify/dify-context.js";
 import { recruitmentPositionAvailable } from "../dify/dify-recruitment.js";
+import { deviceInviteGroupBinding, ensureGroupConversation, resolveDeviceInviteGroup } from "../../shared/invite-group.js";
+import { DeviceBridgeStore } from "../messaging/device-bridge.js";
 import { normalizeInterviewPoints, normalizePositionFacts } from "../../shared/position-facts.js";
 import { previewFavoriteLocation } from "../../shared/favorite-location.js";
 import { positionKnowledge } from './position-knowledge.js';
@@ -330,6 +332,17 @@ function normalizeReply(parsed: Record<string, unknown>) {
 
 export async function registerAgentChatRoutes(app: FastifyInstance, db: DatabaseSync) {
   const isAdmin = (request: FastifyRequest) => request.auth?.role === "admin";
+  const bridge = new DeviceBridgeStore(db);
+
+  function queueArchiveNotice(deviceCode: string, sessionKey: string, content: () => string): void {
+    const binding = deviceInviteGroupBinding(db, deviceCode);
+    const group = binding.startsWith("R:") && resolveDeviceInviteGroup(db, deviceCode, binding);
+    if (!group) return;
+    const customerId = ensureGroupConversation(db, deviceCode, group.conv_id, group.name);
+    bridge.enqueue({ deviceCode, customerId, content: content(), idempotencyKey: `group-notify:${sessionKey}` },
+      { queueWhileOffline: true });
+    db.prepare("UPDATE agent_archive SET group_notified=1 WHERE session_key=?").run(sessionKey);
+  }
 
   // ── 调试台上下文：人设 / 事实 / 开场 / 拼好的 messages ──────────
   app.get<{ Querystring: { position_id?: string; device_code?: string } }>(
@@ -588,9 +601,9 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         WHERE a.name != '' OR a.phone != '' OR a.interview_date != ''
         ORDER BY a.updated_at DESC`,
     ).all() as Array<Record<string, unknown>>;
-    const notifyStmt = db.prepare(
-      "SELECT status FROM bridge_commands WHERE device_code=? AND substr(idempotency_key,1,?)=? ORDER BY created_at DESC LIMIT 1",
-    );
+    const notifyStmt = db.prepare(`SELECT status, simulated, contact_id, lease_until, error FROM bridge_commands
+      WHERE device_code=? AND (idempotency_key=? OR substr(idempotency_key,1,?)=?)
+      ORDER BY created_at DESC LIMIT 1`);
     const items: Array<Record<string, unknown>> = [];
     const candidateBySession = new Map(archiveCandidates(db).map(item => [item.session_key,item]));
     for (const row of rows) {
@@ -610,22 +623,31 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
       // 与推送判定保持一致：电话 + 面试时间齐全即算「可推送」，姓名缺失不再阻断。
       const complete = Boolean(row.phone && (row.interview_date || row.interview_time));
       let notifyStatus = !complete ? "incomplete" : !groupChat ? "no-group" : "pending";
+      let notifyDetail = "";
       if (sessionKey.startsWith("dify:")) {
         const notice = difyGroupNotificationState(db, deviceCode, sessionKey, groupChat);
         notifyStatus = notice.status;
         groupChat = notice.target;
-      } else if (complete && groupChat) {
-        // 按前缀取最新一条群通知指令：入队键带毫秒时间戳，而 updated_at 会被
-        // 「改备注」这类操作刷新——用完整键匹配会突然查不到，状态退回「待推送」。
-        const prefix = `group-notify:${sessionKey}:`;
-        const cmd = notifyStmt.get(deviceCode, prefix.length, prefix) as { status: string } | undefined;
+      } else {
+        const group = groupChat.startsWith("R:") && resolveDeviceInviteGroup(db, deviceCode, groupChat);
+        if (group) groupChat = group.name;
+        else if (complete && groupChat) notifyStatus = "group-unavailable";
+        const key = `group-notify:${sessionKey}`;
+        const prefix = key + ":";
+        const cmd = notifyStmt.get(deviceCode, key, prefix.length, prefix) as
+          {status: string; simulated: number; contact_id: string; lease_until: number; error: string} | undefined;
         if (cmd) {
-          // 指令状态是 sending 语义（succeeded），网页用的是展示语义（sent）：
-          // 不归一化时前端映射表没有 succeeded，会显示成「待推送」。
-          const raw = String(cmd.status);
-          notifyStatus = raw === "succeeded" ? "sent" : raw;
+          notifyStatus = cmd.status === "succeeded" ? (cmd.simulated ? "unknown" : "sent") : cmd.status;
+          if (notifyStatus === "claimed" && cmd.lease_until <= Date.now()) notifyStatus = "unknown";
+          if (notifyStatus === "failed" && cmd.error === "通知群无法核对，消息未发送。请核对群绑定后处理这条登记。") {
+            notifyDetail = cmd.error;
+          }
+          const actual = resolveDeviceInviteGroup(db, deviceCode, cmd.contact_id);
+          groupChat = actual?.name || cmd.contact_id;
+        } else if (notifyStatus === "pending" && sessionKey.startsWith("manual:")) {
+          notifyStatus = "not-queued";
+          notifyDetail = "这条登记没有进入发送队列，请人工核对后补发。";
         }
-        if (notifyStatus === "pending" && Number(row.group_notified ?? 0)) notifyStatus = "sent";
       }
       items.push({
         session_key: sessionKey,
@@ -643,6 +665,7 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         interview_address: shared?.interview_address || "",
         arrival_status: String(row.arrival_status ?? ""),
         notify_status: notifyStatus,
+        ...(notifyDetail && { notify_detail: notifyDetail }),
         updated_at: String(row.updated_at ?? ""),
         has_conversation: shared?.has_conversation === true,
       });
@@ -788,52 +811,12 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
        VALUES (?,?,?,?,?,?,?,?,1,CURRENT_TIMESTAMP)`,
     ).run(sessionKey, positionId, name, phone, text("city"), interviewDate, interviewTime, remark);
     if (deviceCode) {
-      db.prepare(
-        `UPDATE agent_archive SET session_key=? WHERE session_key=?`,
-      ).run(`manual:${deviceCode}:${sessionKey}`, sessionKey);
-      const groupChat = (() => {
-        const devRow = db.prepare(
-        "SELECT data_json FROM agent_devices WHERE json_extract(data_json,'$.device_code')=?",
-      )
-          .get(deviceCode) as { data_json: string } | undefined;
-        try {
-          return String((JSON.parse(devRow?.data_json || "{}") as Record<string, unknown>).group_chat ?? "");
-        } catch {
-          return "";
-        }
-      })();
-      if (groupChat) {
-        const groupExists = db.prepare(
-          "SELECT id FROM agent_conversations WHERE device_code=? AND customer_id=? LIMIT 1",
-        ).get(deviceCode, groupChat);
-        if (!groupExists) {
-          db.prepare(
-            `INSERT INTO agent_conversations(device_code,customer_id,nickname,state,unread,external_conversation_id,updated_at)
-             VALUES (?,?,?,'active',0,?,CURRENT_TIMESTAMP)`,
-          ).run(deviceCode, groupChat, groupChat, `group:${groupChat}`);
-        } else {
-          db.prepare(
-            "UPDATE agent_conversations SET nickname=? WHERE device_code=? AND customer_id=? AND nickname<>?",
-          ).run(groupChat, deviceCode, groupChat, groupChat);
-        }
-        const finalKey = `manual:${deviceCode}:${sessionKey}`;
-        // 和 Agent 链路同一套一行文案：姓名 微信名称 手机 工厂 岗位 日期 时间 面试点
-        const notifyText = buildArchiveNoticeLine(db, {
-          name,
-          remark,
-          nickname: text("customer_nickname"),
-          phone,
-          positionId,
-          interviewDate,
-          interviewTime,
-          place: text("interview_address"),
-        });
-        db.prepare(
-          `INSERT INTO bridge_commands(id,device_code,customer_id,contact_id,content,idempotency_key,created_at)
-           VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)`,
-        ).run(randomUUID(), deviceCode, groupChat, groupChat, notifyText, `group-notify:${finalKey}`);
-        db.prepare("UPDATE agent_archive SET group_notified=1 WHERE session_key=?").run(finalKey);
-      }
+      const finalKey = `manual:${deviceCode}:${sessionKey}`;
+      db.prepare("UPDATE agent_archive SET session_key=? WHERE session_key=?").run(finalKey, sessionKey);
+      queueArchiveNotice(deviceCode, finalKey, () => buildArchiveNoticeLine(db, {
+        name, remark, nickname: text("customer_nickname"), phone, positionId,
+        interviewDate, interviewTime, place: text("interview_address"),
+      }));
     }
     return { ok: true, session_key: deviceCode ? `manual:${deviceCode}:${sessionKey}` : sessionKey };
   });
@@ -1200,83 +1183,22 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
           archive.interview_time,
           archive.interview_confirmed ? 1 : 0,
         );
-        // 群聊通知：档案里姓名/电话/面试时间齐全且尚未通知时，把「时间+姓名+电话」
-        // 推送到设备绑定的群聊（agent_devices.data_json.group_chat，设备页可配）。
-        // 群聊名没配就保留 group_notified=0——配好群聊后下一轮对话自动补推。
-        // 设备端按 agent_conversations.nickname 搜索会话发送，群聊也占一行记录。
-        // 姓名缺失不再阻断推群：电话 + 面试时间是硬条件，姓名用「（待补）」占位。
-        // 之前要求 name 非空，模型漏填一次就永久卡住（2026-11-20 实测 3 条姓名全空）。
-        const archiveComplete = Boolean(
-          archive.phone && (archive.interview_date || archive.interview_time),
-        );
-        const notifiedRow = db
-          .prepare("SELECT group_notified FROM agent_archive WHERE session_key=?")
-          .get(sessionKey) as { group_notified: number } | undefined;
-        if (archiveComplete && notifiedRow && !notifiedRow.group_notified) {
-          const convRow = db
-            .prepare(
-              "SELECT device_code, nickname FROM agent_conversations WHERE external_conversation_id=? ORDER BY updated_at DESC LIMIT 1",
-            )
-            .get(sessionKey) as { device_code: string; nickname: string } | undefined;
-          if (convRow) {
-            const devRow = db
-              .prepare(
-          "SELECT data_json FROM agent_devices WHERE json_extract(data_json,'$.device_code')=?",
-        )
-              .get(convRow.device_code) as { data_json: string } | undefined;
-            let devData: Record<string, unknown> = {};
-            try {
-              devData = JSON.parse(devRow?.data_json || "{}") as Record<string, unknown>;
-            } catch {
-              devData = {};
-            }
-            const groupChat = String(devData.group_chat ?? "").trim();
-            if (groupChat) {
-              const groupExists = db
-                .prepare(
-                  "SELECT id FROM agent_conversations WHERE device_code=? AND customer_id=? LIMIT 1",
-                )
-                .get(convRow.device_code, groupChat);
-              if (!groupExists) {
-                // nickname 必须是真实群名：客户端是拿 nickname 去企微搜索框里找会话的，
-                // 早先写死成「群聊」会搜不到，发送被「不在企微会话列表」拦掉
-                // （2026-11-25 实测：面试信息采集成功，群通知发不出去）。
-                db.prepare(
-                  `INSERT INTO agent_conversations(device_code,customer_id,nickname,state,unread,external_conversation_id,updated_at)
-                   VALUES (?,?,?,'active',0,?,CURRENT_TIMESTAMP)`,
-                ).run(convRow.device_code, groupChat, groupChat, `group:${groupChat}`);
-              } else {
-                // 历史行 nickname 是「群聊」，顺手纠正过来
-                db.prepare(
-                  "UPDATE agent_conversations SET nickname=? WHERE device_code=? AND customer_id=? AND nickname<>?",
-                ).run(groupChat, convRow.device_code, groupChat, groupChat);
-              }
-              // 群通知：一条消息、一行字。姓名后面紧跟微信名称（备注优先，
-              // 其次是客户企微昵称），再是手机、工厂、岗位、日期、时间、面试点。
-              const notifyText = buildArchiveNoticeLine(db, {
-                name: archive.name,
-                remark: String(archiveRow?.remark ?? ""),
-                nickname: convRow.nickname,
-                phone: archive.phone,
-                positionId,
-                interviewDate: archive.interview_date,
-                interviewTime: archive.interview_time,
-                place: String(archiveRow?.interview_address || archiveRow?.interview_point || ""),
-              });
-              db.prepare(
-                `INSERT INTO bridge_commands(id,device_code,customer_id,contact_id,content,idempotency_key,created_at)
-                 VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)`,
-              ).run(
-                randomUUID(),
-                convRow.device_code,
-                groupChat,
-                groupChat,
-                notifyText,
-                `group-notify:${sessionKey}:${new Date().toISOString()}`,
-              );
-              db.prepare("UPDATE agent_archive SET group_notified=1 WHERE session_key=?").run(sessionKey);
-            }
-          }
+        // 仅在手机号和面试日期或时间齐全时排队，姓名缺失允许待补。
+        const notified = db.prepare("SELECT group_notified FROM agent_archive WHERE session_key=?")
+          .get(sessionKey) as { group_notified: number };
+        if (archive.phone && (archive.interview_date || archive.interview_time) && !notified.group_notified && deviceCode) {
+          const convRow = db.prepare("SELECT nickname FROM agent_conversations WHERE device_code=? AND external_conversation_id=?")
+            .get(deviceCode, sessionKey) as { nickname: string } | undefined;
+          if (convRow) queueArchiveNotice(deviceCode, sessionKey, () => buildArchiveNoticeLine(db, {
+            name: archive.name,
+            remark: String(archiveRow?.remark ?? ""),
+            nickname: convRow.nickname,
+            phone: archive.phone,
+            positionId,
+            interviewDate: archive.interview_date,
+            interviewTime: archive.interview_time,
+            place: String(archiveRow?.interview_address || archiveRow?.interview_point || ""),
+          }));
         }
       }
 

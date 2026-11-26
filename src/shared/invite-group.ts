@@ -336,8 +336,8 @@ export function ensureGroupConversation(db: DatabaseSync, deviceCode: string, co
     return existing.customer_id;
   }
   const groupCustomerId = Number((db.prepare(`SELECT MAX(value)+1 AS id FROM (
-    SELECT COALESCE(MAX(customer_id),0) value FROM agent_conversations UNION ALL
-    SELECT COALESCE(MAX(customer_id),0) FROM bridge_contacts UNION ALL SELECT 0)`)
+    SELECT COALESCE(MAX(customer_id),0) value FROM agent_conversations WHERE typeof(customer_id)='integer' UNION ALL
+    SELECT COALESCE(MAX(customer_id),0) FROM bridge_contacts WHERE typeof(customer_id)='integer' UNION ALL SELECT 0)`)
     .get() as { id: number }).id);
   db.prepare("INSERT OR IGNORE INTO bridge_contacts(device_code,contact_id,customer_id,nickname) VALUES (?,?,?,?)")
     .run(deviceCode, convId, groupCustomerId, groupName);
@@ -354,8 +354,7 @@ export function deviceInviteGroupBinding(db: DatabaseSync, deviceCode: string): 
   return String(parseDeviceData(device?.data_json).group_chat ?? "").trim();
 }
 
-export function resolveDeviceInviteGroup(db: DatabaseSync, deviceCode: string, binding: string) {
-  if (!binding.trim()) return undefined;
+export function selectableDeviceInviteGroups(db: DatabaseSync, deviceCode: string) {
   const rebound = db.prepare(`SELECT created_at FROM device_events
     WHERE device_code=? AND event_type='account_rebound' ORDER BY created_at DESC LIMIT 1`)
     .get(deviceCode) as { created_at: string } | undefined;
@@ -374,13 +373,16 @@ export function resolveDeviceInviteGroup(db: DatabaseSync, deviceCode: string, b
           WHERE i.device_code=b.device_code AND substr(i.event_id,1,length(b.contact_id)+1)=b.contact_id||':')`)
       .all(deviceCode) as { conv_id: string; name: string }[]);
   }
-  const matches = groups.filter(group => binding.startsWith("R:") ? group.conv_id === binding : group.name === binding);
-  if (matches.length !== 1) return undefined;
-  const [group] = matches;
   // Windows searches by name and verifies the real group ID on readback.
-  if (groups.filter(item => item.name === group.name).length !== 1) return undefined;
   const namesake = db.prepare(`SELECT 1 FROM bridge_contacts
-    WHERE device_code=? AND nickname=? AND contact_id<>? LIMIT 1`).get(deviceCode, group.name, group.conv_id);
-  return namesake ? undefined : group;
+    WHERE device_code=? AND nickname=? AND contact_id<>? LIMIT 1`);
+  return groups.filter(group => groups.filter(item => item.name === group.name).length === 1
+    && !namesake.get(deviceCode, group.name, group.conv_id));
+}
+
+export function resolveDeviceInviteGroup(db: DatabaseSync, deviceCode: string, binding: string) {
+  if (!binding.trim()) return undefined;
+  return selectableDeviceInviteGroups(db, deviceCode)
+    .find(group => binding.startsWith("R:") ? group.conv_id === binding : group.name === binding);
 }
 

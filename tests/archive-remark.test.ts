@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildServer } from "../src/server.js";
 import { buildArchiveNoticeLine } from "../src/modules/agent/archive-notify.js";
 import { buildInviteLine } from "../src/shared/invite-group.js";
+import { DeviceBridgeStore } from "../src/modules/messaging/device-bridge.js";
 
 // 面试登记备注（remark）与群通知一行文案。
 //
@@ -31,7 +32,8 @@ describe("面试登记备注与群通知", () => {
       payload: { username: "local-admin", password: "local-demo-only" },
     });
     headers = { authorization: `Bearer ${res.json().access_token}` };
-    setGroupChat("面试通知群");
+    new DeviceBridgeStore(app.db).saveGroups("local-device-001", [{ conv_id: "R:interview", name: "面试通知群" }]);
+    setGroupChat("R:interview");
   });
   afterAll(() => app.close());
 
@@ -64,6 +66,8 @@ describe("面试登记备注与群通知", () => {
   });
 
   it("手动登记带备注：落库并在群指令里发一行", async () => {
+    app.db.prepare("INSERT OR IGNORE INTO agent_conversations(device_code,customer_id,nickname) VALUES (?,?,?)")
+      .run("local-device-001", "旧群名称", "旧群名称");
     const res = await app.inject({
       method: "POST",
       url: "/api/v1/agent/archive/manual",
@@ -84,9 +88,53 @@ describe("面试登记备注与群通知", () => {
     const archive = app.db.prepare("SELECT remark FROM agent_archive WHERE session_key=?").get(key) as { remark: string };
     expect(archive.remark).toBe("微信名叫小李");
     const command = app.db
-      .prepare("SELECT content FROM bridge_commands WHERE device_code='local-device-001' AND idempotency_key=?")
-      .get(`group-notify:${key}`) as { content: string } | undefined;
+      .prepare("SELECT content,contact_id FROM bridge_commands WHERE device_code='local-device-001' AND idempotency_key=?")
+      .get(`group-notify:${key}`) as { content: string; contact_id: string } | undefined;
+    expect(command?.contact_id).toBe("R:interview");
     expect(command?.content).toBe("李四 微信名叫小李 13900139000 本地示例工厂 本地示例岗位 11/25 14:00");
+  });
+
+  it("blocks unverified group changes, saves a verified ID, and keeps registrations with a stale group", async () => {
+    const device = app.db.prepare("SELECT id FROM agent_devices WHERE json_extract(data_json,'$.device_code')=?")
+      .get("local-device-001") as { id: number };
+    const update = (group_chat: string) => app.inject({method:"PUT",url:`/api/v1/agent/devices/${device.id}`,headers,payload:{group_chat}});
+    setGroupChat("面试通知群");
+    expect((await update("用户手填的群")).statusCode).toBe(422);
+    expect((await update("R:interview")).statusCode).toBe(200);
+    expect(app.db.prepare("SELECT json_extract(data_json,'$.group_chat') AS binding FROM agent_devices WHERE id=?")
+      .get(device.id)).toMatchObject({binding:"R:interview"});
+    setGroupChat("找不到的旧群");
+    try {
+      const res = await app.inject({method:"POST",url:"/api/v1/agent/archive/manual",headers,
+        payload:{name:"待核验",phone:"13800138000",interview_time:"09:00",device_code:"local-device-001"}});
+      expect(res.statusCode).toBe(200);
+      const key = res.json().session_key;
+      expect(app.db.prepare("SELECT 1 FROM bridge_commands WHERE idempotency_key=?").get(`group-notify:${key}`)).toBeUndefined();
+      const list = (await app.inject({url:"/api/v1/agent/archive/list",headers})).json().items as Array<Record<string, unknown>>;
+      expect(list.find(row => row.session_key === key)).toMatchObject({ notify_status:"group-unavailable" });
+    } finally { setGroupChat("R:interview"); }
+  });
+
+  it("holds a queued notice when the device logs into a different account even if it sees the same group", async () => {
+    const code = "archive-switch-fixture";
+    app.db.prepare("INSERT INTO agent_devices(device_name,status,data_json) VALUES (?,'enabled',?)")
+      .run(code, JSON.stringify({device_code:code,group_chat:"R:shared"}));
+    const bridge = new DeviceBridgeStore(app.db);
+    const groups = [{conv_id:"R:shared",name:"验收报名群"}];
+    bridge.pair(code);
+    bridge.heartbeat(code,"online","first-account");
+    bridge.saveGroups(code,groups);
+    const res = await app.inject({method:"POST",url:"/api/v1/agent/archive/manual",headers,
+      payload:{name:"测试登记",phone:"13800138000",interview_time:"09:00",device_code:code}});
+    expect(res.statusCode).toBe(200);
+    const key = `group-notify:${res.json().session_key}`;
+    const notice = app.db.prepare("SELECT id, created_at FROM bridge_commands WHERE idempotency_key=?")
+      .get(key) as {id:string;created_at:number};
+    const afterSwitch = new DeviceBridgeStore(app.db, () => notice.created_at + 5000);
+    afterSwitch.heartbeat(code,"online","second-account");
+    afterSwitch.saveGroups(code,groups);
+    expect(afterSwitch.claim(code)).toBeNull();
+    expect(afterSwitch.command(notice.id)).toMatchObject({status:"failed"});
   });
 
   it("Dify 名单行同样把微信名称放在姓名后面", () => {
@@ -117,10 +165,10 @@ describe("面试登记备注与群通知", () => {
       payload: { name: "赵六", phone: "13600136000", interview_date: "2026-11-27", interview_time: "11:00", device_code: "local-device-001" },
     });
     const key = res.json().session_key as string;
-    const prefix = `group-notify:${key}:`;
+    const notificationKey = `group-notify:${key}`;
     app.db
-      .prepare("UPDATE bridge_commands SET status='succeeded' WHERE device_code='local-device-001' AND substr(idempotency_key,1,?)=?")
-      .run(prefix.length, prefix);
+      .prepare("UPDATE bridge_commands SET status='succeeded' WHERE device_code='local-device-001' AND idempotency_key=?")
+      .run(notificationKey);
     const list = (await app.inject({ url: "/api/v1/agent/archive/list", headers })).json().items as Array<Record<string, unknown>>;
     expect(list.find((row) => row.session_key === key)).toMatchObject({ notify_status: "sent" });
   });

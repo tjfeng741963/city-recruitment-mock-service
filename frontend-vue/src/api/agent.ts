@@ -53,6 +53,8 @@ export interface CloudAgentAssignment {
 export interface CloudAgentMachine { code: string; name: string }
 
 export interface DeviceGroup {
+  conv_id?: string
+  selectable?: boolean
   id?: number | string
   name?: string
   chat_id?: string

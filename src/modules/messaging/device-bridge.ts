@@ -481,6 +481,15 @@ export class DeviceBridgeStore {
             AND json_extract(d.data_json,'$.reply_provider')='dify'`)
           .get(next.id,code,device?.account_id ?? "",next.contact_id,next.customer_id);
         if (valid) break;
+      } else if (next.idempotency_key.startsWith("group-notify:")) {
+        const group = resolveDeviceInviteGroup(this.db, code, deviceInviteGroupBinding(this.db, code));
+        const switched = this.db.prepare(`SELECT 1 FROM device_events
+          WHERE device_code=? AND event_type='account_rebound' AND created_at>=? LIMIT 1`)
+          .get(code, new Date(Number(next.created_at) || 0).toISOString());
+        if (group && group.conv_id === next.contact_id && !switched) {
+          ensureGroupConversation(this.db, code, group.conv_id, group.name);
+          break;
+        }
       } else if (!next.idempotency_key.startsWith(DIFY_GROUP_NOTIFICATION_PREFIX)) {
         break;
       } else {
@@ -493,7 +502,12 @@ export class DeviceBridgeStore {
           break;
         }
       }
-      this.db.prepare("UPDATE bridge_commands SET status='failed' WHERE id=? AND status='queued'").run(next.id);
+      if (next.idempotency_key.startsWith("group-notify:")) {
+        this.db.prepare("UPDATE bridge_commands SET status='failed',error=? WHERE id=? AND status='queued'")
+          .run("通知群无法核对，消息未发送。请核对群绑定后处理这条登记。", next.id);
+      } else {
+        this.db.prepare("UPDATE bridge_commands SET status='failed' WHERE id=? AND status='queued'").run(next.id);
+      }
       next = nextQueued();
     }
     if (!next) return null;
@@ -521,7 +535,9 @@ export class DeviceBridgeStore {
     // 刷新二维码没有 message_id 可回：它不产生客户消息，回执成功不要求 message_id。
     const isRefresh = command.kind === "refresh_login_qr";
     if (status === "succeeded" && !isRefresh && !messageId.trim()) throw new BridgeError("Successful receipt requires message_id", 422);
-    if (status === "succeeded" && !simulated && !isRefresh && (command.idempotency_key.startsWith(DIFY_GROUP_NOTIFICATION_PREFIX) || isDifyReminder(command))) {
+    const groupNotice = command.idempotency_key.startsWith(DIFY_GROUP_NOTIFICATION_PREFIX)
+      || (command.idempotency_key.startsWith("group-notify:") && command.contact_id.startsWith("R:"));
+    if (status === "succeeded" && !simulated && !isRefresh && (groupNotice || isDifyReminder(command))) {
       const prefix = command.contact_id + ":";
       if (!messageId.startsWith(prefix) || !messageId.slice(prefix.length).trim()) {
         throw new BridgeError("Receipt does not match the target conversation", 422);

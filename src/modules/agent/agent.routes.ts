@@ -14,6 +14,7 @@ import { NOOP_NOTIFIER, type StreamNotifier } from "../messaging/stream-events.j
 import { readWeComConfig } from "../wecom/wecom-config.js";
 import { listReminderTasks } from "./followup.js";
 import { loadFactories, parseDeviceData, readDeviceFactoryIds, receptionFactoryIds, resolveDevicePosition } from "../../shared/device-factories.js";
+import { resolveDeviceInviteGroup, selectableDeviceInviteGroups } from "../../shared/invite-group.js";
 
 const ADMIN_REQUIRED = { detail: "Admin access required" } as const;
 
@@ -216,6 +217,15 @@ export function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync, noti
     }
     const merged = { ...data, ...body } as Record<string, unknown>;
     const code = String(data.device_code ?? "");
+    if (Object.hasOwn(body, "group_chat")) {
+      const group = typeof body.group_chat === "string" ? body.group_chat.trim() : null;
+      const changed = group !== data.group_chat;
+      const resolved = changed && group && resolveDeviceInviteGroup(db, String(merged.device_code ?? ""), group);
+      if (group === null || (group && changed && !resolved)) {
+        return reply.code(422).send({ detail: "找不到该账号已同步的唯一企微群，请从群列表重新选择。" });
+      }
+      merged.group_chat = resolved ? resolved.conv_id : group;
+    }
     const mode = replyModeRow(db, code);
     const provider = (mode?.effective ?? data.reply_provider) === "dify" ? "dify" : "agent";
     const hasPosition = Object.hasOwn(body, "position_id");
@@ -329,7 +339,10 @@ export function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync, noti
     if (!canAccessDevice(getUserScope(db, request.auth!), code)) {
       return reply.code(403).send({ detail: "Device scope required" });
     }
-    return { items: bridgeStore.listGroups(code) };
+    const selectable = selectableDeviceInviteGroups(db, code);
+    const reported = bridgeStore.listGroups(code);
+    const ids = new Set(selectable.map(group => group.conv_id));
+    return { items: (reported.length ? reported : selectable).map(group => ({ ...group, selectable: ids.has(group.conv_id) })) };
   });
   // 登录二维码的网页读取口。设备用自己的桥接令牌 POST 上传（见 device-bridge.routes.ts），
   // 网页这一侧用用户 JWT 读——二维码等同于登录凭证，拿到就能顶替这个号登录，不能公开。
