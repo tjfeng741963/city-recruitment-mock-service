@@ -59,7 +59,8 @@ export interface FlowLike {
 export function normalizeFlow<T extends FlowLike>(raw: T): T {
   const nodes = (Array.isArray(raw.nodes) ? raw.nodes : []).map((node) => {
     const parts = Array.isArray(node.parts) ? node.parts : []
-    const keepParts = parts.length > 0 || NO_PARTS_TYPES.has(String(node.node_type))
+    const keepParts = parts.length > 0 || NO_PARTS_TYPES.has(String(node.node_type)) ||
+      (Array.isArray(raw.shared_opening) && raw.shared_opening.includes(node.node_key))
     return {
       ...node,
       title: node.title || node.node_key,

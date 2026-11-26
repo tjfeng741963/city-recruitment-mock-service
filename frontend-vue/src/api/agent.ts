@@ -294,6 +294,7 @@ export interface AgentFlowPart {
   location?: { lng: number; lat: number; name: string; address: string }
   delay_before_ms?: number
   delay_ms?: number
+  opening_id?: number
 }
 
 export interface AgentFlowNode {
@@ -326,6 +327,7 @@ export interface AgentFlow {
   canvas?: Record<string, unknown>
   nodes: AgentFlowNode[]
   edges: AgentFlowEdge[]
+  shared_opening?: string[]
   [key: string]: unknown
 }
 
@@ -371,7 +373,7 @@ export interface AgentExecutionTrace {
 export const agentApi = {
   persona: () => http.get<Record<string, unknown>>('/api/v1/agent-persona'),
   personaGet: (positionId: number | string) =>
-    http.get<{ persona?: { content?: string; status?: string }; openings?: Record<string, unknown>[]; opening_version?: string; opening_revision?: string }>(
+    http.get<{ persona?: { content?: string; status?: string }; openings?: Record<string, unknown>[]; opening_version?: string; opening_revision?: string; shared_opening?: boolean }>(
       '/api/v1/agent-persona',
       { params: { position_id: positionId } },
     ),
@@ -385,8 +387,8 @@ export const agentApi = {
     http.post<Record<string, unknown>>('/api/v1/agent-opening', payload),
   updateOpening: (id: number | string, payload: Record<string, unknown>) =>
     http.put<Record<string, unknown>>(`/api/v1/agent-opening/${id}`, payload),
-  removeOpening: (id: number | string) =>
-    http.delete<OkResult>(`/api/v1/agent-opening/${id}`),
+  removeOpening: (id: number | string, revision?: string) =>
+    http.delete<OkResult>(`/api/v1/agent-opening/${id}`, { params: { revision } }),
   removeOpenings: (payload: { position_id: number; ids: number[]; revision: string }) =>
     http.post<{ deleted_count: number; items: Record<string, unknown>[]; opening_revision: string }>(
       '/api/v1/agent-opening/batch-delete', payload,
@@ -397,8 +399,9 @@ export const agentApi = {
     http.get<AgentFlow>(`/api/v1/agent-flow`, { params: { position_id: positionId } }),
   flowMigrate: (positionId: number | string) =>
     http.post<AgentFlow>('/api/v1/agent-flow/migrate', { position_id: positionId }),
-  flowSave: (payload: AgentFlow) =>
-    http.put<AgentFlow>('/api/v1/agent-flow', payload),
+  flowSave: (payload: AgentFlow, options?: { usePositionOpening: boolean; createSharedOpening: boolean; openingVersion: string | null }) =>
+    http.put<AgentFlow>('/api/v1/agent-flow', { ...payload, use_position_opening: options?.usePositionOpening,
+      create_shared_opening: options?.createSharedOpening, opening_version: options?.openingVersion }),
   configSync: (deviceCode: string) =>
     http.get<ConfigSyncEvidence>('/api/v1/agent/config-sync', { params: { device_code: deviceCode } }),
   flowStateSummary: (deviceCode: string) =>

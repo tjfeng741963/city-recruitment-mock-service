@@ -258,6 +258,7 @@ function triggerLabel(trigger: string): string {
 
 function nodeTypeLabel(nodeType: string): string {
   if (nodeType === 'favorite_location') return '地址＋导航链接'
+  if (nodeType === 'location') return '位置'
   return labels[nodeType] || nodeType
 }
 
@@ -279,6 +280,7 @@ function nodeSummary(node: AgentFlowNode): string {
   const preview = parts.map((part) => {
     if (part.kind === 'text') return part.body
     if (part.kind === 'favorite_location') return `${flowLocationLabel(part.interview_point || '未选地点')}（导航）`
+    if (part.kind === 'location') return part.location?.name || part.location?.address || '未填地点'
     return part.media_name ? `${nodeTypeLabel(part.kind)}：${part.media_name}` : '未选素材'
   })
     .filter(Boolean)

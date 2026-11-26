@@ -5,16 +5,21 @@ import { DeviceBridgeStore } from "../messaging/device-bridge.js";
 import { devicePositionId } from "../../shared/device-factories.js";
 import { deviceReplyProvider } from "../dify/dify-reply.js";
 import { favoritePointTitles } from "../../shared/favorite-location.js";
-import { flowLocationLabel, flowLocationOptions, WORK_LOCATION_KEY } from "../../shared/flow-location.js";
-import { interviewLocation, type InterviewLocation } from "../../shared/interview-location.js";
+import { flowLocationLabel, flowLocationOptions, validFlowCoordinates, WORK_LOCATION_KEY } from "../../shared/flow-location.js";
+import { interviewLocation } from "../../shared/interview-location.js";
+import { openingVersion } from "../../shared/opening-version.js";
+import { parseOpeningLocation } from "../../shared/opening-location.js";
+import { matchingOpeningLayout, openingLayout, openingLocationReply, openingNodes, saveSharedOpening,
+  sharedOpeningParts, SHARED_OPENING_LIMIT, splitSharedOpening, storedOpeningLayout, unverifiedOpeningNumbers,
+  validateOpeningGroups, validateSharedOpening, type SharedOpeningPart } from "./shared-opening.js";
 
 const NODE_TYPES = new Set(["text", "image", "video", "followup", "branch", "end"]);
 const EDGE_TRIGGERS = new Set(["default", "any_reply", "timeout", "keyword", "giveup"]);
 const PHASES = new Set(["idle", "running", "awaiting", "followup_due", "followup_sent", "replied", "expired", "held"]);
-const PART_KINDS = new Set(["text", "image", "video", "favorite_location"]);
+const PART_KINDS = new Set(["text", "image", "video", "favorite_location", "location"]);
 
 type Json = Record<string, unknown>;
-type FlowPart = { kind: string; body: string; media_name: string; delay_ms: number; interview_point?: string; delay_before_ms?: number; location?: InterviewLocation; location_link_enabled?: true };
+type FlowPart = SharedOpeningPart & { interview_point?: string; delay_before_ms?: number; location_link_enabled?: true };
 type FlowNode = {
   node_key: string; node_type: string; title: string; body: string; media_name: string;
   parts: FlowPart[]; delay_ms: number; await_reply: boolean; wait_minutes: number;
@@ -53,13 +58,26 @@ function parseArray(value: unknown): unknown[] {
   try { const parsed = JSON.parse(value) as unknown; return Array.isArray(parsed) ? parsed : []; } catch { return []; }
 }
 
-function normalizeParts(raw: unknown, nodeType: string): FlowPart[] {
+function normalizeParts(raw: unknown, nodeType: string, shared: boolean): FlowPart[] {
   const parts = parseArray(raw);
-  if (parts.length < 1 || parts.length > 6) throw new Error("每个节点必须有 1 到 6 条 parts");
+  if (shared ? parts.length > SHARED_OPENING_LIMIT : parts.length < 1 || parts.length > 6) {
+    throw new Error(shared ? "共享开场最多 30 条" : "每个节点必须有 1 到 6 条 parts");
+  }
   return parts.map((value, index) => {
     const item = parseObject(value);
     const kind = str(item.kind, nodeType === "image" ? "image" : nodeType === "video" ? "video" : "text");
     if (!PART_KINDS.has(kind)) throw new Error(`parts[${index}].kind 无效`);
+    const delayMs = finiteInt(item.delay_ms ?? item.delayMs, 2000, 0, 60_000);
+    const openingId = finiteInt(item.opening_id, 0, 1);
+    const identity = openingId ? { opening_id: openingId } : {};
+    if (kind === "location") {
+      if (!shared) throw new Error("岗位位置卡只能在共享开场使用");
+      const location = parseOpeningLocation(item.location);
+      if (!location || !validFlowCoordinates(location.lng, location.lat) || !location.address || location.address.length > 200) {
+        throw new Error("位置卡需要经纬度及详细地址，地址最多 200 字");
+      }
+      return { kind, body: JSON.stringify(location), location, media_name: "", delay_ms: delayMs, ...identity };
+    }
     if (kind === "favorite_location") {
       const interview_point = str(item.interview_point).trim().normalize("NFC");
       if (!interview_point) throw new Error("请选择要发送的位置卡对应的面试点");
@@ -78,12 +96,13 @@ function normalizeParts(raw: unknown, nodeType: string): FlowPart[] {
       kind,
       body,
       media_name: mediaName,
-      delay_ms: finiteInt(item.delay_ms ?? item.delayMs, 2000, 0, 60_000),
+      delay_ms: delayMs,
+      ...identity,
     };
   });
 }
 
-function normalizeNodes(raw: unknown): FlowNode[] {
+function normalizeNodes(raw: unknown, sharedKeys: Set<string>): FlowNode[] {
   const values = parseArray(raw);
   if (values.length < 1 || values.length > 500) throw new Error("nodes 必须有 1 到 500 个节点");
   const keys = new Set<string>();
@@ -95,7 +114,7 @@ function normalizeNodes(raw: unknown): FlowNode[] {
     keys.add(nodeKey);
     const nodeType = str(item.node_type || item.nodeType, "text");
     if (!NODE_TYPES.has(nodeType)) throw new Error(`节点类型无效：${nodeType}`);
-    const parts = nodeType === "branch" || nodeType === "end" ? [] : normalizeParts(item.parts, nodeType);
+    const parts = nodeType === "branch" || nodeType === "end" ? [] : normalizeParts(item.parts, nodeType, sharedKeys.has(nodeKey));
     if (nodeType === "followup" && (parts.length !== 1 || parts[0]?.kind !== "text")) {
       throw new Error("复聊只允许一条文本消息");
     }
@@ -216,19 +235,26 @@ function jsonObject(raw: unknown): Json {
 
 export function readFlow(db: DatabaseSync, positionId: number, executableOnly = false) {
   const flow = db.prepare("SELECT * FROM agent_flow WHERE position_id=?").get(positionId) as Record<string, unknown> | undefined;
-  if (!flow) return { position_id: positionId, version: 0, status: "disabled", entry_key: "", canvas: {}, nodes: [], edges: [] };
+  if (!flow) return { position_id: positionId, version: 0, status: "disabled", entry_key: "", canvas: {},
+    ...(!executableOnly && { shared_opening: [] as string[] }), nodes: [], edges: [] };
   const nodes = db.prepare("SELECT * FROM agent_flow_node WHERE flow_id=? ORDER BY id").all(Number(flow.id)) as Array<Record<string, unknown>>;
   const edges = db.prepare("SELECT * FROM agent_flow_edge WHERE flow_id=? ORDER BY priority DESC,id").all(Number(flow.id)) as Array<Record<string, unknown>>;
+  const layout = storedOpeningLayout(flow.canvas_json);
+  const shared = splitSharedOpening(layout, layout.length ? sharedOpeningParts(db, positionId) : []);
   return {
     position_id: positionId,
     version: Number(flow.version),
     status: String(flow.status),
     entry_key: str(jsonObject(flow.canvas_json).entry_key),
     canvas: { viewport: jsonObject(flow.canvas_json).viewport ?? {} },
+    ...(!executableOnly && { shared_opening: layout.map(({ key }) => key) }),
     nodes: nodes.map((node) => ({
-      node_key: node.node_key, node_type: node.node_type, title: node.title, body: node.body,
-      media_name: node.media_name, parts: parseArray(node.parts_json).filter(part =>
-        !executableOnly || parseObject(part).kind !== "favorite_location"), delay_ms: node.delay_ms,
+      node_key: node.node_key, node_type: node.node_type, title: node.title,
+      body: shared.has(String(node.node_key)) ? shared.get(String(node.node_key))?.[0]?.body ?? "" : node.body,
+      media_name: shared.has(String(node.node_key)) ? shared.get(String(node.node_key))?.[0]?.media_name ?? "" : node.media_name,
+      parts: (shared.get(String(node.node_key)) ?? parseArray(node.parts_json)).filter((part: unknown) =>
+        !executableOnly || parseObject(part).kind !== "favorite_location"),
+      delay_ms: shared.get(String(node.node_key))?.[0]?.delay_ms ?? node.delay_ms,
       await_reply: Boolean(node.await_reply), wait_minutes: node.wait_minutes, max_times: node.max_times,
       x: node.x, y: node.y, status: node.status,
     })),
@@ -254,21 +280,16 @@ export function firstFlowSegment(db: DatabaseSync, positionId: number) {
     if (node.await_reply) break;
     key = str(flow.edges.find(edge => edge.from_key === key && edge.trigger === "default")?.to_key);
   }
-  return parts.map((part, index) => ({seq:index + 1,kind:part.kind,content:part.body,media_name:part.media_name,delay_ms:part.delay_ms}));
+  return parts.map((part, index) => ({seq:index + 1,kind:part.kind,content:part.body,media_name:part.media_name,delay_ms:part.delay_ms,
+    ...(part.kind === "location" && { location: part.location })}));
 }
 
 function validateNumbers(db: DatabaseSync, positionId: number, nodes: FlowNode[]) {
   const row = db.prepare("SELECT data_json FROM service_positions WHERE id=?").get(positionId) as {data_json: string};
   const data = jsonObject(row.data_json);
-  const factKeys = ["wage_text", "hours_text", "age_text", "welfare_text", "place", "interview_time",
-    "interview_time_text", "interview_address", "interview_material", "basic_requirements", "onboarding_notes",
-    "height_text", "tattoo_policy", "cert_text", "job_content"];
-  const allowed = new Set(factKeys.flatMap(key => str(data[key]).match(/\d+(?:\.\d+)?/g) || []));
   for (const node of nodes.filter(item => item.status === "enabled")) {
-    for (const part of node.parts.filter(item => item.kind === "text")) {
-      const unverified = (part.body.match(/\d+(?:\.\d+)?/g) || []).filter(value => !allowed.has(value));
-      if (unverified.length) throw new Error(`节点「${node.title || node.node_key}」数字未出现在本岗位事实中：${[...new Set(unverified)].join("、")}`);
-    }
+    const unverified = unverifiedOpeningNumbers(data, node.parts);
+    if (unverified.length) throw new Error(`节点「${node.title || node.node_key}」数字未出现在本岗位事实中：${unverified.join("、")}`);
   }
 }
 
@@ -377,25 +398,25 @@ export async function registerAgentFlowRoutes(app: FastifyInstance, db: Database
       return { position_id: positionId, location_steps: 1, reply_mode_id, version: 0, nodes: [], edges: [], status: "disabled" };
     }
     const withLocations = request.query.location_links === "1";
-    const result = readFlow(db, positionId, !withLocations);
+    const { shared_opening: _shared, ...result } = readFlow(db, positionId, !withLocations);
     // 停用只阻止新会话；在途会话使用本地持久化快照。
     if (result.status !== "enabled") return { ...result, location_steps: 1, nodes: [], edges: [], reply_mode_id };
-    if (withLocations) {
-      result.nodes = result.nodes.map(node => ({
-        ...node,
-        parts: node.parts.flatMap(raw => {
-          const part = parseObject(raw);
-          if (part.kind !== "favorite_location") return [raw];
-          if (part.location_link_enabled !== true) return [];
-          const location = interviewLocation(part.location);
-          const body = location
-            ? `${location.name}：${location.address}\n导航：https://uri.amap.com/marker?position=${location.lng},${location.lat}`
-            : "";
-          return [{ kind: part.kind, body, media_name: "", interview_point: part.interview_point,
-            delay_before_ms: part.delay_before_ms, delay_ms: part.delay_ms }];
-        }),
-      }));
-    }
+    result.nodes = result.nodes.map(node => {
+      const parts = node.parts.flatMap(raw => {
+        const { opening_id: _id, ...part } = parseObject(raw);
+        if (part.kind === "location") {
+          const location = parseOpeningLocation(part.location);
+          return location ? [{ kind: "text", body: openingLocationReply(location), media_name: "", delay_ms: part.delay_ms }] : [];
+        }
+        if (part.kind !== "favorite_location") return [part];
+        if (part.location_link_enabled !== true) return [];
+        const location = interviewLocation(part.location);
+        return [{ kind: part.kind, body: location ? openingLocationReply(location) : "", media_name: "", interview_point: part.interview_point,
+          delay_before_ms: part.delay_before_ms, delay_ms: part.delay_ms }];
+      });
+      const firstLocation = parseObject(node.parts[0]).kind === "location";
+      return { ...node, parts, body: firstLocation ? parts[0]?.body ?? "" : node.body };
+    });
     return { ...result, location_steps: 1, reply_mode_id };
   });
 
@@ -405,14 +426,14 @@ export async function registerAgentFlowRoutes(app: FastifyInstance, db: Database
     if (!positionId || !db.prepare("SELECT id FROM service_positions WHERE id=?").get(positionId)) return reply.code(422).send({detail:"岗位不存在"});
     const existing = readFlow(db, positionId);
     if (existing.version) return existing;
-    const items = db.prepare("SELECT * FROM position_opening WHERE position_id=? AND status='enabled' ORDER BY seq,id").all(positionId) as Array<Record<string, unknown>>;
+    const items = sharedOpeningParts(db, positionId);
     if (!items.length) return reply.code(422).send({detail:"没有可迁移的开场"});
-    // 保守迁移：每条都是等待闸门；运营显式调整分组后再启用。
-    const nodes = items.map((item, i) => ({node_key:`opening_${item.id}`,node_type:"text",title:`开场 ${i+1}`,await_reply:true,
-      parts:[{kind:item.kind,body:item.content,media_name:item.media_name,delay_ms:item.delay_ms}],x:80,y:40+i*180}));
-    const edges = nodes.map((node,i) => ({from_key:node.node_key,to_key:nodes[i+1]?.node_key ?? "",trigger:"any_reply"}));
+    const nodes = [{ node_key: "intro", node_type: "text", title: "招聘介绍", await_reply: true, parts: items, x: 80, y: 64 }];
+    const edges = [{ from_key: "intro", to_key: "", trigger: "any_reply" }];
     const response = await app.inject({method:"PUT",url:"/api/v1/agent-flow",headers:{authorization:request.headers.authorization},
-      payload:{position_id:positionId,entry_key:nodes[0].node_key,nodes,edges,status:"disabled"}});
+      payload:{position_id:positionId,version:0,entry_key:"intro",nodes,edges,status:"disabled",
+        use_position_opening:true,opening_version:openingVersion(positionId,
+          db.prepare("SELECT seq,kind,content,media_name,delay_ms,status FROM position_opening WHERE position_id=? ORDER BY seq,id").all(positionId))}});
     return reply.code(response.statusCode).send(response.json());
   });
 
@@ -423,14 +444,101 @@ export async function registerAgentFlowRoutes(app: FastifyInstance, db: Database
     if (!positionId) return reply.code(422).send({ detail: "position_id is required" });
     const position = db.prepare("SELECT data_json FROM service_positions WHERE id=?").get(positionId) as { data_json: string } | undefined;
     if (!position) return reply.code(422).send({ detail: "岗位不存在" });
+    const existing = db.prepare("SELECT id,version,status,canvas_json FROM agent_flow WHERE position_id=?").get(positionId) as
+      { id: number; version: number; status: string; canvas_json: string } | undefined;
+    if (body.version !== undefined && Number(body.version) !== (existing?.version ?? 0)) {
+      return reply.code(409).send({detail:"流程或开场已被修改，请重新载入"});
+    }
+    if (typeof body.opening_version === "string") {
+      const rows = db.prepare("SELECT seq,kind,content,media_name,delay_ms,status FROM position_opening WHERE position_id=? ORDER BY seq,id").all(positionId);
+      if (body.opening_version !== openingVersion(positionId, rows)) {
+        return reply.code(409).send({ detail: "岗位开场已被修改，请重新载入" });
+      }
+    }
     try {
-      const nodes = normalizeNodes(body.nodes);
+      const priorLayout = storedOpeningLayout(existing?.canvas_json);
+      if (priorLayout.length && body.version === undefined) return reply.code(409).send({ detail: "请重新载入后保存共享开场" });
+      const sharedInputKeys = new Set(priorLayout.map(({ key }) => key));
+      if (body.use_position_opening === true) {
+        const first = parseObject(parseArray(body.nodes)[0]);
+        sharedInputKeys.add(str(body.entry_key ?? body.entryKey ?? first.node_key ?? first.nodeKey));
+      }
+      const nodes = normalizeNodes(body.nodes, sharedInputKeys);
       const edges = normalizeEdges(body.edges, nodes);
-      const existing = db.prepare("SELECT id,version FROM agent_flow WHERE position_id=?").get(positionId) as { id: number; version: number } | undefined;
       const entryKey = str(body.entry_key ?? body.entryKey, nodes[0]?.node_key ?? "");
       validateGraph(nodes, edges, entryKey);
+      const path = openingNodes(entryKey, nodes, edges, priorLayout.length > 0);
+      const published = body.status !== "disabled";
+      const list = sharedOpeningParts(db, positionId);
+      const matching = matchingOpeningLayout(path, list, published);
+      let layout = [] as ReturnType<typeof openingLayout>;
+      let writeOpening = false;
+      if (priorLayout.length) {
+        const priorKeys = new Set(priorLayout.map(({ key }) => key));
+        const reversedIndex = [...path].reverse().findIndex(node => priorKeys.has(node.node_key));
+        const sharedPath = path.slice(0, reversedIndex < 0 ? 1 : path.length - reversedIndex);
+        if (!sharedPath.length) throw new Error("共享开场需要一个消息入口节点");
+        if (sharedPath.some(node => node.parts.some(part => part.kind === "favorite_location"))) {
+          throw new Error("共享开场请使用岗位位置卡；后续节点可以选用岗位面试点");
+        }
+        layout = openingLayout(sharedPath);
+        const keys = new Set(layout.map(({ key }) => key));
+        if (nodes.some(node => !keys.has(node.node_key) && (priorKeys.has(node.node_key) || node.parts.some(part => part.opening_id)))) {
+          throw new Error("共享开场节点须保留在主发送路径");
+        }
+        writeOpening = true;
+      } else if (matching.length) {
+        layout = matching;
+        const canonical = splitSharedOpening(layout, list);
+        for (const node of path) node.parts = canonical.get(node.node_key) ?? node.parts;
+      } else if (body.use_position_opening === true) {
+        const first = path[0];
+        if (!first || !list.length) {
+          throw new Error("当前流程无法直接关联岗位开场，请检查开场消息和入口节点");
+        }
+        if (path.length === 1) {
+          layout = [{ key: first.node_key, count: list.length }];
+        } else {
+          let count = 0;
+          for (const node of path) {
+            if (count >= list.length) break;
+            layout.push({ key: node.node_key, count: node.parts.length });
+            count += node.parts.length;
+          }
+          if (count !== list.length) {
+            throw new Error("岗位开场条数与画布分组对不上。请先调整画布消息数量，再关联以保留原有等待及后续回复");
+          }
+        }
+        const canonical = splitSharedOpening(layout, list);
+        for (const node of path) {
+          if (!canonical.has(node.node_key)) break;
+          if (node.parts.some(part => part.kind === "favorite_location")) {
+            throw new Error("要关联的开场节点包含另外设置的地点，请先将它移到后续节点");
+          }
+          node.parts = canonical.get(node.node_key)!;
+        }
+      } else if (!list.length && body.create_shared_opening === true) {
+        const first = path[0];
+        if (!first || first.parts.some(part => part.kind === "favorite_location")) {
+          throw new Error("共享开场需要一条文字或素材作为入口");
+        }
+        layout = openingLayout([first]);
+        writeOpening = true;
+      }
+      const sharedKeys = new Set(layout.map(({ key }) => key));
+      if (layout.length) {
+        const sharedPath = path.slice(0, layout.length);
+        const parts = sharedPath.flatMap(node => node.parts);
+        validateOpeningGroups([{ await_reply: false, parts }]);
+        if (published) {
+          const groups = sharedPath.filter(node => node.status === "enabled");
+          validateOpeningGroups(groups);
+          validateSharedOpening(db, positionId, groups.flatMap(node => node.parts),
+            existing?.status === "enabled" && priorLayout.length ? list : []);
+        }
+      }
       // Drafts preserve historical content for review; activation enforces facts.
-      if (body.status !== "disabled") validateNumbers(db, positionId, nodes);
+      if (published) validateNumbers(db, positionId, nodes.filter(node => !sharedKeys.has(node.node_key)));
       const positionData = jsonObject(position.data_json);
       const points = favoritePointTitles(positionData.interview_points);
       const locations = flowLocationOptions(positionData);
@@ -459,32 +567,35 @@ export async function registerAgentFlowRoutes(app: FastifyInstance, db: Database
           if (!asset || asset.kind !== part.kind || ![0,positionId].includes(Number(asset.position_id))) throw new Error(`媒体不存在或不属于本岗位：${part.media_name}`);
         }
       }
-      if (body.version !== undefined && Number(body.version) !== (existing?.version ?? 0)) return reply.code(409).send({detail:"流程已被其他人修改，请重新载入"});
-      const canvas = { viewport: jsonObject(body.canvas ?? body.canvas_json).viewport ?? {}, entry_key: entryKey };
+      const canvas = { viewport: jsonObject(body.canvas ?? body.canvas_json).viewport ?? {}, entry_key: entryKey, opening_layout: layout };
       db.exec("BEGIN");
       try {
+        if (writeOpening) saveSharedOpening(db, positionId, path.slice(0, layout.length).flatMap(node => node.parts));
         let flowId: number;
-        let version: number;
         if (existing) {
-          flowId = existing.id; version = Number(existing.version) + 1;
-          db.prepare("UPDATE agent_flow SET version=?,canvas_json=?,status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?")
-            .run(version, JSON.stringify(canvas), str(body.status, "enabled") === "disabled" ? "disabled" : "enabled", flowId);
+          flowId = existing.id;
+          db.prepare("UPDATE agent_flow SET version=version+1,canvas_json=?,status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?")
+            .run(JSON.stringify(canvas), published ? "enabled" : "disabled", flowId);
           db.prepare("DELETE FROM agent_flow_edge WHERE flow_id=?").run(flowId);
           db.prepare("DELETE FROM agent_flow_node WHERE flow_id=?").run(flowId);
         } else {
           const inserted = db.prepare("INSERT INTO agent_flow(position_id,version,canvas_json,status) VALUES (?,1,?,?)")
             .run(positionId, JSON.stringify(canvas), str(body.status, "enabled") === "disabled" ? "disabled" : "enabled");
-          flowId = Number(inserted.lastInsertRowid); version = 1;
+          flowId = Number(inserted.lastInsertRowid);
         }
         const insertNode = db.prepare(`INSERT INTO agent_flow_node
           (flow_id,node_key,node_type,title,body,media_name,parts_json,delay_ms,await_reply,wait_minutes,max_times,x,y,status)
           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
-        for (const node of nodes) insertNode.run(flowId, node.node_key, node.node_type, node.title, node.body, node.media_name,
-          JSON.stringify(node.parts), node.delay_ms, node.await_reply ? 1 : 0, node.wait_minutes, node.max_times, node.x, node.y, node.status);
+        for (const node of nodes) {
+          const shared = sharedKeys.has(node.node_key);
+          insertNode.run(flowId, node.node_key, node.node_type, node.title, shared ? "" : node.body,
+            shared ? "" : node.media_name, JSON.stringify(shared ? [] : node.parts), shared ? 2000 : node.delay_ms, node.await_reply ? 1 : 0,
+            node.wait_minutes, node.max_times, node.x, node.y, node.status);
+        }
         const insertEdge = db.prepare(`INSERT INTO agent_flow_edge(flow_id,from_key,to_key,trigger,condition_value,priority) VALUES (?,?,?,?,?,?)`);
         for (const edge of edges) insertEdge.run(flowId, edge.from_key, edge.to_key, edge.trigger, edge.condition_value, edge.priority);
         db.exec("COMMIT");
-        return { ...readFlow(db, positionId), version };
+        return readFlow(db, positionId);
       } catch (error) { db.exec("ROLLBACK"); throw error; }
     } catch (error) {
       return reply.code(422).send({ detail: error instanceof Error ? error.message : String(error) });

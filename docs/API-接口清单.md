@@ -118,14 +118,14 @@ Agent 的下发配置带当前单岗 `position_id`（已绑定时），岗位话
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |---|---|---|---|
-| GET | `/api/v1/agent-persona?position_id=:id` | admin | 取该岗位的人设与全部开场条目 |
+| GET | `/api/v1/agent-persona?position_id=:id` | admin | 读取人设、开场、列表的 `opening_revision` 及是否与画布共享的 `shared_opening` |
 | GET | `/api/v1/agent-persona` | admin | 全量摘要，列表页显示「已配几条」用 |
 | PUT | `/api/v1/agent-persona` | admin | 保存人设，body `{position_id,content,status?}` |
-| POST | `/api/v1/agent-opening` | admin | 追加一条开场，自动排到末尾 |
-| PUT | `/api/v1/agent-opening/:id` | admin | 改一条，body 可含 `kind/content/media_name/delay_ms/status` |
-| DELETE | `/api/v1/agent-opening/:id` | admin | 删除一条 |
+| POST | `/api/v1/agent-opening` | admin | 追加一条开场。图片或视频可带 `caption`，事务内保存为素材前的独立文字。共享开场必填 `revision` |
+| PUT | `/api/v1/agent-opening/:id` | admin | 编辑类型、正文、素材、间隔、状态或配文。共享开场必填 `revision` |
+| DELETE | `/api/v1/agent-opening/:id` | admin | 删除一条。共享开场必填查询参数 `revision`，缺失或过期时返回 409 |
 | POST | `/api/v1/agent-opening/batch-delete` | admin | 一次删除本岗位选中的条目。提交 `position_id`、`ids` 及读取开场时返回的 `opening_revision`（请求参数名 `revision`）。列表变更时返回 409。 |
-| POST | `/api/v1/agent-opening/reorder` | admin | 重排，body `{position_id,ids:[...]}` |
+| POST | `/api/v1/agent-opening/reorder` | admin | 重排。请求含 `position_id` 和 `ids`，共享开场必填 `revision` |
 
 <!-- api-check:end -->
 
@@ -164,7 +164,7 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 | 方法 | 路径 | 鉴权 | 说明 |
 |---|---|---|---|
 | GET | `/api/v1/agent/context?position_id=:id` | admin | 调试台用：事实 / 人设 / 开场 / 话术库 / 适用问答 knowledge / 资料来源 / 模型是否配置 |
-| GET | `/api/v1/agent/opening?device_code=:code` | 设备令牌或服务令牌 | 默认保持旧开场；显式加 `mode=flow` 只展开首个等待闸门前的流程消息；岗位停用时返回空清单和“岗位已停用” |
+| GET | `/api/v1/agent/opening?device_code=:code` | 设备令牌或服务令牌 | 按岗位读取开场，包括原生 `location` 卡的坐标和地址；显式加 `mode=flow` 只展开首个等待节点为止的消息；岗位停用时返回空清单和“岗位已停用” |
 | POST | `/api/v1/agent/opening/log` | 设备令牌或服务令牌 | 客户端逐条回执：`{session_key,device_code,position_id,seq,kind,status,error}`，返回 `trace_id` 供运营回查发送证据 |
 | GET | `/api/v1/agent/archive?session_key=:key` | admin | 查面试档案：姓名 / 电话 / 城市 / 面试日期与时段（模型 JSON 判断结果累积） |
 | GET | `/api/v1/agent/archive/list` | admin | 面试登记清单。`has_conversation` 表示精确关联到一条会话。Dify 的 `group_chat` 显示通知对应的目标。状态包括 `no-group`（未绑群）、`group-unavailable`（无法确认目标群）、`pending`、`queued`、`claimed`、`sent`、`failed`、`unknown`。核对目标群的真实设备成功回执后显示 `sent`。 |
@@ -178,10 +178,10 @@ curl -X POST http://127.0.0.1:8080/api/v1/agent-opening \
 | GET | `/api/v1/agent/execution-traces?trace_id=&session_key=&device_code=&position_id=&limit=` | admin | 查询试答或正式会话的岗位、资料来源、流程版本和结果证据 |
 | POST | `/api/v1/agent/execution-traces` | admin/设备令牌 | 为客户端直接执行的流程节点创建执行记录，返回 `trace_id` |
 | POST | `/api/v1/agent/execution-traces/:trace_id/delivery` | admin/设备令牌 | 客户端回传真实发送结果：`{status,message_id,detail,device_code,session_key,node_key}` |
-| GET | `/api/v1/agent-flow?position_id=:id` | admin | 读取岗位节点流程、节点、边和画布视口 |
-| PUT | `/api/v1/agent-flow` | admin | 事务保存整张流程图并递增 version |
-| POST | `/api/v1/agent-flow/migrate` | admin | 从旧 `position_opening` 生成停用的初始流程 |
-| GET | `/api/v1/agent/flow?device_code=:code` | 设备令牌 | 客户端读取设备岗位的启用流程 |
+| GET | `/api/v1/agent-flow?position_id=:id` | admin | 读取岗位节点流程、节点、边和画布视口。`shared_opening` 为共享开场的节点键，节点条目含 `opening_id` |
+| PUT | `/api/v1/agent-flow` | admin | 事务保存整张流程图和共享开场并递增版本。可带 `opening_version` 检查并发，以及 `use_position_opening` 或 `create_shared_opening` 关联开场 |
+| POST | `/api/v1/agent-flow/migrate` | admin | 从岗位开场生成停用画布，按原顺序连发后等待一次回复；已有画布时返回现有版本 |
+| GET | `/api/v1/agent/flow?device_code=:code` | 设备令牌 | 客户端读取设备岗位的启用流程。共享开场从 `position_opening` 读取，同一位置按现有文本协议下发地址和导航链接。后续节点选用的独立地点仍通过 `location_links=1` 下发 |
 | GET | `/api/v1/agent/state?device_code=:code` | 设备令牌；`summary=1` 仅管理员 | 客户端读取会话状态用于重连对账；管理员读取单设备去标识汇总 |
 | POST | `/api/v1/agent/state` | 设备令牌 | 客户端批量上报会话阶段和流程快照 |
 | GET | `/api/v1/agent/config-sync?device_code=:code` | admin | 单设备最近配置拉取摘要；未上报不推断已同步 |
@@ -257,6 +257,8 @@ Dify 有序回复支持 `text`（`content`）、`image` 和 `video`（`name` 为
 - 同步摘要仅白名单存入 `agent_devices.data_json.config_sync`，其余传入字段丢弃。服务端生成 `server_received_at`，POST 返回 `{ok:true,server_received_at}`。管理员 GET 必须指定单设备码。返回 `{available,device_code,reply_provider,bridge_state}`，有报告时另含 `client_commit,flow,opening,server_received_at`。回复来源为 agent 或 dify，企微桥接状态为 online、offline、scanning 或 null，不含 token、客户正文或会话快照。该摘要仅证明客户端配置拉取，不等于企微在线或消息已送达。
 
 - `PUT /agent-flow`：传 `position_id, version, entry_key, status, nodes, edges, canvas`。`version` 不匹配返回 409；前端必须携带读取时版本，重新载入后再编辑。`status=disabled` 保存草稿，启用时校验文本数字是否存在于本岗位事实字段。数字集合校验只能挡住未知数字，不能替代工价含义与单位的人工审核。
+- 共享开场以岗位的 `position_opening` 列表为运行时来源。画布保存消息分组、等待和后续分支。已关联的文字、图片、视频及间隔可从任一入口保存。改动会使已读的旧流程版本过期。停用流程时设备按岗位开场顺序读取，启用时设备得到填好的节点分组；旧版原生位置卡及画布企微收藏位置卡保留各自原有路径。
+- 存量关联只处理内容和次序可核对的岗位。已启用的画布还须逐条匹配原生效间隔。独立草稿可在保存时确认采用岗位开场；此操作不改动草稿的回复、关键词和超时连线。
 - 节点 `node_type` 仅为 `text/image/video/followup/branch/end`；等待使用独立布尔 `await_reply`。`parts` 为数组，每节点 1–6 条，文本每条最多 2000 字；`followup` 仅允许一条文本且 `max_times` 固定为 1。`branch/end` 不带消息。媒体必须来自本岗位或通用池。
 - 边字段 `from_key,to_key,trigger,condition_value,priority`；`to_key=""` 表示结束。等待节点用 `any_reply/keyword` 进入后续节点；`timeout` 只指向一次性复聊；分支需要 `default` 兜底。孤儿节点、循环、非法出口均拒绝保存。
 - 节点 `status=disabled` 时保留其节点与连接供后台编辑；Windows 客户端跳过该节点内容，只沿 `default` 或 `any_reply` 主兜底继续，不执行其关键词/超时条件。等待节点和分支节点按优先级从高到低执行不区分大小写的关键词包含匹配；分支未命中时沿 `default` 出口继续。启用的复聊节点仍必须由启用的等待节点通过唯一 `timeout` 边进入。在途会话使用已存流程快照，不因新版本保存而重写。

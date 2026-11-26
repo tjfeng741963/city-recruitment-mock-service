@@ -40,7 +40,7 @@
           <el-button size="small" :disabled="openingBusy" class="pill-btn" @click="startAdd('image')">+ 图片</el-button>
           <el-button size="small" :disabled="openingBusy" class="pill-btn" @click="startAdd('video')">+ 视频</el-button>
           <el-button size="small" :disabled="openingBusy" class="pill-btn" @click="startAdd('location')">+ 位置卡</el-button>
-          <span class="opening-hint">旧开场按此顺序发送，节点流程以画布为准。</span>
+          <span v-if="sharedOpening" class="opening-hint">与画布共用</span>
         </div>
 
         <el-dialog
@@ -96,7 +96,6 @@
               :address="draft.location.address"
               :name="draft.location.name"
             />
-            <p class="opening-hint">保存后开场播到最后一条时，客户端直接发这张原生位置卡（客户点开可导航）。</p>
           </div>
           <template v-else>
             <div class="media-row">
@@ -113,8 +112,8 @@
             </div>
             <el-input v-model="draft.content" placeholder="前置文本（可选）：保存后会拆成一条独立文本，排在素材前面发送" class="media-caption" />
           </template>
-          <el-form-item v-if="!embedded" label="间隔（秒）" class="delay-row">
-            <el-input-number v-model="delaySeconds" :min="2" :max="120" controls-position="right" />
+          <el-form-item v-if="!embedded || sharedOpening" label="间隔（秒）" class="delay-row">
+            <el-input-number v-model="delaySeconds" :min="sharedOpening ? 0 : 2" :max="60" controls-position="right" />
           </el-form-item>
           </div>
           <template #footer>
@@ -201,7 +200,7 @@
               <span v-if="entry.content" class="opening-caption">配文：{{ entry.content }}</span>
             </template>
           </div>
-          <div v-if="!embedded" class="opening-delay">间隔 {{ Math.round((entry.delay_ms || 0) / 1000) }} 秒后发下一条</div>
+          <div v-if="!embedded || sharedOpening" class="opening-delay">间隔 {{ entry.delay_ms / 1000 }} 秒后继续</div>
         </div>
       </el-tab-pane>
 
@@ -275,6 +274,7 @@ const savedPersona = ref('')
 const openings = ref<PersonaOpening[]>([])
 const selectedIds = ref<number[]>([])
 const openingRevision = ref('')
+const sharedOpening = ref(false)
 const deletingOpenings = ref(false)
 const updatingOpenings = ref(false)
 const mediaItems = ref<MediaItem[]>([])
@@ -295,9 +295,9 @@ const canDrag = computed(() => !openingBusy.value && openings.value.length > 1)
 
 const personaDirty = computed(() => persona.value !== savedPersona.value)
 const delaySeconds = computed({
-  get: () => Math.round((draft.value?.delay_ms || MIN_DELAY_MS) / 1000),
+  get: () => (draft.value?.delay_ms ?? MIN_DELAY_MS) / 1000,
   set: (value: number) => {
-    if (draft.value) draft.value.delay_ms = Math.max(MIN_DELAY_MS, Math.round(value * 1000))
+    if (draft.value) draft.value.delay_ms = Math.max(sharedOpening.value ? 0 : MIN_DELAY_MS, Math.round(value * 1000))
   },
 })
 
@@ -323,6 +323,7 @@ async function load(opening = false): Promise<void> {
     savedPersona.value = persona.value
     openings.value = (Array.isArray(data.openings) ? data.openings : []) as unknown as PersonaOpening[]
     openingRevision.value = data.opening_revision || ''
+    sharedOpening.value = data.shared_opening === true
   } catch (error: any) {
     loadError.value = error?.response?.data?.detail || 'Agent 配置加载失败，请重新打开岗位设置。'
   } finally {
@@ -474,7 +475,7 @@ async function onDrop(index: number): Promise<void> {
   openings.value = reordered
   try {
     updatingOpenings.value = true
-    await agentApi.reorderOpenings({ position_id: positionId, ids: moved })
+    await agentApi.reorderOpenings({ position_id: positionId, ids: moved, revision: openingRevision.value })
     if (props.position?.id !== positionId) return
     await load()
     emit('changed')
@@ -573,29 +574,12 @@ async function saveDraft(): Promise<void> {
       content: entry.kind === 'location' ? locationContent : (caption ? '' : entry.content),
       media_name: entry.kind === 'location' ? '' : entry.media_name,
       delay_ms: entry.delay_ms,
+      revision: openingRevision.value,
+      ...(caption ? { caption } : {}),
     }
     if (entry.id) await agentApi.updateOpening(entry.id, payload)
     else await agentApi.createOpening(payload)
 
-    if (caption) {
-      const { data } = await agentApi.createOpening({
-        position_id: positionId,
-        kind: 'text',
-        content: caption,
-        media_name: '',
-        delay_ms: entry.delay_ms,
-      })
-      const newId = Number((data as Record<string, unknown>)?.id)
-      // 新增时文本天然排在媒体后建之前，只有编辑已有媒体项才需要挪到它前面
-      if (entry.id && newId) {
-        const { data: persona } = await agentApi.personaGet(positionId)
-        const ids = ((persona.openings || []) as unknown as PersonaOpening[]).map(item => item.id)
-        const mediaIndex = ids.indexOf(entry.id)
-        const reordered = ids.filter(id => id !== newId)
-        reordered.splice(mediaIndex < 0 ? reordered.length : mediaIndex, 0, newId)
-        await agentApi.reorderOpenings({ position_id: positionId, ids: reordered })
-      }
-    }
     ElMessage.success(caption ? (entry.id ? '已保存，配文已拆成前置文本' : '已添加，配文已拆成前置文本') : (entry.id ? '已保存' : '已添加'))
     editorVisible.value = false
     draft.value = null
@@ -626,7 +610,7 @@ async function removeSelected(): Promise<void> {
   deletingOpenings.value = true
   try {
     await ElMessageBox.confirm(
-      `确定删除选中的 ${ids.length} 条旧版开场？已保存的画布节点继续按当前配置执行。`,
+      sharedOpening.value ? `确定从岗位和画布删除选中的 ${ids.length} 条开场？` : `确定删除选中的 ${ids.length} 条开场？`,
       '批量删除开场',
       { type: 'warning', confirmButtonText: `删除 ${ids.length} 条`, cancelButtonText: '取消' },
     )
@@ -664,8 +648,8 @@ async function removeEntry(entry: PersonaOpening): Promise<void> {
   if (openingBusy.value) return
   updatingOpenings.value = true
   try {
-    await ElMessageBox.confirm('删除后，旧版开场将跳过此条。已保存的画布节点仍使用编排时选入的文字。', '删除开场', { type: 'warning' })
-    await agentApi.removeOpening(entry.id)
+    await ElMessageBox.confirm(sharedOpening.value ? '删除后，岗位和画布都将移除此条。' : '删除后，开场将跳过此条。', '删除开场', { type: 'warning' })
+    await agentApi.removeOpening(entry.id, openingRevision.value)
     ElMessage.success('已删除')
     await load()
     emit('changed')
@@ -684,7 +668,7 @@ async function move(index: number, offset: number): Promise<void> {
   ;[swapped[index], swapped[target]] = [swapped[target], swapped[index]]
   try {
     updatingOpenings.value = true
-    await agentApi.reorderOpenings({ position_id: props.position.id, ids: swapped })
+    await agentApi.reorderOpenings({ position_id: props.position.id, ids: swapped, revision: openingRevision.value })
     await load()
     emit('changed')
   } catch (error: any) {

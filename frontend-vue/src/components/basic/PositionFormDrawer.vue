@@ -241,7 +241,6 @@
           <el-tab-pane v-if="auth.user?.role === 'admin'" label="系统 Agent" name="agent">
             <div class="agent-intro">
               <el-tag effect="plain" type="primary">系统 Agent</el-tag>
-              <span>先保存人设与消息正文，再到画布编排发送顺序和等待条件。</span>
               <el-button v-if="editableAgentPosition" size="small" plain @click="openAgentCanvas">去画布编排</el-button>
             </div>
             <p v-if="!editableAgentPosition" class="tab-tip">先保存岗位，重新打开后可编辑本岗位的 Agent 话术。</p>

@@ -1,4 +1,4 @@
-import type { AgentFlow, AgentFlowEdge, AgentFlowNode } from '../../api/agent'
+import type { AgentFlow, AgentFlowEdge, AgentFlowNode, AgentFlowPart } from '../../api/agent'
 import { flowLocationLabel } from '../../../../src/shared/flow-location'
 
 export interface LegacyOpening {
@@ -7,6 +7,7 @@ export interface LegacyOpening {
   kind: string
   content?: string
   media_name?: string
+  location?: AgentFlowPart['location']
   delay_ms?: number
   status?: string
 }
@@ -50,7 +51,8 @@ export function buildRuntimeFlow(saved: AgentFlow, openings: LegacyOpening[], ai
     : activeOpenings(openings).map((item, index) => ({
       node_key: `legacy_${index + 1}`, node_type: item.kind, title: `旧开场 ${index + 1}`,
       status: 'enabled', await_reply: false,
-      parts: [{ kind: item.kind, body: item.content || '', media_name: item.media_name || '', delay_ms: item.delay_ms ?? 2000 }],
+      parts: [{ kind: item.kind, body: item.content || '', media_name: item.media_name || '', location: item.location,
+        delay_ms: item.delay_ms ?? 2000 }],
     }))
   const edges: AgentFlowEdge[] = usesFlow
     ? saved.edges.filter(edge => {
@@ -192,6 +194,7 @@ export function describeRuntimeNode(node: AgentFlowNode, graph: AgentFlow, legac
       const timing = legacy ? `发送后至少间隔 ${seconds} 秒；Windows 客户端安全冷却配置可能增加额外等待，失败会增加退避。` : `完成后间隔 ${seconds} 秒。`
       if (part.kind === 'text') result.push(`第 ${index + 1} 条：发送下面的原文，确认目标会话与文本发送结果。${timing}`)
       else if (part.kind === 'favorite_location') result.push(`第 ${index + 1} 条地址和导航链接：${flowLocationLabel(part.interview_point || '未选地点')}。轮到此条后等待 ${Number(part.delay_before_ms ?? 0) / 1000} 秒发送。`)
+      else if (part.kind === 'location') result.push(`第 ${index + 1} 条：${legacy ? '原生位置卡' : '地址＋导航链接'}。${timing}`)
       else {
         result.push(`第 ${index + 1} 条${part.kind === 'video' ? '视频' : '图片'}：先查 Windows 本地素材，缺失时从服务器预取「${part.media_name || '未选择素材'}」，再通过现有企微媒体发送动作处理。${timing}`)
         if (!legacy) result.push('媒体需要本轮先成功发送文本并确认目标会话；跨过等待闸门后会重新开始本轮校验。独立媒体节点若没有这个前提，会暂停待人工核对。')

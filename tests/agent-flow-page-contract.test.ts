@@ -49,7 +49,7 @@ describe("招聘流程图入口接线", () => {
 
     expect(page).toContain("route.query.position_id");
     expect(page).toContain("agentApi.flowGet(id)");
-    expect(page).toContain("agentApi.flowSave(candidate)");
+    expect(page).toContain("agentApi.flowSave(candidate,");
     expect(page).toContain("Number(error?.response?.status) === 409");
   });
 
@@ -62,7 +62,7 @@ describe("招聘流程图入口接线", () => {
     expect(header).toContain("停用流程");
     expect(page).not.toContain('command="flow"');
     expect(page).not.toContain('active-text="新会话启用"');
-    expect(page.indexOf('await ElMessageBox.confirm(message, title,')).toBeLessThan(page.indexOf('agentApi.flowSave(candidate)'));
+    expect(page.indexOf('await ElMessageBox.confirm(message, title,')).toBeLessThan(page.indexOf('agentApi.flowSave(candidate,'));
   });
 
   it("confirms before leaving the route with unsaved edits", () => {
