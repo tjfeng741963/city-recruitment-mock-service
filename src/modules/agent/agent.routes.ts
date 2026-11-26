@@ -9,6 +9,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { MessageEventService } from "../messaging/message-events.js";
 import { createMessageChannelProvider } from "../messaging/message-channel-provider.js";
 import { BridgeError, DeviceBridgeStore } from "../messaging/device-bridge.js";
+import { isDirectRecipient, issueRecipientRemark, readRecipientBinding, recipientBindings } from "../messaging/recipient-binding.js";
 import { NOOP_NOTIFIER, type StreamNotifier } from "../messaging/stream-events.js";
 import { readWeComConfig } from "../wecom/wecom-config.js";
 import { listReminderTasks } from "./followup.js";
@@ -87,6 +88,14 @@ export function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync, noti
   // 同时先把 agent_messages(status=queued) 与会话 last_msg 落库，界面立刻可见。
   // 设备回执成功后再由 DeviceBridgeStore.receipt 推进为 sent。
   const enqueueManualMessage = (deviceCode: string, customerId: number, content: string, suppliedKey: string) => {
+    const account = bridgeStore.status(deviceCode)?.account_id ?? "";
+    const contact = db.prepare("SELECT contact_id FROM bridge_contacts WHERE device_code=? AND customer_id=?")
+      .get(deviceCode, customerId);
+    const binding = account && contact?.contact_id
+      ? readRecipientBinding(db, deviceCode, account, String(contact.contact_id)) : undefined;
+    if (binding && binding.status !== "verified") {
+      throw new BridgeError("请先确认企微发送对象", 409);
+    }
     const idempotencyKey = suppliedKey.trim() || randomUUID();
     const eventId = `manual-reply:${createHash("sha256").update(`${deviceCode}\0${customerId}\0${idempotencyKey}`).digest("hex")}`;
     const sourceEventId = `${eventId}:outbound`;
@@ -515,7 +524,45 @@ export function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync, noti
   // 本地新增，目标站契约里没有这条（7 轮 parity 快照均未抓到同类端点）——
   // 纯运维工具：管理员在后台填完某设备自己的 dify_url/dify_key 后，一键验证能否连上，
   // 不用等真实客户发消息才发现配置错了。调用既有的 DifyProvider.healthCheck()，不新建逻辑。
-  app.get<{ Querystring: { device_code?: string } }>("/api/v1/agent/conversations", async (request, reply) => { const deviceCode = request.query.device_code ?? ""; if (!canAccessDevice(getUserScope(db, request.auth!), deviceCode)) return reply.code(403).send({ detail: "Device scope required" }); bridgeStore.expireClaims(deviceCode); const rows = db.prepare("SELECT * FROM agent_conversations WHERE device_code=? ORDER BY updated_at DESC").all(deviceCode); return { items: rows, total_unread: (rows as Array<Record<string, unknown>>).reduce((sum, row) => sum + Number(row.unread ?? 0), 0) }; });
+  app.get<{ Querystring: { device_code?: string } }>("/api/v1/agent/conversations", async (request, reply) => {
+    const deviceCode = request.query.device_code ?? "";
+    if (!canAccessDevice(getUserScope(db, request.auth!), deviceCode)) {
+      return reply.code(403).send({ detail: "Device scope required" });
+    }
+    bridgeStore.expireClaims(deviceCode);
+    const account = bridgeStore.status(deviceCode)?.account_id ?? "";
+    const bindings = new Map((account ? recipientBindings(db, deviceCode, account) : [])
+      .map(({ conversation_id, status, remark }) => [conversation_id, { status, remark }]));
+    const rows = db.prepare("SELECT * FROM agent_conversations WHERE device_code=? ORDER BY updated_at DESC").all(deviceCode);
+    const items = rows.map((row) => {
+      const binding = bindings.get(String(row.external_conversation_id ?? ""));
+      return binding ? { ...row, recipient_binding: binding } : row;
+    });
+    return { items, total_unread: rows.reduce((sum, row) => sum + Number(row.unread ?? 0), 0) };
+  });
+
+  app.post<{ Params: { id: string }; Querystring: { device_code?: string } }>(
+    "/api/v1/agent/conversations/:id/recipient-binding", async (request, reply) => {
+      const device = request.query.device_code ?? "";
+      if (!canAccessDevice(getUserScope(db, request.auth!), device)) {
+        return reply.code(403).send({ detail: "Device scope required" });
+      }
+      const id = Number(request.params.id);
+      if (!Number.isSafeInteger(id) || id <= 0) return reply.code(422).send({ detail: "会话编号无效" });
+      const contact = db.prepare(`SELECT c.external_conversation_id FROM agent_conversations c
+        JOIN bridge_contacts b ON b.device_code=c.device_code AND b.customer_id=c.customer_id
+          AND b.contact_id=c.external_conversation_id
+        WHERE c.device_code=? AND c.customer_id=?`).get(device, id);
+      if (!contact) return reply.code(404).send({ detail: "未找到对应的企微会话" });
+      const account = bridgeStore.status(device)?.account_id ?? "";
+      const conversation = String(contact.external_conversation_id ?? "");
+      if (!bridgeStore.enabled(device) || !isDirectRecipient(account, conversation)) {
+        return reply.code(409).send({ detail: "当前登录账号与该会话不一致" });
+      }
+      const binding = issueRecipientRemark(db, device, account, conversation);
+      return binding ?? reply.code(409).send({ detail: "此会话尚无需要确认的同名冲突" });
+    },
+  );
   app.get<{ Querystring: { device_code?: string; customer_id?: string; after_id?: string } }>("/api/v1/agent/messages", async (request, reply) => {
     const deviceCode = request.query.device_code ?? "";
     if (!canAccessDevice(getUserScope(db, request.auth!), deviceCode)) return reply.code(403).send({ detail: "Device scope required" });

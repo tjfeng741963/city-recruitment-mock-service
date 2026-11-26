@@ -39,11 +39,12 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 from copy import deepcopy
 import time
 import traceback
-from contextlib import closing
+from contextlib import closing, contextmanager
 from ctypes import wintypes as wt
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
@@ -996,6 +997,7 @@ class Reporter:
             log(f"[上报] 异常（忽略）：{agent_client.describe_error(exc)}")
         try:
             self._send_bridge_messages()
+            _publish_recipient_reports(self.bridge)
         except Exception as exc:  # noqa: BLE001
             log(f"[桥接] messages 异常（忽略）：{agent_client.describe_error(exc)}")
 
@@ -1713,9 +1715,356 @@ def desktop_send_ready(route: str) -> tuple[bool, str]:
     return False, "企微发送窗口不可用，本次未执行发送"
 
 
+_recipient_reports: dict[tuple[str, str], tuple[str, str]] = {}
+_recipient_report_lock = threading.Lock()
+
+
+def _recipient_account(store: Store) -> str:
+    account = store.self_id()
+    return account if isinstance(account, str) and account not in ("", "unknown") else ""
+
+
+def _recipient_other(account: str, cid: str) -> str:
+    if not account or not cid.startswith("S:"):
+        return ""
+    members = cid[2:]
+    prefix, suffix = account + "_", "_" + account
+    other = (members[len(prefix):] if members.startswith(prefix) else
+             members[:-len(suffix)] if members.endswith(suffix) else "")
+    return other if other != account else ""
+
+
+def _recipient_names(store: Store) -> tuple[dict, dict, dict[str, set[str]]] | None:
+    """Read nickname and both searchable remark fields from the current Store."""
+    try:
+        contacts = store.contacts()
+        con = store._conn("user.db")
+        if con is None:
+            return None
+        remarks = {}
+        with closing(con):
+            for contact_id, real, fallback in con.execute(
+                "SELECT user_id,real_remarks,remarks FROM external_user_relation_v3 "
+                "WHERE trim(coalesce(real_remarks,''))<>'' OR trim(coalesce(remarks,''))<>''"
+            ):
+                remarks[str(contact_id)] = (str(real or "").strip(), str(fallback or "").strip())
+        owners: dict[str, set[str]] = {}
+        for contact_id in set(contacts) | set(remarks):
+            values = (str(contacts.get(contact_id) or ""), *remarks.get(contact_id, ()))
+            for value in values:
+                key = _recipient_key(value)
+                if key:
+                    owners.setdefault(key, set()).add(str(contact_id))
+        return contacts, remarks, owners
+    except (OSError, sqlite3.Error, AttributeError, TypeError):
+        return None
+
+
+def _resolve_recipient(store: Store, cid: str, binding: dict | None,
+                       names: tuple[dict, dict, dict[str, set[str]]] | None = None) -> tuple[str, str]:
+    """Return a safe search term and any binding status to publish."""
+    other = _recipient_other(_recipient_account(store), cid)
+    if not other or (binding and binding["status"] in {"conflict", "needs_confirmation"}):
+        return "", ""
+    names = names if names is not None else _recipient_names(store)
+    if names is None:
+        return "", ""
+    contacts, remarks, search_owners = names
+    nickname = str(contacts.get(other) or "").strip()
+    real_remark, fallback = remarks.get(other, ("", ""))
+    term = binding["remark"] if binding else (real_remark or fallback or nickname)
+    key = _recipient_key(term)
+    if not key:
+        return "", ""
+    owners = search_owners.get(key, set())
+    if binding:
+        if (real_remark or fallback) != term or owners != {other}:
+            return "", "needs_confirmation" if binding["status"] == "verified" else ""
+        return term, "verified"
+    return (term, "") if owners == {other} else ("", "conflict")
+
+
+def _queue_recipient_report(account: str, cid: str, status: str, remark: str = "") -> None:
+    if not account or not status:
+        return
+    with _recipient_report_lock:
+        _recipient_reports[(account, cid)] = (status, remark)
+
+
+def _publish_recipient_reports(bridge) -> None:
+    if not bridge or not getattr(bridge, "enabled", False):
+        return
+    with _recipient_report_lock:
+        work = list(_recipient_reports.items())[:10]
+    for (account, cid), (status, remark) in work:
+        try:
+            bridge.report_recipient_binding(account, cid, status, remark)
+        except HTTPError as exc:
+            if exc.code not in (404, 409, 422):
+                return
+        except (OSError, ValueError):
+            return
+        with _recipient_report_lock:
+            if _recipient_reports.get((account, cid)) == (status, remark):
+                _recipient_reports.pop((account, cid))
+
+
+def _latest_recipient_outbound(store: Store, account: str, cid: str) -> float | None:
+    try:
+        con = store._conn("message.db")
+        if con is None:
+            return None
+        with closing(con):
+            row = con.execute("SELECT max(send_time) FROM message_table WHERE conversation_id=? AND sender_id=?",
+                              (cid, account)).fetchone()
+        return float(row[0] or 0) if row else None
+    except (OSError, ValueError, sqlite3.Error):
+        return None
+
+
+def _refresh_recipient_recoveries(store: Store) -> None:
+    account = _recipient_account(store)
+    if not account or not remote_cfg.recipient_binding_account_active(account):
+        return
+    now = time.time()
+    bindings = remote_cfg.recipient_bindings(account)
+    unavailable = remote_cfg.takeover_sessions() | remote_cfg.abandoned_sessions()
+    blocked_conversations = set(rlog.recipient_blocked_conversations(now - REPORT_FIRST_WINDOW))
+    if not bindings and not blocked_conversations:
+        return
+    names = _recipient_names(store)
+    if names is None:
+        return
+    for cid in set(bindings) | blocked_conversations:
+        if cid in unavailable or not _recipient_other(account, cid):
+            continue
+        binding = bindings.get(cid)
+        name, report = _resolve_recipient(store, cid, binding, names)
+        if report and (not binding or report != binding["status"]):
+            _queue_recipient_report(account, cid, report, binding["remark"] if binding else "")
+        if not name or not binding or binding["status"] != "verified":
+            continue
+        blocked = rlog.recipient_blocked(cid)
+        if blocked and blocked["msg_time"] >= now - RECOVERY_REPLY_MAX_AGE:
+            outbound = _latest_recipient_outbound(store, account, cid)
+            rlog.restore_recipient_blocked(
+                cid, blocked["message_id"], conv_name=name,
+                cutoff=now - RECOVERY_REPLY_MAX_AGE, outbound_at=outbound,
+            )
+
+
+
+_guard_recipient = False
+_recipient_binding_enabled = False
+_recipient_proof: tuple[str, tuple[int, bytes]] | None = None
+_RECIPIENT_BLOCKED = "发送前无法核对企微当前会话，已保留待回复记录"
+
+
+class _RecipientUnverified(Exception):
+    pass
+
+
+def _recipient_key(name: str) -> str:
+    # OCR can omit underscore glyphs or insert spaces. Apply the same matching
+    # rules to all saved names so lossy matches cannot hide a duplicate.
+    return "".join(re.split(r"[\s_]+", name.casefold()))
+
+
+def _unique_direct_recipient(store: Store, name: str, cid: str) -> bool:
+    try:
+        me = store.self_id()
+        if not isinstance(me, str) or me in ("", "unknown") or not cid.startswith("S:"):
+            return False
+        members = cid[2:]
+        other = (members[len(me) + 1:] if members.startswith(me + "_") else
+                 members[:-len(me) - 1] if members.endswith("_" + me) else "")
+        key = _recipient_key(name)
+        owners = {str(contact_id) for contact_id, label in store.contacts().items()
+                  if key and _recipient_key(str(label or "")) == key}
+        return bool(other and other != me and owners == {other})
+    except Exception:
+        return False
+
+
+def _recipient_heading() -> tuple[int, bytes] | None:
+    """Read the title from the selected, foreground WeCom main window."""
+    from screenshot import encode_png, grab
+
+    try:
+        target = win.find_window()
+        hwnd = target["hwnd"] if target and target.get("visible") else 0
+        if not hwnd or win.win32gui.GetForegroundWindow() != hwnd:
+            return None
+        width, height, pixels = grab(hwnd, method="screen")
+        if win.win32gui.GetForegroundWindow() != hwnd:
+            return None
+        # The title sits just right of the conversation list. Read only its
+        # header strip, and require the adjacent green external-contact badge.
+        x1, x2 = int(width * .225), int(width * .47)
+        y1, y2 = int(height * .01), int(height * .085)
+        ink = []
+        badge = []
+        for y in range(y1, y2):
+            for x in range(x1, x2):
+                offset = (width * y + x) * 4
+                blue, green, red = pixels[offset:offset + 3]
+                high, low = max(red, green, blue), min(red, green, blue)
+                if high <= 165 and high - low < 45:
+                    ink.append((x, y))
+                if green - max(blue, red) >= 22:
+                    badge.append(x)
+        if not ink or len(badge) < 24:
+            return None
+        left, right = min(x for x, _ in ink), max(x for x, _ in ink)
+        top, bottom = min(y for _, y in ink), max(y for _, y in ink)
+        if left <= x1 or right >= x2 - 1 or sum(x > right for x in badge) < 24:
+            return None
+        if top <= y1 or bottom >= y2 - 1:
+            return None
+        # Keep OCR input deterministic and only retain dark title pixels.
+        # Padding and 3x enlargement help with short, mixed-script names.
+        scale, pad_x, pad_y = 3, 34, 39
+        w = (right - left + 1) * scale + pad_x + 259
+        h = (bottom - top + 1) * scale + 2 * pad_y
+        image = bytearray(b"\xff" * (w * h * 4))
+        for x, y in ink:
+            origin = ((y - top) * scale + pad_y) * w + (x - left) * scale + pad_x
+            for row in range(scale):
+                pos = (origin + row * w) * 4
+                image[pos:pos + 4 * scale] = b"\0" * (4 * scale)
+        return hwnd, encode_png(w, h, image)
+    except Exception:
+        return None
+
+
+_RECIPIENT_OCR_SCRIPT = r"""
+$ErrorActionPreference='Stop'
+[Console]::OutputEncoding=[Text.Encoding]::UTF8
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$file=[Windows.Storage.StorageFile,Windows.Storage,ContentType=WindowsRuntime]
+$mode=[Windows.Storage.FileAccessMode,Windows.Storage,ContentType=WindowsRuntime]
+$stream=[Windows.Storage.Streams.IRandomAccessStream,Windows.Storage.Streams,ContentType=WindowsRuntime]
+$decoder=[Windows.Graphics.Imaging.BitmapDecoder,Windows.Graphics.Imaging,ContentType=WindowsRuntime]
+$bitmap=[Windows.Graphics.Imaging.SoftwareBitmap,Windows.Graphics.Imaging,ContentType=WindowsRuntime]
+$ocr=[Windows.Media.Ocr.OcrEngine,Windows.Foundation,ContentType=WindowsRuntime]
+$result=[Windows.Media.Ocr.OcrResult,Windows.Foundation,ContentType=WindowsRuntime]
+$lang=[Windows.Globalization.Language,Windows.Globalization,ContentType=WindowsRuntime]
+$asTask=[System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+    $_.Name -eq 'AsTask' -and $_.IsGenericMethod -and $_.GetParameters().Count -eq 1 -and
+    $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1'
+} | Select-Object -First 1
+function ReadResult($operation,[Type]$type) {
+    $task=$asTask.MakeGenericMethod($type).Invoke($null,@($operation))
+    if (-not $task.Wait(2000)) { throw 'OCR timed out' }
+    $task.Result
+}
+$f=ReadResult ($file::GetFileFromPathAsync($env:CITY_RECRUIT_HEADING_IMAGE)) $file
+$s=ReadResult ($f.OpenAsync($mode::Read)) $stream
+try {
+    $d=ReadResult ($decoder::CreateAsync($s)) $decoder
+    $im=ReadResult ($d.GetSoftwareBitmapAsync()) $bitmap
+    try {
+        $engine=$ocr::TryCreateFromLanguage($lang::new('zh-Hans-CN'))
+        if ($engine) { (ReadResult ($engine.RecognizeAsync($im)) $result).Text }
+    } finally { $im.Dispose() }
+} finally { $s.Dispose() }
+"""
+
+
+def _recipient_search_field() -> tuple[int, bytes] | None:
+    """Capture only the search field above the conversation list."""
+    from screenshot import encode_png, grab
+
+    try:
+        target = win.find_window()
+        hwnd = target["hwnd"] if target and target.get("visible") else 0
+        if not hwnd or win.win32gui.GetForegroundWindow() != hwnd:
+            return None
+        width, height, pixels = grab(hwnd, method="screen")
+        if win.win32gui.GetForegroundWindow() != hwnd:
+            return None
+        x1, x2 = int(width * .047), int(width * .218)
+        y1, y2 = int(height * .032), int(height * .103)
+        if x2 <= x1 or y2 <= y1:
+            return None
+        crop = b"".join(pixels[(y * width + x1) * 4:(y * width + x2) * 4] for y in range(y1, y2))
+        return hwnd, encode_png(x2 - x1, y2 - y1, crop)
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _recognize_recipient_heading(heading: tuple[int, bytes], name: str) -> str:
+    try:
+        with tempfile.TemporaryDirectory(prefix="city-recruit-heading-") as folder:
+            file = Path(folder) / "heading.png"
+            file.write_bytes(heading[1])
+            env = dict(os.environ, CITY_RECRUIT_HEADING_IMAGE=str(file))
+            ps = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+            result = subprocess.run(
+                [str(ps), "-NoProfile", "-NonInteractive", "-Command", _RECIPIENT_OCR_SCRIPT],
+                capture_output=True, env=env, timeout=8, creationflags=_CREATE_NO_WINDOW,
+            )
+        return result.stdout.decode("utf-8-sig").strip() if result.returncode == 0 else ""
+    except (OSError, KeyError, UnicodeError, subprocess.TimeoutExpired):
+        return ""
+
+
+@contextmanager
+def _check_recipient_at_enter(enabled, check):
+    """Check the existing send keystroke without adding an input event."""
+    if not enabled:
+        yield
+        return
+    tap = win.tap
+
+    def checked_tap(key: str) -> None:
+        if key == "enter" and not check():
+            raise _RecipientUnverified
+        tap(key)
+
+    win.tap = checked_tap
+    try:
+        yield
+    finally:
+        win.tap = tap
+
+
+def _recipient_guard_enabled(cid: str) -> bool:
+    if not cid.startswith("S:"):
+        return False
+    return bool(_guard_recipient or _recipient_binding_enabled)
+
+
+def _recipient_unchanged(store: Store, cid: str) -> bool:
+    proof = _recipient_proof
+    return not _recipient_guard_enabled(cid) or bool(
+        proof and proof[0] == cid and _recipient_heading() == proof[1]
+    )
+
+
+
 def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
                log_fn, readback_before: dict[str, str] | None = None, **context: object) -> tuple[str, str, str]:
     """Run the existing sender and classify the available target evidence."""
+    global _recipient_proof
+    _recipient_proof = None
+    account = _recipient_account(store)
+    managed = _recipient_binding_enabled and remote_cfg.recipient_binding_account_active(account)
+    binding = remote_cfg.recipient_bindings(account).get(cid) if managed else None
+    guard = _recipient_guard_enabled(cid)
+    if _recipient_binding_enabled and guard and not managed:
+        return "blocked", _RECIPIENT_BLOCKED, ""
+    if guard and _recipient_binding_enabled:
+        name, report = _resolve_recipient(store, cid, binding)
+        if report and managed and (not binding or report != binding["status"]):
+            _queue_recipient_report(account, cid, report, binding["remark"] if binding else "")
+        if not name or (binding and binding["status"] != "verified"):
+            return "blocked", _RECIPIENT_BLOCKED, ""
+    elif guard and not _unique_direct_recipient(store, name, cid):
+        return "blocked", _RECIPIENT_BLOCKED, ""
+    heading = None
+    search_before = None
+    phase = "start"
     started = monotonic()
     attempt_id = uuid4().hex
     if route != "manual":
@@ -1725,12 +2074,46 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
         log("wecom_send", scope="send", route=route, phase=phase, attempt_id=attempt_id,
             sender_pid=os.getpid(), **context, **_foreground_sample(), **fields)
 
+    def authorize_enter() -> bool:
+        if phase == "send":
+            if _recipient_binding_enabled:
+                current_account = _recipient_account(store)
+                if (current_account != account or not remote_cfg.recipient_binding_account_active(account)
+                        or remote_cfg.recipient_bindings(account).get(cid) != binding):
+                    return False
+            return bool(heading and _recipient_heading() == heading)
+        if phase == "search" and not _recipient_binding_enabled:
+            return True
+        if phase != "search" or not search_before:
+            return False
+        search = _recipient_search_field()
+        if not search or search == search_before or search[0] != search_before[0]:
+            return False
+        if _recipient_key(_recognize_recipient_heading(search, name)) != _recipient_key(name):
+            return False
+        current = _recipient_search_field()
+        return current == search
+
     def on_step(message: str) -> None:
+        nonlocal heading, search_before, phase
         # The core's start message contains the entire body. Keep only the
         # structured start event and avoid the clipboard hint in step 3.
         if message.startswith("开始发送 ->"):
             return
         step, _, _ = message.partition(" ")
+        if guard and step == "步骤0":
+            heading = None
+            phase = "search"
+            search_before = _recipient_search_field() if _recipient_binding_enabled else None
+        if guard and step == "步骤1":
+            phase = "chat"
+            heading = _recipient_heading()
+            if not heading or _recipient_key(_recognize_recipient_heading(heading, name)) != _recipient_key(name):
+                raise _RecipientUnverified
+        if guard and step == "步骤3":
+            phase = "send"
+            if not heading or _recipient_heading() != heading:
+                raise _RecipientUnverified
         if step in ("步骤0", "步骤3", "步骤4"):
             event(f"core_{step[-1]}")
         if step == "步骤3":
@@ -1747,8 +2130,13 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
               duration_ms=int((monotonic() - started) * 1000))
         return "blocked", detail, ""
     try:
-        result = core_send.send(store, name, body, expect_id=cid if cid.startswith(("S:", "R:")) else "",
-                                verify_db=True, log=on_step)
+        with _check_recipient_at_enter(guard, authorize_enter):
+            result = core_send.send(store, name, body, expect_id=cid if cid.startswith(("S:", "R:")) else "",
+                                    verify_db=True, log=on_step)
+    except _RecipientUnverified:
+        event("result", level="warning", outcome="blocked", reason_code="recipient_unverified",
+              duration_ms=int((monotonic() - started) * 1000))
+        return "blocked", _RECIPIENT_BLOCKED, ""
     except Exception as exc:
         event("result", level="warning", outcome="unknown", reason_code="sender_exception",
               exception_type=type(exc).__name__, duration_ms=int((monotonic() - started) * 1000))
@@ -1786,18 +2174,32 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
             reason = ("snapshot_unavailable" if readback_before is None or after is None
                       else "target_message_ambiguous" if candidates else "target_message_missing")
             detail = "未回读到目标会话中唯一的新消息，请核对实际落点"
+    if guard and status == "sent" and heading:
+        _recipient_proof = (cid, heading)
     event("result", level="info" if status == "sent" else "warning", outcome=status, reason_code=reason,
           has_conversation=bool(observed_cid), target_match=target_match, outbound_id=message_id.rpartition(":")[2],
           duration_ms=int((monotonic() - started) * 1000))
     return status, detail, message_id
 
 
-def _send_media(name: str, log_fn, *, route: str) -> tuple[str, str]:
+def _send_media(store: Store, cid: str, name: str, log_fn, *, route: str) -> tuple[str, str]:
+    if not _recipient_unchanged(store, cid):
+        return "blocked", _RECIPIENT_BLOCKED
     ready, detail = desktop_send_ready(route)
     if not ready:
         return "blocked", detail
-    ok, detail = core_send.paste_media(name, log=log_fn)
+    with _check_recipient_at_enter(_recipient_guard_enabled(cid),
+                                   lambda: _recipient_unchanged(store, cid)):
+        ok, detail = core_send.paste_media(name, log=log_fn)
     return ("sent" if ok else "unknown"), str(detail)
+
+
+def _send_location_to_recipient(store: Store, cid: str, *args, **kwargs):
+    if not _recipient_unchanged(store, cid):
+        return False, _RECIPIENT_BLOCKED
+    with _check_recipient_at_enter(_recipient_guard_enabled(cid),
+                                   lambda: _recipient_unchanged(store, cid)):
+        return location_card.send_card(*args, **kwargs)
 
 
 def _send_dify_media(store: Store, cid: str, step: dict, log_fn) -> tuple[str, str]:
@@ -1812,7 +2214,7 @@ def _send_dify_media(store: Store, cid: str, step: dict, log_fn) -> tuple[str, s
                 if msg.get("id") and msg.get("sender_id") == me and msg.get("type") in kinds}
 
     before = sent_ids()
-    status, detail = _send_media(step["name"], log_fn, route="dify")
+    status, detail = _send_media(store, cid, step["name"], log_fn, route="dify")
     if status == "blocked":
         return status, detail
     if status != "sent" or len(sent_ids() - before) != 1:
@@ -1848,7 +2250,7 @@ def _send_agent_media(store: Store, cid: str, name: str, kind: str, log_fn, *, r
     before = _media_outbound_snapshot(store, cid, kind)
     if before is None:
         return "failed", "媒体目标会话回读不可用，本次未执行媒体发送"
-    status, detail = _send_media(name, log_fn, route=route)
+    status, detail = _send_media(store, cid, name, log_fn, route=route)
     if status != "sent":
         return status, detail
     # 视频要等企微转码/写库，回车后不一定立刻能回读到：最多等 2 秒（4 次 × 0.5s）。
@@ -1953,6 +2355,10 @@ def _sequence_block_reason(cid: str, cfg: dict, source: tuple, store: Store, nam
         return "回复来源已切换，停止旧介绍"
     try:
         me = store.self_id()
+        binding = remote_cfg.recipient_bindings(me).get(cid) if _recipient_binding_enabled and isinstance(me, str) else None
+        if binding:
+            term, _ = _resolve_recipient(store, cid, binding)
+            return "" if term and binding["status"] == "verified" else _RECIPIENT_BLOCKED
         # Only actual two-member IDs can identify the counterpart. Do not
         # guess by splitting underscores, which can occur in external IDs.
         if isinstance(me, str) and me not in ("", "unknown") and cid.startswith("S:"):
@@ -2508,6 +2914,11 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             stats["blocked"] += expired
             if expired:
                 log("reply_recovery_age_hold", level="warning", scope="send", count=expired)
+    account = _recipient_account(store) if not dry else ""
+    managed = bool(_recipient_binding_enabled and account and remote_cfg.recipient_binding_account_active(account))
+    bindings = remote_cfg.recipient_bindings(account) if managed else {}
+    if managed:
+        _refresh_recipient_recoveries(store)
     items = rlog.pending(include_failed=True)
     if items and not dry and not desktop_send_ready("auto")[0]:
         stats["blocked"] += len(items)
@@ -2550,7 +2961,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 if not dry:
                     rlog.mark_skipped(entry["message_id"], cid, "同会话合并到最新一条")
                 stats["merged"] += 1
-        recovering = it.get("last_step") == "recovery-queued"
+        recovering = it.get("last_step") in ("recovery-queued", "recipient-recovery-queued")
         preview = (it["in_text"] or "").strip()[:20].replace("\n", " ") or f"[type={it['in_type']}]"
         agent_medias: list[tuple[str, str]] = []
         dify_plan: list[dict] = []
@@ -2582,6 +2993,27 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             log(f"跳过 {name or cid}：客户已流失")
             continue
 
+        if _recipient_binding_enabled and not managed and cid.startswith("S:"):
+            stats["blocked"] += 1
+            continue
+        if managed and _recipient_other(account, cid):
+            if it.get("last_step") == "recipient-recovery-queued":
+                outbound = _latest_recipient_outbound(store, account, cid)
+                if outbound is None:
+                    stats["blocked"] += 1
+                    continue
+                if outbound >= float(it["msg_time"] or 0):
+                    rlog.mark_held(mid, cid, "该会话已有更新的企微出站，补回前需核对")
+                    stats["blocked"] += 1
+                    continue
+            binding = bindings.get(cid)
+            name, report = _resolve_recipient(store, cid, binding)
+            if not name or (binding and binding["status"] != "verified"):
+                if report and (not binding or report != binding["status"]):
+                    _queue_recipient_report(account, cid, report, binding["remark"] if binding else "")
+                rlog.mark_recipient_blocked(mid, cid, _RECIPIENT_BLOCKED)
+                stats["blocked"] += 1
+                continue
         if not name or name == cid:
             if not dry:
                 rlog.mark_skipped(mid, cid, "会话没有可搜索的名字")
@@ -2808,7 +3240,10 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                         log("wecom_send_hold", level="warning", scope="send", route="opening",
                                             message_id=mid, trace_id=trace, part=seq, completed_items=sent_items)
                                     elif status == "blocked":
-                                        rlog.mark_failed(mid, cid, detail, "开场")
+                                        if detail == _RECIPIENT_BLOCKED:
+                                            rlog.mark_held(mid, cid, detail, "开场")
+                                        else:
+                                            rlog.mark_failed(mid, cid, detail, "开场")
                                         stats["blocked"] += 1
                                     else:
                                         rlog.mark_held(mid, cid, "开场发送失败，暂停本轮，待人工核对")
@@ -2905,8 +3340,8 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                         return stats
                                     opening_claimed = True
                                 _last_reply_at = time.time()
-                                ok_card, detail_c = location_card.send_card(
-                                    card.get("lng"), card.get("lat"),
+                                ok_card, detail_c = _send_location_to_recipient(
+                                    store, cid, card.get("lng"), card.get("lat"),
                                     str(card.get("address") or ""), str(card.get("name") or ""),
                                     log=lambda s: log(f"    {s}"),
                                 )
@@ -3110,7 +3545,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 for kind, mname in medias:
                     try:
                         media_status, detail_m = _send_media(
-                            mname, lambda s: log(f"    {s}", scope="media", message_id=mid, trace_id=trace),
+                            store, cid, mname, lambda s: log(f"    {s}", scope="media", message_id=mid, trace_id=trace),
                             route="auto",
                         )
                         log(f"    [媒体] {kind}:{mname} "
@@ -3175,7 +3610,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     log(f"    [媒体] {mname} 预取：{pre_detail}", scope="media",
                         message_id=mid, trace_id=trace)
                     media_status, detail_m = _send_media(
-                        mname, lambda s: log(f"    {s}"), route="auto",
+                        store, cid, mname, lambda s: log(f"    {s}"), route="auto",
                     )
                     ok_m = media_status == "sent"
                     level = "info" if ok_m else "warning"
@@ -3189,8 +3624,8 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 if agent_card:
                     _last_reply_at = time.time()
                     try:
-                        ok_card, detail_card = location_card.send_card(
-                            agent_card.get("lng"), agent_card.get("lat"),
+                        ok_card, detail_card = _send_location_to_recipient(
+                            store, cid, agent_card.get("lng"), agent_card.get("lat"),
                             str(agent_card.get("address") or ""), str(agent_card.get("name") or ""),
                             log=lambda s: log(f"    {s}"),
                         )
@@ -3201,7 +3636,10 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                         level="info" if ok_card else "warning",
                         scope="media", message_id=mid, trace_id=trace)
             else:
-                rlog.mark_failed(mid, cid, detail, scene, text)
+                if status == "blocked" and detail == _RECIPIENT_BLOCKED:
+                    rlog.mark_held(mid, cid, detail, scene)
+                else:
+                    rlog.mark_failed(mid, cid, detail, scene, text)
                 if _brain is not None:
                     _brain.log_delivery(agent_trace_id, "failed", session_key=cid, detail=detail)
                 _last_error = detail[:200]
@@ -3550,7 +3988,7 @@ def pump_commands(
         media_attempted = False
         for kind, mname in cmd_medias:
             try:
-                media_status, detail_m = _send_media(mname, lambda s: mlog(f"    {s}"), route="manual")
+                media_status, detail_m = _send_media(store, contact_id, mname, lambda s: mlog(f"    {s}"), route="manual")
                 if media_status == "blocked":
                     break
                 media_attempted = True
@@ -3596,7 +4034,7 @@ def pump_commands(
         # Only a verified text landing authorizes its attachments.
         for kind, mname in cmd_medias:
             try:
-                media_status, detail_m = _send_media(mname, lambda s: mlog(f"    {s}"), route="manual")
+                media_status, detail_m = _send_media(store, contact_id, mname, lambda s: mlog(f"    {s}"), route="manual")
                 if media_status == "blocked":
                     _last_error = detail_m[:200]
                     mlog("    文本已通过回读，附件未执行发送，待核对", level="warning", message_id=message_id)
@@ -3794,6 +4232,11 @@ def load_config(args: argparse.Namespace, config_path: Path | None = None) -> di
         for key in (*DEFAULTS, "dry_run"):
             if key in file_cfg:
                 cfg[key] = file_cfg[key]
+        for flag in ("verify_direct_chat_heading", "enable_recipient_binding"):
+            if flag in file_cfg:
+                if type(file_cfg[flag]) is not bool:
+                    raise ValueError(f"{flag} must be true or false")
+                cfg[flag] = file_cfg[flag]
         if "interval" not in file_cfg and "interval_seconds" in file_cfg:
             cfg["interval"] = file_cfg["interval_seconds"]
         for key in ("server", "device_token", "device_code", "bridge_server", "bridge_token"):
@@ -4007,7 +4450,10 @@ def main() -> int:
         log(f"人工回执：{counts}")
         return 0 if complete and not counts.get("rejected") else 1
 
-    global _brain
+    global _brain, _guard_recipient, _recipient_binding_enabled
+    _guard_recipient = cfg.get("verify_direct_chat_heading", False)
+    _recipient_binding_enabled = bool(cfg.get("enable_recipient_binding") and
+                                      cfg.get("bridge_server") and cfg.get("bridge_token"))
     _brain = build_brain(cfg, log)
     cfg["_reply_mode_enabled"] = bool(_brain is not None and hasattr(_brain, "sync_reply_mode"))
 

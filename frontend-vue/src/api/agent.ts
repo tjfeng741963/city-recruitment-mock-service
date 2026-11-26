@@ -127,6 +127,11 @@ export const devicesApi = {
 }
 
 /** ---------- 会话与消息 ---------- */
+export interface RecipientBinding {
+  status: 'conflict' | 'awaiting' | 'verified' | 'needs_confirmation'
+  remark: string
+}
+
 export interface AgentConversation {
   id: number
   device_code: string
@@ -150,6 +155,7 @@ export interface AgentConversation {
   interview_time?: string
   is_old_friend?: boolean
   external_conversation_id?: string
+  recipient_binding?: RecipientBinding
   [key: string]: unknown
 }
 
@@ -182,6 +188,10 @@ export const conversationsApi = {
     http.get<ConversationListResult>('/api/v1/agent/conversations', { params }),
   messages: (params: PageQuery = {}) =>
     http.get<MessageListResult>('/api/v1/agent/messages', { params }),
+  issueRecipientRemark: (deviceCode: string, customerId: number) =>
+    http.post<RecipientBinding>(`/api/v1/agent/conversations/${customerId}/recipient-binding`, {}, {
+      params: { device_code: deviceCode },
+    }),
   /** 优先走会话发送口，失败回退人工回复口（两条路径后端都存在） */
   sendMessage: async (deviceCode: string, customerId: number | string, content: string) => {
     try {

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import time
 import math
 from pathlib import Path
 
@@ -34,6 +35,57 @@ _takeover_sessions: set[str] = set()
 
 # 已流失的会话（客户说「我不去了」）。drain 命中就整轮不碰，不再发任何消息。
 _abandoned_sessions: set[str] = set()
+
+
+# Recipient bindings may authorize sending, so only a live, account-scoped
+# snapshot can supply them. Publish the account and rows together.
+_recipient_binding_snapshot: tuple[str, dict[str, dict], float] = ("", {}, 0.0)
+_RECIPIENT_BINDING_MAX_AGE = 90.0
+_RECIPIENT_BINDING_STATES = {"conflict", "awaiting", "verified", "needs_confirmation"}
+
+
+def recipient_bindings(account_id: str) -> dict[str, dict]:
+    account, bindings, observed = _recipient_binding_snapshot
+    if not account or account_id != account or time.monotonic() - observed > _RECIPIENT_BINDING_MAX_AGE:
+        return {}
+    return {cid: dict(binding) for cid, binding in bindings.items()}
+
+
+def recipient_binding_account_active(account_id: str) -> bool:
+    account, _, observed = _recipient_binding_snapshot
+    return bool(account and account_id == account and time.monotonic() - observed <= _RECIPIENT_BINDING_MAX_AGE)
+
+
+def _parse_recipient_binding_snapshot(remote: dict) -> tuple[str, dict[str, dict]]:
+    account = remote.get("recipient_bindings_account_id")
+    rows = remote.get("recipient_bindings")
+    if not isinstance(account, str) or not account.strip() or not isinstance(rows, list):
+        return "", {}
+    account = account.strip()
+    prefix, suffix = f"S:{account}_", f"_{account}"
+    bindings, duplicates = {}, set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        cid, remark, status = (row.get(key) for key in ("conversation_id", "remark", "status"))
+        if not all(isinstance(field, str) for field in (cid, remark, status)):
+            continue
+        if status not in _RECIPIENT_BINDING_STATES:
+            continue
+        if cid.startswith(prefix):
+            other = cid[len(prefix):]
+        elif cid.startswith("S:") and cid.endswith(suffix):
+            other = cid[2:-len(suffix)]
+        else:
+            continue
+        if not other or other == account:
+            continue
+        if cid in bindings:
+            duplicates.add(cid)
+        bindings[cid] = {"conversation_id": cid, "remark": remark, "status": status}
+    for cid in duplicates:
+        del bindings[cid]
+    return account, bindings
 
 
 def device_scripts() -> list[dict]:
@@ -138,6 +190,8 @@ class RemoteConfig:
         # 调用方据此决定要不要重建 Brain——Brain 在 main() 只构造一次，
         # 光改 cfg["brain"]["mode"] 不会切换行为。
         self.last_changed: list[str] = []
+        global _recipient_binding_snapshot
+        _recipient_binding_snapshot = ("", {}, 0.0)
         cached = load_remote_cache(self.cache_path)
         if cached:
             self.version = str(cached.get("version") or "")
@@ -175,6 +229,9 @@ class RemoteConfig:
                 self.log_fn("[远端配置] 拉取失败（忽略，用本地/缓存兜底）")
             return False
         self._last_ok = True
+        global _recipient_binding_snapshot
+        account, bindings = _parse_recipient_binding_snapshot(remote)
+        _recipient_binding_snapshot = (account, bindings, time.monotonic())
         version = str(remote.get("version") or "")
         if version != self.version:
             scripts = remote.get("scripts")

@@ -143,6 +143,22 @@ class BridgeClient:
             {"state": state or "offline", "account_id": (account_id or "")[:128]},
         )
 
+    def report_recipient_binding(
+        self, account_id: str, conversation_id: str, status: str, remark: str = "",
+    ) -> dict:
+        """Report the current Windows client's evidence for a direct recipient."""
+        code = quote(self.device_code, safe="")
+        return self._request(
+            "POST",
+            f"/api/v1/bridge/devices/{code}/recipient-binding",
+            {
+                "account_id": account_id,
+                "conversation_id": conversation_id,
+                "status": status,
+                "remark": remark,
+            },
+        )
+
     def report_groups(self, groups: list[dict]) -> dict:
         """上报企微群聊清单（管理端下拉自选绑定群聊用）。
 

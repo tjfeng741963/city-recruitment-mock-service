@@ -52,6 +52,7 @@ const DEVICE_TOKEN_ROUTES = new Set(["heartbeat", "claim", "receipts", "inbound"
   .concat([
     "GET /api/v1/bridge/devices/:code/config",
     "POST /api/v1/bridge/devices/:code/reply-mode",
+    "POST /api/v1/bridge/devices/:code/recipient-binding",
     "POST /api/v1/bridge/devices/:code/cloud-assignment",
     // 登录二维码：设备用自己的桥接令牌上传/清除，路由内 authenticate() 校验，
     // 不走用户 JWT（客户端没有登录态）。网页读取走用户鉴权的 /api/v1/agent/... 那侧。
