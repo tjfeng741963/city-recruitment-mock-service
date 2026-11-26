@@ -47,6 +47,7 @@ import traceback
 from contextlib import closing, contextmanager
 from ctypes import wintypes as wt
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path, PureWindowsPath
 from time import monotonic
 from urllib.parse import quote
@@ -2010,23 +2011,33 @@ def _recognize_recipient_heading(heading: tuple[int, bytes], name: str) -> str:
 
 
 @contextmanager
-def _check_recipient_at_enter(enabled, check):
-    """Check the existing send keystroke without adding an input event."""
+def _check_recipient_at_enter(enabled, check, *, before_paste=False):
+    """Gate existing input events on the current recipient."""
     if not enabled:
         yield
         return
     tap = win.tap
+    hotkey = win.hotkey
 
     def checked_tap(key: str) -> None:
         if key == "enter" and not check():
             raise _RecipientUnverified
         tap(key)
 
+    def checked_hotkey(*keys: str) -> None:
+        if keys == ("ctrl", "v") and not check():
+            raise _RecipientUnverified
+        hotkey(*keys)
+
     win.tap = checked_tap
+    if before_paste:
+        win.hotkey = checked_hotkey
     try:
         yield
     finally:
         win.tap = tap
+        if before_paste:
+            win.hotkey = hotkey
 
 
 def _recipient_guard_enabled(cid: str) -> bool:
@@ -2044,14 +2055,17 @@ def _recipient_unchanged(store: Store, cid: str) -> bool:
 
 
 def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
-               log_fn, readback_before: dict[str, str] | None = None, **context: object) -> tuple[str, str, str]:
+               log_fn, readback_before: dict[str, str] | None = None,
+               require_recipient: bool = False, **context: object) -> tuple[str, str, str]:
     """Run the existing sender and classify the available target evidence."""
     global _recipient_proof
     _recipient_proof = None
     account = _recipient_account(store)
     managed = _recipient_binding_enabled and remote_cfg.recipient_binding_account_active(account)
     binding = remote_cfg.recipient_bindings(account).get(cid) if managed else None
-    guard = _recipient_guard_enabled(cid)
+    if require_recipient and not _recipient_other(account, cid):
+        return "blocked", _RECIPIENT_BLOCKED, ""
+    guard = _recipient_guard_enabled(cid) or require_recipient
     if _recipient_binding_enabled and guard and not managed:
         return "blocked", _RECIPIENT_BLOCKED, ""
     if guard and _recipient_binding_enabled:
@@ -2059,6 +2073,10 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
         if report and managed and (not binding or report != binding["status"]):
             _queue_recipient_report(account, cid, report, binding["remark"] if binding else "")
         if not name or (binding and binding["status"] != "verified"):
+            return "blocked", _RECIPIENT_BLOCKED, ""
+    elif require_recipient:
+        name, _ = _resolve_recipient(store, cid, None)
+        if not name:
             return "blocked", _RECIPIENT_BLOCKED, ""
     elif guard and not _unique_direct_recipient(store, name, cid):
         return "blocked", _RECIPIENT_BLOCKED, ""
@@ -2076,6 +2094,8 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
 
     def authorize_enter() -> bool:
         if phase == "send":
+            if require_recipient and _recipient_account(store) != account:
+                return False
             if _recipient_binding_enabled:
                 current_account = _recipient_account(store)
                 if (current_account != account or not remote_cfg.recipient_binding_account_active(account)
@@ -2182,15 +2202,26 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
     return status, detail, message_id
 
 
-def _send_media(store: Store, cid: str, name: str, log_fn, *, route: str) -> tuple[str, str]:
+def _send_media(store: Store, cid: str, name: str, log_fn, *, route: str, authorize=None) -> tuple[str, str]:
     if not _recipient_unchanged(store, cid):
         return "blocked", _RECIPIENT_BLOCKED
     ready, detail = desktop_send_ready(route)
     if not ready:
         return "blocked", detail
-    with _check_recipient_at_enter(_recipient_guard_enabled(cid),
-                                   lambda: _recipient_unchanged(store, cid)):
+    vetoed = False
+
+    def permitted() -> bool:
+        nonlocal vetoed
+        vetoed = not (_recipient_unchanged(store, cid) and (authorize is None or authorize()))
+        return not vetoed
+
+    if authorize is not None and not permitted():
+        return "blocked", _RECIPIENT_BLOCKED
+    with _check_recipient_at_enter(_recipient_guard_enabled(cid) or authorize is not None,
+                                   permitted, before_paste=authorize is not None):
         ok, detail = core_send.paste_media(name, log=log_fn)
+    if authorize is not None and vetoed:
+        return "blocked", _RECIPIENT_BLOCKED
     return ("sent" if ok else "unknown"), str(detail)
 
 
@@ -2246,11 +2277,12 @@ def _media_outbound_snapshot(store: Store, cid: str, kind: str) -> set[str] | No
         return None
 
 
-def _send_agent_media(store: Store, cid: str, name: str, kind: str, log_fn, *, route: str) -> tuple[str, str]:
+def _send_agent_media(store: Store, cid: str, name: str, kind: str, log_fn, *, route: str, authorize=None) -> tuple[str, str]:
     before = _media_outbound_snapshot(store, cid, kind)
     if before is None:
         return "failed", "媒体目标会话回读不可用，本次未执行媒体发送"
-    status, detail = _send_media(store, cid, name, log_fn, route=route)
+    status, detail = (_send_media(store, cid, name, log_fn, route=route) if authorize is None
+                      else _send_media(store, cid, name, log_fn, route=route, authorize=authorize))
     if status != "sent":
         return status, detail
     # 视频要等企微转码/写库，回车后不一定立刻能回读到：最多等 2 秒（4 次 × 0.5s）。
@@ -2418,16 +2450,76 @@ def _send_dify_plan(store: Store, name: str, cid: str, plan: list[dict], log_fn)
     return status, detail, confirmed
 
 
-def _send_faq_plan(store: Store, cfg: dict, name: str, cid: str, plan: list[dict], log_fn) -> tuple[str, str, int]:
-    """Send the FAQ text while the current media sender lacks a pre-send recipient check."""
-    reason = _sequence_block_reason(cid, cfg, _reply_source_identity(), store, name)
+def _send_faq_plan(store: Store, cfg: dict, name: str, cid: str, plan: list[dict], log_fn, *,
+                   authorize_asset, source: tuple | None = None) -> tuple[str, str, int]:
+    """Execute the saved FAQ sequence against the same verified direct conversation."""
+    global _last_reply_at
+    if source is None:
+        source = _reply_source_identity()
+    account = _recipient_account(store)
+    binding = deepcopy(remote_cfg.recipient_bindings(account).get(cid)) if account and _recipient_binding_enabled else None
+    reason = _sequence_block_reason(cid, cfg, source, store, name)
     if reason:
         return "blocked", reason, 0
-    status, detail, _ = _send_text(store, name, cid, plan[0]["content"], route="auto", log_fn=log_fn)
+    # Group chats can receive the existing text reply, but lack direct-recipient proof.
+    require_recipient = cid.startswith("S:")
+    status, detail, _ = _send_text(
+        store, name, cid, plan[0]["content"], route="auto", log_fn=log_fn, require_recipient=require_recipient,
+    )
     if status != "sent":
         return status, detail, 0
-    labels = "、".join({"image": "图片", "video": "视频"}[step["type"]] for step in plan[1:])
-    return "blocked", f"文字已回读；{labels}待核验发送前的目标会话，未自动发送", 1
+    proof = _recipient_proof
+    if not require_recipient or not proof or proof[0] != cid:
+        return "blocked", _RECIPIENT_BLOCKED, 1
+
+    def authorized() -> bool:
+        return bool(
+            account and _recipient_account(store) == account
+            and _reply_source_identity() == source
+            and cid not in remote_cfg.takeover_sessions() and cid not in remote_cfg.abandoned_sessions()
+            and proof and proof[0] == cid and _recipient_proof == proof
+            and (not _recipient_binding_enabled or (
+                remote_cfg.recipient_binding_account_active(account)
+                and remote_cfg.recipient_bindings(account).get(cid) == binding
+            ))
+            and _recipient_heading() == proof[1]
+        )
+
+    confirmed = 1
+    for step in plan[1:]:
+        try:
+            if step["delay_ms"]:
+                time.sleep(step["delay_ms"] / 1000)
+            reason = _sequence_block_reason(cid, cfg, source, store, name)
+            if reason or not authorized():
+                return "blocked", reason or _RECIPIENT_BLOCKED, confirmed
+            kind, filename = step["type"], step["name"]
+            label = "图片" if kind == "image" else "视频"
+            alias = re.fullmatch(r"dify-asset-[1-9]\d*-([a-f0-9]{64})\.(jpe?g|png|mp4)", filename)
+            if not alias or (kind == "video") != (alias[2] == "mp4"):
+                return "failed", f"{label}素材引用无效", confirmed
+            ready, detail = media_fetch.ensure_media(
+                filename, label, base_url=(cfg.get("bridge_server") or "").strip(),
+                token=(cfg.get("bridge_token") or "").strip(), log=log_fn,
+            )
+            if not ready:
+                return "failed", f"{label}素材未就绪：{detail}", confirmed
+            path = media_fetch.local_file(filename)
+            if path is None or sha256(path.read_bytes()).hexdigest() != alias[1]:
+                return "failed", f"{label}素材校验失败", confirmed
+            if not authorize_asset(filename):
+                return "blocked", f"{label}已失效，或暂时无法核对问答素材计划", confirmed
+            reason = _sequence_block_reason(cid, cfg, source, store, name)
+            if reason or not authorized():
+                return "blocked", reason or _RECIPIENT_BLOCKED, confirmed
+            _last_reply_at = time.time()
+            status, detail = _send_agent_media(store, cid, filename, kind, log_fn, route="faq", authorize=authorized)
+        except Exception as exc:
+            return "unknown", f"问答素材发送异常（{type(exc).__name__}），请核对实际落点", confirmed
+        if status != "sent":
+            return status, detail, confirmed
+        confirmed += 1
+    return "sent", "已回读目标会话的问答文字及对应类型的媒体消息", confirmed
 
 
 def _location_value(card: object) -> dict | None:
@@ -2966,6 +3058,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         agent_medias: list[tuple[str, str]] = []
         dify_plan: list[dict] = []
         faq_media_plan = False
+        chat_source = None
 
         if is_system_conv(cid, name):
             if not dry:
@@ -3396,6 +3489,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     # 会话记忆在服务端：只报 session_key（会话 id）+ 这句话。
                     # 服务端自己持有全量上下文（含开场序列），客户端不传历史。
                     chat_kwargs = {"turn_id": str(mid)} if dify_mode else {}
+                    chat_source = _reply_source_identity()
                     res = _brain.chat(hint, cid, sent_summary=_flow_summary(cid) if flow is not None else None, **chat_kwargs)
                     agent_trace_id = str(res.get("trace_id") or "")
                     agent_medias = res.get("medias") or []
@@ -3520,6 +3614,8 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             if faq_media_plan:
                 status, detail, confirmed_parts = _send_faq_plan(
                     store, cfg, name, cid, dify_plan, lambda msg: log(f"    {msg}", scope="send", message_id=mid, trace_id=trace),
+                    authorize_asset=lambda filename: _brain.authorize_faq_media(agent_trace_id, cid, filename),
+                    source=chat_source,
                 )
             elif dify_plan:
                 status, detail, confirmed_parts = _send_dify_plan(

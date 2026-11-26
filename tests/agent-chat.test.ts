@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildServer } from "../src/server.js";
+import { DeviceBridgeStore } from "../src/modules/messaging/device-bridge.js";
 
 // Agent 会话接口（src/modules/agent/agent-chat.routes.ts）
 //
@@ -98,6 +99,70 @@ describe("agent chat routes", () => {
       modelAnswer = answer;
       app.db.prepare("UPDATE media_assets SET status='disabled' WHERE id=?").run(video.id);
       expect((await preview()).reply.messages).toEqual([{ type:"text", content:answer }]);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it.each([
+    { label: "both capabilities", capabilities: { faq_media: true, ordered_reply: true }, mediaExpected: true },
+    { label: "legacy client", capabilities: {}, mediaExpected: false },
+    { label: "FAQ capability only", capabilities: { faq_media: true }, mediaExpected: false },
+    { label: "ordered capability only", capabilities: { ordered_reply: true }, mediaExpected: false },
+  ])("negotiates scoped FAQ image and video over device-authenticated Agent chat: $label", async ({ capabilities, mediaExpected }) => {
+    process.env.AGENT_LLM_API_KEY = "fixture-only";
+    const code = "agent-faq-device";
+    app.db.prepare("INSERT INTO agent_devices(device_name,status,data_json) VALUES ('问答测试设备','enabled',?)")
+      .run(JSON.stringify({ device_code: code, position_id: positionId }));
+    const bridge = new DeviceBridgeStore(app.db);
+    const device = { authorization: `Bearer ${bridge.pair(code)}` };
+    bridge.heartbeat(code, "online", "test-account");
+    const sha = "e".repeat(64);
+    const insert = app.db.prepare("INSERT INTO media_assets(name,kind,storage_path,sha256,bytes,status,position_id) VALUES (?,?,?,?,1,'enabled',?) RETURNING id");
+    const picture = insert.get("岗位现场.jpg", "image", "e.jpg", sha, positionId) as { id: number };
+    const video = insert.get("岗位现场.mp4", "video", "e.mp4", sha, positionId) as { id: number };
+    const answer = "请看这个岗位的现场实拍。";
+    const faq = await app.inject({ method: "POST", url: "/api/v1/kb-faqs", headers: admin, payload: {
+      question: "现场实拍", answer, scope_level: "position", scope_position_id: positionId,
+      media: [`asset:${video.id}:${sha}`, `asset:${picture.id}:${sha}`],
+    } });
+    expect(faq.statusCode).toBe(201);
+    const model = vi.fn(async () => new Response(JSON.stringify({ model: "deepseek-chat", choices: [{ message: {
+      content: JSON.stringify({ messages: [{ type: "text", content: answer }] }),
+    } }] })));
+    vi.stubGlobal("fetch", model);
+    try {
+      const response = await app.inject({ method: "POST", url: "/api/v1/agent/chat", headers: device,
+        payload: { device_code: code, session_key: "S:test-account_faq", text: "现场实拍", ...capabilities } });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.ok).toBe(true);
+      if (mediaExpected) {
+        expect(body.reply.faq).toEqual({ id: faq.json().id, question: "现场实拍" });
+        expect(body.reply.messages).toEqual([
+          { type: "text", content: answer },
+          { type: "image", name: `dify-asset-${picture.id}-${sha}.jpg`, content: "图片 · 岗位现场.jpg" },
+          { type: "video", name: `dify-asset-${video.id}-${sha}.mp4`, content: "视频 · 岗位现场.mp4" },
+        ]);
+        expect(body.reply.delays_before_ms).toHaveLength(3);
+        expect(body.reply.delays_before_ms[0]).toBe(0);
+        const validateMedia = (headers = device) => app.inject({ method: "POST",
+          url: "/api/v1/agent/faq-media/validate", headers, payload: { device_code: code,
+            trace_id: body.trace_id, session_key: "S:test-account_faq", name: body.reply.messages[1].name } });
+        expect((await validateMedia()).json()).toEqual({ ok: true });
+        const otherCode = "other-faq-device";
+        app.db.prepare("INSERT INTO agent_devices(device_name,status,data_json) VALUES ('另一个设备','enabled',?)")
+          .run(JSON.stringify({ device_code: otherCode, position_id: positionId }));
+        expect((await validateMedia({ authorization: `Bearer ${bridge.pair(otherCode)}` })).statusCode).toBe(403);
+        app.db.prepare("UPDATE media_assets SET status='disabled' WHERE id=?").run(picture.id);
+        expect((await validateMedia()).statusCode).toBe(409);
+        app.db.prepare("UPDATE media_assets SET status='enabled' WHERE id=?").run(picture.id);
+        app.db.prepare("UPDATE kb_faq SET status='disabled' WHERE id=?").run(faq.json().id);
+        expect((await validateMedia()).statusCode).toBe(409);
+      } else {
+        expect(body.reply.messages).toEqual([{ type: "text", content: answer }]);
+        expect(body.reply).not.toHaveProperty("faq");
+        expect(body.reply).not.toHaveProperty("delays_before_ms");
+      }
+      expect(model).toHaveBeenCalledTimes(1);
     } finally { vi.unstubAllGlobals(); }
   });
 

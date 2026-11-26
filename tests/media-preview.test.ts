@@ -26,6 +26,28 @@ describe('media library preview', () => {
     expect(flow).toContain('<VideoPreview v-else');
     expect(player).toContain('@error="prepareCompatible"');
     expect(player).toContain('if (!video.videoWidth || !video.videoHeight) void prepareCompatible()');
-    expect(player).toContain("params: { preview: 'compatible' }");
+    expect(player).toContain("params: { preview: 'compatible', version: props.version }");
+  });
+});
+
+describe('FAQ reply media preview', () => {
+  it('previews the exact image and video selected in the copy dialog', () => {
+    const dialog = readFileSync('frontend-vue/src/components/kb/KnowledgeFormDialog.vue', 'utf8');
+    const flow = readFileSync('frontend-vue/src/components/agent/FlowMediaPreview.vue', 'utf8');
+    expect(dialog).toMatch(/<FlowMediaPreview[\s\S]*?:version="[^"]+\.sha256"/);
+    expect(flow).toContain('params: { version: props.version }');
+    expect(flow).toContain(':version="version"');
+  });
+
+  it('preserves the Agent and Dify reply sequence and renders actual media', () => {
+    const agent = readFileSync('frontend-vue/src/components/agent/PositionQa.vue', 'utf8');
+    const dify = readFileSync('frontend-vue/src/components/agent/ReceptionTestDrawer.vue', 'utf8');
+    const reply = readFileSync('frontend-vue/src/components/agent/ReplyMessagesPreview.vue', 'utf8');
+    expect(agent).toContain('<ReplyMessagesPreview :messages="answer"');
+    expect(dify).toContain('<ReplyMessagesPreview :messages="turn.messages"');
+    expect(dify).toContain('messages: answer.reply.messages');
+    expect(reply).toContain('v-for="(message, index) in messages"');
+    expect(reply).toContain(':name="message.name"');
+    expect(reply).toContain(':kind="message.type"');
   });
 });

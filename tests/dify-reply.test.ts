@@ -37,6 +37,60 @@ describe("Dify second reply route", () => {
     bridge.heartbeat(code,"online","test-account");return result;
   };
   const chat=(session="S:test",text="工资多少？",headers=device)=>app.inject({method:"POST",url:"/api/v1/agent/chat",headers,payload:{device_code:code,session_key:session,text}});
+  it.each([
+    { label: "both capabilities", capabilities: { faq_media: true, ordered_reply: true }, mediaExpected: true, orderedExpected: true },
+    { label: "legacy client", capabilities: {}, mediaExpected: false, orderedExpected: false },
+    { label: "FAQ capability only", capabilities: { faq_media: true }, mediaExpected: false, orderedExpected: false },
+    { label: "ordered capability only", capabilities: { ordered_reply: true }, mediaExpected: false, orderedExpected: true },
+  ])("negotiates scoped FAQ image and video over device-authenticated chat: $label", async ({ capabilities, mediaExpected, orderedExpected }) => {
+    const sha = "d".repeat(64);
+    const insert = app.db.prepare("INSERT INTO media_assets(name,kind,storage_path,sha256,bytes,status,position_id) VALUES (?,?,?,?,1,'enabled',?) RETURNING id");
+    const picture = insert.get("岗位现场.png", "image", "d.png", sha, position) as { id: number };
+    const video = insert.get("岗位现场.mp4", "video", "d.mp4", sha, position) as { id: number };
+    const answer = "请看这个岗位的现场实拍。";
+    const faq = await app.inject({ method: "POST", url: "/api/v1/kb-faqs", headers: admin, payload: {
+      question: "现场实拍", answer, scope_level: "position", scope_position_id: position,
+      media: [`asset:${video.id}:${sha}`, `asset:${picture.id}:${sha}`],
+    } });
+    expect(faq.statusCode).toBe(201);
+    expect((await select()).statusCode).toBe(200);
+    const model = vi.fn(async () => new Response(JSON.stringify({ answer, conversation_id: "device-faq" })));
+    vi.stubGlobal("fetch", model);
+
+    const response = await app.inject({ method: "POST", url: "/api/v1/agent/chat", headers: device,
+      payload: { device_code: code, session_key: "S:test-account_faq", text: "现场实拍", ...capabilities } });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body).toMatchObject({ ok: true, provider: "dify" });
+    if (mediaExpected) {
+      expect(body.reply.faq).toEqual({ id: faq.json().id, question: "现场实拍" });
+      expect(body.reply.messages).toEqual([
+        { type: "text", content: answer },
+        { type: "image", name: `dify-asset-${picture.id}-${sha}.png`, content: "图片 · 岗位现场.png" },
+        { type: "video", name: `dify-asset-${video.id}-${sha}.mp4`, content: "视频 · 岗位现场.mp4" },
+      ]);
+      const payload = { device_code: code, trace_id: body.trace_id, session_key: "S:test-account_faq",
+        name: body.reply.messages[2].name };
+      const validate = (values = payload) => app.inject({ method: "POST", url: "/api/v1/agent/faq-media/validate",
+        headers: device, payload: values });
+      expect((await validate()).json()).toEqual({ ok: true });
+      expect((await validate({ ...payload, session_key: "S:another_session" })).statusCode).toBe(409);
+      app.db.prepare("UPDATE kb_faq SET status='disabled' WHERE id=?").run(faq.json().id);
+      expect((await validate()).statusCode).toBe(409);
+    } else {
+      expect(body.reply.messages).toEqual([{ type: "text", content: answer }]);
+      expect(body.reply).not.toHaveProperty("faq");
+    }
+    if (orderedExpected) {
+      expect(body.reply.delays_before_ms).toHaveLength(body.reply.messages.length);
+      expect(body.reply.delays_before_ms[0]).toBe(0);
+      expect(body.reply.delays_before_ms.every((delay: number) => Number.isInteger(delay) && delay >= 0 && delay <= 30_000)).toBe(true);
+    } else {
+      expect(body.reply).not.toHaveProperty("delays_before_ms");
+    }
+    expect(model).toHaveBeenCalledTimes(1);
+  });
   it("adds bound media only when Chatflow adopts the scoped FAQ instead of bypassing its answer", async () => {
     const sha = "c".repeat(64);
     const asset = app.db.prepare("INSERT INTO media_assets(name,kind,storage_path,sha256,bytes,status,position_id) VALUES (?,?,?,?,1,'enabled',?) RETURNING id")

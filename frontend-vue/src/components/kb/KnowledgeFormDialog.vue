@@ -33,12 +33,15 @@
 
       <el-form-item v-if="selectedScope === 'position' || form.media.length" label="随答案发送">
         <div class="faq-media w-full">
-          <el-select v-for="kind in mediaKinds" :key="kind.key"
-            :model-value="selectedMedia(kind.key)" :aria-label="kind.label" :placeholder="kind.label"
-            filterable clearable :loading="mediaLoading" @change="(value: string | undefined) => setMedia(kind.key, value)">
-            <el-option v-for="asset in availableMedia(kind.key)" :key="asset.reference"
-              :label="asset.name" :value="asset.reference" />
-          </el-select>
+          <template v-for="field in mediaFields" :key="field.key">
+            <el-select :model-value="field.selected?.reference" :aria-label="field.label" :placeholder="field.label"
+              filterable clearable :loading="mediaLoading" @change="(value: string | undefined) => setMedia(field.selected?.reference, value)">
+              <el-option v-for="asset in field.options" :key="asset.reference"
+                :label="asset.name" :value="asset.reference" />
+            </el-select>
+            <FlowMediaPreview v-if="field.selected" :kind="field.key"
+              :name="field.selected.name" :version="field.selected.sha256" />
+          </template>
           <p v-if="mediaError" class="kb-sort-hint" role="status">{{ mediaError }}</p>
           <p v-else-if="missingMedia.length" class="kb-sort-hint" role="status">有素材已失效或不适用当前岗位，请移除或重新选择。</p>
           <div v-for="reference in missingMedia" :key="reference" class="faq-media-missing">
@@ -47,7 +50,6 @@
           </div>
           <router-link v-if="selectedScope === 'position'" :to="{ path: '/media', query: selectedPositionId ? { position_id: selectedPositionId } : {} }"
             target="_blank" rel="noopener" @click="refreshOnReturn = true">管理图片与视频（新标签页）</router-link>
-          <p class="kb-sort-hint">图片（JPG 或 PNG）和视频（MP4）可各选一个。接待测试可预览发送顺序，企微自动发送素材待验证。</p>
         </div>
       </el-form-item>
 
@@ -141,6 +143,7 @@ import type { Employer, KnowledgeDraft, KnowledgeItem, LocationNode, Vertical } 
 import type { ServicePosition } from '../../api/types'
 import { positionOptionLabel } from '../../utils/position-context'
 import { mediaApi } from '../../api/core'
+import FlowMediaPreview from '../agent/FlowMediaPreview.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -190,7 +193,7 @@ const selectedPositionId = computed(() => props.item ? props.item.scope_position
 const selectedScope = computed(() => props.item?.scope_level ?? legacyScope.value ?? (selectedPositionId.value ? 'position' : 'global'))
 const mediaKinds = [{ key: 'image', label: '选择图片' }, { key: 'video', label: '选择视频' }] as const
 type MediaKind = typeof mediaKinds[number]['key']
-const mediaAssets = ref<Array<{ reference: string; name: string; kind: MediaKind; positionId: number }>>([])
+const mediaAssets = ref<Array<{ reference: string; name: string; kind: MediaKind; positionId: number; sha256: string }>>([])
 const mediaLoading = ref(false)
 const mediaError = ref('')
 const refreshOnReturn = ref(false)
@@ -199,17 +202,17 @@ function availableMedia(kind: MediaKind) {
     ? mediaAssets.value.filter(asset => asset.kind === kind && (!asset.positionId || asset.positionId === selectedPositionId.value))
     : []
 }
-function selectedMedia(kind: MediaKind): string | undefined {
-  return availableMedia(kind).find(asset => form.media.includes(asset.reference))?.reference
-}
+const mediaFields = computed(() => mediaKinds.map(kind => {
+  const options = availableMedia(kind.key)
+  return { ...kind, options, selected: options.find(asset => form.media.includes(asset.reference)) }
+}))
 const missingMedia = computed(() => mediaLoading.value || mediaError.value ? [] : form.media.filter(reference =>
-  !mediaKinds.some(kind => selectedMedia(kind.key) === reference)))
+  !mediaFields.value.some(field => field.selected?.reference === reference)))
 
 function removeMedia(reference: string): void {
   form.media = form.media.filter(item => item !== reference)
 }
-function setMedia(kind: MediaKind, value: string | undefined): void {
-  const previous = selectedMedia(kind)
+function setMedia(previous: string | undefined, value: string | undefined): void {
   if (previous) removeMedia(previous)
   if (value) form.media.push(value)
 }
@@ -220,7 +223,7 @@ async function loadMedia(): Promise<void> {
   try {
     const { data } = await mediaApi.list()
     mediaAssets.value = (data.items || []).flatMap(row => row.supports_faq === true && (row.kind === 'image' || row.kind === 'video')
-      ? [{ reference: `asset:${row.id}:${row.sha256}`, name: String(row.name), kind: row.kind, positionId: Number(row.position_id) }]
+      ? [{ reference: `asset:${row.id}:${row.sha256}`, name: String(row.name), kind: row.kind, positionId: Number(row.position_id), sha256: String(row.sha256) }]
       : [])
   } catch {
     mediaError.value = '素材加载失败，关闭后重新打开可重试。'
@@ -405,7 +408,7 @@ function confirm(): void {
   width: 100%;
 }
 
-.faq-media { display: grid; gap: 8px; }
+.faq-media { --media-preview-height: 160px; display: grid; gap: 8px; }
 .faq-media .kb-sort-hint { margin: 0; line-height: 1.5; }
 .faq-media-missing { display: flex; align-items: center; gap: 8px; }
 
