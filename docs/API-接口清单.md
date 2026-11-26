@@ -94,6 +94,8 @@ Key 由服务端加密保存，接口响应只显示是否配置。同一地址�
 
 报名通知群从 `GET /api/v1/agent/devices/:code/groups` 返回的已同步群中选择。群条目的 `selectable` 表示当前账号下能否唯一核对该群。更新 `group_chat` 时，空字符串解除绑定。唯一可识别的群保存为企微群会话 ID，无法核对的新值返回 422。Agent 和手动登记使用群 ID，旧群名需要从已同步群列表重新选择。入队与领取时均核对目标群，新增群通知的成功回执须对应同一群会话。领取时发现旧指令目标无法核对会显示失败，`notify_detail` 可说明原因。
 
+客户端通过 `POST /api/v1/bridge/devices/:code/groups` 上报 `{account_id, complete:true, groups:[{conv_id,name}]}`，成功读取空清单也可替换，读库失败时应跳过上报。仅接受当前已登录设备的账号，换账号后隐藏上一账号的清单。旧客户端格式兼容至首次接收账号级快照。网页群列表的 `sync_state` 为 `waiting`、`legacy`、`synced` 或 `stale`，并返回 `synced_at`。升级时已有且可唯一对应群 ID 的 Agent 配置会迁移，无法确认的旧名称保留待核对。
+
 GET /api/v1/agent/devices/:code/login-qr 保留原 available 与可用图片字段。另返回 login_status，区分 logged_in、waiting_for_scan、waiting_for_qr、qr_expired、disconnected、device_disabled 和 authorization_failed。新鲜企微登录心跳可确认登录完成，超过两分钟的二维码截图不再返回。限时安全验证由操作者在 Win 的官方企业微信窗口完成。
 
 网页通过 `POST /api/v1/agent/devices/:code/verify-code` 提交手机企微显示的验证码或按企微要求收到的短信验证码。沿用用户设备范围校验，设备必须启用。请求体为 `{code: string}`，接受 4–8 位数字并保留前导零。响应为 `{ok: true, verification_status: "pending"}`。验证码只保存在服务进程内存中，最长两分钟。

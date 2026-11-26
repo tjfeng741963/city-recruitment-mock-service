@@ -26,6 +26,7 @@ const emit = defineEmits<{ 'update:modelValue': [value: string] }>()
 const groups = ref<Array<{ conv_id: string; name: string; selectable: boolean }>>([])
 const loading = ref(false)
 const failed = ref(false)
+const syncState = ref<'waiting' | 'synced' | 'stale' | 'legacy'>()
 let request = 0
 
 const selected = computed(() => groups.value.find(group => group.conv_id === props.modelValue && group.selectable))
@@ -33,6 +34,7 @@ const selected = computed(() => groups.value.find(group => group.conv_id === pro
 const message = computed(() => {
   if (!props.deviceCode || loading.value) return ''
   if (failed.value) return '群列表读取失败，请重新打开下拉列表重试。'
+  if (syncState.value === 'waiting' && !groups.value.length) return '正在等当前企微账号同步群列表，可稍后重新打开下拉列表。'
   if (props.modelValue && !selected.value) {
     return props.modelValue.startsWith('R:')
       ? '已绑定的群不在同步列表，请重新选择。'
@@ -40,6 +42,8 @@ const message = computed(() => {
         ? `请从同步列表重新选择「${props.modelValue}」，确认通知群。`
         : `已填写的「${props.modelValue}」无法核对，请从同步列表重新选择。`
   }
+  if (syncState.value === 'stale') return '企微群列表暂未更新，当前显示上一次同步结果。'
+  if (syncState.value === 'legacy') return '客户端仍按最近会话上报，群列表可能不完整。'
   return groups.value.some(group => group.selectable) ? '' : '此账号暂无可选的企微群，重新打开下拉列表可再次查询。'
 })
 
@@ -51,8 +55,11 @@ async function refresh(): Promise<void> {
   if (!code) return
   try {
     const { data } = await devicesApi.groups(code)
-    if (current === request) groups.value = data.items.flatMap(group =>
-      group.conv_id?.startsWith('R:') && group.name ? [{ conv_id: group.conv_id, name: group.name, selectable: group.selectable === true }] : [])
+    if (current === request) {
+      syncState.value = data.sync_state
+      groups.value = data.items.flatMap(group =>
+        group.conv_id?.startsWith('R:') && group.name ? [{ conv_id: group.conv_id, name: group.name, selectable: group.selectable === true }] : [])
+    }
   } catch {
     if (current === request) {
       groups.value = []

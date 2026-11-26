@@ -358,14 +358,18 @@ export function selectableDeviceInviteGroups(db: DatabaseSync, deviceCode: strin
   const rebound = db.prepare(`SELECT created_at FROM device_events
     WHERE device_code=? AND event_type='account_rebound' ORDER BY created_at DESC LIMIT 1`)
     .get(deviceCode) as { created_at: string } | undefined;
+  const snapshot = db.prepare(`SELECT s.account_id,s.synced_at,b.account_id AS current_account
+    FROM device_group_snapshots s LEFT JOIN bridge_devices b ON b.device_code=s.device_code WHERE s.device_code=?`)
+    .get(deviceCode) as {account_id:string;synced_at:number;current_account:string|null} | undefined;
   const reboundAt = rebound ? Date.parse(rebound.created_at) : 0;
+  if (snapshot && (snapshot.account_id !== snapshot.current_account || snapshot.synced_at < reboundAt)) return [];
   const groups = db.prepare(`SELECT DISTINCT conv_id, name FROM device_group_chats
     WHERE device_code=? AND updated_at>=? AND conv_id LIKE 'R:%' AND LENGTH(conv_id)>2 AND TRIM(name)<>''`)
     .all(deviceCode, reboundAt) as { conv_id: string; name: string }[];
   // Older clients can sync real group messages before they report their group list.
   // Those legacy observations lack an account ID, so a device that switched
   // accounts must report its current group list before sending.
-  if (!groups.length && !rebound) {
+  if (!groups.length && !rebound && !snapshot) {
     groups.push(...db.prepare(`SELECT b.contact_id AS conv_id, b.nickname AS name
       FROM bridge_contacts b WHERE b.device_code=? AND b.contact_id LIKE 'R:%'
         AND LENGTH(b.contact_id)>2 AND TRIM(b.nickname)<>''
@@ -376,8 +380,12 @@ export function selectableDeviceInviteGroups(db: DatabaseSync, deviceCode: strin
   // Windows searches by name and verifies the real group ID on readback.
   const namesake = db.prepare(`SELECT 1 FROM bridge_contacts
     WHERE device_code=? AND nickname=? AND contact_id<>? LIMIT 1`);
-  return groups.filter(group => groups.filter(item => item.name === group.name).length === 1
-    && !namesake.get(deviceCode, group.name, group.conv_id));
+  const nameCounts = new Map<string, number>();
+  for (const group of groups) nameCounts.set(group.name, (nameCounts.get(group.name) ?? 0) + 1);
+  // In an account-scoped snapshot, stale contacts from the prior account must
+  // not veto the current group. The upgraded client checks its private aliases.
+  return groups.filter(group => nameCounts.get(group.name) === 1
+    && (snapshot || !namesake.get(deviceCode, group.name, group.conv_id)));
 }
 
 export function resolveDeviceInviteGroup(db: DatabaseSync, deviceCode: string, binding: string) {

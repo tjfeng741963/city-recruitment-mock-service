@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildServer } from "../src/server.js";
+import { migrateDatabase } from "../src/db/migrate.js";
 import { DeviceBridgeStore } from "../src/modules/messaging/device-bridge.js";
 
 describe("independent device bridge", () => {
@@ -27,6 +28,69 @@ describe("independent device bridge", () => {
     }
   });
   const call = (suffix: string, payload: object = {}) => app.inject({ method: "POST", url: `/api/v1/bridge/devices/local-device-001/${suffix}`, headers: device, payload });
+
+  it("accepts complete group snapshots only from the current account and distinguishes a confirmed empty list", async () => {
+    const list = async () => (await app.inject({url:"/api/v1/agent/devices/local-device-001/groups",headers:admin})).json();
+    await call("heartbeat",{state:"online",account_id:"first"});
+    const groups = [{conv_id:"R:expected",name:"预约报名群"},{conv_id:"R:another",name:"其他群"}];
+    new DeviceBridgeStore(app.db).contact("local-device-001","R:expected","预约报名群");
+    expect((await call("groups",{account_id:"first",complete:true,groups})).statusCode).toBe(200);
+    expect((await list()).items).toHaveLength(2);
+    expect((await call("groups",{account_id:"first",complete:true,groups:[{conv_id:"S:not-a-group",name:"坏快照"}]})).statusCode).toBe(422);
+    expect((await list()).items).toHaveLength(2);
+    await call("heartbeat",{state:"online",account_id:"second"});
+    expect(await list()).toMatchObject({items:[],sync_state:"waiting"});
+    expect((await call("groups",{account_id:"first",complete:true,groups})).statusCode).toBe(409);
+    expect((await call("groups",{account_id:"second",complete:true,groups:[{conv_id:"R:current",name:"预约报名群"}]})).statusCode).toBe(200);
+    expect((await list()).items).toEqual([{conv_id:"R:current",name:"预约报名群",selectable:true}]);
+    expect((await call("groups",{account_id:"second",complete:true,groups:[]})).statusCode).toBe(200);
+    expect(await list()).toMatchObject({items:[],sync_state:"synced"});
+    expect((await call("groups",{groups})).statusCode).toBe(409);
+  });
+
+  it("preserves a unique legacy notification group at upgrade and ignores malformed historic settings", async () => {
+    const store = new DeviceBridgeStore(app.db);
+    const code = "local-device-001";
+    await call("heartbeat",{state:"online",account_id:"test-account"});
+    store.saveGroups(code,[{conv_id:"R:confirmed",name:"报名群"}]);
+    app.db.prepare("UPDATE agent_devices SET data_json=json_set(data_json,'$.group_chat','报名群') WHERE json_extract(data_json,'$.device_code')=?").run(code);
+    app.db.prepare("INSERT INTO agent_devices(device_name,status,data_json) VALUES (?,'enabled',?)")
+      .run("numeric-legacy",JSON.stringify({device_code:"numeric-legacy",group_chat:123}));
+    store.pair("numeric-legacy");
+    store.heartbeat("numeric-legacy","online","test-other");
+    store.saveGroups("numeric-legacy",[{conv_id:"R:fixture",name:"另一个群"}]);
+    app.db.exec("DROP TABLE device_group_snapshots; DELETE FROM schema_migrations WHERE version=67;");
+    migrateDatabase(app.db);
+    const binding = app.db.prepare("SELECT json_extract(data_json,'$.group_chat') AS value FROM agent_devices WHERE json_extract(data_json,'$.device_code')=?");
+    expect(binding.get(code)).toMatchObject({value:"R:confirmed"});
+    expect(binding.get("numeric-legacy")).toMatchObject({value:123});
+  });
+
+  it("rejects a late legacy upload after changing accounts even before the client has upgraded", async () => {
+    const groups = [{conv_id:"R:old",name:"上一个账号的群"}];
+    await call("heartbeat",{state:"online",account_id:"old"});
+    expect((await call("groups",{groups})).statusCode).toBe(200);
+    await call("heartbeat",{state:"online",account_id:"new"});
+    expect((await call("groups",{groups})).statusCode).toBe(409);
+    const result = await app.inject({url:"/api/v1/agent/devices/local-device-001/groups",headers:admin});
+    expect(result.json()).toMatchObject({items:[],sync_state:"waiting"});
+  });
+
+  it("keeps pending Dify notices when the operator selects the same group by ID", async () => {
+    const code = "local-device-001";
+    await call("heartbeat",{state:"online",account_id:"current"});
+    await call("groups",{account_id:"current",complete:true,groups:[{conv_id:"R:existing",name:"报名群"}]});
+    const id = (app.db.prepare(`UPDATE agent_devices SET data_json=json_set(data_json,'$.group_chat','报名群','$.reply_provider','dify')
+      WHERE json_extract(data_json,'$.device_code')=? RETURNING id`).get(code) as {id:number}).id;
+    const add = app.db.prepare(`INSERT INTO agent_archive(session_key,position_id,dify_device_code,dify_account_id,dify_notify_binding,dify_notify_content)
+      VALUES (?,1,?,?,'报名群','fixture')`);
+    add.run("current-notice",code,"current");
+    add.run("old-notice",code,"old");
+    expect((await app.inject({method:"PUT",url:`/api/v1/agent/devices/${id}`,headers:admin,payload:{group_chat:"R:existing"}})).statusCode).toBe(200);
+    const binding = app.db.prepare("SELECT dify_notify_binding AS binding FROM agent_archive WHERE session_key=?");
+    expect(binding.get("current-notice")).toMatchObject({binding:"R:existing"});
+    expect(binding.get("old-notice")).toMatchObject({binding:"报名群"});
+  });
 
   it("binds a logged-in account, maps an opaque contact id and stores the inbound message for the agent chain", async () => {
     await call("heartbeat", { state: "online", account_id: "wx-owner" });

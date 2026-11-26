@@ -397,11 +397,64 @@ def wal_signature(data_dir: Path) -> tuple:
     return tuple(sig)
 
 
+def _group_source_stamp(store: Store) -> tuple | None:
+    data_dir = getattr(store, "data_dir", None)
+    if not isinstance(data_dir, Path):
+        return None
+    stamp = []
+    for filename in ("session.db", "session.db-wal"):
+        try:
+            info = (data_dir / filename).stat()
+            stamp.append((info.st_mtime_ns, info.st_size))
+        except FileNotFoundError:
+            if filename == "session.db":
+                return None
+            stamp.append(None)
+        except OSError:
+            return None
+    return (data_dir, *stamp)
+
+
 def refresh_store(store: Store) -> None:
     """Do not acknowledge a new signature while any database is still stale."""
+    source_stamp = _group_source_stamp(store)
+    store._group_source_stamp = None
     result = store.refresh()
     if isinstance(result, dict) and result.get("failed", 0):
         raise RuntimeError("企微数据库刷新未完成，保留原变化签名，下轮重试")
+    if source_stamp == _group_source_stamp(store):
+        store._group_source_stamp = source_stamp
+
+
+def _group_conversations(store: Store, expected: tuple[str, str] | None = None) -> list[dict] | None:
+    """Read the current account's local group conversations, or check a queued target."""
+    stamp = _group_source_stamp(store)
+    if stamp is None or stamp != getattr(store, "_group_source_stamp", None):
+        return None
+    conn = store._conn("session.db")
+    if conn is None:
+        return None
+    with closing(conn):
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(conversation_table)")}
+        remark = "TRIM(COALESCE(roomname_remark,''))" if "roomname_remark" in columns else "''"
+        name = f"COALESCE(NULLIF({remark},''),TRIM(COALESCE(name,'')))"
+        if expected is not None:
+            conversation_id, label = expected
+            key = _recipient_key(label)
+            rows = conn.execute(f"SELECT id,{name},COALESCE(name,'') FROM conversation_table")
+            matches = {(cid, shown) for cid, shown, base in rows
+                       if key in (_recipient_key(shown), _recipient_key(base))}
+            recipients = _recipient_names(store, allow_missing_remarks=True)
+            if (matches == {expected} and recipients is not None
+                    and key not in recipients[2] and stamp == _group_source_stamp(store)):
+                return [{"conv_id": conversation_id, "name": label}]
+            return []
+        rows = conn.execute(
+            f"SELECT id, {name} FROM conversation_table WHERE id GLOB 'R:*' AND LENGTH(id)>2 "
+            "ORDER BY last_message_time DESC, id",
+        )
+        groups = [{"conv_id": str(row[0]), "name": row[1]} for row in rows if row[1]]
+        return groups if stamp == _group_source_stamp(store) else None
 
 
 def is_system_conv(conv_id: str, name: str = "") -> bool:
@@ -749,6 +802,13 @@ class Reporter:
             except Exception as exc:
                 self._bridge_capture_error = True
                 log(f"[桥接] 读取消息快照失败：{type(exc).__name__}", level="warning")
+            if wecom_state == "online" and self._bridge_account not in ("", "unknown"):
+                try:
+                    groups = _group_conversations(self.store)
+                    if groups is not None and self.store.self_id() == self._bridge_account:
+                        batch["group_snapshot"] = (self._bridge_account, groups)
+                except Exception as exc:
+                    log(f"[群聊] 无法读取会话列表：{type(exc).__name__}", level="warning")
             if time.time() - self._favorite_last >= 300:
                 self._favorite_last = time.time()
                 try:
@@ -953,10 +1013,8 @@ class Reporter:
             self._send_config_sync()
         except Exception as exc:  # noqa: BLE001
             log(f"[配置同步] 摘要上报失败（忽略）：{type(exc).__name__}")
-        try:
-            self._send_groups()
-        except Exception as exc:  # noqa: BLE001
-            log(f"[群聊] 异常（忽略）：{agent_client.describe_error(exc)}")
+        if "group_snapshot" in batch:
+            self._send_groups(*batch["group_snapshot"])
         favorite = batch.get("favorite_sync")
         if isinstance(favorite, dict):
             try:
@@ -1054,26 +1112,16 @@ class Reporter:
         except Exception as exc:  # noqa: BLE001
             log(f"[桥接] 失败（忽略，不影响主心跳）：{agent_client.describe_error(exc)}")
 
-    def _send_groups(self) -> None:
-        """把企微里的群聊清单上报到 4222（管理端下拉自选绑定群聊）。
-
-        从 sessions（type='群聊'，R: 前缀）读取；失败只记日志，下轮再报。
-        """
+    def _send_groups(self, account_id: str, groups: list[dict]) -> None:
+        """Report a successful read, including a real empty result for the current account."""
         bridge = self.bridge
         if bridge is None or not bridge.enabled:
             return
         try:
-            groups = [
-                {"conv_id": s["id"], "name": s["name"]}
-                for s in self.store.sessions(limit=500)
-                if s.get("type") == "群聊" and (s.get("name") or "").strip()
-            ]
-            # 空清单绝不上报（2026-11-23）：企微登出/读不到会话时 sessions 是空的，
-            # 而服务端 saveGroups 是「整体替换」——一次空上报就把运营在面试登记页
-            # 绑定的群名清空，前端下拉变空，登记再也推不出去。
-            if not groups:
-                return
-            result = bridge.report_groups(groups)
+            code = quote(bridge.device_code, safe="")
+            result = bridge._request("POST", f"/api/v1/bridge/devices/{code}/groups", {
+                "account_id": account_id, "complete": True, "groups": groups,
+            })
             log(f"[群聊] 已上报 {result.get('count', len(groups))} 个群聊")
         except Exception as exc:  # noqa: BLE001
             log(f"[群聊] 上报失败（忽略，下轮再报）：{agent_client.describe_error(exc)}")
@@ -1735,7 +1783,7 @@ def _recipient_other(account: str, cid: str) -> str:
     return other if other != account else ""
 
 
-def _recipient_names(store: Store) -> tuple[dict, dict, dict[str, set[str]]] | None:
+def _recipient_names(store: Store, *, allow_missing_remarks: bool = False) -> tuple[dict, dict, dict[str, set[str]]] | None:
     """Read nickname and both searchable remark fields from the current Store."""
     try:
         contacts = store.contacts()
@@ -1744,11 +1792,16 @@ def _recipient_names(store: Store) -> tuple[dict, dict, dict[str, set[str]]] | N
             return None
         remarks = {}
         with closing(con):
-            for contact_id, real, fallback in con.execute(
-                "SELECT user_id,real_remarks,remarks FROM external_user_relation_v3 "
-                "WHERE trim(coalesce(real_remarks,''))<>'' OR trim(coalesce(remarks,''))<>''"
-            ):
-                remarks[str(contact_id)] = (str(real or "").strip(), str(fallback or "").strip())
+            columns = ({row[1] for row in con.execute("PRAGMA table_info(external_user_relation_v3)")}
+                       if allow_missing_remarks else {"user_id", "real_remarks", "remarks"})
+            if "user_id" in columns:
+                real_column = "real_remarks" if "real_remarks" in columns else "''"
+                fallback_column = "remarks" if "remarks" in columns else "''"
+                for contact_id, real, fallback in con.execute(
+                    f"SELECT user_id,{real_column},{fallback_column} FROM external_user_relation_v3 "
+                    f"WHERE TRIM(COALESCE({real_column},''))<>'' OR TRIM(COALESCE({fallback_column},''))<>''"
+                ):
+                    remarks[str(contact_id)] = (str(real or "").strip(), str(fallback or "").strip())
         owners: dict[str, set[str]] = {}
         for contact_id in set(contacts) | set(remarks):
             values = (str(contacts.get(contact_id) or ""), *remarks.get(contact_id, ()))
@@ -4059,12 +4112,29 @@ def pump_commands(
         receipt("failed")
         stats["failed"] += 1
         return stats
-    if names and name not in names:
+    def verify_group() -> bool:
+        try:
+            stamp = _group_source_stamp(store)
+            if stamp is not None and stamp != getattr(store, "_group_source_stamp", None):
+                refresh_store(store)
+            valid = bool(_group_conversations(store, (contact_id, name)))
+        except Exception:
+            valid = False
+        if not valid:
+            mlog("    拒绝发送：本机企微无法唯一核对目标群", level="warning")
+            receipt("failed")
+            stats["failed"] += 1
+        return valid
+
+    if contact_id.startswith("R:"):
+        if not verify_group():
+            return stats
+    elif names and name not in names:
         mlog(f"    拒绝发送：{name} 不在企微会话列表，避免搜索落空后发错人", level="warning")
         receipt("failed")
         stats["failed"] += 1
         return stats
-    if not names:
+    elif not names:
         # 读不到会话列表就无法确认落点，宁可失败也不能盲发。
         mlog("    拒绝发送：读不到企微会话列表，无法确认目标会话", level="warning")
         receipt("failed")
@@ -4116,6 +4186,10 @@ def pump_commands(
 
     before = _outbound_snapshot(store, contact_id)
     if stop_if_lease_invalid():
+        return stats
+    if contact_id.startswith("R:") and not verify_group():
+        return stats
+    if contact_id.startswith("R:") and stop_if_lease_invalid():
         return stats
     # 与自动回复同一口径：按键前更新冷却，失败也算一次企微操作，
     # 不给"失败后立即重试/下一条"留零成本通道。

@@ -217,6 +217,7 @@ export function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync, noti
     }
     const merged = { ...data, ...body } as Record<string, unknown>;
     const code = String(data.device_code ?? "");
+    let previousGroupName = "";
     if (Object.hasOwn(body, "group_chat")) {
       const group = typeof body.group_chat === "string" ? body.group_chat.trim() : null;
       const changed = group !== data.group_chat;
@@ -225,6 +226,7 @@ export function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync, noti
         return reply.code(422).send({ detail: "找不到该账号已同步的唯一企微群，请从群列表重新选择。" });
       }
       merged.group_chat = resolved ? resolved.conv_id : group;
+      if (resolved && merged.device_code === code && data.group_chat === resolved.name) previousGroupName = resolved.name;
     }
     const mode = replyModeRow(db, code);
     const provider = (mode?.effective ?? data.reply_provider) === "dify" ? "dify" : "agent";
@@ -286,6 +288,13 @@ export function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync, noti
     }
     const result = db.prepare("UPDATE agent_devices SET device_name=COALESCE(?,device_name),status=COALESCE(?,status),data_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?")
       .run(typeof request.body?.device_name === "string" ? request.body.device_name : null, typeof request.body?.status === "string" ? request.body.status : null, JSON.stringify(merged), id);
+    // Re-selecting the same saved Dify group upgrades the reference, not the recipient.
+    if (result.changes && provider === "dify" && previousGroupName) {
+      const currentAccount = bridgeStore.status(code)?.account_id;
+      if (currentAccount) db.prepare(`UPDATE agent_archive SET dify_notify_binding=?
+        WHERE dify_device_code=? AND dify_account_id=? AND dify_notify_binding=? AND dify_notify_content<>''`)
+        .run(String(merged.group_chat), code, currentAccount, previousGroupName);
+    }
     return result.changes ? db.prepare("SELECT * FROM agent_devices WHERE id=?").get(id) : reply.code(404).send({ detail: "设备不存在" });
   });
   // The target 404s on a missing row; returning {success:false} with 200 is a
@@ -305,6 +314,8 @@ export function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync, noti
         const code = String(data.device_code ?? "");
         db.prepare("DELETE FROM reply_mode_transition WHERE device_code=?").run(code);
         db.prepare("DELETE FROM windows_runtime_health WHERE device_code=?").run(code);
+        db.prepare("DELETE FROM device_group_chats WHERE device_code=?").run(code);
+        db.prepare("DELETE FROM device_group_snapshots WHERE device_code=?").run(code);
       }
       db.exec("COMMIT");
       return result.changes ? { success: true } : reply.code(404).send({ detail: "Device not found" });
@@ -342,7 +353,12 @@ export function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync, noti
     const selectable = selectableDeviceInviteGroups(db, code);
     const reported = bridgeStore.listGroups(code);
     const ids = new Set(selectable.map(group => group.conv_id));
-    return { items: (reported.length ? reported : selectable).map(group => ({ ...group, selectable: ids.has(group.conv_id) })) };
+    const sync = bridgeStore.groupSync(code);
+    return {
+      ...sync,
+      sync_state: sync.sync_state === "waiting" && !reported.length && selectable.length ? "legacy" : sync.sync_state,
+      items: (reported.length ? reported : selectable).map(group => ({ ...group, selectable: ids.has(group.conv_id) })),
+    };
   });
   // 登录二维码的网页读取口。设备用自己的桥接令牌 POST 上传（见 device-bridge.routes.ts），
   // 网页这一侧用用户 JWT 读——二维码等同于登录凭证，拿到就能顶替这个号登录，不能公开。

@@ -94,7 +94,8 @@ export const devicesApi = {
     http.put<AgentDeviceItem>(`/api/v1/agent/devices/${id}`, payload),
   remove: (id: number | string) => http.delete<OkResult>(`/api/v1/agent/devices/${id}`),
   groups: (code: string) =>
-    http.get<{ items: DeviceGroup[] }>(`/api/v1/agent/devices/${encodeURIComponent(code)}/groups`),
+    http.get<{ items: DeviceGroup[]; sync_state?: 'waiting' | 'synced' | 'stale' | 'legacy'; synced_at?: string | null }>(
+      `/api/v1/agent/devices/${encodeURIComponent(code)}/groups`),
   loginQr: (code: string, signal?: AbortSignal) =>
     http.get<LoginQrResult>(`/api/v1/agent/devices/${encodeURIComponent(code)}/login-qr`, { signal, timeout: 5000 }),
   // 让客户端点登录窗的「刷新」并立即重传二维码（服务端写一条 refresh_login_qr 指令）

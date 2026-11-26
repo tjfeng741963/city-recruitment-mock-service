@@ -9,6 +9,7 @@ backend 测试环境没有这些依赖，这里用桩替代后再加载模块。
 from __future__ import annotations
 
 import json
+import sqlite3
 from unittest.mock import MagicMock
 
 from tests.agent_loader import load_autopilot as _load_autopilot
@@ -54,6 +55,43 @@ def make_reporter(autopilot, api, bridge, tmp_path):
         bridge=bridge,
     )
     return rep
+
+
+def test_group_snapshot_reads_old_groups_and_group_remarks_without_recent_limit(tmp_path, monkeypatch):
+    autopilot = _load_autopilot()
+    file = tmp_path / "session.db"
+    with sqlite3.connect(file) as conn:
+        conn.execute("CREATE TABLE conversation_table(id TEXT, name TEXT, roomname_remark TEXT, last_message_time INTEGER)")
+        conn.executemany("INSERT INTO conversation_table VALUES (?, ?, '', ?)",
+                         [(f"S:{i}", f"客户 {i}", i + 1) for i in range(510)])
+        conn.execute("INSERT INTO conversation_table VALUES ('R:old', '', '预约报名群', 0)")
+        conn.execute("INSERT INTO conversation_table VALUES ('R:new', '最新通知群', '', 999)")
+    bridge = MagicMock(enabled=True, device_code="pc-office-01")
+    bridge._request.return_value = {"count": 2}
+    reporter = make_reporter(autopilot, None, bridge, tmp_path)
+    reporter.store._conn.side_effect = lambda _: sqlite3.connect(file)
+    reporter.store.data_dir = tmp_path
+    reporter.store.refresh.return_value = {"failed": 0}
+    autopilot.refresh_store(reporter.store)
+    monkeypatch.setattr(autopilot, "_recipient_names", lambda _, **kwargs: ({}, {}, {}))
+    reporter._send_groups(reporter.store.self_id(), autopilot._group_conversations(reporter.store))
+    bridge._request.assert_called_once_with("POST", "/api/v1/bridge/devices/pc-office-01/groups", {
+        "account_id": reporter.store.self_id(),
+        "complete": True,
+        "groups": [{"conv_id": "R:new", "name": "最新通知群"}, {"conv_id": "R:old", "name": "预约报名群"}],
+    })
+    assert autopilot._group_conversations(reporter.store, ("R:old", "预约报名群"))
+    assert not autopilot._group_conversations(reporter.store, ("R:new", "预约报名群"))
+    monkeypatch.setattr(autopilot, "_recipient_names", lambda _, **kwargs: ({}, {}, {"预约报名群": {"older contact"}}))
+    assert not autopilot._group_conversations(reporter.store, ("R:old", "预约报名群"))
+    with sqlite3.connect(file) as conn:
+        conn.execute("INSERT INTO conversation_table VALUES ('R:changed', '新群', '', 1001)")
+    assert autopilot._group_conversations(reporter.store) is None
+    autopilot.refresh_store(reporter.store)
+    assert len(autopilot._group_conversations(reporter.store)) == 3
+    reporter.store._conn.return_value = None
+    reporter.store._conn.side_effect = None
+    assert autopilot._group_conversations(reporter.store) is None
 
 
 # --------------------------------------------------------------------------- #
