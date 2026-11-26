@@ -74,6 +74,7 @@ def test_bound_send_checks_both_enters(recipient, monkeypatch, failure):
     agent, store, _ = recipient
     cid = "S:self_one"
     route = {"status": "verified", "remark": "RCP8K6AXH"}
+    monkeypatch.setattr(agent, "_recipient_binding_enabled", True)
     monkeypatch.setattr(agent.remote_cfg, "recipient_binding_account_active", lambda me: me == "self")
     monkeypatch.setattr(agent.remote_cfg, "recipient_bindings", lambda me: {cid: route})
     empty, typed = (1, b"empty"), (1, b"search")

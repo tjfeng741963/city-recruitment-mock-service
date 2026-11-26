@@ -1855,7 +1855,7 @@ def _refresh_recipient_recoveries(store: Store) -> None:
 
 
 _guard_recipient = False
-_recipient_bridge_configured = False
+_recipient_binding_enabled = False
 _recipient_proof: tuple[str, tuple[int, bytes]] | None = None
 _RECIPIENT_BLOCKED = "发送前无法核对企微当前会话，已保留待回复记录"
 
@@ -2013,16 +2013,15 @@ def _check_recipient_at_enter(enabled, check):
         win.tap = tap
 
 
-def _recipient_guard_enabled(store: Store, cid: str) -> bool:
+def _recipient_guard_enabled(cid: str) -> bool:
     if not cid.startswith("S:"):
         return False
-    account = _recipient_account(store)
-    return bool(_guard_recipient or cid in remote_cfg.recipient_bindings(account))
+    return bool(_guard_recipient or _recipient_binding_enabled)
 
 
 def _recipient_unchanged(store: Store, cid: str) -> bool:
     proof = _recipient_proof
-    return not _recipient_guard_enabled(store, cid) or bool(
+    return not _recipient_guard_enabled(cid) or bool(
         proof and proof[0] == cid and _recipient_heading() == proof[1]
     )
 
@@ -2034,10 +2033,10 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
     global _recipient_proof
     _recipient_proof = None
     account = _recipient_account(store)
-    managed = remote_cfg.recipient_binding_account_active(account)
+    managed = _recipient_binding_enabled and remote_cfg.recipient_binding_account_active(account)
     binding = remote_cfg.recipient_bindings(account).get(cid) if managed else None
-    guard = _recipient_guard_enabled(store, cid)
-    if guard and _recipient_bridge_configured and not managed:
+    guard = _recipient_guard_enabled(cid)
+    if _recipient_binding_enabled and guard and not managed:
         return "blocked", _RECIPIENT_BLOCKED, ""
     if guard:
         name, report = _resolve_recipient(store, cid, binding)
@@ -2059,7 +2058,14 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
 
     def authorize_enter() -> bool:
         if phase == "send":
+            if _recipient_binding_enabled:
+                current_account = _recipient_account(store)
+                if (current_account != account or not remote_cfg.recipient_binding_account_active(account)
+                        or remote_cfg.recipient_bindings(account).get(cid) != binding):
+                    return False
             return bool(heading and _recipient_heading() == heading)
+        if phase == "search" and not _recipient_binding_enabled:
+            return True
         if phase != "search" or not search_before:
             return False
         search = _recipient_search_field()
@@ -2080,7 +2086,7 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
         if guard and step == "步骤0":
             heading = None
             phase = "search"
-            search_before = _recipient_search_field()
+            search_before = _recipient_search_field() if _recipient_binding_enabled else None
         if guard and step == "步骤1":
             phase = "chat"
             heading = _recipient_heading()
@@ -2164,7 +2170,7 @@ def _send_media(store: Store, cid: str, name: str, log_fn, *, route: str) -> tup
     ready, detail = desktop_send_ready(route)
     if not ready:
         return "blocked", detail
-    with _check_recipient_at_enter(_recipient_guard_enabled(store, cid),
+    with _check_recipient_at_enter(_recipient_guard_enabled(cid),
                                    lambda: _recipient_unchanged(store, cid)):
         ok, detail = core_send.paste_media(name, log=log_fn)
     return ("sent" if ok else "unknown"), str(detail)
@@ -2173,7 +2179,7 @@ def _send_media(store: Store, cid: str, name: str, log_fn, *, route: str) -> tup
 def _send_location_to_recipient(store: Store, cid: str, *args, **kwargs):
     if not _recipient_unchanged(store, cid):
         return False, _RECIPIENT_BLOCKED
-    with _check_recipient_at_enter(_recipient_guard_enabled(store, cid),
+    with _check_recipient_at_enter(_recipient_guard_enabled(cid),
                                    lambda: _recipient_unchanged(store, cid)):
         return location_card.send_card(*args, **kwargs)
 
@@ -2331,7 +2337,7 @@ def _sequence_block_reason(cid: str, cfg: dict, source: tuple, store: Store, nam
         return "回复来源已切换，停止旧介绍"
     try:
         me = store.self_id()
-        binding = remote_cfg.recipient_bindings(me).get(cid) if isinstance(me, str) else None
+        binding = remote_cfg.recipient_bindings(me).get(cid) if _recipient_binding_enabled and isinstance(me, str) else None
         if binding:
             term, _ = _resolve_recipient(store, cid, binding)
             return "" if term and binding["status"] == "verified" else _RECIPIENT_BLOCKED
@@ -2891,9 +2897,9 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             if expired:
                 log("reply_recovery_age_hold", level="warning", scope="send", count=expired)
     account = _recipient_account(store) if not dry else ""
-    managed = bool(account and remote_cfg.recipient_binding_account_active(account))
+    managed = bool(_recipient_binding_enabled and account and remote_cfg.recipient_binding_account_active(account))
     bindings = remote_cfg.recipient_bindings(account) if managed else {}
-    if managed and _guard_recipient:
+    if managed:
         _refresh_recipient_recoveries(store)
     items = rlog.pending(include_failed=True)
     if items and not dry and not desktop_send_ready("auto")[0]:
@@ -2969,10 +2975,10 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             log(f"跳过 {name or cid}：客户已流失")
             continue
 
-        if _guard_recipient and _recipient_bridge_configured and not managed and cid.startswith("S:"):
+        if _recipient_binding_enabled and not managed and cid.startswith("S:"):
             stats["blocked"] += 1
             continue
-        if managed and (_guard_recipient or cid in bindings) and _recipient_other(account, cid):
+        if managed and _recipient_other(account, cid):
             if it.get("last_step") == "recipient-recovery-queued":
                 outbound = _latest_recipient_outbound(store, account, cid)
                 if outbound is None:
@@ -3216,7 +3222,10 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                                         log("wecom_send_hold", level="warning", scope="send", route="opening",
                                             message_id=mid, trace_id=trace, part=seq, completed_items=sent_items)
                                     elif status == "blocked":
-                                        rlog.mark_failed(mid, cid, detail, "开场")
+                                        if detail == _RECIPIENT_BLOCKED:
+                                            rlog.mark_held(mid, cid, detail, "开场")
+                                        else:
+                                            rlog.mark_failed(mid, cid, detail, "开场")
                                         stats["blocked"] += 1
                                     else:
                                         rlog.mark_held(mid, cid, "开场发送失败，暂停本轮，待人工核对")
@@ -3609,7 +3618,10 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                         level="info" if ok_card else "warning",
                         scope="media", message_id=mid, trace_id=trace)
             else:
-                rlog.mark_failed(mid, cid, detail, scene, text)
+                if status == "blocked" and detail == _RECIPIENT_BLOCKED:
+                    rlog.mark_held(mid, cid, detail, scene)
+                else:
+                    rlog.mark_failed(mid, cid, detail, scene, text)
                 if _brain is not None:
                     _brain.log_delivery(agent_trace_id, "failed", session_key=cid, detail=detail)
                 _last_error = detail[:200]
@@ -4202,10 +4214,11 @@ def load_config(args: argparse.Namespace, config_path: Path | None = None) -> di
         for key in (*DEFAULTS, "dry_run"):
             if key in file_cfg:
                 cfg[key] = file_cfg[key]
-        if "verify_direct_chat_heading" in file_cfg:
-            if type(file_cfg["verify_direct_chat_heading"]) is not bool:
-                raise ValueError("verify_direct_chat_heading must be true or false")
-            cfg["verify_direct_chat_heading"] = file_cfg["verify_direct_chat_heading"]
+        for flag in ("verify_direct_chat_heading", "enable_recipient_binding"):
+            if flag in file_cfg:
+                if type(file_cfg[flag]) is not bool:
+                    raise ValueError(f"{flag} must be true or false")
+                cfg[flag] = file_cfg[flag]
         if "interval" not in file_cfg and "interval_seconds" in file_cfg:
             cfg["interval"] = file_cfg["interval_seconds"]
         for key in ("server", "device_token", "device_code", "bridge_server", "bridge_token"):
@@ -4419,9 +4432,10 @@ def main() -> int:
         log(f"人工回执：{counts}")
         return 0 if complete and not counts.get("rejected") else 1
 
-    global _brain, _guard_recipient, _recipient_bridge_configured
-    _recipient_bridge_configured = bool(cfg.get("bridge_server") and cfg.get("bridge_token"))
+    global _brain, _guard_recipient, _recipient_binding_enabled
     _guard_recipient = cfg.get("verify_direct_chat_heading", False)
+    _recipient_binding_enabled = bool(cfg.get("enable_recipient_binding") and
+                                      cfg.get("bridge_server") and cfg.get("bridge_token"))
     _brain = build_brain(cfg, log)
     cfg["_reply_mode_enabled"] = bool(_brain is not None and hasattr(_brain, "sync_reply_mode"))
 

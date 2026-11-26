@@ -131,3 +131,19 @@ def test_report_recipient_binding_uses_device_route_and_exact_body(monkeypatch):
             "remark": "JOB-A7C3",
         },
     )
+
+
+
+def test_binding_snapshot_expires_when_the_bridge_cannot_refresh(remote_config, tmp_path, monkeypatch):
+    rc = remote_config
+    clock = Mock(return_value=100)
+    monkeypatch.setattr(rc.time, "monotonic", clock)
+    client = Mock()
+    client.fetch_config.side_effect = [payload(rows=[row()]), None]
+    config = rc.RemoteConfig(client, tmp_path / "cache.json")
+    assert config.sync()
+    assert rc.recipient_binding_account_active("me")
+    clock.return_value = 191
+    assert not config.sync()
+    assert not rc.recipient_binding_account_active("me")
+    assert rc.recipient_bindings("me") == {}

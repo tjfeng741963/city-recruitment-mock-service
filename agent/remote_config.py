@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import time
 import math
 from pathlib import Path
 
@@ -38,20 +39,21 @@ _abandoned_sessions: set[str] = set()
 
 # Recipient bindings may authorize sending, so only a live, account-scoped
 # snapshot can supply them. Publish the account and rows together.
-_recipient_binding_snapshot: tuple[str, dict[str, dict]] = ("", {})
+_recipient_binding_snapshot: tuple[str, dict[str, dict], float] = ("", {}, 0.0)
+_RECIPIENT_BINDING_MAX_AGE = 90.0
 _RECIPIENT_BINDING_STATES = {"conflict", "awaiting", "verified", "needs_confirmation"}
 
 
 def recipient_bindings(account_id: str) -> dict[str, dict]:
-    account, bindings = _recipient_binding_snapshot
-    if not account or account_id != account:
+    account, bindings, observed = _recipient_binding_snapshot
+    if not account or account_id != account or time.monotonic() - observed > _RECIPIENT_BINDING_MAX_AGE:
         return {}
     return {cid: dict(binding) for cid, binding in bindings.items()}
 
 
 def recipient_binding_account_active(account_id: str) -> bool:
-    account, _ = _recipient_binding_snapshot
-    return bool(account and account_id == account)
+    account, _, observed = _recipient_binding_snapshot
+    return bool(account and account_id == account and time.monotonic() - observed <= _RECIPIENT_BINDING_MAX_AGE)
 
 
 def _parse_recipient_binding_snapshot(remote: dict) -> tuple[str, dict[str, dict]]:
@@ -189,7 +191,7 @@ class RemoteConfig:
         # 光改 cfg["brain"]["mode"] 不会切换行为。
         self.last_changed: list[str] = []
         global _recipient_binding_snapshot
-        _recipient_binding_snapshot = ("", {})
+        _recipient_binding_snapshot = ("", {}, 0.0)
         cached = load_remote_cache(self.cache_path)
         if cached:
             self.version = str(cached.get("version") or "")
@@ -228,7 +230,8 @@ class RemoteConfig:
             return False
         self._last_ok = True
         global _recipient_binding_snapshot
-        _recipient_binding_snapshot = _parse_recipient_binding_snapshot(remote)
+        account, bindings = _parse_recipient_binding_snapshot(remote)
+        _recipient_binding_snapshot = (account, bindings, time.monotonic())
         version = str(remote.get("version") or "")
         if version != self.version:
             scripts = remote.get("scripts")
