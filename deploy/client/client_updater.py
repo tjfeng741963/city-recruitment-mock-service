@@ -85,8 +85,16 @@ def _verify_installed_core(root: Path, protected: dict[str, str]) -> None:
         raise UpdateError("release frozen-core manifest is invalid")
     for name, digest in protected.items():
         path = root / "wecom_io_core" / name
-        if not path.is_file() or _normalized_sha256(path.read_bytes()) != str(digest).lower():
-            raise UpdateError(f"installed frozen core differs from approved hash: {name}")
+        expected = str(digest).lower()
+        actual = _normalized_sha256(path.read_bytes()) if path.is_file() else ""
+        if actual != expected:
+            # 2026-11-26 现场：核心文件被手工覆盖过，启动校验只报文件名，运维无法判断
+            # 该恢复成哪个版本。把两个哈希都打出来，才能对着发布包里的同名文件恢复。
+            raise UpdateError(
+                f"installed frozen core differs from approved hash: {name}"
+                f"（本地 {actual[:12] or '文件缺失'}，冻结清单 {expected[:12]}；"
+                f"该文件被手工改过，请用官方发布包里的 wecom_io_core/{name} 覆盖后再启动或更新）"
+            )
 
 
 def _verify_zip(
@@ -150,7 +158,18 @@ def _verify_zip(
         approved = {str(name): str(value).lower() for name, value in installed_pins.items()}
         package_pins = {str(name): str(value).lower() for name, value in protected.items()}
         if approved != package_pins:
-            raise UpdateError("release frozen core manifest differs from local approved pins")
+            # 报出具体是哪几个核心文件对不上：只报「清单不一致」时，运维分不清是
+            # 本地被手工改过，还是发布包改了核心（核心不随包下发，后者属于发布事故）。
+            differing = sorted(
+                name for name in set(approved) | set(package_pins)
+                if approved.get(name) != package_pins.get(name)
+            )
+            raise UpdateError(
+                "release frozen core manifest differs from local approved pins: "
+                + ", ".join(differing)
+                + "（本机冻结核心与本次发布包清单不一致。核心文件不随包下发，"
+                "需先确认本机 wecom_io_core 是否被手工改动，用官方包同名文件恢复后再更新）"
+            )
         _verify_installed_core(root, approved)
 
         declared = manifest.get("files")
@@ -164,7 +183,11 @@ def _verify_zip(
                 raise UpdateError("client manifest entry is invalid")
             name = item.get("path")
             if not isinstance(name, str) or not _allowed_path(name):
-                raise UpdateError("unsafe package path")
+                raise UpdateError(
+                    f"unsafe package path: {name}"
+                    "（本机更新器不认识这个文件，说明 client_updater.py 比发布包旧；"
+                    "先从发布包里取出 client_updater.py 覆盖本机，再重试更新）"
+                )
             if name in declared_names or name not in archive_names:
                 raise UpdateError("client manifest contains duplicate or missing package files")
             if name.startswith("wecom_io_core/"):

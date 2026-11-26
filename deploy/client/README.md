@@ -75,6 +75,13 @@ Win 端不是 Git checkout。合并到 `main` 后，CI 通过测试与 Linux 部
 
 若手动导入早于本修复的官方包以回滚业务版本，该包可能同时装回旧更新器。再次升级前，须重新执行上述一次性更新器迁移。
 
+若启动或更新提示 `installed frozen core differs from approved hash: <文件>` 或 `release frozen core manifest differs from local approved pins: <文件>`，说明 `C:\agent\wecom_io_core\` 下的核心文件与 `frozen-core-sha256.json` 记录的已批准哈希对不上。核心文件**不随发布包下发**，只能由运维恢复，分两种情况：
+
+1. **本机被手工覆盖过**（该文件哈希不属于任何已发布提交）：从发布包或仓库同一路径取出 `wecom_io_core/<文件>` 覆盖本机，`certutil -hashfile <文件> SHA256` 与清单一致后再启动。
+2. **发布本身改过核心**（先 `git log --oneline <旧SHA>..<新SHA> -- agent/wecom_io_core/` 确认）：这属于已批准的核心变更，升级时必须同时把本机 `wecom_io_core/<文件>` 换成该提交的版本、把 `frozen-core-sha256.json` 换成 `deploy/client/frozen-core-sha256.json`，否则老客户端永远升不上去。
+
+两种情况都要先备份本机原文件。**不要只改 `frozen-core-sha256.json` 而不换文件**——那等于让校验形同虚设，下一次启动仍会因实际哈希不符被拒。
+
 更新过程日志写在 `C:\agent\logs\update.log`，只记录提交 SHA、变更文件数和阶段结果，不写配置或客户聊天内容。
 
 `sync_from_github.py` 保留只读预览，手动 `--apply` 已禁用，避免绕过流水线提交 SHA、核心校验和备份流程。

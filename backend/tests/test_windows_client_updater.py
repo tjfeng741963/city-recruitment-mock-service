@@ -172,11 +172,15 @@ def test_rejects_installed_frozen_core_drift(tmp_path):
     (root / "wecom_io_core/send.py").write_bytes(b"modified sender")
     package = archive_bytes({"autopilot.py": b"# new autopilot\n"})
 
-    with pytest.raises(UPDATER.UpdateError, match="installed frozen core differs"):
+    with pytest.raises(UPDATER.UpdateError, match="installed frozen core differs") as error:
         UPDATER.apply_package(
             package, expected_commit=COMMIT, expected_sha256=hashlib.sha256(package).hexdigest(), root=root
         )
 
+    # 2026-11-26 现场：只报文件名时运维不知道该恢复成哪个版本，必须带实际值和处置方向。
+    message = str(error.value)
+    assert "send.py" in message
+    assert "手工改过" in message
     assert not (root / "autopilot.py").exists()
 
 
@@ -279,13 +283,16 @@ def test_rejects_manifest_frozen_pin_change_even_when_archive_hash_is_valid(tmp_
             target.writestr(item.filename, data)
     tampered = output.getvalue()
 
-    with pytest.raises(UPDATER.UpdateError, match="frozen core manifest differs"):
+    with pytest.raises(UPDATER.UpdateError, match="frozen core manifest differs") as error:
         UPDATER.apply_package(
             tampered,
             expected_commit=COMMIT,
             expected_sha256=hashlib.sha256(tampered).hexdigest(),
             root=root,
         )
+
+    # 必须指出是哪个核心文件对不上，否则分不清「本机被改」和「发布改了核心」。
+    assert "send.py" in str(error.value)
 
 
 def test_rolls_back_replaced_files_if_later_replace_fails(tmp_path, monkeypatch):
