@@ -98,7 +98,30 @@
       <p class="field-note">配置拉取和状态上报不是送达回执。</p>
     </div>
 
-    <el-alert v-if="pageError && !conflict" class="page-alert" type="error" :title="pageError" show-icon :closable="false" />
+    <el-alert
+      v-if="pageError && !conflict"
+      class="page-alert"
+      type="error"
+      :title="typeof pageError === 'string' ? pageError : savedFlow?.status === 'enabled' ? '流程修改未保存' : '暂时无法启用画布流程'"
+      show-icon
+      :closable="false"
+    >
+      <template v-if="typeof pageError !== 'string'" #default>
+        <ul class="flow-validation-issues">
+          <li v-for="(issue, index) in pageError" :key="index">{{ issue }}</li>
+        </ul>
+        <p class="flow-validation-guide">
+          {{ viewMode === 'runtime' ? '点击「编辑流程」，' : '' }}在画布上选中上面提到的节点，在右侧「发送内容」里修改。
+          如果这一步用不上，可以在右侧「状态」停用该节点，流程入口需保留启用。
+          {{ savedFlow?.status === 'enabled' ? '修改后再点「保存流程」。' : '修改后再点「启用流程」，并确认「保存并启用」。' }}
+        </p>
+        <p class="flow-validation-guide">
+          {{ savedFlow?.status === 'enabled'
+            ? '本次修改提交前，系统 Agent 继续使用上次保存的流程。'
+            : '画布启用前，系统 Agent 的新会话继续使用已保存的岗位开场，仍可读取岗位问答。' }}
+        </p>
+      </template>
+    </el-alert>
     <el-alert
       v-if="conflict"
       class="page-alert"
@@ -464,7 +487,7 @@ const positionsLoading = ref(false)
 const loading = ref(false)
 const saving = ref(false)
 const migrating = ref(false)
-const pageError = ref('')
+const pageError = ref<string | string[]>('')
 const conflict = ref(false)
 const positionId = ref(0)
 const flow = ref<AgentFlow | null>(null)
@@ -942,7 +965,7 @@ async function saveFlow(status?: 'enabled' | 'disabled'): Promise<void> {
         : candidate
       const issues = flowActivationIssues(checkCandidate)
       if (issues.length) {
-        pageError.value = `启用前请修正：${issues.join('；')}`
+        pageError.value = issues
         return
       }
     }
@@ -1304,6 +1327,8 @@ onBeforeUnmount(() => { loadSequence += 1; if(evidenceTimer)clearInterval(eviden
 .toolbar-spacer { flex: 1; }
 .dirty-hint { color: var(--el-color-warning); font-size: 12px; }
 .page-alert { margin-bottom: 12px; }
+.flow-validation-issues { margin: 0 0 6px; padding-inline-start: 1.25em; }
+.flow-validation-guide { margin: 4px 0 0; line-height: 1.6; }
 .page-loading,.empty-flow { min-height: 360px; padding: 28px; border: 1px solid var(--bd-border, #e8ecf3); border-radius: 6px; background: var(--el-bg-color, #fff); }
 .empty-actions { justify-content: center; }
 .graph-actions { margin-bottom: 12px; }

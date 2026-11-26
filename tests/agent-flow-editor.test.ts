@@ -389,13 +389,13 @@ describe("node flow editor graph edits", () => {
 
   it("blocks activation while enabled nodes contain placeholder text or missing media", () => {
     const draft = createBlankFlow(1);
-    expect(flowActivationIssues(draft)).toContain("招聘介绍：请替换占位话术");
+    expect(flowActivationIssues(draft)).toContain("「招聘介绍」还在使用系统示例文字「请填写此节点要发送的内容」。请改成要发给候选人的话术。");
 
     const missingMedia = {
       ...draft,
       nodes: [{ ...draft.nodes[0], parts: [{ kind: "image", media_name: "", body: "" }] }],
     };
-    expect(flowActivationIssues(missingMedia)).toContain("招聘介绍：请选择图片素材");
+    expect(flowActivationIssues(missingMedia)).toContain("「招聘介绍」还没选择图片。请在「发送内容」中选择要发给候选人的图片。");
 
     const disabled = { ...draft, nodes: draft.nodes.map((node) => ({ ...node, status: "disabled" })) };
     expect(flowActivationIssues(disabled)).toEqual([]);

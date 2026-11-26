@@ -395,13 +395,16 @@ export function flowActivationIssues(source: FlowLike): string[] {
   for (const node of source.nodes) {
     if (node.status === "disabled" || NO_PARTS_TYPES.has(String(node.node_type))) continue
     for (const part of node.parts ?? []) {
-      const label = String(node.title || node.node_key)
+      const label = `「${node.title || node.node_key}」`
       if (part.kind === "text") {
         const body = String(part.body || "").trim()
-        if (!body) issues.push(`${label}：文本内容不能为空`)
-        else if (placeholders.has(body)) issues.push(`${label}：请替换占位话术`)
+        if (!body) issues.push(`${label}的文本为空。请在「发送内容」中填写要发给候选人的话术。`)
+        else if (placeholders.has(body)) {
+          issues.push(`${label}还在使用系统示例文字「${body}」。请改成要发给候选人的话术。`)
+        }
       } else if ((part.kind === "image" || part.kind === "video") && !String(part.media_name || "").trim()) {
-        issues.push(`${label}：请选择${part.kind === "image" ? "图片" : "视频"}素材`)
+        const media = part.kind === "image" ? "图片" : "视频"
+        issues.push(`${label}还没选择${media}。请在「发送内容」中选择要发给候选人的${media}。`)
       }
     }
   }
