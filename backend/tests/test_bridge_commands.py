@@ -203,10 +203,11 @@ def test_send_exception_is_contained(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# 4. 企微非 online 只查刷新指令，dry-run 和未配置桥接时跳过
+# 4. 企微非 online 只查刷新指令；已登录但发送未就绪时只领设置备注
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("wecom_state", ["hidden", "online"])
-def test_unavailable_desktop_claims_only_qr_refresh_commands(wecom_state):
+@pytest.mark.parametrize("wecom_state", ["hidden", "scanning"])
+def test_unavailable_wecom_claims_only_qr_refresh_commands(wecom_state):
+    """未登录 / 扫码中：设置备注要操作窗口，没登录做不了，只领刷新指令。"""
     autopilot = _load_autopilot()
     _reset(autopilot)
     autopilot.desktop_send_ready.return_value = (False, "企微窗口不可用")
@@ -219,11 +220,34 @@ def test_unavailable_desktop_claims_only_qr_refresh_commands(wecom_state):
     assert bridge.receipts == []
     autopilot.core_send.send.assert_not_called()
 
-    autopilot._last_claim_at = 0.0
+
+def test_logged_in_but_desktop_unavailable_claims_only_remark():
+    """已登录、只是发送未就绪：改备注只是点通讯录，仍然做得成，所以只领 set_remark。
+
+    2026-11-26 之前这里领的是 refresh_login_qr，导致窗口一黑备注就永久卡在
+    队列里，网页上点了没反应。
+    """
+    autopilot = _load_autopilot()
+    _reset(autopilot)
+    autopilot.desktop_send_ready.return_value = (False, "企微窗口不可用")
+    bridge = FakeBridge(command=dict(COMMAND, kind="set_remark"))
+
+    autopilot.pump_commands(MagicMock(), _cfg(), bridge=bridge, wecom_state="online")
+
+    assert bridge.claim_filters == ["set_remark"]
+    autopilot.core_send.send.assert_not_called()
+
+
+def test_dry_run_and_missing_bridge_never_claim():
+    autopilot = _load_autopilot()
+    _reset(autopilot)
+    autopilot.desktop_send_ready.return_value = (False, "企微窗口不可用")
+    bridge = FakeBridge(command=dict(COMMAND))
+
     assert autopilot.pump_commands(_mock_store(), _cfg(dry_run=True), bridge=bridge, wecom_state="online") == {
         "claimed": 0, "sent": 0, "failed": 0,
     }
-    assert bridge.claim_filters == ["refresh_login_qr"]
+    assert bridge.claim_filters == []
     assert autopilot.pump_commands(_mock_store(), _cfg(), bridge=None, wecom_state="online")["claimed"] == 0
 
 
