@@ -231,6 +231,21 @@ export class DeviceBridgeStore {
     this.db.prepare("DELETE FROM device_login_qr WHERE device_code=?").run(code);
   }
 
+  /** 分配一个新的客户编号。
+   *
+   * 只统计整数 customer_id：群聊会话的 customer_id 是字符串（如「预约报名群」），
+   * 一旦混进来，SQLite 的 MAX() 会返回文本（TEXT 类型排序高于 INTEGER），
+   * 再 +1 得到 1，与已有客户撞 UNIQUE(device_code,customer_id)，整条上报 500。
+   * 2026-11-26 生产上 64 条消息就是这样卡了两天（客户端遇 500 会 break 整个队列）。
+   */
+  private allocateCustomerId(): number {
+    const row = this.db.prepare(`SELECT MAX(value) AS id FROM (
+      SELECT MAX(customer_id) value FROM agent_conversations WHERE typeof(customer_id)='integer' UNION ALL
+      SELECT MAX(customer_id) FROM bridge_contacts WHERE typeof(customer_id)='integer' UNION ALL
+      SELECT 0)`).get() as { id: number | null } | undefined;
+    return Number(row?.id ?? 0) + 1;
+  }
+
   contact(code: string, contactId: string, nickname: string): number {
     const existing = this.db.prepare("SELECT customer_id FROM bridge_contacts WHERE device_code=? AND contact_id=?").get(code, contactId) as { customer_id: number } | undefined;
     if (existing) {
@@ -241,10 +256,7 @@ export class DeviceBridgeStore {
     }
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const customerId = Number((this.db.prepare(`SELECT MAX(value)+1 AS id FROM (
-        SELECT COALESCE(MAX(customer_id),0) value FROM agent_conversations UNION ALL
-        SELECT COALESCE(MAX(customer_id),0) FROM bridge_contacts UNION ALL SELECT 0)`)
-        .get() as { id: number }).id);
+      const customerId = this.allocateCustomerId();
       this.db.prepare("INSERT INTO bridge_contacts(device_code,contact_id,customer_id,nickname) VALUES (?,?,?,?)").run(code, contactId, customerId, nickname);
       this.db.prepare("INSERT INTO agent_conversations(device_code,customer_id,nickname,external_conversation_id) VALUES (?,?,?,?)").run(code, customerId, nickname, contactId);
       this.db.exec("COMMIT");

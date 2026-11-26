@@ -51,6 +51,22 @@ describe("observed device outbound messages", () => {
       .toMatchObject({ role: "agent", source: "bridge" });
   });
 
+  it("allocates integer ids even when a group conversation stored a text customer_id", async () => {
+    // 群聊会话历史把 customer_id 写成了群名（TEXT）：SQLite 的 MAX() 会取到它，
+    // +1 退化成 1，新联系人插入撞 UNIQUE(device_code,customer_id) → 整条上报 500。
+    app.db.prepare("INSERT INTO agent_conversations(device_code,customer_id,nickname,external_conversation_id) VALUES (?,?,?,?)")
+      .run(code, "预约报名群", "预约报名群", "group:预约报名群");
+    const first = await observe();
+    expect(first.statusCode).toBe(200);
+    const second = await observe({ ...payload, event_id: `${contact}:104`, contact_id: "S:another", nickname: "Another" });
+    expect(second.statusCode).toBe(200);
+    const ids = app.db.prepare("SELECT customer_id FROM bridge_contacts WHERE device_code=?").all(code)
+      .map((row) => (row as { customer_id: unknown }).customer_id);
+    expect(ids).toHaveLength(2);
+    expect(ids.every((id) => typeof id === "number")).toBe(true);
+    expect(new Set(ids).size).toBe(2);
+  });
+
   it("deduplicates event replay but preserves distinct messages with equal text", async () => {
     await observe();
     expect((await observe()).json()).toMatchObject({ status: "duplicate", created: false });
