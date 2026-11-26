@@ -111,12 +111,22 @@ def test_brain_failure_still_blocks_input(agent):
     ("missing", "window_missing"),
     ("locked", "desktop_unavailable"),
     ("probe_error", "window_probe_failed"),
+    ("restored", None),
+    ("still_minimized", "window_minimized"),
+    ("restore_switches_window", "window_changed"),
+    ("restore_changes_owner", "window_changed"),
+    ("minimized_foreign", "window_owner_unverified"),
 ])
 def test_send_window_guard_checks_current_core_choice(monkeypatch, case, reason):
     agent = load_autopilot(mock_send_window=False)
     monkeypatch.setattr(agent, "log", MagicMock())
     monkeypatch.setattr(agent, "_reply_desktop_active", lambda: case != "locked")
-    monkeypatch.setattr(agent, "_is_wecom_window_owner", lambda pid: pid == 9344 and case != "foreign")
+    monkeypatch.setattr(agent, "_is_wecom_window_owner", lambda pid: pid == 9344 and case not in ("foreign", "minimized_foreign"))
+    monkeypatch.setattr(agent.time, "sleep", MagicMock())
+    may_restore = case in ("restored", "still_minimized", "restore_switches_window", "restore_changes_owner")
+    agent.win.user32.IsIconic.side_effect = lambda _hwnd: (
+        case in ("still_minimized", "minimized_foreign") or (may_restore and not agent.win.user32.ShowWindow.called)
+    )
     if case == "hidden":
         agent.win.find_window.return_value = {"hwnd": 20, "rect": (0, 0, 1180, 715), "visible": False}
     elif case == "missing":
@@ -128,6 +138,15 @@ def test_send_window_guard_checks_current_core_choice(monkeypatch, case, reason)
     agent.win.win32gui.IsWindowEnabled.return_value = case != "disabled"
     agent.win.win32gui.GetClassName.return_value = "WeWorkWindow"
     agent.win.win32process.GetWindowThreadProcessId.return_value = (2, 9344)
+    if case == "restore_switches_window":
+        target = agent.win.find_window.return_value
+        agent.win.find_window.side_effect = lambda: (
+            {**target, "hwnd": 30} if agent.win.user32.ShowWindow.called else target
+        )
+    if case == "restore_changes_owner":
+        agent.win.win32process.GetWindowThreadProcessId.side_effect = lambda _hwnd: (
+            (2, 9999) if agent.win.user32.ShowWindow.called else (2, 9344)
+        )
     dwm = MagicMock()
 
     def attribute(_hwnd, _attribute, output, _size):
@@ -136,8 +155,15 @@ def test_send_window_guard_checks_current_core_choice(monkeypatch, case, reason)
 
     dwm.DwmGetWindowAttribute.side_effect = attribute
     monkeypatch.setattr(agent.ctypes, "WinDLL", lambda _: dwm, raising=False)
+    if may_restore:
+        assert agent.desktop_send_ready("health") == (True, "")
+        agent.win.user32.ShowWindow.assert_not_called()
     outcome, _, _ = agent._send_text(MagicMock(), "Test", "S:test", "test", route="auto", log_fn=MagicMock())
 
+    if may_restore:
+        agent.win.user32.ShowWindow.assert_called_once_with(20, 9)
+    else:
+        agent.win.user32.ShowWindow.assert_not_called()
     if reason is None:
         agent.core_send.send.assert_called_once()
     else:

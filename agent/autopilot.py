@@ -1657,64 +1657,54 @@ def _is_wecom_window_owner(pid: int) -> bool:
         kernel.CloseHandle(process)
 
 
-def _window_minimized(hwnd: int) -> bool:
-    """窗口是否最小化（最小化的窗口抢不到前台，必须先还原）。"""
-    try:
-        return bool(win.user32.IsIconic(hwnd))
-    except Exception:  # noqa: BLE001
-        return False
-
-
-def _window_minimized(hwnd: int) -> bool:
-    """窗口是否最小化（最小化的窗口抢不到前台，必须先还原）。"""
-    try:
-        return bool(win.user32.IsIconic(hwnd))
-    except Exception:  # noqa: BLE001
-        return False
-
-
 def desktop_send_ready(route: str) -> tuple[bool, str]:
-    """Inspect the frozen sender's current choice without activating a window."""
+    """Check the sender's target before and after any send-time restoration."""
     hwnd = pid = 0
     visible = False
+    reason = "desktop_unavailable"
     try:
-        if not _reply_desktop_active():
-            reason = "desktop_unavailable"
-        else:
+        restored = None
+        for _ in range(2):
+            if not _reply_desktop_active():
+                reason = "desktop_unavailable"
+                break
             target = win.find_window()
             if not target:
                 reason = "window_missing"
-            elif _window_minimized(target["hwnd"]):
-                # 最小化的窗口抢不到前台（2026-11-26 实测：开场第 3 条就是这里挂的，
-                # 报「抢不到前台，已中止」，会话留下未确认开场，后续消息全被 hold）。
-                # 先还原再交给发送器。
-                try:
-                    win.user32.ShowWindow(target["hwnd"], 9)  # SW_RESTORE
-                    time.sleep(0.4)
-                except Exception:  # noqa: BLE001
-                    pass
-                reason = "" if not _window_minimized(target["hwnd"]) else "window_minimized"
-            else:
-                hwnd = target["hwnd"]
-                gui = win.win32gui
-                if not gui.IsWindow(hwnd):
-                    reason = "window_missing"
-                else:
-                    _, pid = win.win32process.GetWindowThreadProcessId(hwnd)
-                    visible = bool(gui.IsWindowVisible(hwnd))
-                    cloaked = wt.DWORD()
-                    dwm = ctypes.WinDLL("dwmapi")
-                    dwm.DwmGetWindowAttribute.argtypes = (wt.HWND, wt.DWORD, ctypes.c_void_p, wt.DWORD)
-                    if not target["visible"] or not visible:
-                        reason = "window_hidden"
-                    elif dwm.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked)) != 0:
-                        reason = "window_probe_failed"
-                    elif cloaked.value or not gui.IsWindowEnabled(hwnd):
-                        reason = "window_unavailable"
-                    elif gui.GetClassName(hwnd) != "WeWorkWindow" or not _is_wecom_window_owner(pid):
-                        reason = "window_owner_unverified"
-                    else:
-                        return True, ""
+                break
+            hwnd = target["hwnd"]
+            gui = win.win32gui
+            if not gui.IsWindow(hwnd):
+                reason = "window_missing"
+                break
+            _, pid = win.win32process.GetWindowThreadProcessId(hwnd)
+            if restored and (hwnd, pid) != restored:
+                reason = "window_changed"
+                break
+            visible = bool(gui.IsWindowVisible(hwnd))
+            if not target["visible"] or not visible:
+                reason = "window_hidden"
+                break
+            cloaked = wt.DWORD()
+            dwm = ctypes.WinDLL("dwmapi")
+            dwm.DwmGetWindowAttribute.argtypes = (wt.HWND, wt.DWORD, ctypes.c_void_p, wt.DWORD)
+            if dwm.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked)) != 0:
+                reason = "window_probe_failed"
+                break
+            if cloaked.value or not gui.IsWindowEnabled(hwnd):
+                reason = "window_unavailable"
+                break
+            if gui.GetClassName(hwnd) != "WeWorkWindow" or not _is_wecom_window_owner(pid):
+                reason = "window_owner_unverified"
+                break
+            if route == "health" or not win.user32.IsIconic(hwnd):
+                return True, ""
+            reason = "window_minimized"
+            if restored:
+                break
+            restored = (hwnd, pid)
+            win.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            time.sleep(0.4)
     except Exception:  # A failed probe cannot authorize sending.
         reason = "window_probe_failed"
     if route != "health":
@@ -1918,12 +1908,7 @@ def _hide_ghost_windows() -> int:
     2026-11-25 现场：两个 WeWorkWindow 同时可见，旧实例 1180×694 但 PrintWindow
     亮度 0.0（纯黑），盖在真窗口 1044×694（亮度 227）上面。后果是所有按屏幕坐标
     的点击都打在黑窗口上，表现为「窗口明明开着却发不出去 / 设备注点不动」。
-    只隐藏不杀进程（可逆）。
-
-    2026-11-26 补充：只剩一个可见窗口时它自己就可能是黑的，而真窗口被切换账号
-    藏起来了（现场 hwnd=2491454 可见但亮度 0，真窗口 hwnd=2425642 隐藏、显示后
-    亮度 239）。旧实现「少于 2 个窗口就不动手」在这种状态下永远恢复不了，所以现在
-    会先把隐藏窗口逐个显示出来找一个能渲染的。
+    只隐藏不杀进程（可逆），且只在存在 ≥2 个窗口时动手，避免把唯一窗口也藏了。
     """
     hidden = 0
     try:
@@ -1931,39 +1916,27 @@ def _hide_ghost_windows() -> int:
         from ctypes import wintypes as wt
 
         user32 = ctypes.WinDLL("user32", use_last_error=True)
-        found: list[tuple[int, int, int, bool]] = []
+        found: list[tuple[int, int, int]] = []
 
         @ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
         def _cb(hwnd, _):
             buf = ctypes.create_unicode_buffer(64)
             user32.GetClassNameW(hwnd, buf, 64)
-            if buf.value == "WeWorkWindow":
+            if buf.value == "WeWorkWindow" and user32.IsWindowVisible(hwnd):
                 rect = wt.RECT()
                 user32.GetWindowRect(hwnd, ctypes.byref(rect))
                 w, h = rect.right - rect.left, rect.bottom - rect.top
                 if w > 400 and h > 300:
-                    found.append((hwnd, w, h, bool(user32.IsWindowVisible(hwnd))))
+                    found.append((hwnd, w, h))
             return True
 
         user32.EnumWindows(_cb, None)
-        if not found:
+        if len(found) < 2:
             return 0
-        alive = {d[0] for d in found if win._renders_content(d[0], d[1], d[2])}
-        # 先把可见的黑窗口收掉，别让它们继续盖在前面
-        for hwnd, _w, _h, visible in found:
-            if visible and hwnd not in alive:
+        for hwnd, w, h in found:
+            if not win._renders_content(hwnd, w, h):
                 user32.ShowWindow(hwnd, 0)  # SW_HIDE
                 hidden += 1
-        # 一个能渲染的都没有：把隐藏窗口逐个显示出来试，找到就停
-        if not alive:
-            for hwnd, w, h, visible in found:
-                if visible:
-                    continue
-                user32.ShowWindow(hwnd, 5)  # SW_SHOW
-                time.sleep(0.6)
-                if win._renders_content(hwnd, w, h):
-                    break
-                user32.ShowWindow(hwnd, 0)
     except Exception:  # noqa: BLE001
         return hidden
     return hidden
