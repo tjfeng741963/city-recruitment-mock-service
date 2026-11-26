@@ -158,6 +158,9 @@
               </el-tag>
               <el-tag v-if="takeover" type="warning" size="small" effect="light">人工接管中</el-tag>
               <span v-if="activeConversation.takeover" class="muted takeover-hint">历史接管标记</span>
+              <el-tag v-if="recipientBinding?.status === 'verified'" type="success" size="small" effect="light">
+                备注已核验
+              </el-tag>
             </div>
             <div class="chat-actions">
               <el-button
@@ -180,6 +183,29 @@
               <el-button size="small" type="danger" plain @click="restartConversation">重启会话</el-button>
               <el-button size="small" type="primary" @click="gotoArchive">面试登记</el-button>
             </div>
+          </div>
+
+          <div v-if="recipientBinding && recipientBlocked" class="recipient-alert" role="status">
+            <div>
+              <strong>{{ recipientBinding.status === 'awaiting' ? '等待企微核验' : '待确认发送对象' }}</strong>
+              <p v-if="recipientBinding.status === 'awaiting'">
+                在企微打开这位客户的会话，设置备注 <code>{{ recipientBinding.remark }}</code>。核验通过后会自动更新状态。
+              </p>
+              <p v-else-if="recipientBinding.status === 'conflict'">
+                企微有同名联系人。待回复消息已保留，请确认这位客户。
+              </p>
+              <p v-else>企微备注已变化或无法核验。待回复消息已保留，请重新确认。</p>
+            </div>
+            <el-button
+              v-if="recipientBinding.status !== 'awaiting'"
+              size="small"
+              type="warning"
+              plain
+              :loading="issuingRecipient"
+              @click="confirmRecipient"
+            >
+              确认发送对象
+            </el-button>
           </div>
 
           <el-alert
@@ -211,7 +237,7 @@
               @keydown.meta.enter.prevent="send"
             />
             <div class="input-foot">
-              <el-button type="primary" :loading="sending" :disabled="!draft.trim()" @click="send">
+              <el-button type="primary" :loading="sending" :disabled="!draft.trim() || recipientBlocked" @click="send">
                 发送
               </el-button>
             </div>
@@ -267,6 +293,9 @@ const msgError = ref('')
 const visibleCount = ref(50)
 const draft = ref('')
 const sending = ref(false)
+const issuingRecipient = ref(false)
+const recipientBinding = computed(() => activeConversation.value?.recipient_binding)
+const recipientBlocked = computed(() => recipientBinding.value != null && recipientBinding.value.status !== 'verified')
 const takeover = ref(false)
 const leftCollapsed = ref(false)
 
@@ -616,12 +645,30 @@ function gotoArchive(): void {
   })
 }
 
+async function confirmRecipient(): Promise<void> {
+  const conversation = activeConversation.value
+  if (!conversation || issuingRecipient.value || !recipientBlocked.value) return
+  const { device_code, customer_id } = conversation
+  issuingRecipient.value = true
+  try {
+    const { data } = await conversationsApi.issueRecipientRemark(device_code, customer_id)
+    const current = activeConversation.value
+    if (current?.device_code === device_code && current.customer_id === customer_id) {
+      current.recipient_binding = data
+    }
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.detail || '暂时无法生成会话备注')
+  } finally {
+    issuingRecipient.value = false
+  }
+}
+
 /* ---------- 发送 ---------- */
 async function send(): Promise<void> {
   const device = activeDevice.value
   const conversation = activeConversation.value
   const content = draft.value.trim()
-  if (!device || !conversation || !content || sending.value) return
+  if (!device || !conversation || !content || sending.value || recipientBlocked.value) return
   sending.value = true
   try {
     await conversationsApi.sendMessage(device.device_code, conversation.customer_id, content)
@@ -1033,6 +1080,33 @@ onBeforeUnmount(() => {
   flex-direction: column;
   flex: 1;
   min-width: 0;
+}
+
+.recipient-alert {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  margin: 8px 12px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--el-color-warning-light-5);
+  border-radius: var(--el-border-radius-base);
+  background: var(--el-color-warning-light-9);
+  color: var(--el-text-color-primary);
+  font-size: 13px;
+}
+
+.recipient-alert p {
+  margin: 3px 0 0;
+  line-height: 1.5;
+}
+
+.recipient-alert code {
+  color: inherit;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  user-select: all;
 }
 
 .chat-header {

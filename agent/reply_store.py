@@ -22,6 +22,7 @@ import sqlite3
 import time
 import uuid
 from contextlib import contextmanager
+from math import isfinite
 from pathlib import Path
 
 DB_PATH = Path(__file__).resolve().parent / "reply_log.db"
@@ -139,14 +140,20 @@ BEGIN
 END;
 """
 
-_RECOVERY_HAS_NEWER_MESSAGE = """EXISTS (
+_HAS_INBOUND_TEXT = "TRIM(COALESCE({row}.in_text,''),CHAR(9,10,11,12,13,32))<>''"
+_RECOVERY_HAS_NEWER_MESSAGE = f"""EXISTS (
     SELECT 1 FROM reply_log AS newer
-    WHERE newer.conv_id=selected.conv_id AND TRIM(COALESCE(newer.in_text,''))<>''
+    WHERE newer.conv_id=selected.conv_id AND {_HAS_INBOUND_TEXT.format(row="newer")}
       AND (COALESCE(newer.msg_time,0),newer.id)>(COALESCE(selected.msg_time,0),selected.id)
+)"""
+_RECIPIENT_UNSENT = f"""selected.attempts=0 AND {_HAS_INBOUND_TEXT.format(row="selected")} AND (
+    (selected.status IN ('held','failed') AND selected.last_step='recipient-blocked')
+    OR (selected.status='skipped' AND selected.last_step='skipped'
+        AND selected.error='会话没有可搜索的名字')
 )"""
 _SKIP_SUPERSEDED_RECOVERY = f"""UPDATE reply_log AS selected
     SET status='skipped',last_step='skipped',error='恢复排队后收到更新的消息',replied_at=?
-    WHERE last_step='recovery-queued' AND {_RECOVERY_HAS_NEWER_MESSAGE}"""
+    WHERE last_step IN ('recovery-queued','recipient-recovery-queued') AND {_RECOVERY_HAS_NEWER_MESSAGE}"""
 _LEGACY_PARTIAL = re.compile(r"^(?:已确认 [1-9]\d* 段文本，|开场第 \d+ 项未完成，已有 [1-9]\d* 项执行成功：)")
 
 
@@ -340,6 +347,71 @@ def record_unread(m: dict, *, allow_requeue: bool = True) -> bool:
         con.close()
 
 
+def mark_recipient_blocked(message_id: str, conv_id: str, reason: str) -> bool:
+    """Hold an inbound text before its first send attempt."""
+    reason = reason.strip()
+    if not reason:
+        raise ValueError("Recipient hold requires a reason")
+    with _welcome_conn() as con:
+        changed = con.execute(
+            f"""UPDATE reply_log AS selected SET status='held',last_step='recipient-blocked',
+                       error=?,replied_at=?
+                WHERE conv_id=? AND message_id=? AND status='pending' AND attempts=0
+                  AND {_HAS_INBOUND_TEXT.format(row="selected")}""",
+            (reason[:500], time.time(), str(conv_id), str(message_id)),
+        ).rowcount
+    return changed == 1
+
+
+def recipient_blocked(conv_id: str) -> dict | None:
+    """Latest inbound text awaiting recipient confirmation, including legacy skips."""
+    with _welcome_conn() as con:
+        row = con.execute(
+            f"""SELECT selected.* FROM reply_log AS selected
+                WHERE conv_id=? AND {_RECIPIENT_UNSENT} AND NOT {_RECOVERY_HAS_NEWER_MESSAGE}""",
+            (str(conv_id),),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def recipient_blocked_conversations(since: float) -> list[str]:
+    """Find recent recipient holds that remain the latest text in their conversation."""
+    with _welcome_conn() as con:
+        rows = con.execute(
+            f"""SELECT selected.conv_id FROM reply_log AS selected
+                WHERE msg_time>=? AND {_RECIPIENT_UNSENT} AND NOT {_RECOVERY_HAS_NEWER_MESSAGE}
+                ORDER BY selected.msg_time DESC, selected.id DESC""",
+            (since,),
+        ).fetchall()
+    return [row["conv_id"] for row in rows]
+
+
+def restore_recipient_blocked(conv_id: str, message_id: str, *, conv_name: str,
+                              cutoff: float, outbound_at: float | None) -> bool:
+    """Enqueue the latest eligible text once, after independently reading outbound history."""
+    name = conv_name.strip()
+    if not name or outbound_at is None or outbound_at < 0 or not isfinite(outbound_at) or not isfinite(cutoff):
+        return False
+    with _welcome_conn() as con:
+        changed = con.execute(
+            f"""UPDATE reply_log AS selected SET conv_name=?,status='pending',
+                       last_step='recipient-recovery-queued',error=NULL,replied_at=NULL
+                WHERE conv_id=? AND message_id=? AND msg_time>=? AND msg_time>?
+                  AND {_RECIPIENT_UNSENT} AND NOT {_RECOVERY_HAS_NEWER_MESSAGE}
+                  AND NOT EXISTS (
+                      SELECT 1 FROM welcome_deliveries w WHERE w.conv_id=selected.conv_id
+                        AND w.state NOT IN ('sent','cancelled')
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM reply_log AS attempt WHERE attempt.conv_id=selected.conv_id
+                        AND (attempt.status='unknown' OR attempt.last_step IN ('sending','partial'))
+                        AND MAX(COALESCE(attempt.replied_at,0),COALESCE(attempt.msg_time,0))>=selected.msg_time
+                  )""",
+            (name, str(conv_id), str(message_id), cutoff, outbound_at),
+        ).rowcount
+    return changed == 1
+
+
 def pending(include_failed: bool = True, limit: int = 200) -> list[dict]:
     """待发送的条目，按消息时间正序（失败的可一起补发）。"""
     statuses = ("pending", "failed") if include_failed else ("pending",)
@@ -348,7 +420,7 @@ def pending(include_failed: bool = True, limit: int = 200) -> list[dict]:
     try:
         rows = con.execute(
             f"SELECT * FROM reply_log WHERE status IN ({marks}) "
-            f"ORDER BY msg_time ASC, id ASC LIMIT ?",
+            f"AND last_step<>'recipient-blocked' ORDER BY msg_time ASC, id ASC LIMIT ?",
             (*statuses, limit),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -363,8 +435,9 @@ def begin_reply_attempt(message_id: str, conv_id: str, scene: str, reply_text: s
         result = con.execute(
             f"""UPDATE reply_log AS selected SET status='unknown', error=?, scene=?, reply_text=?,
                 last_step='sending', replied_at=? WHERE conv_id=? AND message_id=?
-                AND status IN ('pending','failed')
-                AND (last_step<>'recovery-queued' OR NOT {_RECOVERY_HAS_NEWER_MESSAGE})""",
+                AND status IN ('pending','failed') AND last_step<>'recipient-blocked'
+                AND (last_step NOT IN ('recovery-queued','recipient-recovery-queued')
+                     OR NOT {_RECOVERY_HAS_NEWER_MESSAGE})""",
             ("发送被中断时请核对企微实际落点", scene, reply_text, time.time(), str(conv_id), str(message_id)),
         )
         if result.rowcount == 0:
@@ -523,7 +596,7 @@ def hold_before(cutoff: float) -> int:
         result = con.execute(
             """UPDATE reply_log SET status='held',last_step='held',
                error='消息已超过自动恢复时限，请人工核对'
-               WHERE status IN ('pending','failed') AND last_step<>'recovery-queued'
+               WHERE status IN ('pending','failed') AND last_step NOT IN ('recovery-queued','recipient-blocked')
                  AND msg_time>0 AND msg_time<?""",
             (cutoff,),
         )
@@ -564,10 +637,12 @@ def queue_reply_recovery(conv_id: str, message_id: str, *, reason: str,
         ).fetchone()
         if row is None:
             return "not_found"
-        if row["last_step"] == "recovery-queued":
+        if row["last_step"] in ("recovery-queued", "recipient-recovery-queued"):
             return "already_queued"
         if row["last_step"] == "sending":
             return "in_progress"
+        if row["last_step"] == "recipient-blocked":
+            return "not_eligible"
         if row["last_step"] == "partial" or (
             row["status"] == "unknown" and _LEGACY_PARTIAL.match(row["error"] or "")
         ):

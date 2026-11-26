@@ -4,6 +4,7 @@ import type { FastifyInstance } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
 import { canAccessDevice, getUserScope } from "../../auth/user-scopes.js";
 import { DeviceBridgeStore } from "./device-bridge.js";
+import { isDirectRecipient, recipientBindings, reportRecipientBinding } from "./recipient-binding.js";
 import { cloudAgentRuntime, hasPendingCloudAssignment, isAssignedCloudAgent, protectedMachineConnection, recordCloudAgentHeartbeat } from "../agent/cloud-agent-assignment.js";
 import { queuePendingDifyGroupNotifications } from "../dify/dify-group-notification.js";
 import { MessageEventService } from "./message-events.js";
@@ -105,7 +106,8 @@ export function registerDeviceBridgeRoutes(
     const code = req.params.code;
     const token = (req.headers.authorization ?? "").replace(/^Bearer /, "");
     // 8090 服务间调用走 X-Profile-Token（常熟比较），设备自身仍走 device token。
-    if (!authorizeProfileRequest(req)) {
+    const profileRequest = authorizeProfileRequest(req);
+    if (!profileRequest) {
       if (!store.authenticate(code, token)) return reply.code(401).send({ detail: "Invalid device token" });
       if (!store.enabled(code)) return reply.code(403).send({ detail: "Device disabled" });
     }
@@ -201,8 +203,10 @@ export function registerDeviceBridgeRoutes(
       "SELECT status,COUNT(*) AS count FROM bridge_commands WHERE device_code=? AND status IN ('queued','claimed','unknown') GROUP BY status",
     ).all(code) as Array<{ status: keyof typeof commandQueue; count: number }>;
     for (const row of commandCounts) commandQueue[row.status] = row.count;
+    const account = profileRequest ? "" : store.status(code)?.account_id ?? "";
     return {
       version: newer,
+      ...(account ? { recipient_bindings_account_id: account, recipient_bindings: recipientBindings(db, code, account) } : {}),
       command_queue: commandQueue,
       interval_seconds: positive(params.interval_seconds, 20),
       cooldown: positive(params.cooldown, 8),
@@ -246,6 +250,30 @@ export function registerDeviceBridgeRoutes(
       ),
     };
   });
+  app.post<DeviceRequest>("/api/v1/bridge/devices/:code/recipient-binding", async (req, reply) => {
+    const { code } = req.params;
+    const token = (req.headers.authorization ?? "").replace(/^Bearer /, "");
+    if (!store.authenticate(code, token)) return reply.code(401).send({ detail: "Invalid device token" });
+    if (!store.enabled(code)) return reply.code(403).send({ detail: "Device disabled" });
+    const body = req.body ?? {};
+    const account_id = field(body, "account_id", 128);
+    const conversation_id = field(body, "conversation_id");
+    const status = field(body, "status", 32);
+    const remark = field(body, "remark", 32);
+    if (!account_id || store.status(code)?.account_id !== account_id) {
+      return reply.code(409).send({ detail: "设备当前登录账号未确认" });
+    }
+    if (!isDirectRecipient(account_id, conversation_id) ||
+      (status !== "conflict" && status !== "verified" && status !== "needs_confirmation")) {
+      return reply.code(422).send({ detail: "会话或核验结果无效" });
+    }
+    if (!db.prepare("SELECT 1 FROM bridge_contacts WHERE device_code=? AND contact_id=?").get(code, conversation_id)) {
+      return reply.code(404).send({ detail: "会话尚未同步" });
+    }
+    const binding = reportRecipientBinding(db, code, { account_id, conversation_id, status, remark });
+    return binding ?? reply.code(409).send({ detail: "核验结果已过期，请刷新会话绑定" });
+  });
+
   app.get<{ Params: { code: string } }>("/api/v1/bridge/devices/:code", async (req, reply) => {
     if (!canAccessDevice(getUserScope(db, req.auth!), req.params.code)) return reply.code(403).send({ detail: "Device scope required" });
     store.expireClaims(req.params.code);

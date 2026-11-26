@@ -36,6 +36,56 @@ _takeover_sessions: set[str] = set()
 _abandoned_sessions: set[str] = set()
 
 
+# Recipient bindings may authorize sending, so only a live, account-scoped
+# snapshot can supply them. Publish the account and rows together.
+_recipient_binding_snapshot: tuple[str, dict[str, dict]] = ("", {})
+_RECIPIENT_BINDING_STATES = {"conflict", "awaiting", "verified", "needs_confirmation"}
+
+
+def recipient_bindings(account_id: str) -> dict[str, dict]:
+    account, bindings = _recipient_binding_snapshot
+    if not account or account_id != account:
+        return {}
+    return {cid: dict(binding) for cid, binding in bindings.items()}
+
+
+def recipient_binding_account_active(account_id: str) -> bool:
+    account, _ = _recipient_binding_snapshot
+    return bool(account and account_id == account)
+
+
+def _parse_recipient_binding_snapshot(remote: dict) -> tuple[str, dict[str, dict]]:
+    account = remote.get("recipient_bindings_account_id")
+    rows = remote.get("recipient_bindings")
+    if not isinstance(account, str) or not account.strip() or not isinstance(rows, list):
+        return "", {}
+    account = account.strip()
+    prefix, suffix = f"S:{account}_", f"_{account}"
+    bindings, duplicates = {}, set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        cid, remark, status = (row.get(key) for key in ("conversation_id", "remark", "status"))
+        if not all(isinstance(field, str) for field in (cid, remark, status)):
+            continue
+        if status not in _RECIPIENT_BINDING_STATES:
+            continue
+        if cid.startswith(prefix):
+            other = cid[len(prefix):]
+        elif cid.startswith("S:") and cid.endswith(suffix):
+            other = cid[2:-len(suffix)]
+        else:
+            continue
+        if not other or other == account:
+            continue
+        if cid in bindings:
+            duplicates.add(cid)
+        bindings[cid] = {"conversation_id": cid, "remark": remark, "status": status}
+    for cid in duplicates:
+        del bindings[cid]
+    return account, bindings
+
+
 def device_scripts() -> list[dict]:
     """当前生效的设备话术（拉不到远端时为 config.remote.json 兜底值，可能为空）。"""
     return list(_device_scripts)
@@ -138,6 +188,8 @@ class RemoteConfig:
         # 调用方据此决定要不要重建 Brain——Brain 在 main() 只构造一次，
         # 光改 cfg["brain"]["mode"] 不会切换行为。
         self.last_changed: list[str] = []
+        global _recipient_binding_snapshot
+        _recipient_binding_snapshot = ("", {})
         cached = load_remote_cache(self.cache_path)
         if cached:
             self.version = str(cached.get("version") or "")
@@ -175,6 +227,8 @@ class RemoteConfig:
                 self.log_fn("[远端配置] 拉取失败（忽略，用本地/缓存兜底）")
             return False
         self._last_ok = True
+        global _recipient_binding_snapshot
+        _recipient_binding_snapshot = _parse_recipient_binding_snapshot(remote)
         version = str(remote.get("version") or "")
         if version != self.version:
             scripts = remote.get("scripts")
