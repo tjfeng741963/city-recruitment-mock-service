@@ -630,6 +630,22 @@ def pending_count() -> int:
         return 0
 
 
+def _read_client_commit() -> str:
+    """当前安装的客户端 git 版本；读不到返回空串。
+
+    心跳（RuntimeHeartbeat 和 _send_bridge 两条通道）和配置同步都要用。
+    空串是合法值：开发环境或没装更新器的旧安装没有 .client-version.json。
+    """
+    try:
+        data = json.loads((ROOT / ".client-version.json").read_text(encoding="utf-8-sig"))
+        candidate = data.get("commit") if isinstance(data, dict) else None
+        if isinstance(candidate, str) and re.fullmatch(r"[0-9a-fA-F]{40}", candidate):
+            return candidate.lower()
+    except (OSError, ValueError, TypeError):
+        pass
+    return ""
+
+
 class RuntimeHeartbeat:
     """A bounded connection heartbeat driven by recent sender observations."""
 
@@ -663,6 +679,9 @@ class RuntimeHeartbeat:
             sync = "unknown"
         bridge_state = "online" if wecom == "online" and account else "scanning" if wecom == "login_required" else "offline"
         return {"state": bridge_state, "account_id": account,
+                # commit 让服务端知道这台机器装的是哪个版本，看板上直接能看；
+                # 旧服务端忽略未知字段，不影响心跳。
+                "commit": _read_client_commit(),
                 "runtime": {"wecom_available": wecom == "online" and bool(account),
                             "reply_ready": reason == "ready", "reason": reason,
                             "sync": sync, "backlog": min(1_000_000, queued + remaining)}}
@@ -1079,19 +1098,8 @@ class Reporter:
 
     @staticmethod
     def _client_commit() -> str:
-        """当前安装的客户端 git 版本；读不到返回空串。
-
-        心跳和配置同步都要用，抽出来避免两处各读一遍。空串是合法值：
-        开发环境或没装更新器的旧安装没有 .client-version.json。
-        """
-        try:
-            data = json.loads((ROOT / ".client-version.json").read_text(encoding="utf-8-sig"))
-            candidate = data.get("commit") if isinstance(data, dict) else None
-            if isinstance(candidate, str) and re.fullmatch(r"[0-9a-fA-F]{40}", candidate):
-                return candidate.lower()
-        except (OSError, ValueError, TypeError):
-            pass
-        return ""
+        """当前安装的客户端 git 版本；与 RuntimeHeartbeat 共用同一份读取逻辑。"""
+        return _read_client_commit()
 
     def _send_config_sync(self) -> None:
         """Background only: refresh and report configuration identity, not sessions."""

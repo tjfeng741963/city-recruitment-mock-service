@@ -257,3 +257,26 @@ def test_runtime_heartbeat_remains_connected_while_sender_stalls(monkeypatch):
     assert stalled["runtime"]["wecom_available"] is True
     assert stalled["runtime"]["reply_ready"] is False
     assert stalled["runtime"]["reason"] == "loop_stalled"
+
+
+def test_runtime_heartbeat_payload_carries_client_commit(monkeypatch, tmp_path):
+    """实际在跑的心跳是 RuntimeHeartbeat，不是 _send_bridge——commit 必须挂在这条上。
+
+    2026-11-27 现场：只改了 _send_bridge，线上 client_commit 一直是空串，
+    因为 runtime_heartbeat 不为 None 时 _send_bridge 根本不执行。
+    """
+    autopilot = _load_autopilot()
+    commit = "a" * 40
+    (tmp_path / ".client-version.json").write_text(json.dumps({"commit": commit}), encoding="utf-8")
+    monkeypatch.setattr(autopilot, "ROOT", tmp_path)
+    heartbeat = autopilot.RuntimeHeartbeat(FakeBridge())
+    heartbeat.observe("online", "fixture-account", reason="ready")
+    assert heartbeat.payload()["commit"] == commit
+
+
+def test_runtime_heartbeat_payload_commit_is_empty_without_version_file(monkeypatch, tmp_path):
+    autopilot = _load_autopilot()
+    monkeypatch.setattr(autopilot, "ROOT", tmp_path)
+    heartbeat = autopilot.RuntimeHeartbeat(FakeBridge())
+    heartbeat.observe("online", "fixture-account", reason="ready")
+    assert heartbeat.payload()["commit"] == ""
