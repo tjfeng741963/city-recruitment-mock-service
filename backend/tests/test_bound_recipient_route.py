@@ -1,4 +1,5 @@
 import sqlite3
+from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import MagicMock
 
@@ -131,3 +132,24 @@ def test_recipient_ocr_uses_language_for_expected_name(monkeypatch, name, langua
 
     monkeypatch.setattr(agent.subprocess, "run", recognize)
     assert agent._recognize_recipient_heading((1, b"heading"), name) == name
+
+
+@pytest.mark.parametrize(("name", "first", "fallback_used"), [
+    ("\u91ca\u6000", "", True),
+    ("\u91ca\u6000", "\u5176\u4ed6\u8054\u7cfb\u4eba", False),
+    ("Dark", "", False),
+])
+def test_title_ocr_uses_grayscale_only_after_empty_chinese_read(monkeypatch, name, first, fallback_used):
+    agent = load_autopilot()
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
+    used = []
+
+    def recognize(command, *, env, **_):
+        frame = Path(env["CITY_RECRUIT_HEADING_IMAGE"]).read_bytes()
+        used.append(frame)
+        return CompletedProcess(command, 0, stdout=(first if frame == b"mono" else name).encode("utf-8"))
+
+    monkeypatch.setattr(agent.subprocess, "run", recognize)
+    result = agent._recognize_recipient_heading((1, b"mono", b"gray"), name)
+    assert result == (name if fallback_used else first)
+    assert used == ([b"mono", b"gray"] if fallback_used else [b"mono"])

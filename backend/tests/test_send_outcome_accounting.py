@@ -231,3 +231,70 @@ def test_approved_recovery_requeues_only_selected_unknown_record(tmp_path):
     assert records.queue_reply_recovery("S:customer", "10", reason="checked", operator="test") == "queued"
     rows = records.pending(include_failed=True)
     assert len(rows) == 1 and rows[0]["status"] == "pending"
+
+
+def _rich_plain_text(*parts):
+    def sized(tag, payload):
+        length = len(payload)
+        prefix = bytes((length,)) if length < 128 else bytes((0x80 | (length & 127), length >> 7))
+        return tag + prefix + payload
+
+    return b"".join(
+        sized(b"\x0a", b"\x08\x00" + sized(b"\x12", sized(b"\x0a", part.encode("utf-8"))))
+        for part in parts
+    )
+
+
+@pytest.mark.parametrize(("case", "status"), [
+    ("exact", "sent"),
+    ("previous_id", "unknown"),
+    ("wrong_body", "unknown"),
+    ("duplicate", "unknown"),
+    ("other_new_outbound", "unknown"),
+    ("foreign_core_cid", "unknown"),
+    ("no_final_enter", "unknown"),
+    ("invalid_fragment", "unknown"),
+])
+def test_guarded_opening_confirms_exact_fragmented_outbound(monkeypatch, case, status):
+    agent = load_autopilot()
+    cid = "S:self_one"
+    first = "Long first line " * 10
+    body = first + "\U0001f600" + "\nsecond line"
+    exact = _rich_plain_text(first, "\U0001f600", "\nsecond line")
+    agent._guard_recipient = True
+    store = MagicMock()
+    store.self_id.return_value = "self"
+    store.contacts.return_value = {"one": "Dark"}
+    c = store._conn.return_value
+    rows = [(42, exact)]
+    if case == "wrong_body":
+        rows = [(42, _rich_plain_text(first, "\nsecond line"))]
+    if case == "invalid_fragment":
+        rows = [(42, exact[:-1])]
+    if case == "duplicate":
+        rows.append((43, exact))
+    if case == "other_new_outbound":
+        rows.append((43, "Another message"))
+    c.execute.return_value.fetchall.side_effect = [
+        rows if case == "previous_id" else [],
+        rows,
+    ]
+    heading = (1, b"heading")
+    monkeypatch.setattr(agent, "_recipient_heading", lambda: heading)
+    monkeypatch.setattr(agent, "_recognize_recipient_heading", lambda *_: "Dark")
+
+    def send(_store, _name, _body, *, log, **_):
+        log("\u6b65\u9aa40 foreground")
+        agent.win.tap("enter")
+        log("\u6b65\u9aa41 selected")
+        log("\u6b65\u9aa43 checked")
+        if case != "no_final_enter":
+            agent.win.tap("enter")
+            log("\u6b65\u9aa44 sent")
+        return {"ok": True, "conversation_id": "S:self_other" if case == "foreign_core_cid" else ""}
+
+    agent.core_send.send.side_effect = send
+    actual, _, outbound_id = agent._send_text(store, "Dark", cid, body, route="opening", log_fn=MagicMock())
+    assert actual == status
+    assert outbound_id == (cid + ":42" if status == "sent" else "")
+    agent.core_send.send.assert_called_once()

@@ -2029,7 +2029,8 @@ def _refresh_recipient_recoveries(store: Store) -> None:
 
 _guard_recipient = False
 _recipient_binding_enabled = False
-_recipient_proof: tuple[str, tuple[int, bytes]] | None = None
+_RecipientHeading = tuple[int, bytes, bytes]
+_recipient_proof: tuple[str, _RecipientHeading] | None = None
 _RECIPIENT_BLOCKED = "发送前无法核对企微当前会话，已保留待回复记录"
 
 
@@ -2059,7 +2060,7 @@ def _unique_direct_recipient(store: Store, name: str, cid: str) -> bool:
         return False
 
 
-def _recipient_heading() -> tuple[int, bytes] | None:
+def _recipient_heading() -> _RecipientHeading | None:
     """Read the title from the selected, foreground WeCom main window."""
     from screenshot import encode_png, grab
 
@@ -2105,7 +2106,22 @@ def _recipient_heading() -> tuple[int, bytes] | None:
             for row in range(scale):
                 pos = (origin + row * w) * 4
                 image[pos:pos + 4 * scale] = b"\0" * (4 * scale)
-        return hwnd, encode_png(w, h, image)
+        # Preserve the original grayscale strokes for short Chinese titles that
+        # Windows OCR cannot read after binarization. Both crops share one frame.
+        gray_margin = 14
+        gw = (right - left + 5) * 2 + 2 * gray_margin
+        gh = (bottom - top + 5) * 2 + 2 * gray_margin
+        gray = bytearray(b"\xff" * (gw * gh * 4))
+        for y in range(top - 2, bottom + 3):
+            for x in range(left - 2, right + 3):
+                offset = (width * y + x) * 4
+                shade = sum(pixels[offset:offset + 3]) // 3
+                point = ((2 * (y - top + 2) + gray_margin) * gw
+                         + 2 * (x - left + 2) + gray_margin) * 4
+                pair = bytes((shade, shade, shade, 255)) * 2
+                gray[point:point + 8] = pair
+                gray[point + gw * 4:point + gw * 4 + 8] = pair
+        return hwnd, encode_png(w, h, image), encode_png(gw, gh, gray)
     except Exception:
         return None
 
@@ -2170,20 +2186,27 @@ def _recipient_search_field() -> tuple[int, bytes] | None:
         return None
 
 
-def _recognize_recipient_heading(heading: tuple[int, bytes], name: str) -> str:
+def _recognize_recipient_heading(heading: tuple[int, bytes] | _RecipientHeading, name: str) -> str:
     try:
         with tempfile.TemporaryDirectory(prefix="city-recruit-heading-") as folder:
             file = Path(folder) / "heading.png"
-            file.write_bytes(heading[1])
             # Chinese OCR can misread short Latin names and issued remark codes.
             language = "en-US" if name.isascii() and re.search(r"[A-Za-z]", name) else "zh-Hans-CN"
             env = dict(os.environ, CITY_RECRUIT_HEADING_IMAGE=str(file), CITY_RECRUIT_HEADING_LANGUAGE=language)
             ps = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
-            result = subprocess.run(
-                [str(ps), "-NoProfile", "-NonInteractive", "-Command", _RECIPIENT_OCR_SCRIPT],
-                capture_output=True, env=env, timeout=8, creationflags=_CREATE_NO_WINDOW,
-            )
-        return result.stdout.decode("utf-8-sig").strip() if result.returncode == 0 else ""
+            images = heading[1:2] if name.isascii() else heading[1:]
+            for image in images:
+                file.write_bytes(image)
+                result = subprocess.run(
+                    [str(ps), "-NoProfile", "-NonInteractive", "-Command", _RECIPIENT_OCR_SCRIPT],
+                    capture_output=True, env=env, timeout=8, creationflags=_CREATE_NO_WINDOW,
+                )
+                if result.returncode:
+                    return ""
+                text = result.stdout.decode("utf-8-sig").strip()
+                if text:
+                    return text
+        return ""
     except (OSError, KeyError, UnicodeError, subprocess.TimeoutExpired):
         return ""
 
@@ -2261,6 +2284,8 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
     heading = None
     search_before = None
     phase = "start"
+    send_enter_verified = False
+    send_enter_dispatched = False
     started = monotonic()
     attempt_id = uuid4().hex
     if route != "manual":
@@ -2271,6 +2296,7 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
             sender_pid=os.getpid(), **context, **_foreground_sample(), **fields)
 
     def authorize_enter() -> bool:
+        nonlocal send_enter_verified
         if phase == "send":
             if require_recipient and _recipient_account(store) != account:
                 return False
@@ -2279,7 +2305,8 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
                 if (current_account != account or not remote_cfg.recipient_binding_account_active(account)
                         or remote_cfg.recipient_bindings(account).get(cid) != binding):
                     return False
-            return bool(heading and _recipient_heading() == heading)
+            send_enter_verified = bool(heading and _recipient_heading() == heading)
+            return send_enter_verified
         if phase == "search" and not _recipient_binding_enabled:
             return True
         if phase != "search" or not search_before:
@@ -2293,7 +2320,7 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
         return current == search
 
     def on_step(message: str) -> None:
-        nonlocal heading, search_before, phase
+        nonlocal heading, search_before, phase, send_enter_dispatched
         # The core's start message contains the entire body. Keep only the
         # structured start event and avoid the clipboard hint in step 3.
         if message.startswith("开始发送 ->"):
@@ -2312,6 +2339,8 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
             phase = "send"
             if not heading or _recipient_heading() != heading:
                 raise _RecipientUnverified
+        if step == "步骤4":
+            send_enter_dispatched = send_enter_verified
         if step in ("步骤0", "步骤3", "步骤4"):
             event(f"core_{step[-1]}")
         if step == "步骤3":
@@ -2359,9 +2388,23 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
     elif not target_match and route != "manual":
         status, reason = "unknown", "target_conversation_missing"
         detail = "已执行发送，企微库未确认目标会话，请核对实际落点"
+        if (route in ("opening", "auto") and send_enter_dispatched and readback_before is not None
+                and account and _recipient_account(store) == account):
+            after = _outbound_snapshot(store, cid, fragmented_only=True)
+            normalized = _normalize_outbound_text(body)
+            new_outbound = {mid: text for mid, text in (after or {}).items()
+                            if mid not in readback_before}
+            candidates = [mid for mid, text in new_outbound.items() if text == normalized]
+            if len(new_outbound) == 1 and len(candidates) == 1:
+                status, reason = "sent", "fragmented_target_message_confirmed"
+                detail = "已发送并回读确认"
+                message_id = f"{cid}:{candidates[0]}"
+                target_match = True
+            elif len(new_outbound) > 1:
+                reason = "target_message_ambiguous"
     else:
         after = _outbound_snapshot(store, cid)
-        normalized = body.replace("\r\n", "\n").replace("\r", "\n").strip()
+        normalized = _normalize_outbound_text(body)
         candidates = [mid for mid, text in (after or {}).items()
                       if readback_before is not None and mid not in readback_before and text == normalized]
         if len(candidates) == 1:
@@ -3988,7 +4031,50 @@ def _session_names(store: Store) -> set[str]:
     return set(_session_index(store))
 
 
-def _outbound_snapshot(store: Store, contact_id: str) -> dict[str, str] | None:
+def _normalize_outbound_text(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def _fragmented_outbound_text(data: object) -> str | None:
+    """Decode only the observed text-only WeCom envelope, including every fragment."""
+    if not isinstance(data, (bytes, bytearray)):
+        return None
+
+    def field(buf, offset, tag):
+        if offset >= len(buf) or buf[offset] != tag:
+            raise ValueError("unexpected field")
+        offset += 1
+        length = 0
+        for shift in range(0, 35, 7):
+            byte = buf[offset]
+            offset += 1
+            length |= (byte & 0x7f) << shift
+            if byte < 0x80:
+                end = offset + length
+                if end > len(buf):
+                    raise ValueError("truncated field")
+                return buf[offset:end], end
+        raise ValueError("invalid field length")
+
+    fragments = []
+    offset = 0
+    try:
+        while offset < len(data):
+            segment, offset = field(data, offset, 0x0a)
+            if not segment.startswith(b"\x08\x00"):
+                return None
+            inner, consumed = field(segment, 2, 0x12)
+            text, end = field(inner, 0, 0x0a)
+            if consumed != len(segment) or end != len(inner):
+                return None
+            fragments.append(text.decode("utf-8"))
+    except (IndexError, ValueError):
+        return None
+    return "".join(fragments) if len(fragments) > 1 else None
+
+
+def _outbound_snapshot(store: Store, contact_id: str, *,
+                       fragmented_only: bool = False) -> dict[str, str] | None:
     """Read the decrypted database, preserving the difference between empty and unreadable."""
     try:
         me = store.self_id()
@@ -4004,10 +4090,11 @@ def _outbound_snapshot(store: Store, contact_id: str) -> dict[str, str] | None:
                    ORDER BY send_time DESC, message_id DESC LIMIT 100""",
                 (contact_id, me),
             ).fetchall()
-        return {
-            str(message_id): _pb_text(content).replace("\r\n", "\n").replace("\r", "\n").strip()
-            for message_id, content in rows if message_id
-        }
+        if fragmented_only:
+            return {str(message_id): _normalize_outbound_text(_fragmented_outbound_text(content) or "")
+                    for message_id, content in rows if message_id}
+        return {str(message_id): _normalize_outbound_text(_pb_text(content))
+                for message_id, content in rows if message_id}
     except Exception:  # noqa: BLE001
         return None
 
