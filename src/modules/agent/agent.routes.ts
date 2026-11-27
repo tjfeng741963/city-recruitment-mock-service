@@ -13,6 +13,7 @@ import { isDirectRecipient, issueRecipientRemark, readRecipientBinding, recipien
 import { NOOP_NOTIFIER, type StreamNotifier } from "../messaging/stream-events.js";
 import { readWeComConfig } from "../wecom/wecom-config.js";
 import { listReminderTasks } from "./followup.js";
+import { cancelInvalidRecontacts } from "../recontact/recontact.js";
 import { loadFactories, parseDeviceData, readDeviceFactoryIds, receptionFactoryIds, resolveDevicePosition } from "../../shared/device-factories.js";
 import { resolveDeviceInviteGroup, selectableDeviceInviteGroups } from "../../shared/invite-group.js";
 
@@ -612,7 +613,15 @@ export function registerAgentRoutes(app: FastifyInstance, db: DatabaseSync, noti
     // 会话页按 role 决定气泡左右；agent_messages 只有 direction，这里补一层映射。
     return { items: rows.map((row) => ({ ...row, role: row.direction === "inbound" ? "customer" : "agent" })), takeover: false };
   });
-  app.post<{ Body: { device_code?: string; customer_id?: number; takeover?: boolean } }>("/api/v1/agent/takeover", async (request, reply) => { const deviceCode = request.body?.device_code ?? ""; if (!canAccessDevice(getUserScope(db, request.auth!), deviceCode)) return reply.code(403).send({ detail: "Device scope required" }); const result = db.prepare("UPDATE agent_conversations SET takeover=? WHERE device_code=? AND customer_id=?").run(request.body?.takeover ? 1 : 0, deviceCode, request.body?.customer_id ?? 0); return result.changes ? { success: true } : reply.code(404).send({ detail: "Conversation not found" }); });
+  app.post<{ Body: { device_code?: string; customer_id?: number; takeover?: boolean } }>("/api/v1/agent/takeover", async (request, reply) => {
+    const deviceCode = request.body?.device_code ?? "";
+    if (!canAccessDevice(getUserScope(db, request.auth!), deviceCode)) return reply.code(403).send({ detail: "Device scope required" });
+    const customerId = request.body?.customer_id ?? 0;
+    const takeOver = Boolean(request.body?.takeover);
+    const result = db.prepare("UPDATE agent_conversations SET takeover=? WHERE device_code=? AND customer_id=?").run(Number(takeOver), deviceCode, customerId);
+    if (result.changes && takeOver) cancelInvalidRecontacts(db,{device:deviceCode,customerId});
+    return result.changes ? { success: true } : reply.code(404).send({ detail: "Conversation not found" });
+  });
   app.post<{ Body: { device_code?: string; customer_id?: number; content?: string } }>("/api/v1/agent/manual-reply", async (request, reply) => {
     const deviceCode = request.body?.device_code ?? "";
     if (!canAccessDevice(getUserScope(db, request.auth!), deviceCode)) return reply.code(403).send({ detail: "Device scope required" });

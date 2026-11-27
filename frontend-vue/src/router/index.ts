@@ -1,7 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { hasToken } from '../api/auth'
 
-/** 路由表：与旧前端的 23 个菜单项一一对应，组件按域懒加载 */
+/** 业务页面按路由懒加载。 */
 const router = createRouter({
   history: createWebHistory(),
   routes: [
@@ -96,6 +96,12 @@ const router = createRouter({
           name: 'conversations',
           component: () => import('../views/ConversationView.vue'),
           meta: { title: '对话管理', group: '日常招聘' },
+        },
+        {
+          path: 'recontact',
+          name: 'recontact',
+          component: () => import('../views/RecontactView.vue'),
+          meta: { title: '复聊板块', group: '日常招聘' },
         },
         {
           path: 'archive',

@@ -77,7 +77,7 @@ function groupIcon(key: string): string {
   return ({operations:'ChatDotRound',basic:'Briefcase',knowledge:'ChatLineRound',system:'Tools'} as Record<string,string>)[key] || 'Grid'
 }
 function itemIcon(path: string): string {
-  return ({'/conversations':'ChatLineRound','/candidates':'User','/archive':'Tickets','/agent-devices':'Monitor','/cities':'Location','/service-positions':'Briefcase','/recruitment-flow':'Share','/knowledge':'Reading','/media':'Picture','/users':'Lock','/settings':'Setting','/recruiters':'Avatar'} as Record<string,string>)[path] || 'Star'
+  return ({'/conversations':'ChatLineRound','/recontact':'ChatDotSquare','/candidates':'User','/archive':'Tickets','/agent-devices':'Monitor','/cities':'Location','/service-positions':'Briefcase','/recruitment-flow':'Share','/knowledge':'Reading','/media':'Picture','/users':'Lock','/settings':'Setting','/recruiters':'Avatar'} as Record<string,string>)[path] || 'Star'
 }
 function menuTarget(path: string): string {
   if (path === route.path) return route.fullPath

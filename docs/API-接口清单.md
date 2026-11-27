@@ -284,7 +284,7 @@ Dify 有序回复支持 `text`（`content`）、`image` 和 `video`（`name` 为
 - 节点 `status=disabled` 时保留其节点与连接供后台编辑；Windows 客户端跳过该节点内容，只沿 `default` 或 `any_reply` 主兜底继续，不执行其关键词/超时条件。等待节点和分支节点按优先级从高到低执行不区分大小写的关键词包含匹配；分支未命中时沿 `default` 出口继续。启用的复聊节点仍必须由启用的等待节点通过唯一 `timeout` 边进入。在途会话使用已存流程快照，不因新版本保存而重写。
 - `/agent/flow`、`/agent/state` 的逐会话状态只接受对应 `device_code` 的设备令牌。流程停用时下发空节点阻止新会话，已开始会话保留本地快照。
 - 管理员可只读调用 `GET /agent/state?device_code=:code&summary=1`，必须指定单个设备码。响应 `{device_code,items:[{position_id,flow_version,node_key,phase,count,updated_at}]}` 按岗位、流程版本、节点和阶段汇总，`updated_at` 为组内最新上报时间，统一返回带 `Z` 的 UTC ISO 8601 格式；不返回会话 ID、会话名、错误详情、正文或快照。该镜像汇总不能证明企微消息已经送达。管理员不能通过此接口读取逐会话明细，设备令牌不能使用管理员汇总模式。
-- `POST /agent/state`：`{device_code,items:[{session_key,position_id,flow_version,node_key,step_index,phase,revision,await_since,followup_sent_at,followup_round,snapshot,conv_name,wait_minutes,last_inbound_at,last_error}]}`，每批最多 200 条。两个等待/复聊时间字段使用 ISO 时间或 null，`last_inbound_at` 为 Unix 秒。游标按 `(device_code,session_key)` 隔离，仅接受更大的 `revision`；返回 `stale` 标识被拒绝的旧镜像。
+- `POST /agent/state`：`{device_code,items:[{session_key,position_id,flow_version,node_key,step_index,phase,revision,await_since,followup_sent_at,followup_round,snapshot,conv_name,wait_minutes,last_inbound_at,recontact_inbound_id,last_error}]}`，每批最多 200 条。两个等待/复聊时间字段使用 ISO 时间或 null，`last_inbound_at` 为 Unix 秒。游标按 `(device_code,session_key)` 隔离，仅接受更大的 `revision`；返回 `stale` 标识被拒绝的旧镜像。复聊客户端用 `recontact_inbound_id` 携带对应入站消息标识，供服务器核对超时复聊。支持复聊的客户端请求 `GET /agent/flow?recontact=1` 时，本轮下发的对应等待节点交给服务端调度。
 - `phase` 只接受 `idle/running/awaiting/followup_due/followup_sent/replied/expired/held`。发件箱投递结果在客户端 SQLite 中记录，不用 `phase` 代替。服务端 `agent_flow_outbox` 是预留表，本轮没有投递明细上报接口。
 
 **返回**
@@ -384,6 +384,31 @@ HTTP 仍是 200——调用方按 `ok` 判断，不要按状态码。模型输�
 | POST | `/api/v1/kb-publish/apply` | 发布 |
 | GET | `/api/v1/kb-publish/history` | 发布历史 |
 | GET | `/api/v1/agent/devices` | 设备绑定列表 |
+
+---
+
+## 六、复聊板块
+
+接口前缀为 `/api/v1/recontact`，管理员及招聘者通过用户令牌访问有权限的岗位和企微会话。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/options` | 返回岗位、设备、可用素材及该岗位的工作地点、面试点。`can_edit_rules` 标记是否有权编辑自动规则。设备带 `position_ids`、`recontact_enabled`、`recontact_account_ready`。缺少坐标的工作地址标记为 `mappable=false`。 |
+| PUT | `/devices/:code` | 提交 `{enabled}`，为有权限的当前企微账号开启或暂停复聊。开启需要设备在线、心跳在 60 秒内且已同步该账号的私聊。离线时也可暂停。切换登录账号会撤销授权，须重新开启。 |
+| GET | `/rules?position_id=` | 返回该岗位已保存的自动复聊规则。 |
+| PUT | `/rules/:position_id/:stage` | 管理员保存阶段规则，返回 `{item}`。阶段为 `work_location` 或 `interview_invite`。提交 `enabled`、`wait_minutes`、`start_minute`、`end_minute` 和 `parts`。 |
+| GET | `/templates?position_id=` | 返回老客户复聊模板。省略岗位时，返回所有有权限的岗位模板。 |
+| POST | `/templates` | 提交 `position_id`、`name`、`parts` 创建模板，返回 `{item}`。 |
+| PUT | `/templates/:id` | 按原岗位更新模板，返回 `{item}`。 |
+| GET | `/candidates?position_id=&device_code=&days=` | 筛选老客户会话。`days` 默认 3，`reason` 为不可选原因。 |
+| POST | `/batches/preview` | 提交 `conversation_ids`、`days` 和 `template_ids`（按岗位编号映射模板编号）或单个 `template_id`。返回逐人消息组、不可选原因及确认令牌。 |
+| POST | `/batches` | 提交预览返回的 `token`。创建前重新核对岗位、会话、最近消息与素材。返回 `{created,skipped:[{id,reason}]}`。同一用户重复确认取回已保存的结果。 |
+| GET | `/jobs?position_id=&device_code=&status=&q=` | 返回复聊任务及逐条发送状态。`q` 匹配候选人昵称或完整客户编号。 |
+| POST | `/jobs/:id/review` | 提交 `resolution` 为 `sent`、`not_sent` 或 `cancel`，处理待核对任务。 |
+
+`parts` 是有序数组，每项含 `kind`、`value`、`delay_ms`。类型为 `text`、`image`、`video`、`location`，值分别为文案、素材名称或保存地点的键。`delay_ms` 是与上一条发送确认之间的间隔。发送时段用北京时间的当日分钟数，允许设置在 09:00–21:00 内。确认令牌供创建者在 15 分钟内使用，一次最多预览 100 个会话。
+
+Windows 使用设备令牌。已有 `POST /api/v1/bridge/devices/:code/claim` 带 `?recontact=1` 时表示客户端可领取复聊指令。复聊指令使用 `kind=recontact`，包含 `recontact_kind`、`recontact_account_id` 及本条的正文、地点链接或素材引用。`POST /api/v1/bridge/devices/:code/recontact-check` 接受 `command_id`、`lease_token`，返回 `{ok,reason?}`，供客户端在每条执行前确认任务仍有效。客户端沿用 `/receipts` 上报实际结果。
 
 ---
 

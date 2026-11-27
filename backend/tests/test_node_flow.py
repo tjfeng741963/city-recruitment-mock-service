@@ -177,7 +177,7 @@ def test_legacy_first_contact_waits_for_the_next_message_before_chat(agent):
     agent._brain.chat.reset_mock(side_effect=True)
     incoming(agent, 2, "工资多少")
     agent.drain(MagicMock(), CFG)
-    agent._brain.chat.assert_called_once_with("工资多少", "S:customer", sent_summary=None)
+    agent._brain.chat.assert_called_once_with("工资多少", "S:customer", sent_summary=None, turn_id="2")
     assert agent.core_send.send.call_args.args[2] == "这是答疑"
 
 

@@ -4,6 +4,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { DIFY_GROUP_NOTIFICATION_PREFIX, deviceInviteGroupBinding, ensureGroupConversation, resolveDeviceInviteGroup } from "../../shared/invite-group.js";
 import type { MessageChannelProvider, OutboundMessageInput, OutboundMessageResult } from "./message-channel-provider.js";
 import { NOOP_NOTIFIER, type StreamNotifier } from "./stream-events.js";
+import { noteRecontactCapability, queueDueRecontact, reconcileRecontact, recontactCommandInfo, revokeRecontactDevice } from "../recontact/recontact.js";
 
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 export class BridgeError extends Error {
@@ -30,13 +31,14 @@ export class DeviceBridgeStore {
     return Boolean(this.db.prepare("SELECT id FROM agent_devices WHERE json_extract(data_json,'$.device_code')=? AND status='enabled'").get(code));
   }
   pair(code: string): string {
-    if (!this.enabled(code)) throw new BridgeError("Enabled device not found", 404);
+    const device = this.db.prepare("SELECT tenant_id FROM agent_devices WHERE json_extract(data_json,'$.device_code')=? AND status='enabled'").get(code);
+    if (!device) throw new BridgeError("Enabled device not found", 404);
     const token = randomBytes(32).toString("hex");
     const pending = this.db.prepare("SELECT * FROM bridge_commands WHERE device_code=? AND status IN ('claimed','queued')").all(code) as unknown as BridgeCommand[];
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.db.prepare(`INSERT INTO bridge_devices(device_code,token_hash) VALUES (?,?)
-        ON CONFLICT(device_code) DO UPDATE SET token_hash=excluded.token_hash,state='offline',heartbeat_at=0`).run(code, digest(token));
+      this.db.prepare(`INSERT INTO bridge_devices(device_code,token_hash,tenant_id) VALUES (?,?,?)
+        ON CONFLICT(device_code) DO UPDATE SET token_hash=excluded.token_hash,state='offline',heartbeat_at=0`).run(code, digest(token),device.tenant_id);
       this.db.prepare("UPDATE reply_mode_transition SET client_at=0,client_ready=0 WHERE device_code=?").run(code);
       this.db.prepare("DELETE FROM windows_runtime_health WHERE device_code=?").run(code);
       // Rotating credentials cannot silently replay commands that may have been sent.
@@ -155,6 +157,7 @@ export class DeviceBridgeStore {
       + "client_commit=CASE WHEN ?<>'' THEN ? ELSE client_commit END WHERE device_code=?")
       .run(state, this.now(), accountId, accountId, commit, commit, code);
     if (rebound) {
+      revokeRecontactDevice(this.db,code,this.now());
       this.db.prepare("INSERT INTO device_events(device_code,event_type,reason,created_at) VALUES (?,?,?,?)")
         .run(code, "account_rebound", `${previousAccount}->${accountId}`, new Date(this.now()).toISOString());
       this.db.prepare("DELETE FROM device_group_chats WHERE device_code=?").run(code);
@@ -263,8 +266,9 @@ export class DeviceBridgeStore {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const customerId = this.allocateCustomerId();
-      this.db.prepare("INSERT INTO bridge_contacts(device_code,contact_id,customer_id,nickname) VALUES (?,?,?,?)").run(code, contactId, customerId, nickname);
-      this.db.prepare("INSERT INTO agent_conversations(device_code,customer_id,nickname,external_conversation_id) VALUES (?,?,?,?)").run(code, customerId, nickname, contactId);
+      const tenant = this.db.prepare("SELECT tenant_id FROM bridge_devices WHERE device_code=?").get(code)?.tenant_id ?? 1;
+      this.db.prepare("INSERT INTO bridge_contacts(device_code,contact_id,customer_id,nickname,tenant_id) VALUES (?,?,?,?,?)").run(code, contactId, customerId, nickname, tenant);
+      this.db.prepare("INSERT INTO agent_conversations(device_code,customer_id,nickname,external_conversation_id,tenant_id) VALUES (?,?,?,?,?)").run(code, customerId, nickname, contactId, tenant);
       this.db.exec("COMMIT");
       return customerId;
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
@@ -286,15 +290,20 @@ export class DeviceBridgeStore {
 
     const command = this.db.prepare("SELECT * FROM bridge_commands WHERE device_code=? AND message_id=? AND status='succeeded' AND simulated=0")
       .get(code, eventId) as unknown as BridgeCommand | undefined;
-    if (command && (command.contact_id !== contactId || normalizedText(command.content) !== normalizedText(content))) throw new BridgeError("Observed message conflicts with command receipt");
-    const sourceEventId = command ? commandSource(command) : `bridge-outbound:${digest(JSON.stringify([code, eventId]))}`;
+    const recontact = command?.kind === "recontact" ? recontactCommandInfo(this.db,command.id) : undefined;
+    const media = recontact?.recontact_kind === "image" || recontact?.recontact_kind === "video";
+    if (command && (command.contact_id !== contactId || (!media && normalizedText(command.content) !== normalizedText(content)))) {
+      throw new BridgeError("Observed message conflicts with command receipt");
+    }
+    const sourceEventId = command && !recontact ? commandSource(command) : `bridge-outbound:${digest(JSON.stringify([code, eventId]))}`;
     const stamp = sentAt ?? new Date(this.now()).toISOString();
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db.prepare("INSERT INTO bridge_outbound(device_code,event_id,contact_id,content_hash,source_event_id) VALUES (?,?,?,?,?)")
         .run(code, eventId, contactId, hash, sourceEventId);
-      const inserted = this.db.prepare("INSERT OR IGNORE INTO agent_messages(device_code,customer_id,direction,content,status,created_at,source_event_id) VALUES (?,?,'outbound',?,'sent',?,?)")
-        .run(code, customerId, content, stamp, sourceEventId);
+      const tenant = this.db.prepare("SELECT tenant_id FROM agent_conversations WHERE device_code=? AND customer_id=?").get(code,customerId)?.tenant_id ?? 1;
+      const inserted = this.db.prepare("INSERT OR IGNORE INTO agent_messages(device_code,customer_id,direction,content,status,created_at,source_event_id,tenant_id) VALUES (?,?,'outbound',?,'sent',?,?,?)")
+        .run(code, customerId, content, stamp, sourceEventId,tenant);
       if (command && sentAt) {
         this.db.prepare("UPDATE agent_messages SET created_at=? WHERE source_event_id=? AND direction='outbound'").run(stamp, sourceEventId);
         this.refreshConversationPreview(code, customerId);
@@ -469,7 +478,8 @@ export class DeviceBridgeStore {
    * 也发不出去；客户端只要 `refresh_login_qr`，不能去碰消息队列（碰了会把
    * 真实待发消息白占 60 秒租约）。
    */
-  claim(code: string, onlyKind = ""): (BridgeCommand & { nickname: string }) | null {
+  claim(code: string, onlyKind = "", supportsRecontact = false):
+    (BridgeCommand & { nickname: string } & Partial<NonNullable<ReturnType<typeof recontactCommandInfo>>>) | null {
     this.expireClaims(code);
     const device = this.status(code);
     if (!this.enabled(code) || replyModePending(this.db, code)) return null;
@@ -485,15 +495,20 @@ export class DeviceBridgeStore {
     if (!onlyKind && device?.state === "online" && this.db.prepare("SELECT 1 FROM agent_devices WHERE json_extract(data_json,'$.device_code')=? AND json_extract(data_json,'$.reply_provider')='dify'").get(code)) {
       this.queueDueDifyReminder(code, device?.account_id ?? "", now);
     }
+    if (!onlyKind && supportsRecontact && device?.state === "online") {
+      noteRecontactCapability(this.db,code,device.account_id,now);
+      queueDueRecontact(this.db,code,now);
+    }
     const pending = onlyKind
       ? this.db.prepare(`SELECT c.*, NULL AS reminder_expires_at FROM bridge_commands c
           WHERE c.device_code=? AND c.status='queued' AND c.kind=? ORDER BY c.created_at,c.rowid LIMIT 1`)
       : this.db.prepare(`SELECT c.*,r.expires_at AS reminder_expires_at FROM bridge_commands c
           LEFT JOIN dify_interview_reminders r ON r.command_id=c.id
-          WHERE c.device_code=? AND c.status='queued' AND (r.command_id IS NULL OR r.due_at<=?) ORDER BY c.created_at,c.rowid LIMIT 1`);
+          WHERE c.device_code=? AND c.status='queued' AND (r.command_id IS NULL OR r.due_at<=?)
+          AND (c.kind<>'recontact' OR ?=1) ORDER BY c.created_at,c.rowid LIMIT 1`);
     type PendingCommand = BridgeCommand & {reminder_expires_at: number | null};
     const nextQueued = () =>
-      (onlyKind ? pending.get(code, onlyKind) : pending.get(code, now)) as unknown as PendingCommand | undefined;
+      (onlyKind ? pending.get(code, onlyKind) : pending.get(code, now,Number(supportsRecontact))) as unknown as PendingCommand | undefined;
     let next = nextQueued();
     while (next) {
       // 刷新二维码：超 5 分钟没人领就作废（客户端可能关机了，再刷也没意义）。
@@ -566,7 +581,8 @@ export class DeviceBridgeStore {
     // opaque internal id that is useless for keyboard automation.
     const conversation = this.db.prepare("SELECT nickname FROM agent_conversations WHERE device_code=? AND customer_id=?")
       .get(code, command.customer_id) as { nickname?: string } | undefined;
-    return { ...command, nickname: conversation?.nickname ?? "" };
+    return { ...command, nickname: conversation?.nickname ?? "",
+      ...(command.kind === "recontact" ? recontactCommandInfo(this.db,command.id) : {}) };
   }
   receipt(code: string, id: string, lease: string, status: "succeeded" | "failed" | "unknown", messageId = "", simulated = false, error = ""): void {
     const command = this.command(id);
@@ -579,7 +595,7 @@ export class DeviceBridgeStore {
     if (status === "succeeded" && !noMessageKind && !messageId.trim()) throw new BridgeError("Successful receipt requires message_id", 422);
     const groupNotice = command.idempotency_key.startsWith(DIFY_GROUP_NOTIFICATION_PREFIX)
       || (command.idempotency_key.startsWith("group-notify:") && command.contact_id.startsWith("R:"));
-    if (status === "succeeded" && !simulated && !noMessageKind && (groupNotice || isDifyReminder(command))) {
+    if (status === "succeeded" && !simulated && !noMessageKind && (groupNotice || isDifyReminder(command) || command.kind === "recontact")) {
       const prefix = command.contact_id + ":";
       if (!messageId.startsWith(prefix) || !messageId.slice(prefix.length).trim()) {
         throw new BridgeError("Receipt does not match the target conversation", 422);
@@ -589,6 +605,10 @@ export class DeviceBridgeStore {
       if (command.status !== status || command.message_id !== messageId || Boolean(command.simulated) !== simulated) throw new BridgeError("Conflicting receipt");
       return;
     }
+    if (status === "succeeded" && !simulated && !noMessageKind &&
+      this.db.prepare("SELECT id FROM bridge_commands WHERE device_code=? AND message_id=? AND status='succeeded' AND id<>?").get(code, messageId, id)) {
+      throw new BridgeError("Message id already belongs to another command");
+    }
     // 无正文指令不产生任何客户消息：只落指令状态和失败原因，不进消息/投递/会话表。
     // 走 applyReceipt 会去查 message_deliveries、bridge_outbound 和会话预览，
     // 对一个无正文指令全是无意义查询，还多一条误改风险。
@@ -597,13 +617,25 @@ export class DeviceBridgeStore {
         .run(status, String(error || "").slice(0, 500), this.now(), id);
       return;
     }
+    // A recontact part can reference a media filename; the desktop observation
+    // stores a media label, so do not compare the two as if both were text.
+    if (command.kind === "recontact") {
+      this.db.exec("BEGIN IMMEDIATE");
+      try {
+        this.db.prepare("UPDATE bridge_commands SET status=?,message_id=?,simulated=?,error=?,receipt_at=? WHERE id=? AND status IN ('claimed','unknown')")
+          .run(status,messageId,Number(simulated),String(error || "").slice(0,500),this.now(),id);
+        reconcileRecontact(this.db,code,this.now());
+        this.refreshConversationPreview(code,command.customer_id);
+        this.db.exec("COMMIT");
+      } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+      return;
+    }
     // A real database message can arrive before its HTTP receipt. Reconcile by
     // the exact device message id, never by text alone.
     const observed = status === "succeeded" && !simulated ? this.db.prepare(`SELECT o.source_event_id,o.contact_id,m.content
       FROM bridge_outbound o JOIN agent_messages m ON m.source_event_id=o.source_event_id
       WHERE o.device_code=? AND o.event_id=?`).get(code, messageId) as { source_event_id: string; contact_id: string; content: string } | undefined : undefined;
     if (observed && (observed.contact_id !== command.contact_id || normalizedText(observed.content) !== normalizedText(command.content))) throw new BridgeError("Receipt conflicts with observed message");
-    if (status === "succeeded" && !simulated && this.db.prepare("SELECT id FROM bridge_commands WHERE device_code=? AND message_id=? AND status='succeeded' AND id<>?").get(code, messageId, id)) throw new BridgeError("Message id already belongs to another command");
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.applyReceipt(command, status, messageId, simulated, observed?.source_event_id);

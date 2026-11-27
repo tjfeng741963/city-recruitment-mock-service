@@ -12,7 +12,8 @@ import { beginReplyMode, replyModePending, replyModeRow, replyModeView } from ".
 import { recruitmentPositionAvailable, recruitmentTurn, selectedRecruitmentPosition } from "./dify-recruitment.js";
 import { difySendDelays, invitationStage, invitationTurn, noteInvitationQuestion } from "./dify-invitation.js";
 import { faqMediaForQuestion, normalizeFaqUtterance } from "../agent/faq-media.js";
-import { writeExecutionTrace } from "../agent/execution-trace.js";
+import { newExecutionTraceId, writeExecutionTrace } from "../agent/execution-trace.js";
+import { markRecontactAnchor } from "../recontact/recontact.js";
 
 function monetaryAmounts(value: string): string[] {
   const units: Record<string, string> = { 小时:"hour", 时:"hour", 天:"day", 班次:"shift", 班:"shift", 月:"month", 晚:"night" };
@@ -270,14 +271,22 @@ export async function generateDifyReply(db: DatabaseSync, input:{deviceCode:stri
       const faq = matchFaq(id, context);
       return digest(JSON.stringify(faq ? [context, faq] : context));
     };
-    const makeResult = (messages: DifyMessage[], model: string, latency_ms: number, faq?: { id: number; question: string }) => ({
-      ok:true,provider:"dify",model,session_key:input.sessionKey,latency_ms,
-      reply:{messages,...(ordered ? {delays_before_ms:difySendDelays(messages)} : {}), ...(faq && { faq })},
-      ...(faq && !input.preview && input.canWriteRegistration && { trace_id: writeExecutionTrace(db, {
-        engine: "dify", stage: "岗位问答随答案发送", deviceCode: input.deviceCode, sessionKey: input.sessionKey,
-        positionId, requestText: input.text, status: "succeeded", model, reply: { messages, faq },
-      }) }),
-    });
+    const makeResult = (messages: DifyMessage[], model: string, latency_ms: number, faq?: { id: number; question: string }) => {
+      let traceId: string | undefined;
+      if (!input.preview && !input.dry && input.canWriteRegistration && ordered) {
+        const trace = newExecutionTraceId();
+        const followup = markRecontactAnchor(db,{traceId:trace,deviceCode:input.deviceCode,sessionKey:input.sessionKey,
+          positionId,provider:"dify",question:input.text,messages,turnId});
+        if (faq || followup) traceId = writeExecutionTrace(db, {
+          traceId:trace,engine:"dify",stage:faq?"岗位问答随答案发送":"复聊计时前置回复",
+          deviceCode:input.deviceCode,sessionKey:input.sessionKey,positionId,requestText:input.text,
+          status:"succeeded",model,reply:{messages,faq},
+        });
+      }
+      return {ok:true,provider:"dify",model,session_key:input.sessionKey,latency_ms,
+        reply:{messages,...(ordered ? {delays_before_ms:difySendDelays(messages)} : {}), ...(faq && {faq})},
+        ...(traceId && {trace_id:traceId})};
+    };
     const result = (messages: DifyMessage[], model = "Dify 招聘流程", latency = 0, faq?: { id: number; question: string }) => {
       const response = makeResult(messages,model,latency,faq);
       if (turnId) {

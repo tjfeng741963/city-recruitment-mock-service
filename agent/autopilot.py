@@ -2362,10 +2362,13 @@ def _recipient_unchanged(store: Store, cid: str) -> bool:
 
 def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
                log_fn, readback_before: dict[str, str] | None = None,
-               require_recipient: bool = False, **context: object) -> tuple[str, str, str]:
-    """Run the existing sender and classify the available target evidence."""
+               require_recipient: bool = False, authorize=None, open_only: bool = False,
+               **context: object) -> tuple[str, str, str]:
+    """Run the existing sender and classify its send or navigation evidence."""
     global _recipient_proof
     _recipient_proof = None
+    require_recipient = require_recipient or open_only
+    strict_search = _recipient_binding_enabled or open_only
     account = _recipient_account(store)
     managed = _recipient_binding_enabled and remote_cfg.recipient_binding_account_active(account)
     binding = remote_cfg.recipient_bindings(account).get(cid) if managed else None
@@ -2393,7 +2396,7 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
     send_enter_dispatched = False
     started = monotonic()
     attempt_id = uuid4().hex
-    if route != "manual":
+    if route != "manual" and not open_only:
         readback_before = _outbound_snapshot(store, cid)
 
     def event(phase: str, **fields: object) -> None:
@@ -2413,9 +2416,9 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
     def authorize_enter() -> bool:
         nonlocal send_enter_verified
         if phase == "send":
-            send_enter_verified = recipient_still_current()
+            send_enter_verified = (authorize is None or authorize()) and recipient_still_current()
             return send_enter_verified
-        if phase == "search" and not _recipient_binding_enabled:
+        if phase == "search" and not strict_search:
             return True
         if phase != "search" or not search_before:
             return False
@@ -2424,8 +2427,9 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
             return False
         if _recipient_key(_recognize_recipient_heading(search, name)) != _recipient_key(name):
             return False
-        current = _recipient_search_field()
-        return current == search
+        if open_only and authorize is not None and not authorize():
+            return False
+        return _recipient_search_field() == search
 
     def authorize_body_paste() -> bool:
         return phase == "search" or (phase == "chat" and recipient_still_current())
@@ -2440,7 +2444,7 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
         if guard and step == "步骤0":
             heading = None
             phase = "search"
-            search_before = _recipient_search_field() if _recipient_binding_enabled else None
+            search_before = _recipient_search_field() if strict_search else None
         if guard and step == "步骤1":
             phase = "chat"
             heading = _recipient_heading()
@@ -2470,8 +2474,13 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
         return "blocked", detail, ""
     try:
         with _check_recipient_at_enter(guard, authorize_enter, before_paste=authorize_body_paste):
-            result = core_send.send(store, name, body, expect_id=cid if cid.startswith(("S:", "R:")) else "",
-                                    verify_db=True, log=on_step)
+            if open_only:
+                # Frozen dry mode stops immediately after opening the search result.
+                result = core_send.send(store, name, name, expect_id=cid, dry=True,
+                                        verify_db=False, log=on_step)
+            else:
+                result = core_send.send(store, name, body, expect_id=cid if cid.startswith(("S:", "R:")) else "",
+                                        verify_db=True, log=on_step)
     except _RecipientUnverified:
         event("result", level="warning", outcome="blocked", reason_code="recipient_unverified",
               duration_ms=int((monotonic() - started) * 1000))
@@ -2480,6 +2489,12 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
         event("result", level="warning", outcome="unknown", reason_code="sender_exception",
               exception_type=type(exc).__name__, duration_ms=int((monotonic() - started) * 1000))
         return "unknown", f"发送过程异常（{type(exc).__name__}），请核对实际落点", ""
+
+    if open_only:
+        if result.get("ok") and heading and _recipient_heading() == heading:
+            _recipient_proof = (cid, heading)
+            return "ready", "已核对企微会话", ""
+        return "failed", _RECIPIENT_BLOCKED, ""
 
     observed_cid = result.get("conversation_id") or ""
     target_match = observed_cid == cid
@@ -2500,7 +2515,7 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
     elif not target_match and route != "manual":
         status, reason = "unknown", "target_conversation_missing"
         detail = "已执行发送，企微库未确认目标会话，请核对实际落点"
-        if (route in ("opening", "auto") and send_enter_dispatched and readback_before is not None
+        if (route in ("opening", "auto", "recontact") and send_enter_dispatched and readback_before is not None
                 and account and _recipient_account(store) == account):
             after = _outbound_snapshot(store, cid, fragmented_only=True)
             normalized = _normalize_outbound_text(body)
@@ -2611,29 +2626,33 @@ def _media_outbound_snapshot(store: Store, cid: str, kind: str) -> set[str] | No
 
 
 def _send_agent_media(store: Store, cid: str, name: str, kind: str, log_fn, *, route: str, authorize=None) -> tuple[str, str]:
+    status, detail, _ = _send_agent_media_readback(store, cid, name, kind, log_fn, route=route, authorize=authorize)
+    return status, detail
+
+
+def _send_agent_media_readback(store: Store, cid: str, name: str, kind: str, log_fn, *, route: str,
+                               authorize=None) -> tuple[str, str, str]:
     before = _media_outbound_snapshot(store, cid, kind)
     if before is None:
-        return "failed", "媒体目标会话回读不可用，本次未执行媒体发送"
+        return "failed", "媒体目标会话回读不可用，本次未执行媒体发送", ""
     status, detail = (_send_media(store, cid, name, log_fn, route=route) if authorize is None
                       else _send_media(store, cid, name, log_fn, route=route, authorize=authorize))
     if status != "sent":
-        return status, detail
+        return status, detail, ""
     # 视频要等企微转码/写库，回车后不一定立刻能回读到：最多等 2 秒（4 次 × 0.5s）。
     # 只认「恰好新增 1 条」——多出来说明有别的媒体在动，按不确定处理。
-    after = None
     for attempt in range(4):
         try:
             refresh_store(store)
             after = _media_outbound_snapshot(store, cid, kind)
         except Exception:
             after = None
-        if after is not None and len(after - before) == 1:
-            return "sent", detail
+        new_ids = after - before if after is not None else set()
+        if len(new_ids) == 1:
+            return "sent", detail, f"{cid}:{next(iter(new_ids))}"
         if attempt < 3:
             time.sleep(0.5)
-    if after is None or len(after - before) != 1:
-        return "unknown", "未回读到目标会话中唯一的新媒体消息，请人工核对，不自动重发"
-    return "sent", detail
+    return "unknown", "未回读到目标会话中唯一的新媒体消息，请人工核对，不自动重发", ""
 
 
 def _reply_source_identity() -> tuple:
@@ -3087,14 +3106,16 @@ def _flow_tick(store: Store, cfg: dict, wecom_state: str) -> None:
         if not name or name == cid or is_system_conv(cid, name):
             state.set_phase(cid, "held", error="复聊目标没有可验证的会话名")
             continue
-        if cfg.get("_reply_mode_enabled") and _flow_recovery_expired(row, now):
-            state.set_phase(cid, "held", error="复聊已超过自动恢复时限，请人工核对")
-            continue
         row_flow = _flow_for_row(row, flow)
         if row_flow is None:
             state.set_phase(cid, "held", error="流程快照与当前回复来源不一致或不存在")
             continue
         current = _flow_node(row_flow, str(row.get("node_key") or ""))
+        if current and current.get("recontact_stage"):
+            continue
+        if cfg.get("_reply_mode_enabled") and _flow_recovery_expired(row, now):
+            state.set_phase(cid, "held", error="复聊已超过自动恢复时限，请人工核对")
+            continue
         nxt = _flow_next(row_flow, str(row.get("node_key") or ""), "timeout")
         if current is None or nxt is None:
             state.set_phase(str(row["session_key"]), "expired", error="没有可用的复聊节点")
@@ -3185,6 +3206,7 @@ def _flow_report(cfg: dict) -> None:
             "followup_round": row.get("followup_round", 0), "revision": row.get("revision", 1),
             "snapshot": json.loads(row.get("snapshot_json") or "{}"), "conv_name": row.get("conv_name", ""),
             "wait_minutes": row.get("wait_minutes", 15), "last_inbound_at": row.get("last_inbound_at", 0),
+            "recontact_inbound_id": str(row.get("last_inbound_id") or ""),
             "last_error": row.get("last_error", ""),
         } for row in rows])
     except Exception as exc:  # noqa: BLE001
@@ -3843,7 +3865,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 elif hint:
                     # 会话记忆在服务端：只报 session_key（会话 id）+ 这句话。
                     # 服务端自己持有全量上下文（含开场序列），客户端不传历史。
-                    chat_kwargs = {"turn_id": str(mid)} if dify_mode else {}
+                    chat_kwargs = {"turn_id": str(mid)}
                     chat_source = _reply_source_identity()
                     res = _brain.chat(hint, cid, sent_summary=_flow_summary(cid) if flow is not None else None, **chat_kwargs)
                     agent_trace_id = str(res.get("trace_id") or "")
@@ -4228,7 +4250,9 @@ def flush_manual_receipts(bridge, *, force: bool = False) -> bool:
         _last_receipt_retry_at = time.time()
         for item in pending:
             try:
-                response = bridge.receipt(item["command_id"], item["lease_token"], item["status"], item["message_id"])
+                args = (item["command_id"], item["lease_token"], item["status"], item["message_id"])
+                error = item.get("error", "")
+                response = bridge.receipt(*args, error) if error else bridge.receipt(*args)
                 if response.get("ok") is not True:
                     raise ValueError("Receipt response did not acknowledge success")
                 rlog.mark_manual_receipt(server, device, item["command_id"], item["lease_token"], "acked")
@@ -4247,6 +4271,166 @@ def flush_manual_receipts(bridge, *, force: bool = False) -> bool:
         _last_error = f"回执未确认：{agent_client.describe_error(exc)}"[:200]
         log(f"[回执] {_last_error}；保留记录，稍后只补传回执", level="warning", scope="manual")
         return False
+
+
+def _recontact_latest_inbound(store: Store, account: str, cid: str) -> tuple[float, str] | None:
+    peer = _recipient_other(account, cid)
+    data_dir = getattr(store, "data_dir", None)
+    if not peer or not isinstance(data_dir, Path) or not (data_dir / "message.db").is_file():
+        return None
+    try:
+        refresh_store(store)
+        database = store._conn("message.db")
+        if database is None:
+            return None
+        with closing(database):
+            row = database.execute(
+                """SELECT CASE WHEN send_time>32503680000 THEN send_time/1000.0 ELSE send_time END AS stamp,
+                          message_id FROM message_table WHERE conversation_id=? AND CAST(sender_id AS TEXT)=?
+                   ORDER BY stamp DESC, message_id DESC LIMIT 1""",
+                (cid, peer),
+            ).fetchone()
+        return (_to_ts(row[0]) * 1000, str(row[1])) if row else None
+    except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
+        return None
+
+
+def _execute_recontact(store: Store, cfg: dict, bridge, command: dict, log_fn) -> tuple[str, str, str]:
+    """Authorize one server-selected part, then use the existing guarded sender."""
+    global _last_reply_at, _recipient_proof
+    cid = str(command.get("contact_id") or "")
+    account = str(command.get("recontact_account_id") or "")
+    inbound_before = command.get("recontact_inbound_before_ms")
+    inbound_source = str(command.get("recontact_inbound_source") or "")
+    kind = command.get("recontact_kind")
+    content = command.get("content")
+    name = str(command.get("nickname") or "").strip()
+    deadline = command["lease_until"]
+    if not account or _recipient_account(store) != account:
+        return "failed", "本机企微登录账号与复聊指令不匹配", ""
+    if (not isinstance(content, str) or not content.strip() or not name or not _recipient_other(account, cid)
+            or is_system_conv(cid, name) or type(inbound_before) is not int or inbound_before < 0
+            or kind not in ("text", "location", "image", "video")):
+        return "failed", "复聊指令缺少有效的内容或会话资料", ""
+
+    path = f"/api/v1/bridge/devices/{quote(bridge.device_code, safe='')}/recontact-check"
+    payload = {"command_id": command["id"], "lease_token": command["lease_token"]}
+    denial = ""
+    last_stamp = last_inbound = None
+
+    def active_account_matches() -> bool:
+        try:
+            current = find_data_dir()
+            return bool(current and isinstance(store.data_dir, Path) and store.data_dir.resolve() == current.resolve()
+                        and _recipient_account(store) == account)
+        except (OSError, RuntimeError, KeyError):
+            return False
+
+    def authorize() -> bool:
+        nonlocal denial, last_stamp, last_inbound
+        if deadline <= time.time() * 1000:
+            denial = "复聊指令已过期"
+        elif not active_account_matches():
+            denial = "本机企微登录账号已切换或无法核对"
+        elif cid in remote_cfg.takeover_sessions() or cid in remote_cfg.abandoned_sessions():
+            denial = "会话已接管或结束"
+        else:
+            try:
+                response = bridge._request("POST", path, payload)
+            except Exception:  # A missing or interrupted authorization is a veto.
+                response = None
+            if not isinstance(response, dict) or response.get("ok") is not True:
+                denial = str(response.get("reason") or "复聊发送授权未确认") if isinstance(response, dict) else "复聊发送授权未确认"
+                return False
+            data_dir = getattr(store, "data_dir", None)
+            stamp = wal_signature(data_dir) if isinstance(data_dir, Path) else None
+            if stamp is None or stamp != last_stamp or last_inbound is None:
+                last_inbound = _recontact_latest_inbound(store, account, cid)
+                last_stamp = stamp
+            if last_inbound is None:
+                denial = "无法读取企微会话最新回复"
+            elif last_inbound[0] > inbound_before:
+                denial = "候选人已回复，复聊停止"
+            elif inbound_source and "bridge-inbound:" + sha256(
+                json.dumps([bridge.device_code, f"{cid}:{last_inbound[1]}"], ensure_ascii=False, separators=(",", ":")).encode()
+            ).hexdigest() != inbound_source:
+                denial = "候选人最近一条来信已变化，复聊停止"
+            elif deadline <= time.time() * 1000:
+                denial = "复聊指令已过期"
+            elif not active_account_matches():
+                denial = "本机企微登录账号已切换或无法核对"
+            else:
+                denial = ""
+        return not denial
+
+    wait = cfg["cooldown"] - (time.time() - _last_reply_at)
+    if wait > 0:
+        time.sleep(wait)
+    if not authorize():
+        return "failed", denial, ""
+    if not compat.wait_clipboard_writable(timeout=15):
+        return "failed", "剪贴板持续被占用", ""
+
+    if kind in ("text", "location"):
+        if not authorize():
+            return "failed", denial, ""
+        _last_reply_at = time.time()
+        status, detail, message_id = _send_text(
+            store, name, cid, content, route="recontact", log_fn=log_fn,
+            require_recipient=True, authorize=authorize, command_id=command["id"],
+        )
+    else:
+        alias = re.fullmatch(r"dify-asset-[1-9]\d*-([a-f0-9]{64})\.(jpe?g|png|mp4)", content)
+        if not alias or (kind == "video") != (alias[2] == "mp4"):
+            return "failed", "复聊素材引用无效", ""
+        ready, detail = media_fetch.ensure_media(
+            content, "图片" if kind == "image" else "视频", base_url=bridge.base_url, token=bridge.token, log=log_fn,
+        )
+        if not ready:
+            return "failed", f"复聊素材未就绪：{detail}", ""
+        file = media_fetch.local_file(content)
+        if file is None or sha256(file.read_bytes()).hexdigest() != alias[1]:
+            return "failed", "复聊素材校验失败", ""
+        if _recipient_binding_enabled and not remote_cfg.recipient_binding_account_active(account):
+            return "failed", _RECIPIENT_BLOCKED, ""
+        binding = deepcopy(remote_cfg.recipient_bindings(account).get(cid)) if _recipient_binding_enabled else None
+        term, _ = _resolve_recipient(store, cid, binding)
+        if not term or (binding and binding.get("status") != "verified"):
+            return "failed", "复聊素材发送前无法核对当前窗口的收件人", ""
+        heading = _recipient_heading()
+        if not heading or (_recipient_proof != (cid, heading)
+                and _recipient_key(_recognize_recipient_heading(heading, term)) != _recipient_key(term)):
+            if not authorize():
+                return "failed", denial, ""
+            _last_reply_at = time.time()
+            opened, _, _ = _send_text(
+                store, name, cid, "", route="recontact", log_fn=log_fn,
+                authorize=authorize, open_only=True, command_id=command["id"],
+            )
+            proof = _recipient_proof
+            if opened != "ready" or not proof or proof[0] != cid:
+                return "failed", denial or "复聊素材发送前无法核对收件人会话", ""
+            heading = proof[1]
+        else:
+            _recipient_proof = (cid, heading)
+
+        def authorize_media() -> bool:
+            return bool(authorize() and _recipient_heading() == heading and (
+                not _recipient_binding_enabled or (
+                    remote_cfg.recipient_binding_account_active(account)
+                    and remote_cfg.recipient_bindings(account).get(cid) == binding
+                )
+            ))
+
+        _last_reply_at = time.time()
+        status, detail, message_id = _send_agent_media_readback(
+            store, cid, content, kind, log_fn, route="recontact", authorize=authorize_media,
+        )
+    if status == "sent" and message_id.startswith(cid + ":") and message_id[len(cid) + 1:]:
+        return "succeeded", "", message_id
+    if status in ("sent", "unknown"):
+        return "unknown", detail, ""
+    return "failed", denial or detail, ""
 
 
 def pump_commands(
@@ -4299,7 +4483,12 @@ def pump_commands(
     only_kind = "refresh_login_qr" if login_blocked else ("set_remark" if send_blocked else "")
 
     try:
-        command = bridge.claim(only=only_kind)
+        if not only_kind and isinstance(bridge, agent_client.BridgeClient):
+            code = quote(bridge.device_code, safe="")
+            response = bridge._request("POST", f"/api/v1/bridge/devices/{code}/claim?recontact=1", {})
+            command = response.get("command")
+        else:
+            command = bridge.claim(only=only_kind)
     except Exception as exc:  # noqa: BLE001
         log(f"[指令] 领取失败（忽略）：{agent_client.describe_error(exc)}")
         return stats
@@ -4413,11 +4602,15 @@ def pump_commands(
         mlog(f"[指令] {_last_error}；停止该条发送", level="warning")
         stats["failed"] += 1
         return stats
-    mlog(f"[指令] 人工发送 #{cmd_id[:8]} → {name or '(无昵称)'}：{_redact_text(content, 30)!r}")
+    recontact = command.get("kind") == "recontact"
+    if recontact:
+        mlog(f"[指令] 复聊发送 #{cmd_id[:8]}")
+    else:
+        mlog(f"[指令] 人工发送 #{cmd_id[:8]} → {name or '(无昵称)'}：{_redact_text(content, 30)!r}")
 
-    def receipt(status: str, message_id: str = "") -> None:
+    def receipt(status: str, message_id: str = "", *, error: str = "") -> None:
         try:
-            rlog.finish_manual_command(bridge.base_url, bridge.device_code, cmd_id, lease, status, message_id)
+            rlog.finish_manual_command(bridge.base_url, bridge.device_code, cmd_id, lease, status, message_id, error=error)
         except Exception as exc:  # noqa: BLE001
             mlog(f"    回执 {status} 写盘失败，保留 unknown：{type(exc).__name__}", level="warning")
             return
@@ -4440,6 +4633,17 @@ def pump_commands(
 
     # Socket timeouts do not bound a streaming response's total duration.
     if stop_if_lease_invalid():
+        return stats
+
+    if recontact:
+        try:
+            status, detail, mid = _execute_recontact(store, cfg, bridge, command, mlog)
+        except Exception as exc:
+            status, detail, mid = "unknown", f"复聊执行异常（{type(exc).__name__}），请核对实际发送", ""
+        if detail:
+            mlog(f"复聊发送结果：{detail}", level="warning")
+        receipt(status, mid, error=detail)
+        stats["sent" if status == "succeeded" else "failed"] += 1
         return stats
 
     if not content or not name:

@@ -14,6 +14,7 @@ import { recordInboundMessage } from "./inbound-store.js";
 import { loadFactories, receptionFactoryIds, resolveDevicePosition } from "../../shared/device-factories.js";
 import { latestPositionScriptStamp, loadPositionScripts } from "../../shared/media-assets.js";
 import { loadPositionLocationCards } from "../../shared/location-card.js";
+import { authorizeRecontactCommand, cancelInvalidRecontacts } from "../recontact/recontact.js";
 
 type DeviceRequest = { Params: { code: string }; Body: Record<string, unknown> };
 const field = (body: Record<string, unknown>, key: string, max = 1000) => typeof body[key] === "string" && String(body[key]).length <= max ? String(body[key]) : "";
@@ -279,6 +280,14 @@ export function registerDeviceBridgeRoutes(
     store.expireClaims(req.params.code);
     return { device: store.status(req.params.code), commands: db.prepare("SELECT id,status,message_id,simulated,created_at FROM bridge_commands WHERE device_code=? ORDER BY created_at DESC LIMIT 50").all(req.params.code) };
   });
+  app.post<DeviceRequest>("/api/v1/bridge/devices/:code/recontact-check", async (req, reply) => {
+    const code = req.params.code;
+    const token = (req.headers.authorization ?? "").replace(/^Bearer /, "");
+    if (!store.authenticate(code,token)) return reply.code(401).send({detail:"Invalid device token"});
+    if (!store.enabled(code) || store.status(code)?.state !== "online") return {ok:false,reason:"账号离线或停用"};
+    const body = req.body ?? {};
+    return authorizeRecontactCommand(db,code,field(body,"command_id"),field(body,"lease_token"));
+  });
   for (const action of ["heartbeat", "claim", "receipts", "inbound", "outbound"] as const) {
     app.post<DeviceRequest>(`/api/v1/bridge/devices/:code/${action}`, async (req, reply) => {
       const code = req.params.code;
@@ -309,7 +318,8 @@ export function registerDeviceBridgeRoutes(
         // only=refresh_login_qr：登录态下只领刷新指令，不碰消息队列。
         const query = (req.query ?? {}) as Record<string, unknown>;
         const only = typeof query.only === "string" ? query.only : "";
-        const command = store.claim(code, only);
+        if (only === "recontact") return {command:null};
+        const command = store.claim(code, only, query.recontact === "1");
         if (command) notifier.commandUpdated(code, command);
         return { command };
       }
@@ -347,7 +357,8 @@ export function registerDeviceBridgeRoutes(
       const scopedId = store.inboundEvent(code, eventId, contactId, content);
       const customerId = store.contact(code, contactId, field(body, "nickname"));
       // 落库（agent_messages + 会话摘要）——原 automation 的存储半段
-      recordInboundMessage(db, { deviceCode: code, customerId, content, sentAt, eventId: scopedId });
+      const inbound = recordInboundMessage(db, { deviceCode: code, customerId, content, sentAt, eventId: scopedId });
+      if (inbound.created) cancelInvalidRecontacts(db,{device:code,customerId});
       events.recordEvent({ eventId: scopedId, eventType: "message.created", direction: "inbound", deviceCode: code, customerId, payload: { content } });
       // SSE 推送（原由 automation 内部触发，摘除 dify 后改为路由内直发）
       notifier.messageCreated(code, customerId, scopedId);
