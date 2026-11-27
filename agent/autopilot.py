@@ -1896,6 +1896,12 @@ def _resolve_recipient(store: Store, cid: str, binding: dict | None,
     return (term, "") if owners == {other} else ("", "conflict")
 
 
+def _local_recipient_term(store: Store, cid: str, names=None) -> str:
+    if names is None:
+        names = _recipient_names(store, allow_missing_remarks=True)
+    return _resolve_recipient(store, cid, None, names)[0] if names is not None else ""
+
+
 def _queue_recipient_report(account: str, cid: str, status: str, remark: str = "") -> None:
     if not account or not status:
         return
@@ -1966,28 +1972,35 @@ def _recover_missing_direct_names(store: Store, cfg: dict, account: str) -> None
     candidates = rlog.recipient_blocked_conversations(cutoff, title_retry=True)
     if not candidates or not account:
         return
-    names = _direct_contact_names(store)
-    if names[0] != account:
+    names = _recipient_names(store, allow_missing_remarks=True)
+    if names is None or _recipient_account(store) != account:
         return
     unavailable = remote_cfg.takeover_sessions() | remote_cfg.abandoned_sessions()
     for cid in candidates:
-        name = _name_from_direct_contact(cid, names)
-        if not name or cid in unavailable or not match_target({"conv_id": cid, "conv_name": name}, cfg["target"]):
-            continue
+        peer = _recipient_other(account, cid)
+        name = _local_recipient_term(store, cid, names)
         row = rlog.recipient_blocked(cid, title_retry=True)
-        if not row:
+        if not name or cid in unavailable or not row:
             continue
-        missing_name = row["error"] == "会话没有可搜索的名字"
-        title_retry = row["last_step"] == "held" and row["error"] == _RECIPIENT_BLOCKED
-        if not missing_name and not (title_retry and _has_disputed_title_glyph(name)):
+        nickname = str(names[0].get(peer) or "")
+        if not match_target({"conv_id": cid, "conv_name": nickname}, cfg["target"]):
+            continue
+        local_remark = name == next((value for value in names[1].get(peer, ()) if value), None)
+        legacy_hold = row["last_step"] == "held" and row["error"] == _RECIPIENT_BLOCKED
+        if legacy_hold and not (local_remark or _has_disputed_title_glyph(name)):
             continue
         outbound = _missing_name_recovery_history(store, account, cid, row)
-        if title_retry and row["scene"] == "开场" and outbound != 0:
+        if legacy_hold and not local_remark and row["scene"] == "开场" and outbound != 0:
             continue
-        if rlog.restore_recipient_blocked(cid, row["message_id"], conv_name=name, cutoff=cutoff,
-                                         outbound_at=outbound, missing_name=missing_name, title_retry=title_retry):
+        remark_reply = local_remark and bool(outbound)
+        if rlog.restore_recipient_blocked(
+            cid, row["message_id"], conv_name=name, cutoff=cutoff, outbound_at=outbound,
+            missing_name=row["error"] == "会话没有可搜索的名字" and row["status"] == "skipped",
+            title_retry=legacy_hold, remark_reply=remark_reply,
+            first_contact=row["last_step"] == "recipient-blocked" and outbound == 0,
+        ):
             log("recipient_recovery_queued", scope="send", conv_id=cid, message_id=row["message_id"],
-                source="native_title" if title_retry else "contact_name")
+                source="local_remark" if local_remark else "native_title" if legacy_hold else "contact_name")
 
 
 def _recovered_name_still_safe(store: Store, account: str, cid: str, row: dict, name: str) -> bool:
@@ -1995,15 +2008,13 @@ def _recovered_name_still_safe(store: Store, account: str, cid: str, row: dict, 
         refresh_store(store)
     except (OSError, RuntimeError, sqlite3.Error):
         return False
-    names = _direct_contact_names(store)
-    if names[0] != account or _name_from_direct_contact(cid, names) != name:
+    if _recipient_account(store) != account or _local_recipient_term(store, cid) != name:
         return False
     outbound = _missing_name_recovery_history(store, account, cid, row)
-    if row["last_step"] == "title-recovery-queued":
-        if row["scene"] == "开场" and outbound != 0:
-            return False
-        if float(row["msg_time"] or 0) < time.time() - RECOVERY_REPLY_MAX_AGE:
-            return False
+    if row["last_step"] == "title-recovery-queued" and row["scene"] == "开场" and outbound != 0:
+        return False
+    if float(row["msg_time"] or 0) < time.time() - RECOVERY_REPLY_MAX_AGE:
+        return False
     return outbound is not None and outbound < float(row["msg_time"] or 0)
 
 
@@ -2060,22 +2071,6 @@ def _recipient_key(name: str) -> str:
     # OCR renders fullwidth ASCII punctuation and digits as halfwidth.
     width_normalized = name.translate(_RECIPIENT_WIDTH)
     return "".join(re.split(r"[\s_]+", width_normalized.casefold()))
-
-
-def _unique_direct_recipient(store: Store, name: str, cid: str) -> bool:
-    try:
-        me = store.self_id()
-        if not isinstance(me, str) or me in ("", "unknown") or not cid.startswith("S:"):
-            return False
-        members = cid[2:]
-        other = (members[len(me) + 1:] if members.startswith(me + "_") else
-                 members[:-len(me) - 1] if members.endswith("_" + me) else "")
-        key = _recipient_key(name)
-        owners = {str(contact_id) for contact_id, label in store.contacts().items()
-                  if key and _recipient_key(str(label or "")) == key}
-        return bool(other and other != me and owners == {other})
-    except Exception:
-        return False
 
 
 def _recipient_heading() -> _RecipientHeading | None:
@@ -2387,8 +2382,12 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
         name, _ = _resolve_recipient(store, cid, None)
         if not name:
             return "blocked", _RECIPIENT_BLOCKED, ""
-    elif guard and not _unique_direct_recipient(store, name, cid):
-        return "blocked", _RECIPIENT_BLOCKED, ""
+    elif guard:
+        name = _local_recipient_term(store, cid)
+        if not name:
+            log("wecom_send", level="warning", scope="send", route=route, phase="result",
+                reason_code="recipient_alias_unverified", outcome="blocked", sender_pid=os.getpid(), **context)
+            return "blocked", _RECIPIENT_BLOCKED, ""
     heading = None
     search_before = None
     phase = "start"
@@ -2410,6 +2409,7 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
                 remote_cfg.recipient_binding_account_active(account)
                 and remote_cfg.recipient_bindings(account).get(cid) == binding
             ))
+            and (_recipient_binding_enabled or _local_recipient_term(store, cid) == name)
             and heading and _recipient_heading() == heading
         )
 
@@ -2743,6 +2743,8 @@ def _sequence_block_reason(cid: str, cfg: dict, source: tuple, store: Store, nam
         if binding:
             term, _ = _resolve_recipient(store, cid, binding)
             return "" if term and binding["status"] == "verified" else _RECIPIENT_BLOCKED
+        if _recipient_guard_enabled(cid):
+            return "" if _local_recipient_term(store, cid) else _RECIPIENT_BLOCKED
         # Only actual two-member IDs can identify the counterpart. Do not
         # guess by splitting underscores, which can occur in external IDs.
         if isinstance(me, str) and me not in ("", "unknown") and cid.startswith("S:"):
@@ -3450,13 +3452,25 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         if _recipient_binding_enabled and not managed and cid.startswith("S:"):
             stats["blocked"] += 1
             continue
-        recovered_name = not dry and (recovery_step == "name-recovery-queued" or title_recovery)
+        local_recipient = not dry and _guard_recipient and not _recipient_binding_enabled and cid.startswith("S:")
+        recovered_name = not dry and (
+            recovery_step == "name-recovery-queued" or title_recovery
+            or (local_recipient and recovery_step == "recipient-recovery-queued")
+        )
         if recovered_name:
             if not _recipient_guard_enabled(cid) or not _recovered_name_still_safe(store, account, cid, it, name):
                 rlog.mark_held(mid, cid, "入站或出站记录发生变化，等待核对")
                 stats["blocked"] += 1
                 continue
-        if not dry and _needs_direct_name(cid, name):
+        if local_recipient:
+            name = _local_recipient_term(store, cid)
+            if not name:
+                if not rlog.mark_recipient_blocked(mid, cid, _RECIPIENT_BLOCKED):
+                    rlog.mark_held(mid, cid, _RECIPIENT_BLOCKED)
+                stats["blocked"] += 1
+                log("recipient_alias_unverified", level="warning", scope="send", conv_id=cid, message_id=mid)
+                continue
+        elif not dry and _needs_direct_name(cid, name):
             name = _name_from_direct_contact(cid, _direct_contact_names(store)) or name
         if managed and _recipient_other(account, cid):
             if it.get("last_step") == "recipient-recovery-queued":

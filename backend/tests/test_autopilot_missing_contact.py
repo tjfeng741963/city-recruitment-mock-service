@@ -26,6 +26,8 @@ class WeComSnapshot:
         self.names = {PEER: "Asky"}
         self.recent_rows = []
         self.conversation_rows = []
+        with closing(self._conn("user.db")) as conn, conn:
+            conn.execute("CREATE TABLE external_user_relation_v3(user_id,real_remarks,remarks)")
         with closing(self._conn("session.db")) as conn, conn:
             conn.execute(
                 "CREATE TABLE unread_conversation_table"
@@ -288,3 +290,100 @@ def test_resident_drains_ocr_title_hold_as_normal_reply_once(client, monkeypatch
     send.assert_called_once()
     assert ledger.recent()[0]["last_step"] == "sent-confirmed"
     assert ledger.recent_reply_recoveries()[0]["outcome"] == "sent"
+
+@pytest.mark.parametrize(("state", "change"), [
+    ("fresh", None), ("fresh", "collision"),
+    ("legacy-skip", None), ("legacy-skip", "collision"), ("legacy-skip", "late-outbound"),
+    ("legacy-opening-hold", None), ("legacy-opening-hold", "collision"), ("legacy-opening-hold", "late-outbound"),
+])
+def test_resident_uses_verified_remark_for_existing_conversation(client, monkeypatch, tmp_path, state, change):
+    agent, store, ledger = client
+    stamp = int(time.time()) - 5
+    remark = "CR0123456789abcdef"
+    store.names = {PEER: "ㅤ", "another_peer": "ㅤ"}
+    with closing(store._conn("user.db")) as conn, conn:
+        conn.execute("INSERT INTO external_user_relation_v3 VALUES (?,?,?)", (PEER, remark, ""))
+        if change == "collision":
+            conn.execute("INSERT INTO external_user_relation_v3 VALUES (?,?,?)", ("another_peer", remark, ""))
+    store.add(message(1, stamp - 60, sender=ACCOUNT, text="此前已发过岗位介绍"))
+    inbound = {**message(2, stamp, text="现在23了吗"), "conv_name": remark if state == "legacy-opening-hold" else CID}
+    store.add(inbound)
+    assert ledger.record_incoming(inbound)
+    if state == "legacy-skip":
+        ledger.mark_skipped(2, CID, LEGACY_SKIP)
+    elif state == "legacy-opening-hold":
+        ledger.mark_held(2, CID, agent._RECIPIENT_BLOCKED, "开场")
+
+    brain = MagicMock(reply_provider="agent")
+    brain.flow.return_value = {"nodes": []}
+    brain.chat.return_value = {"ok": True, "reply": "具体工价按岗位确认。", "trace_id": "reply-trace"}
+    brain.opening.return_value = {"ok": True, "items": [
+        {"seq": 1, "kind": "text", "content": "岗位介绍", "delay_ms": 0},
+    ]}
+    if change == "late-outbound":
+        def reply_after_human(*args, **kwargs):
+            store.add(message(3, stamp + 1, sender=ACCOUNT))
+            return brain.chat.return_value
+        brain.chat.side_effect = reply_after_human
+    send = MagicMock(return_value=("sent", "confirmed", "3"))
+    monkeypatch.setattr(agent, "_brain", brain)
+    monkeypatch.setattr(agent, "_guard_recipient", True)
+    monkeypatch.setattr(agent, "_send_text", send)
+    monkeypatch.setattr(agent, "_flow_state", agent.flow_state_mod.FlowState(tmp_path / "flow.db"))
+    monkeypatch.setattr(agent, "GREET_STATE", tmp_path / ".greeted.json")
+    if state == "fresh":
+        agent._save_greeted({CID})
+    monkeypatch.setattr(agent.remote_cfg, "takeover_sessions", set)
+    monkeypatch.setattr(agent.remote_cfg, "abandoned_sessions", set)
+    cfg = {**CFG, "cooldown": 0}
+
+    result = agent.drain(store, cfg)
+    brain.opening.assert_not_called()
+    if change:
+        assert result["sent"] == 0
+        send.assert_not_called()
+        return
+    assert result["sent"] == 1
+    assert agent.drain(store, cfg)["sent"] == 0
+    assert brain.chat.call_args.args == ("现在23了吗", CID)
+    assert (send.call_args.args[1:], send.call_args.kwargs["route"]) == (
+        (remark, CID, "具体工价按岗位确认。"), "auto",
+    )
+    send.assert_called_once()
+    assert ledger.recent()[0]["last_step"] == "sent-confirmed"
+
+def test_new_contact_recovers_first_opening_once_after_unique_remark(client, monkeypatch, tmp_path):
+    agent, store, ledger = client
+    store.names = {PEER: "ㅤ", "another_peer": "ㅤ"}
+    inbound = message(1, int(time.time()) - 5, text="你好")
+    store.add(inbound)
+    assert ledger.record_incoming(inbound)
+
+    brain = MagicMock(reply_provider="agent")
+    brain.flow.return_value = {"nodes": []}
+    brain.opening.return_value = {"ok": True, "items": [
+        {"seq": 1, "kind": "text", "content": "岗位介绍", "delay_ms": 0},
+    ]}
+    send = MagicMock(return_value=("sent", "confirmed", "2"))
+    monkeypatch.setattr(agent, "_brain", brain)
+    monkeypatch.setattr(agent, "_guard_recipient", True)
+    monkeypatch.setattr(agent, "_send_text", send)
+    monkeypatch.setattr(agent, "_flow_state", agent.flow_state_mod.FlowState(tmp_path / "flow.db"))
+    monkeypatch.setattr(agent, "GREET_STATE", tmp_path / ".greeted.json")
+    monkeypatch.setattr(agent.remote_cfg, "takeover_sessions", set)
+    monkeypatch.setattr(agent.remote_cfg, "abandoned_sessions", set)
+    cfg = {**CFG, "cooldown": 0}
+
+    assert agent.drain(store, cfg)["blocked"] == 1
+    assert ledger.recent()[0]["last_step"] == "recipient-blocked"
+    send.assert_not_called()
+    with closing(store._conn("user.db")) as conn, conn:
+        conn.execute("INSERT INTO external_user_relation_v3 VALUES (?,?,'')", (PEER, "CR-new-contact"))
+    agent.drain(store, cfg)
+    agent.drain(store, cfg)
+
+    send.assert_called_once()
+    assert send.call_args.args[1:] == ("CR-new-contact", CID, "岗位介绍")
+    assert send.call_args.kwargs["route"] == "opening"
+    brain.chat.assert_not_called()
+    assert CID in agent._load_greeted()

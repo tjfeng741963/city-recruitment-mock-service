@@ -401,13 +401,18 @@ def recipient_blocked_conversations(since: float, *, title_retry: bool = False) 
 
 def restore_recipient_blocked(conv_id: str, message_id: str, *, conv_name: str,
                               cutoff: float, outbound_at: float | None, missing_name: bool = False,
-                              title_retry: bool = False) -> bool:
+                              title_retry: bool = False, remark_reply: bool = False,
+                              first_contact: bool = False) -> bool:
     """Enqueue the latest eligible text once, after independently reading outbound history."""
     name = conv_name.strip()
     if not name or outbound_at is None or outbound_at < 0 or not isfinite(outbound_at) or not isfinite(cutoff):
         return False
-    step = ("title-recovery-queued" if title_retry else
-            "name-recovery-queued" if missing_name else "recipient-recovery-queued")
+    step = "recipient-recovery-queued"
+    if not remark_reply:
+        if title_retry:
+            step = "title-recovery-queued"
+        elif missing_name or first_contact:
+            step = "name-recovery-queued"
     eligible = _RECIPIENT_UNSENT
     if title_retry:
         eligible = _TITLE_RECIPIENT_UNSENT
@@ -435,7 +440,8 @@ def restore_recipient_blocked(conv_id: str, message_id: str, *, conv_name: str,
             con.execute(
                 """INSERT INTO reply_recoveries(conv_id,message_id,operator,reason,previous_status,
                        requested_at) VALUES (?,?,?,?,'held',?)""",
-                (str(conv_id), str(message_id), _TITLE_RETRY_OPERATOR, "本机标题复核", now),
+                (str(conv_id), str(message_id), _TITLE_RETRY_OPERATOR,
+                 "本机备注复核" if remark_reply else "本机标题复核", now),
             )
     return changed == 1
 

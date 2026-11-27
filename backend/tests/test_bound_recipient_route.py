@@ -71,6 +71,79 @@ def test_unbound_nickname_with_another_contacts_remark_is_a_conflict(recipient):
 
 
 
+@pytest.mark.parametrize(
+    ("nickname", "change", "expected_status", "expected_enters"),
+    [
+        ("", "", "sent", 2),
+        ("\u3164", "", "sent", 2),
+        ("Same", "", "sent", 2),
+        ("Same", "moved", "blocked", 0),
+        ("Same", "duplicate_remark", "blocked", 0),
+        ("Same", "nickname_collision", "blocked", 0),
+        ("Same", "wrong_title", "blocked", 1),
+        ("Same", "moved_before_paste", "blocked", 1),
+        ("Same", "moved_before_enter", "blocked", 1),
+    ],
+)
+def test_nonpilot_send_uses_only_the_current_peer_unique_remark(
+    recipient, monkeypatch, nickname, change, expected_status, expected_enters,
+):
+    agent, store, path = recipient
+    cid, remark = "S:self_one", "RCP8K6AXH"
+    store.contacts.return_value["one"] = nickname
+    if change in {"moved", "duplicate_remark"}:
+        with sqlite3.connect(path) as db:
+            db.execute("UPDATE external_user_relation_v3 SET real_remarks=? WHERE user_id='two'", (remark,))
+            if change == "moved":
+                db.execute("UPDATE external_user_relation_v3 SET real_remarks='' WHERE user_id='one'")
+    elif change == "nickname_collision":
+        store.contacts.return_value["two"] = remark
+    monkeypatch.setattr(agent, "_guard_recipient", True)
+    monkeypatch.setattr(agent, "_recipient_binding_enabled", False)
+    monkeypatch.setattr(agent, "_recipient_heading", lambda: (1, b"heading"))
+    monkeypatch.setattr(agent, "_recognize_recipient_heading", lambda *_: (
+        "Other contact" if change == "wrong_title" else remark
+    ))
+    monkeypatch.setattr(agent, "_outbound_snapshot", MagicMock(side_effect=[{}, {"22": "response"}]))
+    presses = MagicMock()
+    monkeypatch.setattr(agent.win, "tap", presses, raising=False)
+
+    def move_remark():
+        with sqlite3.connect(path) as db:
+            db.execute("UPDATE external_user_relation_v3 SET real_remarks='' WHERE user_id='one'")
+            db.execute("UPDATE external_user_relation_v3 SET real_remarks=? WHERE user_id='two'", (remark,))
+
+    def desktop_sender(_store, _term, _body, *, expect_id, verify_db, log):
+        log("步骤0 前台就位")
+        agent.win.hotkey("ctrl", "v")
+        agent.win.tap("enter")
+        log("步骤1 已回车进入会话")
+        if change == "moved_before_paste":
+            move_remark()
+        agent.win.hotkey("ctrl", "v")
+        log("步骤3 输入框校验通过")
+        if change == "moved_before_enter":
+            move_remark()
+        agent.win.tap("enter")
+        return {"ok": True, "conversation_id": expect_id}
+
+    agent.core_send.send.side_effect = desktop_sender
+    result = agent._send_text(store, nickname, cid, "response", route="auto", log_fn=MagicMock())
+
+    if expected_enters:
+        agent.core_send.send.assert_called_once()
+        args, kwargs = agent.core_send.send.call_args
+        assert args == (store, remark, "response")
+        assert kwargs["expect_id"] == cid
+        assert kwargs["verify_db"] is True
+    else:
+        agent.core_send.send.assert_not_called()
+    assert result[0] == expected_status
+    assert presses.call_count == expected_enters
+    if result[0] == "sent":
+        assert result[2] == f"{cid}:22"
+
+
 @pytest.mark.parametrize("failure", ["", "unchanged_search", "wrong_search", "wrong_chat", "focus_changed"])
 def test_bound_send_checks_both_enters(recipient, monkeypatch, failure):
     agent, store, _ = recipient
@@ -215,7 +288,9 @@ def title_raster(glyph):
 
 @pytest.mark.parametrize("changed", [False, True])
 def test_mixed_title_send_rechecks_live_frame_before_body_paste(recipient, monkeypatch, changed):
-    agent, store, _ = recipient
+    agent, store, path = recipient
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE external_user_relation_v3 SET real_remarks=''")
     name = "小e（工作时间09~18点）"
     cid = "S:self_one"
     store.contacts.return_value = {"one": name}
@@ -252,4 +327,4 @@ def test_title_width_equivalent_contacts_are_ambiguous():
     store = MagicMock()
     store.self_id.return_value = "self"
     store.contacts.return_value = {"one": "小e（工作时间09~18点）", "two": "小e(工作时间09~18点)"}
-    assert not agent._unique_direct_recipient(store, "小e（工作时间09~18点）", "S:self_one")
+    assert not agent._local_recipient_term(store, "S:self_one")
