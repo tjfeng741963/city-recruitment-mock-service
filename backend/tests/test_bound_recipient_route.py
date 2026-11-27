@@ -1,4 +1,5 @@
 import sqlite3
+from subprocess import CompletedProcess
 from unittest.mock import MagicMock
 
 import pytest
@@ -105,3 +106,28 @@ def test_bound_send_checks_both_enters(recipient, monkeypatch, failure):
     assert result[0] == ("blocked" if failure else "sent")
     expected_enters = 0 if failure in {"unchanged_search", "wrong_search"} else 1 if failure else 2
     assert inputs.call_count == expected_enters
+
+
+@pytest.mark.parametrize(
+    ("name", "language"),
+    [
+        ("Dark", "en-US"),
+        ("RCP8K6AXH", "en-US"),
+        ("Alice-23", "en-US"),
+        ("小明", "zh-Hans-CN"),
+        ("Evans_峰", "zh-Hans-CN"),
+        ("1", "zh-Hans-CN"),
+    ],
+)
+def test_recipient_ocr_uses_language_for_expected_name(monkeypatch, name, language):
+    agent = load_autopilot()
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
+
+    def recognize(command, *, env, **_):
+        selected = env.get("CITY_RECRUIT_HEADING_LANGUAGE", "zh-Hans-CN")
+        # As seen on Windows, Chinese OCR can misread an English name.
+        result = name if selected == language else "unrelated title"
+        return CompletedProcess(command, 0, stdout=result.encode("utf-8"))
+
+    monkeypatch.setattr(agent.subprocess, "run", recognize)
+    assert agent._recognize_recipient_heading((1, b"heading"), name) == name

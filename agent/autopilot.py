@@ -2137,7 +2137,11 @@ try {
     $d=ReadResult ($decoder::CreateAsync($s)) $decoder
     $im=ReadResult ($d.GetSoftwareBitmapAsync()) $bitmap
     try {
-        $engine=$ocr::TryCreateFromLanguage($lang::new('zh-Hans-CN'))
+        $preferred=$env:CITY_RECRUIT_HEADING_LANGUAGE
+        $engine=$ocr::TryCreateFromLanguage($lang::new($preferred))
+        if (-not $engine -and $preferred -eq 'en-US') {
+            $engine=$ocr::TryCreateFromLanguage($lang::new('zh-Hans-CN'))
+        }
         if ($engine) { (ReadResult ($engine.RecognizeAsync($im)) $result).Text }
     } finally { $im.Dispose() }
 } finally { $s.Dispose() }
@@ -2171,7 +2175,9 @@ def _recognize_recipient_heading(heading: tuple[int, bytes], name: str) -> str:
         with tempfile.TemporaryDirectory(prefix="city-recruit-heading-") as folder:
             file = Path(folder) / "heading.png"
             file.write_bytes(heading[1])
-            env = dict(os.environ, CITY_RECRUIT_HEADING_IMAGE=str(file))
+            # Chinese OCR can misread short Latin names and issued remark codes.
+            language = "en-US" if name.isascii() and re.search(r"[A-Za-z]", name) else "zh-Hans-CN"
+            env = dict(os.environ, CITY_RECRUIT_HEADING_IMAGE=str(file), CITY_RECRUIT_HEADING_LANGUAGE=language)
             ps = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
             result = subprocess.run(
                 [str(ps), "-NoProfile", "-NonInteractive", "-Command", _RECIPIENT_OCR_SCRIPT],
