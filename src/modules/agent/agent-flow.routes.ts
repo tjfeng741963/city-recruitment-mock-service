@@ -9,6 +9,7 @@ import { flowLocationLabel, flowLocationOptions, validFlowCoordinates, WORK_LOCA
 import { interviewLocation } from "../../shared/interview-location.js";
 import { openingVersion } from "../../shared/opening-version.js";
 import { parseOpeningLocation } from "../../shared/opening-location.js";
+import { recontactFlowStage } from "../recontact/recontact.js";
 import { matchingOpeningLayout, openingLayout, openingLocationReply, openingNodes, saveSharedOpening,
   sharedOpeningParts, SHARED_OPENING_LIMIT, splitSharedOpening, storedOpeningLayout, unverifiedOpeningNumbers,
   validateOpeningGroups, validateSharedOpening, type SharedOpeningPart } from "./shared-opening.js";
@@ -387,7 +388,7 @@ export async function registerAgentFlowRoutes(app: FastifyInstance, db: Database
     return readFlow(db, id);
   });
 
-  app.get<{ Querystring: { device_code?: string; location_links?: string } }>("/api/v1/agent/flow", async (request, reply) => {
+  app.get<{ Querystring: { device_code?: string; location_links?: string; recontact?: string } }>("/api/v1/agent/flow", async (request, reply) => {
     const code = str(request.query.device_code).trim();
     if (!deviceAllowed(request, code)) return reply.code(403).send({ detail: "Device token or scope invalid" });
     const mode = replyModeRow(db, code);
@@ -401,7 +402,8 @@ export async function registerAgentFlowRoutes(app: FastifyInstance, db: Database
     const { shared_opening: _shared, ...result } = readFlow(db, positionId, !withLocations);
     // 停用只阻止新会话；在途会话使用本地持久化快照。
     if (result.status !== "enabled") return { ...result, location_steps: 1, nodes: [], edges: [], reply_mode_id };
-    result.nodes = result.nodes.map(node => {
+    const serverWaitNodes = new Set<string>();
+    const nodes = result.nodes.map(node => {
       const parts = node.parts.flatMap(raw => {
         const { opening_id: _id, ...part } = parseObject(raw);
         if (part.kind === "location") {
@@ -415,9 +417,14 @@ export async function registerAgentFlowRoutes(app: FastifyInstance, db: Database
           delay_before_ms: part.delay_before_ms, delay_ms: part.delay_ms }];
       });
       const firstLocation = parseObject(node.parts[0]).kind === "location";
-      return { ...node, parts, body: firstLocation ? parts[0]?.body ?? "" : node.body };
+      const stage = request.query.recontact === "1" && node.await_reply && node.status === "enabled"
+        ? recontactFlowStage(db,positionId,parts) : undefined;
+      if (stage) serverWaitNodes.add(str(node.node_key));
+      return { ...node, parts, body: firstLocation ? parts[0]?.body ?? "" : node.body,
+        ...(stage ? {recontact_stage:stage} : {}) };
     });
-    return { ...result, location_steps: 1, reply_mode_id };
+    const edges = result.edges.filter(edge => edge.trigger !== "timeout" || !serverWaitNodes.has(str(edge.from_key)));
+    return { ...result, nodes, edges, location_steps: 1, reply_mode_id };
   });
 
   app.post<{ Body: Json }>("/api/v1/agent-flow/migrate", async (request, reply) => {
@@ -636,25 +643,26 @@ export async function registerAgentFlowRoutes(app: FastifyInstance, db: Database
         if (Number(item.followup_round)>1) throw new Error("复聊最多一次");
         const snapshot = jsonObject(item.snapshot);
         if (JSON.stringify(snapshot).length > 500_000) throw new Error("流程快照过大");
+        if (item.recontact_inbound_id && !/^\d{1,24}$/.test(str(item.recontact_inbound_id))) throw new Error("复聊入站标识无效");
         return {...item,await_since:isoOrNull(item.await_since),followup_sent_at:isoOrNull(item.followup_sent_at),snapshot_json:JSON.stringify(snapshot)};
       });
       db.exec("BEGIN");
       const rejected: string[] = [];
       try {
         const stmt = db.prepare(`INSERT INTO agent_conversation_state
-          (session_key,device_code,position_id,flow_version,node_key,step_index,phase,await_since,followup_sent_at,followup_round,last_error,revision,snapshot_json,conv_name,wait_minutes,last_inbound_at,updated_at)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+          (session_key,device_code,position_id,flow_version,node_key,step_index,phase,await_since,followup_sent_at,followup_round,last_error,revision,snapshot_json,conv_name,wait_minutes,last_inbound_at,recontact_inbound_id,updated_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
           ON CONFLICT(device_code,session_key) DO UPDATE SET position_id=excluded.position_id,flow_version=excluded.flow_version,
           node_key=excluded.node_key,step_index=excluded.step_index,phase=excluded.phase,await_since=excluded.await_since,
           followup_sent_at=excluded.followup_sent_at,followup_round=MAX(agent_conversation_state.followup_round,excluded.followup_round),
           last_error=excluded.last_error,revision=excluded.revision,snapshot_json=excluded.snapshot_json,conv_name=excluded.conv_name,
-          wait_minutes=excluded.wait_minutes,last_inbound_at=excluded.last_inbound_at,updated_at=CURRENT_TIMESTAMP
+          wait_minutes=excluded.wait_minutes,last_inbound_at=excluded.last_inbound_at,recontact_inbound_id=excluded.recontact_inbound_id,updated_at=CURRENT_TIMESTAMP
           WHERE excluded.revision>agent_conversation_state.revision`);
         for (const raw of rows) {
           const item: Json = raw;
           const result = stmt.run(str(item.session_key),deviceCode,Number(item.position_id),Number(item.flow_version),str(item.node_key),Number(item.step_index),str(item.phase),
             item.await_since as string|null,item.followup_sent_at as string|null,Number(item.followup_round),str(item.last_error).slice(0,2000),finiteInt(item.revision,1,1),str(item.snapshot_json,"{}"),
-            str(item.conv_name).slice(0,200),finiteInt(item.wait_minutes,15,1,10080),finiteNumber(item.last_inbound_at));
+            str(item.conv_name).slice(0,200),finiteInt(item.wait_minutes,15,1,10080),finiteNumber(item.last_inbound_at),str(item.recontact_inbound_id));
           if (!result.changes) rejected.push(str(item.session_key));
         }
         db.exec("COMMIT");

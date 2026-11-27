@@ -19,6 +19,7 @@ import { registerGenericRoutes } from "./modules/generic/generic.routes.js";
 import { registerResourceRoutes } from "./modules/resources/resource.routes.js";
 import { registerFileRoutes } from "./modules/files/file.routes.js";
 import { registerAgentRoutes } from "./modules/agent/agent.routes.js";
+import { registerRecontactRoutes } from "./modules/recontact/recontact.routes.js";
 import { registerCloudAgentAssignment } from "./modules/agent/cloud-agent-assignment.js";
 import { registerRelationRoutes } from "./modules/relations/relations.routes.js";
 import { registerPermissionRoutes } from "./modules/permissions/permission.routes.js";
@@ -53,6 +54,7 @@ const DEVICE_TOKEN_ROUTES = new Set(["heartbeat", "claim", "receipts", "inbound"
     "GET /api/v1/bridge/devices/:code/config",
     "POST /api/v1/bridge/devices/:code/reply-mode",
     "POST /api/v1/bridge/devices/:code/recipient-binding",
+    "POST /api/v1/bridge/devices/:code/recontact-check",
     "POST /api/v1/bridge/devices/:code/cloud-assignment",
     // 登录二维码：设备用自己的桥接令牌上传/清除，路由内 authenticate() 校验，
     // 不走用户 JWT（客户端没有登录态）。网页读取走用户鉴权的 /api/v1/agent/... 那侧。
@@ -200,6 +202,7 @@ export function buildServer() {
   registerResourceRoutes(app, db);
   registerFileRoutes(app, db);
   const { clearLoginVerification } = registerAgentRoutes(app, db, notifier);
+  registerRecontactRoutes(app, db);
   const bridgeStore = registerDeviceBridgeRoutes(app, db, notifier, clearLoginVerification);
   registerCloudAgentAssignment(app, db, bridgeStore);
   // 掉线清扫（契约：掉线提醒）：每 30s 把 60s 无心跳的“在线”设备翻成 offline，

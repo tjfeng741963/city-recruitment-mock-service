@@ -855,15 +855,15 @@ def begin_manual_command(server: str, device_code: str, command_id: str, lease_t
 
 
 def finish_manual_command(server: str, device_code: str, command_id: str, lease_token: str,
-                          status: str, message_id: str = "") -> None:
+                          status: str, message_id: str = "", *, error: str = "") -> None:
     if status not in ("unknown", "succeeded", "failed") or (status == "succeeded" and not message_id.strip()):
         raise ValueError("Invalid manual command outcome")
     con = _conn()
     try:
         cur = con.execute(
-            "UPDATE manual_commands SET status=?,message_id=?,updated_at=? "
+            "UPDATE manual_commands SET status=?,message_id=?,error=?,updated_at=? "
             "WHERE server=? AND device_code=? AND command_id=? AND lease_token=? AND status='unknown' AND receipt_state='pending'",
-            (status, message_id, time.time(), server, device_code, command_id, lease_token),
+            (status, message_id, error[:200], time.time(), server, device_code, command_id, lease_token),
         )
         if cur.rowcount != 1:
             raise ValueError("Manual command attempt is missing or already finalized")
@@ -890,7 +890,7 @@ def mark_manual_receipt(server: str, device_code: str, command_id: str, lease_to
     con = _conn()
     try:
         con.execute(
-            "UPDATE manual_commands SET receipt_state=?,error=?,updated_at=? "
+            "UPDATE manual_commands SET receipt_state=?,error=COALESCE(NULLIF(?,''),error),updated_at=? "
             "WHERE server=? AND device_code=? AND command_id=? AND lease_token=?",
             (receipt_state, error[:200], time.time(), server, device_code, command_id, lease_token),
         )

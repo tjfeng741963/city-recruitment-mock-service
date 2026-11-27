@@ -24,6 +24,7 @@ import { faqMediaForQuestion, normalizeFaqUtterance } from "./faq-media.js";
 import { difySendDelays } from "../dify/dify-invitation.js";
 import { listExecutionTraces, newExecutionTraceId, readExecutionTrace, writeExecutionTrace } from "./execution-trace.js";
 import { updateExecutionTraceDelivery } from "./execution-trace.js";
+import { finishRecontactAnchor, markRecontactAnchor } from "../recontact/recontact.js";
 import {
   buildOrchestration,
   guessCustomerName,
@@ -437,6 +438,11 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         nodeKey: text(request.body?.node_key),
       });
       if (!updated) return reply.code(404).send({ detail: "Execution trace not found" });
+      const deviceCode = text(request.body?.device_code);
+      const sessionKey = text(request.body?.session_key);
+      if (status === "sent" && deviceCode && hasDifyDeviceToken(db,request,deviceCode)) {
+        finishRecontactAnchor(db,traceId,deviceCode,sessionKey);
+      }
       return { ok: true, trace_id: traceId, delivery_status: status };
     },
   );
@@ -1208,6 +1214,12 @@ export async function registerAgentChatRoutes(app: FastifyInstance, db: Database
         latency_ms: result.latency_ms,
         reply: orderedReply || replyPayload,
       });
+      if (!body.dry && !body.preview && !locationCard && !replyPayload.handoff && !replyPayload.done
+        && deviceCode && hasDifyDeviceToken(db,request,deviceCode)
+        && (orderedReply || replyPayload.messages.every(item => item.type === "text"))) {
+        markRecontactAnchor(db,{traceId,deviceCode,sessionKey,positionId,provider:"agent",question:input,
+          messages:(orderedReply || replyPayload).messages,turnId:text(body.turn_id)});
+      }
       return {
         ok: true,
         trace_id: traceId,

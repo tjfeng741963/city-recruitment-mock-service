@@ -5,7 +5,9 @@ export function navigationForRole(role: string): NavigationGroup[] {
   return [
     { key: 'home', label: '首页', items: [{ path: '/dashboard', label: '首页' }] },
     { key: 'operations', label: '日常招聘', items: [
-      { path: '/conversations', label: '对话管理' }, { path: '/candidates', label: '候选人管理' },
+      { path: '/conversations', label: '对话管理' },
+      ...(role === 'admin' || role === 'recruiter' ? [{ path: '/recontact', label: '复聊板块' }] : []),
+      { path: '/candidates', label: '候选人管理' },
       { path: '/archive', label: '面试登记' }, { path: '/agent-devices', label: '微信账号' },
     ] },
     { key: 'basic', label: '招聘资料', items: [

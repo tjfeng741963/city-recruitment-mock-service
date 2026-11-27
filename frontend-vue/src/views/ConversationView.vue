@@ -37,6 +37,7 @@
           <div class="mid-title-row">
             <span>客户列表</span>
             <span class="mid-actions">
+              <el-button v-if="returnToRecontact" link size="small" @click="router.push(returnToRecontact)">返回发送记录</el-button>
               <el-button v-if="leftCollapsed" link size="small" @click="leftCollapsed = false">展开设备</el-button>
               <el-button link size="small" :loading="convLoading" @click="loadConversations()">刷新</el-button>
             </span>
@@ -263,7 +264,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   ChatDotSquare,
@@ -281,8 +282,11 @@ import {
 } from '../api/agent'
 import { createAgentStream } from '../api/realtime'
 import { formatDateTime } from '../utils/format'
+import { recontactReturnRoute } from '../components/recontact/recontact-view'
 
 const router = useRouter()
+const route = useRoute()
+const returnToRecontact = computed(() => recontactReturnRoute(route.query))
 
 const devices = ref<AgentDeviceItem[]>([])
 const devicesLoading = ref(false)
@@ -426,7 +430,22 @@ async function loadDevices(): Promise<void> {
     const { data } = await devicesApi.list({ my: true, page: 1, page_size: 1000 })
     devices.value = data.items || []
     if (!activeDevice.value && devices.value.length) {
-      await selectDevice(devices.value[0])
+      const linkedDevice = returnToRecontact.value ? route.query.device_code : undefined
+      const device = typeof linkedDevice === 'string'
+        ? devices.value.find(item => item.device_code === linkedDevice)
+        : devices.value[0]
+      if (!device) {
+        devicesError.value = '该企微账号不可访问'
+        return
+      }
+      const linkedCustomer = linkedDevice ? route.query.customer_id : undefined
+      if (typeof linkedCustomer === 'string') dateRange.value = null
+      await selectDevice(device)
+      if (typeof linkedCustomer === 'string') {
+        const conversation = conversations.value.find(item => String(item.customer_id) === linkedCustomer)
+        if (conversation) await selectConversation(conversation)
+        else if (!convError.value) convError.value = '该客户会话不可访问'
+      }
     } else if (activeDevice.value) {
       const current = devices.value.find((item) => item.id === activeDevice.value?.id)
       if (current) activeDevice.value = current
