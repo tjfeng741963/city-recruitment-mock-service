@@ -146,14 +146,16 @@ _RECOVERY_HAS_NEWER_MESSAGE = f"""EXISTS (
     WHERE newer.conv_id=selected.conv_id AND {_HAS_INBOUND_TEXT.format(row="newer")}
       AND (COALESCE(newer.msg_time,0),newer.id)>(COALESCE(selected.msg_time,0),selected.id)
 )"""
+_MISSING_NAME_SKIP = """selected.status='skipped' AND selected.last_step='skipped'
+        AND selected.error='会话没有可搜索的名字'"""
 _RECIPIENT_UNSENT = f"""selected.attempts=0 AND {_HAS_INBOUND_TEXT.format(row="selected")} AND (
     (selected.status IN ('held','failed') AND selected.last_step='recipient-blocked')
-    OR (selected.status='skipped' AND selected.last_step='skipped'
-        AND selected.error='会话没有可搜索的名字')
+    OR ({_MISSING_NAME_SKIP})
 )"""
 _SKIP_SUPERSEDED_RECOVERY = f"""UPDATE reply_log AS selected
     SET status='skipped',last_step='skipped',error='恢复排队后收到更新的消息',replied_at=?
-    WHERE last_step IN ('recovery-queued','recipient-recovery-queued') AND {_RECOVERY_HAS_NEWER_MESSAGE}"""
+    WHERE last_step IN ('recovery-queued','recipient-recovery-queued','name-recovery-queued')
+    AND {_RECOVERY_HAS_NEWER_MESSAGE}"""
 _LEGACY_PARTIAL = re.compile(r"^(?:已确认 [1-9]\d* 段文本，|开场第 \d+ 项未完成，已有 [1-9]\d* 项执行成功：)")
 
 
@@ -387,17 +389,19 @@ def recipient_blocked_conversations(since: float) -> list[str]:
 
 
 def restore_recipient_blocked(conv_id: str, message_id: str, *, conv_name: str,
-                              cutoff: float, outbound_at: float | None) -> bool:
+                              cutoff: float, outbound_at: float | None, missing_name: bool = False) -> bool:
     """Enqueue the latest eligible text once, after independently reading outbound history."""
     name = conv_name.strip()
     if not name or outbound_at is None or outbound_at < 0 or not isfinite(outbound_at) or not isfinite(cutoff):
         return False
+    step = "name-recovery-queued" if missing_name else "recipient-recovery-queued"
+    eligible = f"{_RECIPIENT_UNSENT} AND ({_MISSING_NAME_SKIP})" if missing_name else _RECIPIENT_UNSENT
     with _welcome_conn() as con:
         changed = con.execute(
             f"""UPDATE reply_log AS selected SET conv_name=?,status='pending',
-                       last_step='recipient-recovery-queued',error=NULL,replied_at=NULL
+                       last_step=?,error=NULL,replied_at=NULL
                 WHERE conv_id=? AND message_id=? AND msg_time>=? AND msg_time>?
-                  AND {_RECIPIENT_UNSENT} AND NOT {_RECOVERY_HAS_NEWER_MESSAGE}
+                  AND {eligible} AND NOT {_RECOVERY_HAS_NEWER_MESSAGE}
                   AND NOT EXISTS (
                       SELECT 1 FROM welcome_deliveries w WHERE w.conv_id=selected.conv_id
                         AND w.state NOT IN ('sent','cancelled')
@@ -407,7 +411,7 @@ def restore_recipient_blocked(conv_id: str, message_id: str, *, conv_name: str,
                         AND (attempt.status='unknown' OR attempt.last_step IN ('sending','partial'))
                         AND MAX(COALESCE(attempt.replied_at,0),COALESCE(attempt.msg_time,0))>=selected.msg_time
                   )""",
-            (name, str(conv_id), str(message_id), cutoff, outbound_at),
+            (name, step, str(conv_id), str(message_id), cutoff, outbound_at),
         ).rowcount
     return changed == 1
 
@@ -436,7 +440,7 @@ def begin_reply_attempt(message_id: str, conv_id: str, scene: str, reply_text: s
             f"""UPDATE reply_log AS selected SET status='unknown', error=?, scene=?, reply_text=?,
                 last_step='sending', replied_at=? WHERE conv_id=? AND message_id=?
                 AND status IN ('pending','failed') AND last_step<>'recipient-blocked'
-                AND (last_step NOT IN ('recovery-queued','recipient-recovery-queued')
+                AND (last_step NOT IN ('recovery-queued','recipient-recovery-queued','name-recovery-queued')
                      OR NOT {_RECOVERY_HAS_NEWER_MESSAGE})""",
             ("发送被中断时请核对企微实际落点", scene, reply_text, time.time(), str(conv_id), str(message_id)),
         )
@@ -637,7 +641,7 @@ def queue_reply_recovery(conv_id: str, message_id: str, *, reason: str,
         ).fetchone()
         if row is None:
             return "not_found"
-        if row["last_step"] in ("recovery-queued", "recipient-recovery-queued"):
+        if row["last_step"] in ("recovery-queued", "recipient-recovery-queued", "name-recovery-queued"):
             return "already_queued"
         if row["last_step"] == "sending":
             return "in_progress"

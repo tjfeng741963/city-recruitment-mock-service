@@ -37,6 +37,7 @@ import json
 import math
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -1466,14 +1467,50 @@ def scan_added_contacts(store: Store, cfg: dict) -> int:
     return added
 
 
+def _direct_contact_names(store: Store) -> tuple[str, dict[str, str], dict[str, set[str]]]:
+    try:
+        account = _recipient_account(store)
+        contacts = store.contacts() if account else {}
+        if not isinstance(contacts, dict):
+            return "", {}, {}
+    except (OSError, sqlite3.Error, AttributeError):
+        return "", {}, {}
+    owners: dict[str, set[str]] = {}
+    for contact_id, label in contacts.items():
+        key = _recipient_key(str(label or ""))
+        if key:
+            owners.setdefault(key, set()).add(str(contact_id))
+    return account, contacts, owners
+
+
+def _name_from_direct_contact(cid: str, names: tuple[str, dict[str, str], dict[str, set[str]]]) -> str:
+    account, contacts, owners = names
+    other = _recipient_other(account, cid)
+    name = str(contacts.get(other) or "").strip()
+    return name if other and owners.get(_recipient_key(name)) == {other} else ""
+
+
+def _needs_direct_name(cid: str, name: object) -> bool:
+    return cid.startswith("S:") and str(name or "").strip() in ("", cid)
+
+
 def scan(store: Store, cfg: dict) -> int:
     """把新的对方消息登记进 reply_log。返回新增条数。"""
     added = 0
+    names = None
     for m in store.recent(limit=60):
         if m.get("is_self"):
             continue
         cid = m.get("conv_id") or ""
-        if not cid or not match_target(m, cfg["target"]):
+        if not cid:
+            continue
+        if _needs_direct_name(cid, m.get("conv_name")):
+            if names is None:
+                names = _direct_contact_names(store)
+            name = _name_from_direct_contact(cid, names)
+            if name:
+                m = {**m, "conv_name": name}
+        if not match_target(m, cfg["target"]):
             continue
         if rlog.record_incoming(m):
             added += 1
@@ -1496,6 +1533,7 @@ def scan_unread(store: Store, cfg: dict) -> int:
     cursor_fallback_count = 0
     selected_count = 0
     unmatched_count = 0
+    contact_names = None
     try:
         try:
             unread_rows = session_db.execute(
@@ -1564,6 +1602,10 @@ def scan_unread(store: Store, cfg: dict) -> int:
                 "type": latest.get("type") or 0,
                 "time": latest.get("time") or 0,
             }
+            if _needs_direct_name(cid, item["conv_name"]):
+                if contact_names is None:
+                    contact_names = _direct_contact_names(store)
+                item["conv_name"] = _name_from_direct_contact(cid, contact_names) or cid
             if not match_target(item, cfg["target"]):
                 continue
             # An unread badge cannot revive an already consumed flow trigger.
@@ -1890,6 +1932,67 @@ def _latest_recipient_outbound(store: Store, account: str, cid: str) -> float | 
         return float(row[0] or 0) if row else None
     except (OSError, ValueError, sqlite3.Error):
         return None
+
+
+def _missing_name_recovery_history(store: Store, account: str, cid: str, row: dict) -> float | None:
+    """Prove the stored inbound still identifies the live turn and has no later outbound."""
+    peer = _recipient_other(account, cid)
+    if not peer:
+        return None
+    try:
+        database = store._conn("message.db")
+        if database is None:
+            return None
+        with closing(database):
+            latest = database.execute(
+                """SELECT message_id,send_time FROM message_table
+                   WHERE conversation_id=? AND CAST(sender_id AS TEXT)=?
+                     AND content_type IN (0,2,573) AND length(content)>0
+                   ORDER BY send_time DESC,message_id DESC LIMIT 1""", (cid, peer),
+            ).fetchone()
+            outbound = database.execute(
+                "SELECT max(send_time) FROM message_table WHERE conversation_id=? AND CAST(sender_id AS TEXT)=?",
+                (cid, account),
+            ).fetchone()
+        if latest and str(latest[0]) == str(row["message_id"]) and float(latest[1]) == float(row["msg_time"]):
+            return float(outbound[0] or 0) if outbound else None
+    except (OSError, ValueError, TypeError, sqlite3.Error):
+        pass
+    return None
+
+
+def _recover_missing_direct_names(store: Store, cfg: dict, account: str) -> None:
+    cutoff = time.time() - RECOVERY_REPLY_MAX_AGE
+    candidates = rlog.recipient_blocked_conversations(cutoff)
+    if not candidates or not account:
+        return
+    names = _direct_contact_names(store)
+    if names[0] != account:
+        return
+    unavailable = remote_cfg.takeover_sessions() | remote_cfg.abandoned_sessions()
+    for cid in candidates:
+        name = _name_from_direct_contact(cid, names)
+        if not name or cid in unavailable or not match_target({"conv_id": cid, "conv_name": name}, cfg["target"]):
+            continue
+        row = rlog.recipient_blocked(cid)
+        if not row or row["error"] != "会话没有可搜索的名字":
+            continue
+        outbound = _missing_name_recovery_history(store, account, cid, row)
+        if rlog.restore_recipient_blocked(cid, row["message_id"], conv_name=name,
+                                         cutoff=cutoff, outbound_at=outbound, missing_name=True):
+            log("会话名称已恢复，重新排队", scope="send", conv_id=cid, message_id=row["message_id"])
+
+
+def _recovered_name_still_safe(store: Store, account: str, cid: str, row: dict, name: str) -> bool:
+    try:
+        refresh_store(store)
+    except (OSError, RuntimeError, sqlite3.Error):
+        return False
+    names = _direct_contact_names(store)
+    if names[0] != account or _name_from_direct_contact(cid, names) != name:
+        return False
+    outbound = _missing_name_recovery_history(store, account, cid, row)
+    return outbound is not None and outbound < float(row["msg_time"] or 0)
 
 
 def _refresh_recipient_recoveries(store: Store) -> None:
@@ -3080,6 +3183,8 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
     bindings = remote_cfg.recipient_bindings(account) if managed else {}
     if managed:
         _refresh_recipient_recoveries(store)
+    elif not dry and not _recipient_binding_enabled and _guard_recipient:
+        _recover_missing_direct_names(store, cfg, account)
     items = rlog.pending(include_failed=True)
     if items and not dry and not desktop_send_ready("auto")[0]:
         stats["blocked"] += len(items)
@@ -3113,7 +3218,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             break
         mid = it["message_id"]
         cid = it["conv_id"]
-        name = it["conv_name"] or ""
+        name = str(it["conv_name"] or "").strip()
         trace = it.get("trace_id") or ""
         dify_mode = getattr(_brain, "reply_provider", None) == "dify"
         earlier = earlier_by_session.get(cid, [])
@@ -3158,6 +3263,14 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         if _recipient_binding_enabled and not managed and cid.startswith("S:"):
             stats["blocked"] += 1
             continue
+        recovered_name = not dry and it.get("last_step") == "name-recovery-queued"
+        if recovered_name:
+            if not _recipient_guard_enabled(cid) or not _recovered_name_still_safe(store, account, cid, it, name):
+                rlog.mark_held(mid, cid, "入站或出站记录发生变化，等待核对")
+                stats["blocked"] += 1
+                continue
+        if not dry and _needs_direct_name(cid, name):
+            name = _name_from_direct_contact(cid, _direct_contact_names(store)) or name
         if managed and _recipient_other(account, cid):
             if it.get("last_step") == "recipient-recovery-queued":
                 outbound = _latest_recipient_outbound(store, account, cid)
@@ -3246,6 +3359,10 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             if flow_row is None or flow_row.get("phase") == "idle":
                 entry = _flow_node(flow, str(flow.get("entry_key") or "")) or (flow.get("nodes") or [None])[0]
                 if entry is not None:
+                    if recovered_name and not _recovered_name_still_safe(store, account, cid, it, name):
+                        rlog.mark_held(mid, cid, "入站或出站记录发生变化，等待核对")
+                        stats["blocked"] += 1
+                        continue
                     flow_state.upsert(cid, device_code=resolve_device_code(cfg), position_id=int(flow.get("position_id") or 0),
                                       flow_version=int(flow.get("version") or 0), node_key=str(entry.get("node_key")),
                                       phase="running", conv_name=name, snapshot_json=json.dumps(flow, ensure_ascii=False))
@@ -3305,6 +3422,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     flow_state.set_phase(cid, "replied")
 
         agent_trace_id = ""
+        opening_claimed = False
         if _brain is not None:
             if not dify_mode:
                 hint = _inbound_hint(it)
@@ -3312,7 +3430,6 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             # 客户问定位时服务端会带一张位置卡（坐标+地址+名称），文本发完再补发。
             agent_card: dict | None = None
             res = {"ok": False, "detail": "Agent 未初始化"}
-            opening_claimed = False
             try:
                 # ── 开场：新会话按序播一遍 ────────────────────────────
                 # 只在「该会话第一次出现消息」时拉开场清单。为什么不靠 hint：
@@ -3368,6 +3485,10 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                             fake_id = f"opening:{cid}:{seq}"
                             if kind == "text" and (item["content"] or "").strip():
                                 if not opening_claimed:
+                                    if recovered_name and not _recovered_name_still_safe(store, account, cid, it, name):
+                                        rlog.mark_held(mid, cid, "入站或出站记录发生变化，等待核对")
+                                        stats["blocked"] += 1
+                                        return stats
                                     if not rlog.begin_reply_attempt(mid, cid, "开场"):
                                         stats["blocked"] += 1
                                         return stats
@@ -3663,6 +3784,10 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 scope="send", message_id=mid, trace_id=trace)
             continue
 
+        if recovered_name and not opening_claimed and not _recovered_name_still_safe(store, account, cid, it, name):
+            rlog.mark_held(mid, cid, "入站或出站记录发生变化，等待核对")
+            stats["blocked"] += 1
+            continue
         send_started = time.time()
         if not rlog.begin_reply_attempt(mid, cid, scene, text):
             stats["blocked"] += 1
