@@ -571,12 +571,15 @@ export class DeviceBridgeStore {
   receipt(code: string, id: string, lease: string, status: "succeeded" | "failed" | "unknown", messageId = "", simulated = false, error = ""): void {
     const command = this.command(id);
     if (!command || command.device_code !== code || !lease || command.lease_token !== lease) throw new BridgeError("Invalid command receipt", 403);
-    // 刷新二维码没有 message_id 可回：它不产生客户消息，回执成功不要求 message_id。
-    const isRefresh = command.kind === "refresh_login_qr";
-    if (status === "succeeded" && !isRefresh && !messageId.trim()) throw new BridgeError("Successful receipt requires message_id", 422);
+    // 刷新二维码和设置备注都不产生客户消息，回执没有 message_id 可回。
+    // 2026-11-27 现场：只豁免了刷新二维码，set_remark 成功回执被
+    // 「Successful receipt requires message_id」422 拒掉，指令留在 claimed，
+    // 60 秒租约过期后被标成 failed——看起来备注全失败，其实界面操作成功了。
+    const noMessageKind = command.kind === "refresh_login_qr" || command.kind === "set_remark";
+    if (status === "succeeded" && !noMessageKind && !messageId.trim()) throw new BridgeError("Successful receipt requires message_id", 422);
     const groupNotice = command.idempotency_key.startsWith(DIFY_GROUP_NOTIFICATION_PREFIX)
       || (command.idempotency_key.startsWith("group-notify:") && command.contact_id.startsWith("R:"));
-    if (status === "succeeded" && !simulated && !isRefresh && (groupNotice || isDifyReminder(command))) {
+    if (status === "succeeded" && !simulated && !noMessageKind && (groupNotice || isDifyReminder(command))) {
       const prefix = command.contact_id + ":";
       if (!messageId.startsWith(prefix) || !messageId.slice(prefix.length).trim()) {
         throw new BridgeError("Receipt does not match the target conversation", 422);
@@ -586,10 +589,10 @@ export class DeviceBridgeStore {
       if (command.status !== status || command.message_id !== messageId || Boolean(command.simulated) !== simulated) throw new BridgeError("Conflicting receipt");
       return;
     }
-    // 刷新二维码不产生任何客户消息：只落指令状态和失败原因，不进消息/投递/会话表。
+    // 无正文指令不产生任何客户消息：只落指令状态和失败原因，不进消息/投递/会话表。
     // 走 applyReceipt 会去查 message_deliveries、bridge_outbound 和会话预览，
     // 对一个无正文指令全是无意义查询，还多一条误改风险。
-    if (isRefresh) {
+    if (noMessageKind) {
       this.db.prepare("UPDATE bridge_commands SET status=?,error=?,receipt_at=COALESCE(receipt_at,?) WHERE id=? AND status='claimed'")
         .run(status, String(error || "").slice(0, 500), this.now(), id);
       return;
