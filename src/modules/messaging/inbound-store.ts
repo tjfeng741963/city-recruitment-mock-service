@@ -21,11 +21,13 @@ export function recordInboundMessage(
   input: InboundMessageInput,
 ): { created: boolean } {
   const now = new Date().toISOString().replace("T", " ").slice(0, 19);
+  const tenant = db.prepare("SELECT tenant_id FROM agent_conversations WHERE device_code=? AND customer_id=?")
+    .get(input.deviceCode,input.customerId)?.tenant_id ?? 1;
   const inserted = db
     .prepare(
-      "INSERT OR IGNORE INTO agent_messages(device_code,customer_id,direction,content,status,created_at,source_event_id) VALUES (?,?, 'inbound',?,'received',?,?)",
+      "INSERT OR IGNORE INTO agent_messages(device_code,customer_id,direction,content,status,created_at,source_event_id,tenant_id) VALUES (?,?, 'inbound',?,'received',?,?,?)",
     )
-    .run(input.deviceCode, input.customerId, input.content, input.sentAt ?? now, input.eventId);
+    .run(input.deviceCode, input.customerId, input.content, input.sentAt ?? now, input.eventId, tenant);
   if (Number(inserted.changes) !== 1) return { created: false };
 
   db.prepare(

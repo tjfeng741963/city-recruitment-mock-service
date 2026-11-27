@@ -23,7 +23,7 @@ type Job = {
   id: number; tenant_id: number; position_id: number; conversation_id: number; customer_id: number;
   device_code: string; account_id: string; contact_id: string; provider: Provider; mode_generation: string;
   source: "auto" | "batch"; stage: RecontactStage | ""; baseline_inbound_id: number;
-  status: string; reason: string; due_at: number; created_at: number;
+  status: string; reason: string; stop_reason: string; due_at: number; created_at: number;
 };
 type Step = ResolvedPart & {
   job_id: number; seq: number; status: string; reason: string; due_at: number | null;
@@ -34,7 +34,53 @@ const DAY = 86400_000;
 const ZONE_OFFSET = 8 * 3600_000;
 const SEND_START = 9 * 60;
 const SEND_END = 21 * 60;
-const rejected = /^(?:我)?(?:不考虑了|暂时不考虑|不去了|不参加面试|先不面试|不感兴趣|不用联系了|不要再联系我)[。！!\s]*$/u;
+const ANCHOR_RECOVERY_MS = DAY;
+const rejected = /^(?:我)?(?:不考虑了|暂时不考虑|暂时不去|不去(?:了)?|不接受|接受不了|不参加面试|先不面试|不感兴趣|不用联系了|不要再联系我)[。！!\s]*$/u;
+
+function deviceAccount(db:DatabaseSync,code:string) {
+  return db.prepare(`SELECT b.account_id,b.state,b.heartbeat_at,p.account_id AS enabled_account,p.enabled_at
+    FROM bridge_devices b JOIN agent_devices d ON json_extract(d.data_json,'$.device_code')=b.device_code AND d.tenant_id=b.tenant_id AND d.status='enabled'
+    LEFT JOIN recontact_devices p ON p.device_code=b.device_code WHERE b.device_code=?`).get(code) as
+    {account_id:string;state:string;heartbeat_at:number;enabled_account:string|null;enabled_at:number|null} | undefined;
+}
+
+export function recontactDeviceStatus(db:DatabaseSync,code:string,now=Date.now()) {
+  const row=deviceAccount(db,code);
+  const ready=Boolean(row?.account_id && row.state==="online" && now-row.heartbeat_at<=60_000 &&
+    db.prepare("SELECT 1 FROM recontact_capability WHERE device_code=? AND account_id=? AND seen_at>=?")
+      .get(code,row.account_id,now-60_000) &&
+    db.prepare(`SELECT 1 FROM bridge_contacts m
+      JOIN agent_conversations c ON c.device_code=m.device_code AND c.customer_id=m.customer_id AND c.external_conversation_id=m.contact_id
+      JOIN bridge_devices b ON b.device_code=m.device_code AND b.tenant_id=c.tenant_id
+      WHERE m.device_code=? AND ((substr(m.contact_id,1,length(?))=? AND length(m.contact_id)>length(?))
+        OR (substr(m.contact_id,1,2)='S:' AND substr(m.contact_id,-length(?))=? AND length(m.contact_id)>length(?)+2))
+        AND m.contact_id<>? LIMIT 1`).get(code,`S:${row.account_id}_`,`S:${row.account_id}_`,`S:${row.account_id}_`,
+          `_${row.account_id}`,`_${row.account_id}`,`_${row.account_id}`,`S:${row.account_id}_${row.account_id}`));
+  const enabled=Boolean(row?.account_id && row.account_id===row.enabled_account);
+  return {enabled,ready};
+}
+
+export function revokeRecontactDevice(db:DatabaseSync,code:string,now=Date.now()) {
+  db.prepare("DELETE FROM recontact_devices WHERE device_code=?").run(code);
+  db.prepare("UPDATE recontact_anchors SET consumed=1 WHERE device_code=? AND consumed=0").run(code);
+  cancelInvalidRecontacts(db,{device:code},now);
+}
+
+export function noteRecontactCapability(db:DatabaseSync,code:string,account:string,now:number) {
+  if (!account) return;
+  db.prepare(`INSERT INTO recontact_capability(device_code,account_id,seen_at) VALUES (?,?,?)
+    ON CONFLICT(device_code) DO UPDATE SET account_id=excluded.account_id,seen_at=excluded.seen_at`).run(code,account,now);
+}
+
+export function setRecontactDevice(db:DatabaseSync,code:string,enabled:boolean,now=Date.now()):boolean {
+  const row=deviceAccount(db,code);
+  if (!enabled) { revokeRecontactDevice(db,code,now); return true; }
+  if (!row?.account_id || !recontactDeviceStatus(db,code,now).ready) return false;
+  db.prepare(`INSERT INTO recontact_devices(device_code,account_id,enabled_at) VALUES (?,?,?)
+    ON CONFLICT(device_code) DO UPDATE SET account_id=excluded.account_id,enabled_at=excluded.enabled_at
+    WHERE recontact_devices.account_id<>excluded.account_id`).run(code,row.account_id,now);
+  return true;
+}
 
 export function recontactTenant(db: DatabaseSync, scope: UserScope): number {
   return (db.prepare("SELECT tenant_id FROM users WHERE id=?").get(scope.userId) as { tenant_id: number } | undefined)?.tenant_id ?? 0;
@@ -136,6 +182,7 @@ export function recontactTarget(db: DatabaseSync, id: number, days = 0, now = Da
     .get(device_code,customer_id,tenant_id) as {created_at:string} | undefined;
   const last_contact_at = activity?.created_at ?? "";
   const binding = contact_id && readRecipientBinding(db,device_code,account_id,contact_id);
+  const invitation = provider==="dify" ? db.prepare("SELECT stage FROM dify_invitation_state WHERE identity=? AND position_id=?").get(identity,position_id) : undefined;
   let reason = "";
   if (row.device_status !== "enabled") reason = "账号已停用";
   else if (!contact_id || contact_id !== row.external_conversation_id || !isDirectRecipient(account_id,contact_id) || !nickname.trim()
@@ -144,11 +191,12 @@ export function recontactTarget(db: DatabaseSync, id: number, days = 0, now = Da
   else if (replyModePending(db,device_code)) reason = "回复模式正在切换";
   else if (!allowed.includes(position_id) || !selectedPosition(db,position_id,tenant_id)) reason = "岗位已变更或停用";
   else if (row.takeover) reason = "人工已接管";
-  else if (row.recruit_status === "disqualified" || row.state === "abandoned" || (latest && rejected.test(latest.content.trim()))) reason = "候选人已拒绝或结束";
+  else if (row.recruit_status === "disqualified" || row.state === "abandoned" || invitation?.stage==="declined" || (latest && rejected.test(latest.content.trim()))) reason = "候选人已拒绝或结束";
   else if (["invited","checked_in","registered"].includes(row.recruit_status) || db.prepare(`SELECT 1 FROM agent_archive WHERE interview_confirmed=1 AND
     ((dify_device_code=? AND dify_conversation_row_id=? AND dify_account_id=?) OR (dify_device_code='' AND session_key=?)) LIMIT 1`)
     .get(device_code,id,account_id,contact_id)) reason = "候选人已报名";
   else if (!latest || !Number.isFinite(stamp(latest.created_at))) reason = "缺少真实来信记录";
+  else if (!recontactDeviceStatus(db,device_code,now).enabled) reason = "此账号的复聊未启用";
   else if (days > 0 && !(now - stamp(last_contact_at) >= days * DAY)) reason = "最近联系时间未达到筛选条件";
   return {id:conversationId,customer_id,nickname,position_id,device_code,tenant_id,account_id,contact_id:contact_id ?? "",
     provider,mode_generation,baseline_inbound_id:latest?.id ?? 0,inbound_at:latest ? stamp(latest.created_at) : 0,last_contact_at,reason};
@@ -244,9 +292,9 @@ function getJob(db: DatabaseSync,id:number): Job | undefined {
   return db.prepare("SELECT * FROM recontact_jobs WHERE id=?").get(id) as Job | undefined;
 }
 
-type Rule = {enabled:number; wait_minutes:number; start_minute:number; end_minute:number; parts_json:string};
+type Rule = {enabled:number; enabled_at:number; wait_minutes:number; start_minute:number; end_minute:number; parts_json:string};
 const ruleOf = (db: DatabaseSync,pid:number,stage:string) =>
-  db.prepare("SELECT enabled,wait_minutes,start_minute,end_minute,parts_json FROM recontact_rules WHERE position_id=? AND stage=?").get(pid,stage) as Rule | undefined;
+  db.prepare("SELECT enabled,enabled_at,wait_minutes,start_minute,end_minute,parts_json FROM recontact_rules WHERE position_id=? AND stage=?").get(pid,stage) as Rule | undefined;
 
 function classifyStage(db:DatabaseSync,positionId:number,bodies:string[],question:string,canvas=false):RecontactStage|undefined {
   const position = db.prepare("SELECT data_json FROM service_positions WHERE id=? AND status='enabled'").get(positionId);
@@ -273,7 +321,7 @@ export function markRecontactAnchor(db:DatabaseSync,input:{
   const stage = classifyStage(db,input.positionId,messages,input.question);
   if (!stage || !ruleOf(db,input.positionId,stage)?.enabled) return false;
   const device=db.prepare("SELECT account_id FROM bridge_devices WHERE device_code=?").get(input.deviceCode) as {account_id:string} | undefined;
-  if (!device || !isDirectRecipient(device.account_id,input.sessionKey)) return false;
+  if (!device || !isDirectRecipient(device.account_id,input.sessionKey) || !recontactDeviceStatus(db,input.deviceCode).enabled) return false;
   const generation=replyModeRow(db,input.deviceCode)?.generation ?? "";
   const inboundSource=inboundEventSource(input.deviceCode,input.sessionKey,input.turnId);
   db.prepare(`INSERT OR IGNORE INTO recontact_anchors(trace_id,device_code,contact_id,account_id,position_id,mode_generation,provider,inbound_source,stage,created_at)
@@ -285,8 +333,9 @@ const inboundEventSource = (device:string,contact:string,messageId:string) =>
   "bridge-inbound:"+createHash("sha256").update(JSON.stringify([device,contact+":"+messageId])).digest("hex");
 
 function saveCanvasAnchors(db:DatabaseSync,device:string,now:number) {
-  const account=db.prepare("SELECT account_id FROM bridge_devices WHERE device_code=?").get(device)?.account_id;
-  if (typeof account!=="string" || !account) return;
+  const bound=deviceAccount(db,device);
+  if (!bound?.account_id || bound.account_id!==bound.enabled_account || bound.enabled_at===null) return;
+  const account=bound.account_id;
   const generation=replyModeRow(db,device)?.generation ?? "";
   const rows=db.prepare(`SELECT s.session_key,s.position_id,s.await_since,s.snapshot_json,s.node_key,s.recontact_inbound_id,s.step_index,
       ('canvas:'||json_array(s.device_code,s.session_key,s.recontact_inbound_id,s.node_key)) AS trace_id
@@ -298,7 +347,7 @@ function saveCanvasAnchors(db:DatabaseSync,device:string,now:number) {
       AND NOT EXISTS (SELECT 1 FROM recontact_anchors a
        WHERE a.trace_id=('canvas:'||json_array(s.device_code,s.session_key,s.recontact_inbound_id,s.node_key)))
       AND EXISTS (SELECT 1 FROM recontact_rules WHERE position_id=s.position_id AND enabled=1)
-    ORDER BY s.await_since LIMIT 60`).all(device,new Date(now-10*60_000).toISOString()) as
+    ORDER BY s.await_since LIMIT 60`).all(device,new Date(Math.max(now-ANCHOR_RECOVERY_MS,bound.enabled_at)).toISOString()) as
     Array<{session_key:string;position_id:number;await_since:string;snapshot_json:string;node_key:string;recontact_inbound_id:string;step_index:number;trace_id:string}>;
   const insert=db.prepare(`INSERT OR IGNORE INTO recontact_anchors
     (trace_id,device_code,contact_id,account_id,position_id,mode_generation,provider,inbound_source,stage,created_at,delivered_at)
@@ -312,6 +361,8 @@ function saveCanvasAnchors(db:DatabaseSync,device:string,now:number) {
       || !node.parts.length || row.step_index!==node.parts.length) continue;
     const delivered=stamp(row.await_since);
     if (!Number.isFinite(delivered) || delivered>now+5000) continue;
+    const rule=ruleOf(db,row.position_id,stage);
+    if (!rule?.enabled || delivered<rule.enabled_at) continue;
     insert.run(row.trace_id,device,row.session_key,account,row.position_id,generation,
       inboundEventSource(device,row.session_key,row.recontact_inbound_id),stage,Math.min(delivered,now),Math.min(delivered,now));
   }
@@ -319,7 +370,7 @@ function saveCanvasAnchors(db:DatabaseSync,device:string,now:number) {
 
 export function finishRecontactAnchor(db:DatabaseSync,traceId:string,deviceCode:string,sessionKey:string,now=Date.now()) {
   db.prepare(`UPDATE recontact_anchors SET delivered_at=? WHERE trace_id=? AND device_code=? AND contact_id=?
-    AND delivered_at IS NULL AND created_at>=?`).run(now,traceId,deviceCode,sessionKey,now-10*60_000);
+    AND delivered_at IS NULL AND created_at>=?`).run(now,traceId,deviceCode,sessionKey,now-ANCHOR_RECOVERY_MS);
   prepareRecontactAnchors(db,deviceCode,now);
 }
 
@@ -328,8 +379,8 @@ function prepareRecontactAnchors(db:DatabaseSync,device:string,now:number) {
     JOIN agent_messages m ON m.source_event_id=a.inbound_source AND m.direction='inbound' AND m.device_code=a.device_code
     JOIN agent_conversations c ON c.device_code=m.device_code AND c.customer_id=m.customer_id AND c.external_conversation_id=a.contact_id
     WHERE a.device_code=? AND a.consumed=0 AND a.delivered_at>=? ORDER BY a.delivered_at LIMIT 30`)
-    .all(device,now-10*60_000) as Array<{trace_id:string;conversation_id:number;account_id:string;position_id:number;mode_generation:string;
-    provider:Provider;inbound_id:number;stage:RecontactStage;delivered_at:number}>;
+    .all(device,now-ANCHOR_RECOVERY_MS) as Array<{trace_id:string;conversation_id:number;account_id:string;position_id:number;mode_generation:string;
+    provider:Provider;inbound_id:number;stage:RecontactStage;created_at:number;delivered_at:number}>;
   for (const a of anchors) {
     const target=recontactTarget(db,a.conversation_id,0,now);
     if (target && legacyWait(db,target)) continue;
@@ -339,7 +390,7 @@ function prepareRecontactAnchors(db:DatabaseSync,device:string,now:number) {
       if (claimed.changes && target && !target.reason && target.account_id===a.account_id && target.provider===a.provider
         && target.position_id===a.position_id && target.mode_generation===a.mode_generation && target.baseline_inbound_id===a.inbound_id) {
         const rule=ruleOf(db,target.position_id,a.stage);
-        if (rule?.enabled) {
+        if (rule?.enabled && a.created_at>=rule.enabled_at) {
           let parts:RecontactPart[]=[];
           try { parts=parseRecontactParts(db,target.position_id,JSON.parse(rule.parts_json)); } catch { /* A rule can lose its asset. */ }
           if (parts.length) {
@@ -369,6 +420,7 @@ function nextWindow(now:number,start:number,end:number):number {
 }
 
 function currentReason(db:DatabaseSync,job:Job,now:number): string {
+  if (job.stop_reason) return job.stop_reason;
   const target = recontactTarget(db,job.conversation_id,0,now);
   if (!timing(db,job).enabled) return "复聊规则已停用";
   if (!target || target.account_id !== job.account_id || target.contact_id !== job.contact_id || target.tenant_id !== job.tenant_id
@@ -388,20 +440,25 @@ function cancelJob(db:DatabaseSync,job:Job,reason:string) {
 
 export function cancelInvalidRecontacts(db:DatabaseSync,filters:{device?:string;customerId?:number;positionId?:number;stage?:RecontactStage},now=Date.now()) {
   const rows=db.prepare(`SELECT j.* FROM recontact_jobs j WHERE
-    (j.status='scheduled' OR (j.status='sending' AND EXISTS (
-      SELECT 1 FROM recontact_steps s JOIN bridge_commands b ON b.id=s.command_id
-      WHERE s.job_id=j.id AND s.status='queued' AND b.status='queued')))
+    j.status IN ('scheduled','sending','unknown')
     AND (?='' OR j.device_code=?) AND (?=0 OR j.customer_id=?)
     AND (?=0 OR j.position_id=?) AND (?='' OR (j.source='auto' AND j.stage=?))`)
     .all(filters.device??"",filters.device??"",filters.customerId??0,filters.customerId??0,
       filters.positionId??0,filters.positionId??0,filters.stage??"",filters.stage??"") as unknown as Job[];
   for (const row of rows) {
     const reason=currentReason(db,row,now);
-    if (reason) cancelJob(db,row,reason);
+    if (!reason) continue;
+    const inFlight=db.prepare(`SELECT 1 FROM recontact_steps s JOIN bridge_commands b ON b.id=s.command_id
+      WHERE s.job_id=? AND s.status IN ('queued','unknown') AND b.status IN ('claimed','unknown','succeeded')`).get(row.id);
+    if (inFlight) {
+      db.prepare("UPDATE recontact_jobs SET stop_reason=?,reason=? WHERE id=?").run(reason,reason,row.id);
+      db.prepare("UPDATE recontact_steps SET status='cancelled',reason=? WHERE job_id=? AND status='pending'").run(reason,row.id);
+    } else cancelJob(db,row,reason);
   }
 }
 
 function advance(db:DatabaseSync,job:Job,seq:number,now:number) {
+  if (job.stop_reason) { cancelJob(db,job,job.stop_reason); return; }
   const next = jobSteps(db,job.id).find(s => s.seq > seq && s.status === "pending");
   if (!next) {
     db.prepare("UPDATE recontact_jobs SET status='sent',reason='' WHERE id=?").run(job.id);
@@ -471,8 +528,8 @@ export function queueDueRecontact(db:DatabaseSync,device:string,now:number) {
     const id = randomUUID();
     db.exec("SAVEPOINT recontact_command");
     try {
-      db.prepare(`INSERT INTO bridge_commands(id,device_code,customer_id,contact_id,content,idempotency_key,created_at,kind)
-        VALUES (?,?,?,?,?,?,?,'recontact')`).run(id,device,job.customer_id,job.contact_id,step.payload,"recontact:"+id,now);
+      db.prepare(`INSERT INTO bridge_commands(id,device_code,customer_id,contact_id,content,idempotency_key,created_at,kind,tenant_id)
+        VALUES (?,?,?,?,?,?,?,'recontact',?)`).run(id,device,job.customer_id,job.contact_id,step.payload,"recontact:"+id,now,job.tenant_id);
       db.prepare("UPDATE recontact_steps SET status='queued',command_id=? WHERE job_id=? AND seq=?").run(id,job.id,step.seq);
       db.prepare("UPDATE recontact_jobs SET status='sending' WHERE id=?").run(job.id);
       db.exec("RELEASE recontact_command");
@@ -518,12 +575,13 @@ export function recontactJobs(db:DatabaseSync,scope:UserScope,filters:{positionI
   reconcileRecontact(db,filters.deviceCode);
   const tenant = recontactTenant(db,scope);
   const q = filters.q ?? "";
+  const positions = scope.isAdmin ? undefined : new Set(recontactPositions(db,scope).map(p=>p.id));
   return (db.prepare(`SELECT j.*,COALESCE(c.nickname,'') AS nickname FROM recontact_jobs j
     LEFT JOIN agent_conversations c ON c.id=j.conversation_id AND c.tenant_id=j.tenant_id
     WHERE j.tenant_id=? AND (?=0 OR j.position_id=?) AND (?='' OR j.device_code=?) AND (?='' OR j.status=?)
       AND (?='' OR instr(lower(COALESCE(c.nickname,'')),lower(?))>0 OR CAST(j.customer_id AS TEXT)=?)
     ORDER BY j.id DESC`).all(tenant,filters.positionId??0,filters.positionId??0,filters.deviceCode??"",filters.deviceCode??"",filters.status??"",filters.status??"",q,q,q) as unknown as Array<Job & { nickname:string }>)
-    .filter(row => canAccessDevice(scope,row.device_code)).slice(0,250)
+    .filter(row => canAccessDevice(scope,row.device_code) && (!positions || positions.has(row.position_id))).slice(0,250)
     .map(row => ({id:row.id,position_id:row.position_id,conversation_id:row.conversation_id,customer_id:row.customer_id,nickname:row.nickname,
       device_code:row.device_code,status:row.status,due_at:row.due_at,reason:row.reason,source:row.source,created_at:row.created_at,
       steps:jobSteps(db,row.id).map(({kind,content,status,reason,due_at,confirmed_at,seq}) => ({kind,content,status,reason,due_at,confirmed_at,seq}))}));
@@ -544,6 +602,7 @@ export function reviewRecontactJob(db:DatabaseSync,id:number,scope:UserScope,res
 function applyReview(db:DatabaseSync,id:number,scope:UserScope,resolution:"sent"|"not_sent"|"cancel"):boolean {
   const job=getJob(db,id);
   if (!job || job.tenant_id!==recontactTenant(db,scope) || !canAccessDevice(scope,job.device_code)) return false;
+  if (!scope.isAdmin && !recontactPositions(db,scope).some(position=>position.id===job.position_id)) return false;
   const now=Date.now();
   if (resolution==="cancel" && ["scheduled","failed","unknown"].includes(job.status)) { cancelJob(db,job,"人工取消"); return true; }
   if (!["unknown","failed"].includes(job.status) || resolution==="cancel") return false;

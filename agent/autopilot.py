@@ -4202,12 +4202,20 @@ def _execute_recontact(store: Store, cfg: dict, bridge, command: dict, log_fn) -
     denial = ""
     last_stamp = last_inbound = None
 
+    def active_account_matches() -> bool:
+        try:
+            current = find_data_dir()
+            return bool(current and isinstance(store.data_dir, Path) and store.data_dir.resolve() == current.resolve()
+                        and _recipient_account(store) == account)
+        except (OSError, RuntimeError, KeyError):
+            return False
+
     def authorize() -> bool:
         nonlocal denial, last_stamp, last_inbound
         if deadline <= time.time() * 1000:
             denial = "复聊指令已过期"
-        elif _recipient_account(store) != account:
-            denial = "本机企微登录账号已切换"
+        elif not active_account_matches():
+            denial = "本机企微登录账号已切换或无法核对"
         elif cid in remote_cfg.takeover_sessions() or cid in remote_cfg.abandoned_sessions():
             denial = "会话已接管或结束"
         else:
@@ -4233,8 +4241,8 @@ def _execute_recontact(store: Store, cfg: dict, bridge, command: dict, log_fn) -
                 denial = "候选人最近一条来信已变化，复聊停止"
             elif deadline <= time.time() * 1000:
                 denial = "复聊指令已过期"
-            elif _recipient_account(store) != account:
-                denial = "本机企微登录账号已切换"
+            elif not active_account_matches():
+                denial = "本机企微登录账号已切换或无法核对"
             else:
                 denial = ""
         return not denial

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { navigationForRole } from '../frontend-vue/src/layouts/navigation.js';
 import {
-  conversationRoute, recontactReturnRoute, reorderParts, selectedTemplateIds, toMinute,
+  accountRecontactAction, conversationRoute, recontactReturnRoute, reorderParts, selectedTemplateIds, toMinute,
 } from '../frontend-vue/src/components/recontact/recontact-view.js';
 
 describe('复聊板块页面行为', () => {
@@ -40,5 +40,15 @@ describe('复聊板块页面行为', () => {
     expect(recontactReturnRoute(link.query)).toEqual({
       name: 'recontact', query: { tab: 'records', ...query },
     });
+  });
+
+  it('can pause an approved account even when it goes offline', () => {
+    expect(accountRecontactAction(undefined)).toBeUndefined();
+    expect(accountRecontactAction({ recontact_enabled: false, recontact_account_ready: false }))
+      .toEqual({ enabled: true, disabled: true, label: '启用此账号复聊' });
+    expect(accountRecontactAction({ recontact_enabled: false, recontact_account_ready: true }))
+      .toEqual({ enabled: true, disabled: false, label: '启用此账号复聊' });
+    expect(accountRecontactAction({ recontact_enabled: true, recontact_account_ready: false }))
+      .toEqual({ enabled: false, disabled: false, label: '暂停此账号复聊' });
   });
 });

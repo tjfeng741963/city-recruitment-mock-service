@@ -6,6 +6,7 @@ CREATE TABLE recontact_rules (
   start_minute INTEGER NOT NULL,
   end_minute INTEGER NOT NULL,
   parts_json TEXT NOT NULL,
+  enabled_at INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (position_id,stage)
 );
@@ -24,6 +25,16 @@ CREATE TABLE recontact_previews (
   expires_at INTEGER NOT NULL,
   result_json TEXT
 );
+CREATE TABLE recontact_devices (
+  device_code TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  enabled_at INTEGER NOT NULL
+);
+CREATE TABLE recontact_capability (
+  device_code TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  seen_at INTEGER NOT NULL
+);
 CREATE TABLE recontact_jobs (
   id INTEGER PRIMARY KEY,
   tenant_id INTEGER NOT NULL,
@@ -41,6 +52,7 @@ CREATE TABLE recontact_jobs (
   baseline_inbound_id INTEGER NOT NULL,
   status TEXT NOT NULL DEFAULT 'scheduled',
   reason TEXT NOT NULL DEFAULT '',
+  stop_reason TEXT NOT NULL DEFAULT '',
   due_at INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
   UNIQUE(tenant_id,account_id,contact_id,origin_key)

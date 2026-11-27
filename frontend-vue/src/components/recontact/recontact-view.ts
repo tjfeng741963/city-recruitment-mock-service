@@ -1,8 +1,18 @@
-import type { RecontactPart, RecontactTime } from '../../api/recontact'
+import type { RecontactDevice, RecontactPart, RecontactTime } from '../../api/recontact'
 
 type Query = Record<string, unknown>
 
 const stringQuery = (value: unknown) => typeof value === 'string' ? value : undefined
+
+export function accountRecontactAction(device?: Pick<RecontactDevice, 'recontact_enabled' | 'recontact_account_ready'>) {
+  if (!device) return undefined
+  const enabled = !device.recontact_enabled
+  return {
+    enabled,
+    disabled: enabled && !device.recontact_account_ready,
+    label: enabled ? '启用此账号复聊' : '暂停此账号复聊',
+  }
+}
 
 export function conversationRoute(
   row: { device_code: string; customer_id: number },

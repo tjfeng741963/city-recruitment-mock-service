@@ -19,6 +19,8 @@ def setup(tmp_path, monkeypatch):
     agent.rlog = load_reply_store(tmp_path / "reply_log.db")
     store = MagicMock()
     store.self_id.return_value = "self"
+    store.data_dir = tmp_path
+    monkeypatch.setattr(agent, "find_data_dir", MagicMock(return_value=tmp_path))
     command = {
         "kind": "recontact", "id": "recontact-1", "lease_token": "lease-1",
         "lease_until": 4_102_444_800_000, "contact_id": CID, "nickname": "嘉宝",
@@ -75,18 +77,20 @@ def test_same_second_new_local_reply_stops_recontact(setup):
     agent._send_text.assert_not_called()
 
 
-@pytest.mark.parametrize("revocation", ["account", "new_reply", "server"])
+@pytest.mark.parametrize("revocation", ["account", "directory", "new_reply", "server"])
 def test_recontact_never_sends_after_recipient_or_authorization_changes(setup, revocation):
     agent, store, bridge, command = setup
     if revocation == "account":
         command["recontact_account_id"] = "old-account"
+    elif revocation == "directory":
+        agent.find_data_dir.return_value = store.data_dir / "other"
     elif revocation == "new_reply":
         agent._recontact_latest_inbound.return_value = (INBOUND + 1000,"2")
     else:
         original = bridge._request.side_effect
         bridge._request.side_effect = lambda *args: {"ok": False} if args[1].endswith("/recontact-check") else original(*args)
     assert agent.pump_commands(store, {"cooldown": 0}, bridge=bridge)["failed"] == 1
-    assert_receipt(bridge, "failed", reason={"account": "账号", "new_reply": "回复", "server": "授权"}[revocation])
+    assert_receipt(bridge, "failed", reason={"account": "账号", "directory": "账号", "new_reply": "回复", "server": "授权"}[revocation])
     agent._send_text.assert_not_called()
     agent.core_send.paste_media.assert_not_called()
 

@@ -393,9 +393,10 @@ HTTP 仍是 200——调用方按 `ok` 判断，不要按状态码。模型输�
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/options` | 返回岗位、设备、可用素材及该岗位的工作地点、面试点。设备带 `position_ids` 用于限定岗位。缺少坐标的工作地址标记为 `mappable=false`。 |
+| GET | `/options` | 返回岗位、设备、可用素材及该岗位的工作地点、面试点。`can_edit_rules` 标记是否有权编辑自动规则。设备带 `position_ids`、`recontact_enabled`、`recontact_account_ready`。缺少坐标的工作地址标记为 `mappable=false`。 |
+| PUT | `/devices/:code` | 提交 `{enabled}`，为有权限的当前企微账号开启或暂停复聊。开启需要设备在线、心跳在 60 秒内且已同步该账号的私聊。离线时也可暂停。切换登录账号会撤销授权，须重新开启。 |
 | GET | `/rules?position_id=` | 返回该岗位已保存的自动复聊规则。 |
-| PUT | `/rules/:position_id/:stage` | 保存阶段规则，返回 `{item}`。阶段为 `work_location` 或 `interview_invite`。提交 `enabled`、`wait_minutes`、`start_minute`、`end_minute` 和 `parts`。 |
+| PUT | `/rules/:position_id/:stage` | 管理员保存阶段规则，返回 `{item}`。阶段为 `work_location` 或 `interview_invite`。提交 `enabled`、`wait_minutes`、`start_minute`、`end_minute` 和 `parts`。 |
 | GET | `/templates?position_id=` | 返回老客户复聊模板。省略岗位时，返回所有有权限的岗位模板。 |
 | POST | `/templates` | 提交 `position_id`、`name`、`parts` 创建模板，返回 `{item}`。 |
 | PUT | `/templates/:id` | 按原岗位更新模板，返回 `{item}`。 |

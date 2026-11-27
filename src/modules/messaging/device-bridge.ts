@@ -4,7 +4,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { DIFY_GROUP_NOTIFICATION_PREFIX, deviceInviteGroupBinding, ensureGroupConversation, resolveDeviceInviteGroup } from "../../shared/invite-group.js";
 import type { MessageChannelProvider, OutboundMessageInput, OutboundMessageResult } from "./message-channel-provider.js";
 import { NOOP_NOTIFIER, type StreamNotifier } from "./stream-events.js";
-import { queueDueRecontact, reconcileRecontact, recontactCommandInfo } from "../recontact/recontact.js";
+import { noteRecontactCapability, queueDueRecontact, reconcileRecontact, recontactCommandInfo, revokeRecontactDevice } from "../recontact/recontact.js";
 
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 export class BridgeError extends Error {
@@ -31,13 +31,14 @@ export class DeviceBridgeStore {
     return Boolean(this.db.prepare("SELECT id FROM agent_devices WHERE json_extract(data_json,'$.device_code')=? AND status='enabled'").get(code));
   }
   pair(code: string): string {
-    if (!this.enabled(code)) throw new BridgeError("Enabled device not found", 404);
+    const device = this.db.prepare("SELECT tenant_id FROM agent_devices WHERE json_extract(data_json,'$.device_code')=? AND status='enabled'").get(code);
+    if (!device) throw new BridgeError("Enabled device not found", 404);
     const token = randomBytes(32).toString("hex");
     const pending = this.db.prepare("SELECT * FROM bridge_commands WHERE device_code=? AND status IN ('claimed','queued')").all(code) as unknown as BridgeCommand[];
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.db.prepare(`INSERT INTO bridge_devices(device_code,token_hash) VALUES (?,?)
-        ON CONFLICT(device_code) DO UPDATE SET token_hash=excluded.token_hash,state='offline',heartbeat_at=0`).run(code, digest(token));
+      this.db.prepare(`INSERT INTO bridge_devices(device_code,token_hash,tenant_id) VALUES (?,?,?)
+        ON CONFLICT(device_code) DO UPDATE SET token_hash=excluded.token_hash,state='offline',heartbeat_at=0`).run(code, digest(token),device.tenant_id);
       this.db.prepare("UPDATE reply_mode_transition SET client_at=0,client_ready=0 WHERE device_code=?").run(code);
       this.db.prepare("DELETE FROM windows_runtime_health WHERE device_code=?").run(code);
       // Rotating credentials cannot silently replay commands that may have been sent.
@@ -156,6 +157,7 @@ export class DeviceBridgeStore {
       + "client_commit=CASE WHEN ?<>'' THEN ? ELSE client_commit END WHERE device_code=?")
       .run(state, this.now(), accountId, accountId, commit, commit, code);
     if (rebound) {
+      revokeRecontactDevice(this.db,code,this.now());
       this.db.prepare("INSERT INTO device_events(device_code,event_type,reason,created_at) VALUES (?,?,?,?)")
         .run(code, "account_rebound", `${previousAccount}->${accountId}`, new Date(this.now()).toISOString());
       this.db.prepare("DELETE FROM device_group_chats WHERE device_code=?").run(code);
@@ -264,8 +266,9 @@ export class DeviceBridgeStore {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const customerId = this.allocateCustomerId();
-      this.db.prepare("INSERT INTO bridge_contacts(device_code,contact_id,customer_id,nickname) VALUES (?,?,?,?)").run(code, contactId, customerId, nickname);
-      this.db.prepare("INSERT INTO agent_conversations(device_code,customer_id,nickname,external_conversation_id) VALUES (?,?,?,?)").run(code, customerId, nickname, contactId);
+      const tenant = this.db.prepare("SELECT tenant_id FROM bridge_devices WHERE device_code=?").get(code)?.tenant_id ?? 1;
+      this.db.prepare("INSERT INTO bridge_contacts(device_code,contact_id,customer_id,nickname,tenant_id) VALUES (?,?,?,?,?)").run(code, contactId, customerId, nickname, tenant);
+      this.db.prepare("INSERT INTO agent_conversations(device_code,customer_id,nickname,external_conversation_id,tenant_id) VALUES (?,?,?,?,?)").run(code, customerId, nickname, contactId, tenant);
       this.db.exec("COMMIT");
       return customerId;
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
@@ -492,7 +495,10 @@ export class DeviceBridgeStore {
     if (!onlyKind && device?.state === "online" && this.db.prepare("SELECT 1 FROM agent_devices WHERE json_extract(data_json,'$.device_code')=? AND json_extract(data_json,'$.reply_provider')='dify'").get(code)) {
       this.queueDueDifyReminder(code, device?.account_id ?? "", now);
     }
-    if (!onlyKind && supportsRecontact && device?.state === "online") queueDueRecontact(this.db,code,now);
+    if (!onlyKind && supportsRecontact && device?.state === "online") {
+      noteRecontactCapability(this.db,code,device.account_id,now);
+      queueDueRecontact(this.db,code,now);
+    }
     const pending = onlyKind
       ? this.db.prepare(`SELECT c.*, NULL AS reminder_expires_at FROM bridge_commands c
           WHERE c.device_code=? AND c.status='queued' AND c.kind=? ORDER BY c.created_at,c.rowid LIMIT 1`)

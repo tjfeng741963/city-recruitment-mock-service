@@ -3,7 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import { migrateDatabase } from "../src/db/migrate.js";
 import { DeviceBridgeStore } from "../src/modules/messaging/device-bridge.js";
 import { parseRecontactParts, queueRecontactBatch, recontactTarget, authorizeRecontactCommand,
-  finishRecontactAnchor, markRecontactAnchor, recontactFlowStage } from "../src/modules/recontact/recontact.js";
+  finishRecontactAnchor, markRecontactAnchor, recontactFlowStage, setRecontactDevice } from "../src/modules/recontact/recontact.js";
 
 describe("recontact device delivery", () => {
   let db: DatabaseSync;
@@ -24,6 +24,9 @@ describe("recontact device delivery", () => {
     bridge.pair(code);
     bridge.heartbeat(code, "online", "account");
     customerId = bridge.contact(code, cid, "测试联系人");
+    expect(bridge.claim(code,"",true)).toBeNull();
+    expect(setRecontactDevice(db,code,true,now)).toBe(true);
+    db.prepare("UPDATE recontact_devices SET enabled_at=? WHERE device_code=?").run(now-86400_000,code);
     conversationId = (db.prepare("SELECT id FROM agent_conversations WHERE device_code=? AND customer_id=?").get(code, customerId) as {id:number}).id;
     db.prepare("INSERT INTO agent_messages(device_code,customer_id,direction,content,status,created_at) VALUES (?,?,'inbound','在哪里上班','received',?)").run(code, customerId, new Date(now-86400_000*4).toISOString());
   });
@@ -59,6 +62,27 @@ describe("recontact device delivery", () => {
     db.prepare("INSERT INTO agent_messages(device_code,customer_id,direction,content,status,created_at) VALUES (?,?,'inbound','我来了','received',?)").run(code, customerId, new Date(now).toISOString());
     expect(authorizeRecontactCommand(db,code,first.id,first.lease_token,now)).toMatchObject({ok:false});
     expect(bridge.claim(code,"",true)).toBeNull();
+  });
+
+  it("does not revive a leased message when the same account is paused and enabled again", () => {
+    const id=queue();
+    const first=bridge.claim(code,"",true)!;
+    expect(authorizeRecontactCommand(db,code,first.id,first.lease_token,now)).toEqual({ok:true});
+    expect(setRecontactDevice(db,code,false,now)).toBe(true);
+    expect(setRecontactDevice(db,code,true,now)).toBe(true);
+    expect(authorizeRecontactCommand(db,code,first.id,first.lease_token,now)).toMatchObject({ok:false});
+    bridge.receipt(code,first.id,first.lease_token,"succeeded",`${cid}:already-sent`);
+    expect(db.prepare("SELECT status FROM recontact_jobs WHERE id=?").get(id!)).toMatchObject({status:"cancelled"});
+    expect(db.prepare("SELECT status FROM recontact_steps WHERE job_id=? ORDER BY seq").all(id!))
+      .toEqual([{status:"sent"},{status:"cancelled"}]);
+  });
+
+  it("keeps the new login paused even if it changes back before a send is authorized", () => {
+    queue();
+    const first=bridge.claim(code,"",true)!;
+    bridge.heartbeat(code,"online","replacement");
+    bridge.heartbeat(code,"online","account");
+    expect(authorizeRecontactCommand(db,code,first.id,first.lease_token,now)).toMatchObject({ok:false});
   });
 
   it.each(["agent","dify"] as const)("uses the confirmed %s answer and the exact inbound id even when sync runs late", (provider) => {

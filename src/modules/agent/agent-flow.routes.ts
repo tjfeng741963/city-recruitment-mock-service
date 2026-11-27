@@ -9,7 +9,7 @@ import { flowLocationLabel, flowLocationOptions, validFlowCoordinates, WORK_LOCA
 import { interviewLocation } from "../../shared/interview-location.js";
 import { openingVersion } from "../../shared/opening-version.js";
 import { parseOpeningLocation } from "../../shared/opening-location.js";
-import { recontactFlowStage } from "../recontact/recontact.js";
+import { recontactDeviceStatus, recontactFlowStage } from "../recontact/recontact.js";
 import { matchingOpeningLayout, openingLayout, openingLocationReply, openingNodes, saveSharedOpening,
   sharedOpeningParts, SHARED_OPENING_LIMIT, splitSharedOpening, storedOpeningLayout, unverifiedOpeningNumbers,
   validateOpeningGroups, validateSharedOpening, type SharedOpeningPart } from "./shared-opening.js";
@@ -402,6 +402,7 @@ export async function registerAgentFlowRoutes(app: FastifyInstance, db: Database
     const { shared_opening: _shared, ...result } = readFlow(db, positionId, !withLocations);
     // 停用只阻止新会话；在途会话使用本地持久化快照。
     if (result.status !== "enabled") return { ...result, location_steps: 1, nodes: [], edges: [], reply_mode_id };
+    const useRecontact = request.query.recontact === "1" && recontactDeviceStatus(db,code).enabled;
     const serverWaitNodes = new Set<string>();
     const nodes = result.nodes.map(node => {
       const parts = node.parts.flatMap(raw => {
@@ -417,7 +418,7 @@ export async function registerAgentFlowRoutes(app: FastifyInstance, db: Database
           delay_before_ms: part.delay_before_ms, delay_ms: part.delay_ms }];
       });
       const firstLocation = parseObject(node.parts[0]).kind === "location";
-      const stage = request.query.recontact === "1" && node.await_reply && node.status === "enabled"
+      const stage = useRecontact && node.await_reply && node.status === "enabled"
         ? recontactFlowStage(db,positionId,parts) : undefined;
       if (stage) serverWaitNodes.add(str(node.node_key));
       return { ...node, parts, body: firstLocation ? parts[0]?.body ?? "" : node.body,

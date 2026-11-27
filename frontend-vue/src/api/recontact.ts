@@ -28,9 +28,18 @@ export interface RecontactTemplate {
   parts: RecontactPart[]
 }
 
+export interface RecontactDevice {
+  code: string
+  name: string
+  position_ids?: number[]
+  recontact_enabled?: boolean
+  recontact_account_ready?: boolean
+}
+
 export interface RecontactOptions {
   positions: { id: number; name: string }[]
-  devices: { code: string; name: string; position_ids?: number[] }[]
+  devices: RecontactDevice[]
+  can_edit_rules?: boolean
   assets: { name: string; kind: 'image' | 'video'; position_id: number }[]
   locations: { position_id: number; key: string; name: string; address: string; mappable: boolean }[]
 }
@@ -79,6 +88,8 @@ const base = '/api/v1/recontact'
 
 export const recontactApi = {
   options: () => http.get<RecontactOptions>(`${base}/options`),
+  setAccountEnabled: (code: string, enabled: boolean) =>
+    http.put<{ enabled: boolean }>(`${base}/devices/${encodeURIComponent(code)}`, { enabled }),
   rules: (position_id: number) =>
     http.get<{ items: RecontactRule[] }>(`${base}/rules`, { params: { position_id } }),
   saveRule: ({ position_id, stage, ...rule }: RecontactRule) =>

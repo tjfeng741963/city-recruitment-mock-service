@@ -7,8 +7,8 @@ import { flowLocationOptions, WORK_LOCATION_KEY } from "../../shared/flow-locati
 import { difyMediaName, type MediaKind } from "../../shared/media-assets.js";
 import { replyModeRow } from "../dify/reply-mode-transition.js";
 import {
-  boundPositions, cancelInvalidRecontacts, parseRecontactParts, queueRecontactBatch, recontactJobs, recontactPendingReason, recontactPositions,
-  recontactTarget, recontactTargets, recontactTenant, resolveRecontactParts, reviewRecontactJob,
+  boundPositions, cancelInvalidRecontacts, parseRecontactParts, queueRecontactBatch, recontactDeviceStatus, recontactJobs, recontactPendingReason,
+  recontactPositions, recontactTarget, recontactTargets, recontactTenant, resolveRecontactParts, reviewRecontactJob, setRecontactDevice,
   type RecontactPart, type RecontactTarget,
 } from "./recontact.js";
 
@@ -137,14 +137,35 @@ export function registerRecontactRoutes(app: FastifyInstance, db: DatabaseSync) 
         const code = String(row.code);
         const config = parseDeviceData(row.data_json);
         const provider = replyModeRow(db, code)?.effective ?? (config.reply_provider === "dify" ? "dify" : "agent");
-        return { code, name: String(row.name), position_ids: boundPositions(db, config, provider, tenant).filter(position => allowed.has(position)) };
+        const { enabled, ready } = recontactDeviceStatus(db, code);
+        return {
+          code, name: String(row.name), position_ids: boundPositions(db, config, provider, tenant).filter(position => allowed.has(position)),
+          recontact_enabled: enabled, recontact_account_ready: ready,
+        };
       });
     const candidates = db.prepare(`SELECT id,name,kind,position_id,sha256,storage_path FROM media_assets
       WHERE status='enabled' AND kind IN ('image','video') ORDER BY name,id`).all() as
       Array<{ id: number; name: string; kind: MediaKind; position_id: number; sha256: string; storage_path: string }>;
     const assets = candidates.filter(asset => (asset.position_id === 0 || allowed.has(asset.position_id)) && difyMediaName(asset))
       .map(({ name, kind, position_id }) => ({ name, kind, position_id }));
-    return { positions, devices, assets, locations: availableLocations(db, positions) };
+    return { can_edit_rules: scope.isAdmin, positions, devices, assets, locations: availableLocations(db, positions) };
+  });
+
+  app.put<{ Params: { code: string } }>(`${PREFIX}/devices/:code`, async request => {
+    const scope = scopeFor(db, request);
+    const { code } = request.params;
+    const { enabled } = object(request.body);
+    if (typeof enabled !== "boolean") throw new RecontactRequestError(422, "启停状态无效");
+    if (!canAccessDevice(scope, code)) throw new RecontactRequestError(403, "企微账号超出权限");
+    const tenant = recontactTenant(db, scope);
+    const rows = db.prepare(`SELECT d.tenant_id,b.tenant_id AS bridge_tenant_id FROM agent_devices d
+      LEFT JOIN bridge_devices b ON b.device_code=json_extract(d.data_json,'$.device_code')
+      WHERE json_extract(d.data_json,'$.device_code')=? LIMIT 2`).all(code);
+    if (rows.length !== 1 || rows[0].tenant_id !== tenant || (rows[0].bridge_tenant_id !== null && rows[0].bridge_tenant_id !== tenant)) {
+      throw new RecontactRequestError(404, "企微账号不可用");
+    }
+    if (!setRecontactDevice(db, code, enabled)) throw new RecontactRequestError(409, "当前企微账号未就绪或私聊尚未同步");
+    return { enabled };
   });
 
   app.get(`${PREFIX}/rules`, async request => {
@@ -154,7 +175,9 @@ export function registerRecontactRoutes(app: FastifyInstance, db: DatabaseSync) 
   });
 
   app.put<{ Params: { position_id: string; stage: string } }>(`${PREFIX}/rules/:position_id/:stage`, async request => {
-    const position = positionFor(db, scopeFor(db, request), request.params.position_id);
+    const scope = scopeFor(db, request);
+    if (!scope.isAdmin) throw new RecontactRequestError(403, "仅管理员可编辑岗位规则");
+    const position = positionFor(db, scope, request.params.position_id);
     const stage = stages.find(value => value === request.params.stage);
     const draft = object(request.body);
     if (!stage || typeof draft.enabled !== "boolean") throw new RecontactRequestError(422, "触发阶段或启停状态无效");
@@ -167,11 +190,12 @@ export function registerRecontactRoutes(app: FastifyInstance, db: DatabaseSync) 
     const raw = JSON.stringify(draft.parts);
     const parts = !draft.enabled && prior?.parts_json === raw ? JSON.parse(prior.parts_json) as RecontactPart[]
       : readParts(db, position, draft.parts, !draft.enabled);
-    const row = db.prepare(`INSERT INTO recontact_rules(position_id,stage,enabled,wait_minutes,start_minute,end_minute,parts_json)
-      VALUES (?,?,?,?,?,?,?) ON CONFLICT(position_id,stage) DO UPDATE SET enabled=excluded.enabled,
+    const row = db.prepare(`INSERT INTO recontact_rules(position_id,stage,enabled,wait_minutes,start_minute,end_minute,parts_json,enabled_at)
+      VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(position_id,stage) DO UPDATE SET enabled=excluded.enabled,
       wait_minutes=excluded.wait_minutes,start_minute=excluded.start_minute,end_minute=excluded.end_minute,
-      parts_json=excluded.parts_json,updated_at=CURRENT_TIMESTAMP RETURNING *`)
-      .get(position, stage, Number(draft.enabled), minutes, start, end, JSON.stringify(parts)) as unknown as RuleRow;
+      parts_json=excluded.parts_json,enabled_at=CASE WHEN recontact_rules.enabled=0 AND excluded.enabled=1 THEN excluded.enabled_at ELSE recontact_rules.enabled_at END,
+      updated_at=CURRENT_TIMESTAMP RETURNING *`)
+      .get(position, stage, Number(draft.enabled), minutes, start, end, JSON.stringify(parts),Date.now()) as unknown as RuleRow;
     if (!row.enabled) cancelInvalidRecontacts(db,{positionId:position,stage});
     return { item: serializeRule(row) };
   });

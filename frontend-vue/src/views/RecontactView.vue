@@ -13,6 +13,11 @@
         <el-select v-model="deviceCode" aria-label="企微账号" placeholder="全部企微账号" clearable filterable>
           <el-option v-for="device in options.devices" :key="device.code" :label="device.name || device.code" :value="device.code" />
         </el-select>
+        <div v-if="accountAction" class="account-control">
+          <el-button :disabled="accountAction.disabled || optionsLoading" :loading="accountSaving"
+            @click="updateAccountRelease">{{ accountAction.label }}</el-button>
+          <span v-if="accountAction.disabled" class="account-reason">等待企微账号在线并完成绑定</span>
+        </div>
         <el-button :icon="Refresh" :loading="loading || optionsLoading" @click="refresh">刷新</el-button>
       </div>
 
@@ -28,7 +33,7 @@
                   <el-tag :type="rule.enabled ? 'success' : 'info'" effect="plain">
                     {{ rule.enabled ? '已启用' : '已停用' }}
                   </el-tag>
-                  <el-button type="primary" link @click="editRule(rule)">编辑规则</el-button>
+                  <el-button v-if="options.can_edit_rules" type="primary" link @click="editRule(rule)">编辑规则</el-button>
                 </div>
                 <div class="rule-facts">
                   <span>等待 {{ rule.wait_minutes }} 分钟</span>
@@ -269,10 +274,12 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { isAxiosError } from 'axios'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import RecontactParts from '../components/recontact/RecontactParts.vue'
-import { asClock, conversationRoute, recontactTime, selectedTemplateIds, toMinute } from '../components/recontact/recontact-view'
+import {
+  accountRecontactAction, asClock, conversationRoute, recontactTime, selectedTemplateIds, toMinute,
+} from '../components/recontact/recontact-view'
 import {
   recontactApi, type RecontactCandidate, type RecontactJob, type RecontactKind, type RecontactOptions,
   type RecontactPart, type RecontactPreview, type RecontactResolution, type RecontactRule, type RecontactStage,
@@ -289,8 +296,11 @@ const jobStatus = ref(typeof route.query.status === 'string' ? route.query.statu
 const recordKeyword = ref(typeof route.query.q === 'string' ? route.query.q : '')
 const dialogWidth = 'min(690px, calc(100vw - 24px))'
 const options = ref<RecontactOptions>({ positions: [], devices: [], assets: [], locations: [] })
+const selectedAccount = computed(() => options.value.devices.find(item => item.code === deviceCode.value))
+const accountAction = computed(() => accountRecontactAction(selectedAccount.value))
+const accountSaving = ref(false)
 const filterPositions = computed(() => {
-  const assigned = options.value.devices.find(item => item.code === deviceCode.value)?.position_ids
+  const assigned = selectedAccount.value?.position_ids
   return assigned ? options.value.positions.filter(item => assigned.includes(item.id)) : options.value.positions
 })
 const optionsLoading = ref(true)
@@ -444,8 +454,37 @@ async function fetchOptions(restoreFilters = false) {
 }
 
 function refresh() {
-  if (optionsError.value) return fetchOptions()
-  return loadSection()
+  return fetchOptions()
+}
+
+async function updateAccountRelease() {
+  const account = selectedAccount.value
+  const action = accountAction.value
+  if (!account || !action || action.disabled || optionsLoading.value || accountSaving.value) return
+  if (action.enabled) {
+    try {
+      await ElMessageBox.confirm(
+        `启用「${account.name || account.code}」后，符合已启用规则的候选人可能收到自动复聊消息。`,
+        action.label,
+        { type: 'warning', confirmButtonText: '确认启用', cancelButtonText: '取消' },
+      )
+    } catch {
+      return
+    }
+  }
+  accountSaving.value = true
+  try {
+    const { data } = await recontactApi.setAccountEnabled(account.code, action.enabled)
+    options.value.devices = options.value.devices.map(device => device.code === account.code
+      ? { ...device, recontact_enabled: data.enabled }
+      : device)
+    ElMessage.success(data.enabled ? '账号复聊已启用' : '账号复聊已暂停')
+    await fetchOptions()
+  } catch (error) {
+    ElMessage.error(errorMessage(error, '账号复聊状态保存失败'))
+  } finally {
+    accountSaving.value = false
+  }
 }
 
 function partsPayload(parts: RecontactPart[]) {
@@ -453,6 +492,7 @@ function partsPayload(parts: RecontactPart[]) {
 }
 
 function editRule(rule: RecontactRule) {
+  if (!options.value.can_edit_rules) return
   ruleDraft.value = { ...rule, parts: partsPayload(rule.parts) }
   startAt.value = asClock(rule.start_minute)
   endAt.value = asClock(rule.end_minute)
@@ -461,7 +501,7 @@ function editRule(rule: RecontactRule) {
 }
 
 async function saveRule() {
-  if (!ruleDraft.value || saving.value) return
+  if (!options.value.can_edit_rules || !ruleDraft.value || saving.value) return
   const draft = ruleDraft.value
   const parts = partsPayload(draft.parts)
   const start = toMinute(startAt.value)
@@ -602,6 +642,8 @@ onMounted(() => void fetchOptions(true))
 .time-controls, .preview-title, .review-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
 .context-row { margin-block: 2px 10px; }
 .context-row .el-select { width: 220px; }
+.account-control { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.account-reason { color: var(--bd-text-secondary, #59677e); font-size: 13px; }
 .recontact-tabs :deep(.el-tabs__content) { overflow: visible; }
 .rules { display: grid; gap: 12px; min-height: 36px; }
 .rule-card { border: 1px solid var(--el-border-color-lighter); border-radius: 8px; padding: 14px 16px; }
