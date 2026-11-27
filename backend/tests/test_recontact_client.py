@@ -191,7 +191,8 @@ def test_inbound_arriving_during_chat_selection_vetoes_final_enter(setup, monkey
     monkeypatch.setattr(agent, "_outbound_snapshot", MagicMock(return_value={}))
     input_events = MagicMock()
     monkeypatch.setattr(agent.win, "tap", input_events)
-    agent._recontact_latest_inbound.side_effect = [(INBOUND,"1"), (INBOUND,"1"), (INBOUND + 1000,"2")]
+    monkeypatch.setattr(agent, "wal_signature", MagicMock(side_effect=[("before",), ("before",), ("after",)]))
+    agent._recontact_latest_inbound.side_effect = [(INBOUND, "1"), (INBOUND + 1000, "2")]
 
     def select_and_send(active_store, name, content, *, log, **options):
         log("步骤0 前台就位")

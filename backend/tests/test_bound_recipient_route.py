@@ -84,7 +84,7 @@ def test_bound_send_checks_both_enters(recipient, monkeypatch, failure):
     monkeypatch.setattr(agent, "_recipient_search_field", MagicMock(side_effect=captures))
     heading = (1, b"heading")
     final = (2, b"heading") if failure == "focus_changed" else heading
-    monkeypatch.setattr(agent, "_recipient_heading", MagicMock(side_effect=[heading, heading, final]))
+    monkeypatch.setattr(agent, "_recipient_heading", MagicMock(side_effect=[heading, heading, heading, final]))
     monkeypatch.setattr(agent, "_outbound_snapshot", MagicMock(side_effect=[{}, {"22": "response"}]))
     monkeypatch.setattr(agent, "_recognize_recipient_heading", lambda frame, _: (
         "Same" if (frame == typed and failure == "wrong_search") or
@@ -181,3 +181,75 @@ def test_unique_contact_does_not_authorize_a_missing_or_different_title(monkeypa
 
     assert result[0] == "blocked"
     presses.assert_called_once_with("enter")
+
+
+
+@pytest.mark.parametrize("glyph, recognized, competitor, verified", [
+    ("wave", "小e(工作时间09·18点)", "", True),
+    ("dot", "小e(工作时间09·18点)", "", False),
+    ("wave", "小e(工作时间09·8点)", "", False),
+    ("wave", "小e(工作时间09·18点)", "小e（工作时间09·18点）", False),
+])
+def test_mixed_title_requires_the_whole_title_and_wave_pixels(recipient, monkeypatch, glyph, recognized, competitor, verified):
+    agent, store, path = recipient
+    name = "小e（工作时间09~18点）"
+    store.contacts.return_value = {"one": name}
+    if competitor:
+        with sqlite3.connect(path) as db:
+            db.execute("UPDATE external_user_relation_v3 SET remarks=? WHERE user_id='two'", (competitor,))
+    raster, rect = title_raster(glyph)
+    monkeypatch.setattr(agent, "_recognize_recipient_heading", lambda *_: "小e")
+    monkeypatch.setattr(agent, "_read_native_title_words", lambda *_: (recognized, [rect]), raising=False)
+    heading = (1, b"mono", b"gray", raster)
+    assert agent._verified_recipient_heading(heading, name, store, "self", "S:self_one") is verified
+
+
+def title_raster(glyph):
+    if glyph == "wave":
+        rows = ["..##......", ".#..#...#.", "#....###..", ".........."]
+    else:
+        rows = ["..........", "....##....", "....##....", ".........."]
+    pixels = bytes(0 if char == "#" else 255 for row in rows for char in row)
+    return (10, 4, pixels), [0, 0, 10, 4]
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_mixed_title_send_rechecks_live_frame_before_body_paste(recipient, monkeypatch, changed):
+    agent, store, _ = recipient
+    name = "小e（工作时间09~18点）"
+    cid = "S:self_one"
+    store.contacts.return_value = {"one": name}
+    raster, rect = title_raster("wave")
+    frame = (1, b"mono", b"gray", raster)
+    frames = [frame, frame, (2, *frame[1:]) if changed else frame, frame, frame]
+    monkeypatch.setattr(agent, "_guard_recipient", True)
+    monkeypatch.setattr(agent, "_recipient_heading", MagicMock(side_effect=frames))
+    monkeypatch.setattr(agent, "_recognize_recipient_heading", lambda *_: "小e")
+    monkeypatch.setattr(agent, "_read_native_title_words", lambda *_: ("小e(工作时间09·18点)", [rect]), raising=False)
+    monkeypatch.setattr(agent, "_outbound_snapshot", MagicMock(side_effect=[{}, {"22": "response"}]))
+    pressed, pasted = MagicMock(), MagicMock()
+    monkeypatch.setattr(agent.win, "tap", pressed, raising=False)
+    monkeypatch.setattr(agent.win, "hotkey", pasted, raising=False)
+
+    def desktop_sender(_store, _term, _body, *, expect_id, verify_db, log):
+        log("步骤0 前台就位")
+        agent.win.hotkey("ctrl", "v")
+        agent.win.tap("enter")
+        log("步骤1 已回车进入会话")
+        agent.win.hotkey("ctrl", "v")
+        log("步骤3 输入框校验通过")
+        agent.win.tap("enter")
+        return {"ok": True, "conversation_id": expect_id}
+
+    agent.core_send.send.side_effect = desktop_sender
+    result = agent._send_text(store, name, cid, "response", route="auto", log_fn=MagicMock())
+    assert result[0] == ("blocked" if changed else "sent")
+    assert pressed.call_count == pasted.call_count == (1 if changed else 2)
+
+
+def test_title_width_equivalent_contacts_are_ambiguous():
+    agent = load_autopilot()
+    store = MagicMock()
+    store.self_id.return_value = "self"
+    store.contacts.return_value = {"one": "小e（工作时间09~18点）", "two": "小e(工作时间09~18点)"}
+    assert not agent._unique_direct_recipient(store, "小e（工作时间09~18点）", "S:self_one")

@@ -1963,7 +1963,7 @@ def _missing_name_recovery_history(store: Store, account: str, cid: str, row: di
 
 def _recover_missing_direct_names(store: Store, cfg: dict, account: str) -> None:
     cutoff = time.time() - RECOVERY_REPLY_MAX_AGE
-    candidates = rlog.recipient_blocked_conversations(cutoff)
+    candidates = rlog.recipient_blocked_conversations(cutoff, title_retry=True)
     if not candidates or not account:
         return
     names = _direct_contact_names(store)
@@ -1974,13 +1974,20 @@ def _recover_missing_direct_names(store: Store, cfg: dict, account: str) -> None
         name = _name_from_direct_contact(cid, names)
         if not name or cid in unavailable or not match_target({"conv_id": cid, "conv_name": name}, cfg["target"]):
             continue
-        row = rlog.recipient_blocked(cid)
-        if not row or row["error"] != "会话没有可搜索的名字":
+        row = rlog.recipient_blocked(cid, title_retry=True)
+        if not row:
+            continue
+        missing_name = row["error"] == "会话没有可搜索的名字"
+        title_retry = row["last_step"] == "held" and row["error"] == _RECIPIENT_BLOCKED
+        if not missing_name and not (title_retry and _has_disputed_title_glyph(name)):
             continue
         outbound = _missing_name_recovery_history(store, account, cid, row)
-        if rlog.restore_recipient_blocked(cid, row["message_id"], conv_name=name,
-                                         cutoff=cutoff, outbound_at=outbound, missing_name=True):
-            log("会话名称已恢复，重新排队", scope="send", conv_id=cid, message_id=row["message_id"])
+        if title_retry and row["scene"] == "开场" and outbound != 0:
+            continue
+        if rlog.restore_recipient_blocked(cid, row["message_id"], conv_name=name, cutoff=cutoff,
+                                         outbound_at=outbound, missing_name=missing_name, title_retry=title_retry):
+            log("recipient_recovery_queued", scope="send", conv_id=cid, message_id=row["message_id"],
+                source="native_title" if title_retry else "contact_name")
 
 
 def _recovered_name_still_safe(store: Store, account: str, cid: str, row: dict, name: str) -> bool:
@@ -1992,6 +1999,11 @@ def _recovered_name_still_safe(store: Store, account: str, cid: str, row: dict, 
     if names[0] != account or _name_from_direct_contact(cid, names) != name:
         return False
     outbound = _missing_name_recovery_history(store, account, cid, row)
+    if row["last_step"] == "title-recovery-queued":
+        if row["scene"] == "开场" and outbound != 0:
+            return False
+        if float(row["msg_time"] or 0) < time.time() - RECOVERY_REPLY_MAX_AGE:
+            return False
     return outbound is not None and outbound < float(row["msg_time"] or 0)
 
 
@@ -2029,7 +2041,8 @@ def _refresh_recipient_recoveries(store: Store) -> None:
 
 _guard_recipient = False
 _recipient_binding_enabled = False
-_RecipientHeading = tuple[int, bytes, bytes]
+_TitleRaster = tuple[int, int, bytes]
+_RecipientHeading = tuple[int, bytes, bytes, _TitleRaster]
 _recipient_proof: tuple[str, _RecipientHeading] | None = None
 _RECIPIENT_BLOCKED = "发送前无法核对企微当前会话，已保留待回复记录"
 
@@ -2038,10 +2051,15 @@ class _RecipientUnverified(Exception):
     pass
 
 
+_RECIPIENT_WIDTH = {code: code - 0xFEE0 for code in range(0xFF01, 0xFF5F)}
+
+
 def _recipient_key(name: str) -> str:
     # OCR can omit underscore glyphs or insert spaces. Apply the same matching
     # rules to all saved names so lossy matches cannot hide a duplicate.
-    return "".join(re.split(r"[\s_]+", name.casefold()))
+    # OCR renders fullwidth ASCII punctuation and digits as halfwidth.
+    width_normalized = name.translate(_RECIPIENT_WIDTH)
+    return "".join(re.split(r"[\s_]+", width_normalized.casefold()))
 
 
 def _unique_direct_recipient(store: Store, name: str, cid: str) -> bool:
@@ -2093,7 +2111,7 @@ def _recipient_heading() -> _RecipientHeading | None:
         top, bottom = min(y for _, y in ink), max(y for _, y in ink)
         if left <= x1 or right >= x2 - 1 or sum(x > right for x in badge) < 24:
             return None
-        if top <= y1 or bottom >= y2 - 1:
+        if top <= y1 or bottom >= y2 - 1 or left < 2 or top < 2 or right + 2 >= width or bottom + 2 >= height:
             return None
         # Keep OCR input deterministic and only retain dark title pixels.
         # Padding and 3x enlargement help with short, mixed-script names.
@@ -2112,16 +2130,19 @@ def _recipient_heading() -> _RecipientHeading | None:
         gw = (right - left + 5) * 2 + 2 * gray_margin
         gh = (bottom - top + 5) * 2 + 2 * gray_margin
         gray = bytearray(b"\xff" * (gw * gh * 4))
+        nw, nh = right - left + 5 + 2 * gray_margin, bottom - top + 5 + 2 * gray_margin
+        native = bytearray(b"\xff" * (nw * nh))
         for y in range(top - 2, bottom + 3):
             for x in range(left - 2, right + 3):
                 offset = (width * y + x) * 4
                 shade = sum(pixels[offset:offset + 3]) // 3
+                native[(y - top + 2 + gray_margin) * nw + x - left + 2 + gray_margin] = shade
                 point = ((2 * (y - top + 2) + gray_margin) * gw
                          + 2 * (x - left + 2) + gray_margin) * 4
                 pair = bytes((shade, shade, shade, 255)) * 2
                 gray[point:point + 8] = pair
                 gray[point + gw * 4:point + gw * 4 + 8] = pair
-        return hwnd, encode_png(w, h, image), encode_png(gw, gh, gray)
+        return hwnd, encode_png(w, h, image), encode_png(gw, gh, gray), (nw, nh, bytes(native))
     except Exception:
         return None
 
@@ -2158,7 +2179,14 @@ try {
         if (-not $engine -and $preferred -eq 'en-US') {
             $engine=$ocr::TryCreateFromLanguage($lang::new('zh-Hans-CN'))
         }
-        if ($engine) { (ReadResult ($engine.RecognizeAsync($im)) $result).Text }
+        if ($engine) {
+            $recognized=ReadResult ($engine.RecognizeAsync($im)) $result
+            if ($env:CITY_RECRUIT_HEADING_WORDS -eq '1') {
+                $dots=@($recognized.Lines.Words | Where-Object { $_.Text -eq [string][char]0xB7 } |
+                    ForEach-Object { ,@($_.BoundingRect.X,$_.BoundingRect.Y,$_.BoundingRect.Width,$_.BoundingRect.Height) })
+                @{text=$recognized.Text; dots=$dots} | ConvertTo-Json -Compress -Depth 4
+            } else { $recognized.Text }
+        }
     } finally { $im.Dispose() }
 } finally { $s.Dispose() }
 """
@@ -2186,15 +2214,13 @@ def _recipient_search_field() -> tuple[int, bytes] | None:
         return None
 
 
-def _recognize_recipient_heading(heading: tuple[int, bytes] | _RecipientHeading, name: str) -> str:
+def _read_recipient_ocr(images: tuple[bytes, ...], language: str, *, words: bool = False) -> str:
     try:
         with tempfile.TemporaryDirectory(prefix="city-recruit-heading-") as folder:
             file = Path(folder) / "heading.png"
-            # Chinese OCR can misread short Latin names and issued remark codes.
-            language = "en-US" if name.isascii() and re.search(r"[A-Za-z]", name) else "zh-Hans-CN"
-            env = dict(os.environ, CITY_RECRUIT_HEADING_IMAGE=str(file), CITY_RECRUIT_HEADING_LANGUAGE=language)
+            env = dict(os.environ, CITY_RECRUIT_HEADING_IMAGE=str(file), CITY_RECRUIT_HEADING_LANGUAGE=language,
+                       CITY_RECRUIT_HEADING_WORDS="1" if words else "0")
             ps = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
-            images = heading[1:2] if name.isascii() else heading[1:]
             for image in images:
                 file.write_bytes(image)
                 result = subprocess.run(
@@ -2206,13 +2232,92 @@ def _recognize_recipient_heading(heading: tuple[int, bytes] | _RecipientHeading,
                 text = result.stdout.decode("utf-8-sig").strip()
                 if text:
                     return text
-        return ""
     except (OSError, KeyError, UnicodeError, subprocess.TimeoutExpired):
-        return ""
+        pass
+    return ""
+
+
+def _recognize_recipient_heading(heading: tuple[int, bytes] | _RecipientHeading, name: str) -> str:
+    # Chinese OCR can misread short Latin names and issued remark codes.
+    language = "en-US" if name.isascii() and re.search(r"[A-Za-z]", name) else "zh-Hans-CN"
+    return _read_recipient_ocr(heading[1:2] if name.isascii() else heading[1:3], language)
+
+
+def _read_native_title_words(raster: _TitleRaster) -> tuple[str, list]:
+    from screenshot import encode_png
+
+    width, height, pixels = raster
+    bgra = b"".join(bytes((shade, shade, shade, 255)) for shade in pixels)
+    try:
+        result = json.loads(_read_recipient_ocr((encode_png(width, height, bgra),), "zh-Hans-CN", words=True))
+        return result["text"], result["dots"]
+    except (ValueError, TypeError, KeyError):
+        return "", []
+
+
+def _title_glyph_is_wave(raster: _TitleRaster, rect: list) -> bool:
+    width, height, pixels = raster
+    try:
+        x1, y1, w, h = (int(value) for value in rect)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if not (0 <= x1 <= width - w and 0 <= y1 <= height - h and 6 <= w <= 42 and 2 <= h <= 18):
+        return False
+    ink = [(x, y) for y in range(y1, y1 + h) for x in range(x1, x1 + w) if pixels[y * width + x] < 160]
+    if not ink:
+        return False
+    left, right = min(x for x, _ in ink), max(x for x, _ in ink)
+    top, bottom = min(y for _, y in ink), max(y for _, y in ink)
+    w, h = right - left + 1, bottom - top + 1
+    if not (w >= 6 and h >= 2 and 2 * h <= w <= 5 * h):
+        return False
+    centers = []
+    for x in range(left, right + 1):
+        weights = [max(160 - pixels[y * width + x], 0) for y in range(top, bottom + 1)]
+        total = sum(weights)
+        if not total:
+            return False
+        centers.append(sum(y * weight for y, weight in enumerate(weights)) / total)
+    middle = w // 2
+    peak = min(centers[1:middle + 1])
+    trough = max(centers[middle:-1])
+    minimum = .20 * (h - 1)
+    return min(centers[0] - peak, trough - peak, trough - centers[-1]) >= minimum
+
+
+def _has_disputed_title_glyph(name: str) -> bool:
+    return not name.isascii() and _recipient_key(name).count("~") == 1
+
+
+def _verified_recipient_heading(heading: _RecipientHeading | None, name: str,
+                                store: Store, account: str, cid: str) -> bool:
+    if not heading:
+        return False
+    expected = _recipient_key(name)
+    if not expected:
+        return False
+    if _recipient_key(_recognize_recipient_heading(heading, name)) == expected:
+        return True
+    if len(heading) != 4 or not _has_disputed_title_glyph(name):
+        return False
+    # Windows OCR can read the rest of a mixed title at the native scale while
+    # misclassifying its tilde as a dot. Verify the exact disputed glyph in
+    # the same image and exclude competing searchable nicknames and remarks.
+    recognized, dots = _read_native_title_words(heading[3])
+    if _recipient_key(recognized) != expected.replace("~", "·") or len(dots) != 1:
+        return False
+    if not _title_glyph_is_wave(heading[3], dots[0]):
+        return False
+    names = _recipient_names(store, allow_missing_remarks=True)
+    other = _recipient_other(account, cid)
+    if not names or not other or names[2].get(expected) != {other}:
+        return False
+    return all(not (names[2].get(expected.replace("~", glyph), set()) - {other})
+               for glyph in "·・∼∽≈﹏﹋∿˷⁓〜-−一ー")
 
 
 @contextmanager
-def _check_recipient_at_enter(enabled, check, *, before_paste=False):
+def _check_recipient_at_enter(enabled, check, *, before_paste=None):
     """Gate existing input events on the current recipient."""
     if not enabled:
         yield
@@ -2226,7 +2331,7 @@ def _check_recipient_at_enter(enabled, check, *, before_paste=False):
         tap(key)
 
     def checked_hotkey(*keys: str) -> None:
-        if keys == ("ctrl", "v") and not check():
+        if keys == ("ctrl", "v") and not before_paste():
             raise _RecipientUnverified
         hotkey(*keys)
 
@@ -2298,17 +2403,20 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
         log("wecom_send", scope="send", route=route, phase=phase, attempt_id=attempt_id,
             sender_pid=os.getpid(), **context, **_foreground_sample(), **fields)
 
+    def recipient_still_current() -> bool:
+        return bool(
+            account and _recipient_account(store) == account
+            and (not _recipient_binding_enabled or (
+                remote_cfg.recipient_binding_account_active(account)
+                and remote_cfg.recipient_bindings(account).get(cid) == binding
+            ))
+            and heading and _recipient_heading() == heading
+        )
+
     def authorize_enter() -> bool:
         nonlocal send_enter_verified
         if phase == "send":
-            if require_recipient and _recipient_account(store) != account:
-                return False
-            if _recipient_binding_enabled:
-                current_account = _recipient_account(store)
-                if (current_account != account or not remote_cfg.recipient_binding_account_active(account)
-                        or remote_cfg.recipient_bindings(account).get(cid) != binding):
-                    return False
-            send_enter_verified = bool((authorize is None or authorize()) and heading and _recipient_heading() == heading)
+            send_enter_verified = (authorize is None or authorize()) and recipient_still_current()
             return send_enter_verified
         if phase == "search" and not strict_search:
             return True
@@ -2322,6 +2430,9 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
         if open_only and authorize is not None and not authorize():
             return False
         return _recipient_search_field() == search
+
+    def authorize_body_paste() -> bool:
+        return phase == "search" or (phase == "chat" and recipient_still_current())
 
     def on_step(message: str) -> None:
         nonlocal heading, search_before, phase, send_enter_dispatched
@@ -2337,7 +2448,8 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
         if guard and step == "步骤1":
             phase = "chat"
             heading = _recipient_heading()
-            if not heading or _recipient_key(_recognize_recipient_heading(heading, name)) != _recipient_key(name):
+            if (not _verified_recipient_heading(heading, name, store, account, cid)
+                    or not recipient_still_current()):
                 raise _RecipientUnverified
         if guard and step == "步骤3":
             phase = "send"
@@ -2361,7 +2473,7 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
               duration_ms=int((monotonic() - started) * 1000))
         return "blocked", detail, ""
     try:
-        with _check_recipient_at_enter(guard, authorize_enter):
+        with _check_recipient_at_enter(guard, authorize_enter, before_paste=authorize_body_paste):
             if open_only:
                 # Frozen dry mode stops immediately after opening the search result.
                 result = core_send.send(store, name, name, expect_id=cid, dry=True,
@@ -2454,7 +2566,7 @@ def _send_media(store: Store, cid: str, name: str, log_fn, *, route: str, author
     if authorize is not None and not permitted():
         return "blocked", _RECIPIENT_BLOCKED
     with _check_recipient_at_enter(_recipient_guard_enabled(cid) or authorize is not None,
-                                   permitted, before_paste=authorize is not None):
+                                   permitted, before_paste=permitted if authorize is not None else None):
         ok, detail = core_send.paste_media(name, log=log_fn)
     if authorize is not None and vetoed:
         return "blocked", _RECIPIENT_BLOCKED
@@ -3298,7 +3410,11 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                 if not dry:
                     rlog.mark_skipped(entry["message_id"], cid, "同会话合并到最新一条")
                 stats["merged"] += 1
-        recovering = it.get("last_step") in ("recovery-queued", "recipient-recovery-queued")
+        recovery_step = it.get("last_step")
+        title_recovery = recovery_step == "title-recovery-queued"
+        recovering = recovery_step in ("recovery-queued", "recipient-recovery-queued") or (
+            title_recovery and it.get("scene") != "开场"
+        )
         preview = (it["in_text"] or "").strip()[:20].replace("\n", " ") or f"[type={it['in_type']}]"
         agent_medias: list[tuple[str, str]] = []
         dify_plan: list[dict] = []
@@ -3334,7 +3450,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         if _recipient_binding_enabled and not managed and cid.startswith("S:"):
             stats["blocked"] += 1
             continue
-        recovered_name = not dry and it.get("last_step") == "name-recovery-queued"
+        recovered_name = not dry and (recovery_step == "name-recovery-queued" or title_recovery)
         if recovered_name:
             if not _recipient_guard_enabled(cid) or not _recovered_name_still_safe(store, account, cid, it, name):
                 rlog.mark_held(mid, cid, "入站或出站记录发生变化，等待核对")

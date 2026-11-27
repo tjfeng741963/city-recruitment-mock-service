@@ -231,3 +231,60 @@ def test_recovery_leaves_unsafe_or_out_of_scope_skips_untouched(client, guard):
     agent._recover_missing_direct_names(store, cfg, store.account)
     assert ledger.pending() == []
     assert ledger.recent()[0]["error"] == LEGACY_SKIP
+
+
+
+@pytest.mark.parametrize("changed", [None, "newer-inbound", "already-replied"])
+def test_recent_title_hold_automatically_requeues_once_with_fresh_history(client, monkeypatch, changed):
+    agent, store, ledger = client
+    stamp = int(time.time()) - 5
+    store.names[PEER] = "小e（工作时间09~18点）"
+    row = {**message(1, stamp), "conv_name": store.names[PEER]}
+    store.add(row)
+    ledger.record_incoming(row)
+    ledger.mark_held(1, CID, agent._RECIPIENT_BLOCKED, "Agent")
+    if changed == "newer-inbound":
+        store.add(message(2, stamp + 1))
+    if changed == "already-replied":
+        store.add(message(2, stamp + 1, sender=ACCOUNT))
+
+    agent._recover_missing_direct_names(store, CFG, ACCOUNT)
+    if changed:
+        assert ledger.pending() == []
+        return
+    assert [(r["message_id"], r["last_step"]) for r in ledger.pending()] == [("1", "title-recovery-queued")]
+    ledger.mark_held(1, CID, agent._RECIPIENT_BLOCKED, "Agent")
+    agent._recover_missing_direct_names(store, CFG, ACCOUNT)
+    assert ledger.pending() == []
+
+def test_resident_drains_ocr_title_hold_as_normal_reply_once(client, monkeypatch, tmp_path):
+    agent, store, ledger = client
+    stamp = int(time.time()) - 5
+    name = store.names[PEER] = "小e（工作时间09~18点）"
+    inbound = {**message(1, stamp, text="岗位在哪里？"), "conv_name": name}
+    store.add(inbound)
+    assert ledger.record_incoming(inbound)
+    ledger.mark_held(1, CID, agent._RECIPIENT_BLOCKED, "Agent")
+    brain = MagicMock(reply_provider="agent")
+    brain.flow.return_value = {"nodes": []}
+    brain.chat.return_value = {"ok": True, "reply": "请看岗位地址。", "trace_id": "reply-trace"}
+    send = MagicMock(return_value=("sent", "confirmed", "2"))
+    monkeypatch.setattr(agent, "_brain", brain)
+    monkeypatch.setattr(agent, "_guard_recipient", True)
+    monkeypatch.setattr(agent, "_send_text", send)
+    monkeypatch.setattr(agent, "_flow_state", agent.flow_state_mod.FlowState(tmp_path / "flow.db"))
+    monkeypatch.setattr(agent, "GREET_STATE", tmp_path / ".greeted.json")
+    monkeypatch.setattr(agent.remote_cfg, "takeover_sessions", set)
+    monkeypatch.setattr(agent.remote_cfg, "abandoned_sessions", set)
+    cfg = {**CFG, "cooldown": 0}
+
+    assert agent.drain(store, cfg)["sent"] == 1
+    assert agent.drain(store, cfg)["sent"] == 0
+    brain.opening.assert_not_called()
+    assert brain.chat.call_args.args == ("岗位在哪里？", CID)
+    assert (send.call_args.args[1:], send.call_args.kwargs["route"]) == (
+        (name, CID, "请看岗位地址。"), "auto",
+    )
+    send.assert_called_once()
+    assert ledger.recent()[0]["last_step"] == "sent-confirmed"
+    assert ledger.recent_reply_recoveries()[0]["outcome"] == "sent"
