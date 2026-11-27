@@ -2333,11 +2333,25 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
         if guard and step == "步骤1":
             phase = "chat"
             heading = _recipient_heading()
-            if not heading or _recipient_key(_recognize_recipient_heading(heading, name)) != _recipient_key(name):
-                raise _RecipientUnverified
+            matched = bool(heading) and _recipient_key(_recognize_recipient_heading(heading, name)) == _recipient_key(name)
+            if not matched:
+                # 2026-11-27 现场：Dark / 释怀 这种英文名和中文昵称，OCR 读标题经常
+                # 认不出来，明明通讯录里只有一个人叫这个名字，却被当成"无法核对"
+                # 整条拦掉，客户加好友后一直不回。
+                # 唯一性已由通讯录确认时放行；真发错会话还有 expect_id 回读校验兜底
+                # （发到别的会话会直接返回"发到了别的会话！"）。
+                if _unique_direct_recipient(store, name, cid):
+                    log_fn("步骤1 标题未识别，但通讯录唯一，继续发送（落点由回读校验）")
+                else:
+                    raise _RecipientUnverified
         if guard and step == "步骤3":
             phase = "send"
-            if not heading or _recipient_heading() != heading:
+            if heading is None:
+                # 步骤1 就没读到标题（OCR 认不出），这里不能拿 None 去比；
+                # 同样只在通讯录唯一时放行，落点由 expect_id 回读校验兜底。
+                if not _unique_direct_recipient(store, name, cid):
+                    raise _RecipientUnverified
+            elif _recipient_heading() != heading:
                 raise _RecipientUnverified
         if step == "步骤4":
             send_enter_dispatched = send_enter_verified

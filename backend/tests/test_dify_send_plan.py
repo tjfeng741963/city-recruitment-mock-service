@@ -113,6 +113,80 @@ def test_faq_group_keeps_text_without_attempting_media(monkeypatch):
     agent.core_send.paste_media.assert_not_called()
 
 
+def _send_with_unreadable_heading(monkeypatch, *, unique):
+    """OCR 读不出标题时的公共装置：unique 决定通讯录唯一性结论。"""
+    agent = load_autopilot()
+    store = MagicMock()
+    store.self_id.return_value = "self"
+    cid = "S:self_contact"
+    monkeypatch.setattr(agent, "_resolve_recipient", lambda *_: ("Dark", ""))
+    monkeypatch.setattr(agent, "_recipient_heading", lambda: None)
+    monkeypatch.setattr(agent, "_unique_direct_recipient", lambda *_: unique)
+    monkeypatch.setattr(agent, "_outbound_snapshot", MagicMock(side_effect=[{}, {"42": "回答"}]))
+    def send(_store, name, body, *, expect_id, verify_db, log):
+        log("步骤0 前台就位")
+        log("步骤1 进入会话")
+        log("步骤3 输入框校验")
+        return {"ok": True, "conversation_id": cid}
+    agent.core_send.send.side_effect = send
+    return agent, agent._send_text(
+        store, "Dark", cid, "回答", route="auto", log_fn=MagicMock(), require_recipient=True,
+    )
+
+
+def test_unreadable_heading_falls_back_to_unique_contact(monkeypatch):
+    """OCR 认不出标题但通讯录唯一 → 继续发。
+
+    2026-11-27 现场：Dark / 释怀 这类名字 OCR 读不准，明明通讯录只有一个人，
+    却被当成"无法核对"整条拦掉，加好友后一直不回。
+    """
+    _, result = _send_with_unreadable_heading(monkeypatch, unique=True)
+    assert result[0] == "sent"
+
+
+def test_unreadable_heading_still_blocks_when_contact_is_ambiguous(monkeypatch):
+    """同名不止一个时仍然拦住——放行只针对"唯一性已确认"的情况。"""
+    _, result = _send_with_unreadable_heading(monkeypatch, unique=False)
+    assert result[0] == "blocked"
+
+
+def _send_with_unreadable_heading(monkeypatch, *, unique):
+    """OCR 读不出标题时的公共装置：unique 决定通讯录唯一性结论。"""
+    agent = load_autopilot()
+    store = MagicMock()
+    store.self_id.return_value = "self"
+    cid = "S:self_contact"
+    monkeypatch.setattr(agent, "_resolve_recipient", lambda *_: ("Dark", ""))
+    monkeypatch.setattr(agent, "_recipient_heading", lambda: None)
+    monkeypatch.setattr(agent, "_unique_direct_recipient", lambda *_: unique)
+    monkeypatch.setattr(agent, "_outbound_snapshot", MagicMock(side_effect=[{}, {"42": "回答"}]))
+    def send(_store, name, body, *, expect_id, verify_db, log):
+        log("步骤0 前台就位")
+        log("步骤1 进入会话")
+        log("步骤3 输入框校验")
+        return {"ok": True, "conversation_id": cid}
+    agent.core_send.send.side_effect = send
+    return agent, agent._send_text(
+        store, "Dark", cid, "回答", route="auto", log_fn=MagicMock(), require_recipient=True,
+    )
+
+
+def test_unreadable_heading_falls_back_to_unique_contact(monkeypatch):
+    """OCR 认不出标题但通讯录唯一 → 继续发。
+
+    2026-11-27 现场：Dark / 释怀 这类名字 OCR 读不准，明明通讯录只有一个人，
+    却被当成"无法核对"整条拦掉，加好友后一直不回。
+    """
+    _, result = _send_with_unreadable_heading(monkeypatch, unique=True)
+    assert result[0] == "sent"
+
+
+def test_unreadable_heading_still_blocks_when_contact_is_ambiguous(monkeypatch):
+    """同名不止一个时仍然拦住——放行只针对"唯一性已确认"的情况。"""
+    _, result = _send_with_unreadable_heading(monkeypatch, unique=False)
+    assert result[0] == "blocked"
+
+
 def test_faq_text_builds_recipient_proof_even_without_optional_desktop_guard(monkeypatch):
     agent = load_autopilot()
     store = MagicMock()
