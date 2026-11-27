@@ -4047,6 +4047,15 @@ def pump_commands(
             log=mlog,
             user_id=user_id,
         )
+        # 写完立刻把核验结果报上去，别等客户下一条消息才更新——
+        # 原来只有 inbound 时才核验，运营点完按钮界面会一直停在「等待企微核验」。
+        if ok and conv_id:
+            try:
+                account_id = store.self_id() or ""
+            except Exception:  # noqa: BLE001
+                account_id = ""
+            if account_id:
+                _queue_recipient_report(account_id, conv_id, "verified", str(payload.get("remark") or ""))
         try:
             bridge.receipt(cmd_id, lease, "succeeded" if ok else "failed", "", detail)
         except Exception as exc:  # noqa: BLE001

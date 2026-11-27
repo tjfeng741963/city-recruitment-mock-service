@@ -48,6 +48,9 @@ class FakeBridge:
         self.claim_exc = claim_exc
         self.claim_filters: list[str] = []
         self.receipts: list[tuple] = []
+        # error 单独记：历史断言按 4 元组精确比较，不能改 receipts 的形状
+        self.receipt_errors: list[str] = []
+        self.bindings: list[tuple] = []
 
     @property
     def claim_calls(self):
@@ -61,8 +64,13 @@ class FakeBridge:
             return None
         return self.command
 
-    def receipt(self, command_id, lease_token, status, message_id=""):
+    def receipt(self, command_id, lease_token, status, message_id="", error=""):
         self.receipts.append((command_id, lease_token, status, message_id))
+        self.receipt_errors.append(error)
+        return {"ok": True}
+
+    def report_recipient_binding(self, account_id, conversation_id, status, remark=""):
+        self.bindings.append((account_id, conversation_id, status, remark))
         return {"ok": True}
 
 
@@ -390,3 +398,47 @@ def test_bridge_client_claim_and_receipt_request_shape(monkeypatch):
         "message_id": "keyboard-cmd-1",
         "error": "",
     }
+
+def test_successful_remark_reports_verified_immediately(monkeypatch):
+    """备注写完立刻上报核验结果，别等客户下一条消息。
+
+    原来只有 inbound 时才核验并上报，运营点完「自动设备注」界面会一直停在
+    「等待企微核验」，看不出到底成没成。
+    """
+    autopilot = _load_autopilot()
+    _reset(autopilot)
+    autopilot._recipient_reports.clear()
+    autopilot.desktop_send_ready.return_value = (False, "企微窗口不可用")
+    payload = {
+        "conversation_id": COMMAND["contact_id"],
+        "user_id": "7881299918302353",
+        "name": "青冥",
+        "remark": "CRabc123",
+    }
+    monkeypatch.setattr(autopilot.remark_ui, "set_remark", lambda *a, **kw: (True, "已设置备注 CRabc123"))
+    bridge = FakeBridge(command=dict(COMMAND, kind="set_remark", content=json.dumps(payload)))
+
+    autopilot.pump_commands(_mock_store(), _cfg(), bridge=bridge, wecom_state="online")
+    autopilot._publish_recipient_reports(bridge)
+
+    assert bridge.bindings == [(ACCOUNT_ID, COMMAND["contact_id"], "verified", "CRabc123")]
+
+
+def test_failed_remark_does_not_report_verified(monkeypatch):
+    """没写成功就不能报 verified，否则前端会把失败的备注当成已核验。"""
+    autopilot = _load_autopilot()
+    _reset(autopilot)
+    autopilot._recipient_reports.clear()
+    autopilot.desktop_send_ready.return_value = (False, "企微窗口不可用")
+    payload = {"conversation_id": COMMAND["contact_id"], "user_id": "7881299918302353",
+               "name": "青冥", "remark": "CRabc123"}
+    monkeypatch.setattr(autopilot.remark_ui, "set_remark",
+                        lambda *a, **kw: (False, "已操作界面但库里备注仍是「空」"))
+    bridge = FakeBridge(command=dict(COMMAND, kind="set_remark", content=json.dumps(payload)))
+
+    autopilot.pump_commands(_mock_store(), _cfg(), bridge=bridge, wecom_state="online")
+    autopilot._publish_recipient_reports(bridge)
+
+    assert bridge.bindings == []
+    assert bridge.receipts[-1][2] == "failed"
+    assert bridge.receipt_errors[-1] == "已操作界面但库里备注仍是「空」"
