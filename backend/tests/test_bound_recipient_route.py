@@ -153,3 +153,31 @@ def test_title_ocr_uses_grayscale_only_after_empty_chinese_read(monkeypatch, nam
     result = agent._recognize_recipient_heading((1, b"mono", b"gray"), name)
     assert result == (name if fallback_used else first)
     assert used == ([b"mono", b"gray"] if fallback_used else [b"mono"])
+
+
+@pytest.mark.parametrize("heading", [None, (42, b"another contact")])
+def test_unique_contact_does_not_authorize_a_missing_or_different_title(monkeypatch, heading):
+    agent = load_autopilot()
+    store = MagicMock()
+    store.self_id.return_value = "self"
+    store.contacts.return_value = {"one": "Dark"}
+    monkeypatch.setattr(agent, "_guard_recipient", True)
+    monkeypatch.setattr(agent, "_recipient_heading", lambda: heading)
+    monkeypatch.setattr(agent, "_recognize_recipient_heading", lambda *_: "Another contact")
+    monkeypatch.setattr(agent, "_outbound_snapshot", lambda *_: {})
+    presses = MagicMock()
+    monkeypatch.setattr(agent.win, "tap", presses, raising=False)
+
+    def desktop_sender(_store, _term, _body, *, expect_id, verify_db, log):
+        log("\u6b65\u9aa40 foreground")
+        agent.win.tap("enter")
+        log("\u6b65\u9aa41 selected")
+        log("\u6b65\u9aa43 before send")
+        agent.win.tap("enter")
+        return {"ok": True, "conversation_id": expect_id}
+
+    agent.core_send.send.side_effect = desktop_sender
+    result = agent._send_text(store, "Dark", "S:self_one", "response", route="opening", log_fn=MagicMock())
+
+    assert result[0] == "blocked"
+    presses.assert_called_once_with("enter")
