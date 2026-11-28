@@ -2983,7 +2983,7 @@ def _location_value(card: object) -> dict | None:
                 or not isinstance(address, str) or not address.strip()):
             return None
         return {"lng": lng, "lat": lat, "name": name.strip(), "address": address.strip()}
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OverflowError):
         return None
 
 
@@ -4037,9 +4037,11 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
 
         if reviewed_title_recovery:
             point = _location_value(agent_card) if agent_card else None
+            body = parts[0] if len(parts) == 1 else ""
+            if body and point:
+                body = f"{body}\n{_location_navigation_text(point)}"
             try:
-                plain_text = not (dify_plan or agent_medias or len(parts) != 1
-                                  or core_send.split_media_marks(parts[0])[1])
+                plain_text = bool(body) and not (dify_plan or agent_medias or core_send.split_media_marks(body)[1])
             except Exception:
                 plain_text = False
             if not plain_text or (agent_card and not point):
@@ -4049,11 +4051,9 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     _brain.log_delivery(agent_trace_id, "failed", session_key=cid, detail=detail)
                 stats["blocked"] += 1
                 continue
-            if point:
-                navigation = _location_navigation_text(point)
-                text = f"{parts[0]}\n{navigation}"
-                parts = [text]
-                agent_card = None
+            text = body
+            parts = [text]
+            agent_card = None
 
         # 冷却按“距上次企微键鼠操作”计算，与成败无关（见 _consecutive_send_failures
         # 处的注释）；连续失败再把间隔拉长，最多 4 倍 cooldown。

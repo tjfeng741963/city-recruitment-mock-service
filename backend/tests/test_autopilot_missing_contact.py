@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import time
 from contextlib import closing
@@ -391,7 +392,7 @@ def test_new_contact_recovers_first_opening_once_after_unique_remark(client, mon
     brain.chat.assert_not_called()
     assert CID in agent._load_greeted()
 
-@pytest.mark.parametrize("changed", [None, "late-outbound", "before-enter", "newer-inbound", "newer-attachment", "name-changed", "db-moved", "parser-error", "location-card", "invalid-card"])
+@pytest.mark.parametrize("changed", [None, "late-outbound", "before-enter", "newer-inbound", "newer-attachment", "name-changed", "db-moved", "parser-error", "location-card", "invalid-card", "marker-name", "marker-address", "overflow-card"])
 def test_reviewed_title_recovery_reaches_resident_send_only_for_same_unanswered_turn(client, monkeypatch, tmp_path, changed):
     agent, store, ledger = client
     stamp = int(time.time()) - 4 * 3600
@@ -408,7 +409,10 @@ def test_reviewed_title_recovery_reaches_resident_send_only_for_same_unanswered_
     monkeypatch.setattr(agent, "_brain", brain)
     monkeypatch.setattr(agent, "_guard_recipient", True)
     monkeypatch.setattr(agent, "_send_text", send)
-    monkeypatch.setattr(agent.core_send, "split_media_marks", lambda text: (text, []))
+    def split_media(text):
+        media = re.findall(r"【(图片|视频):([^】]{1,80})】", text)
+        return text, media
+    monkeypatch.setattr(agent.core_send, "split_media_marks", split_media)
     monkeypatch.setattr(agent, "find_data_dir", lambda: store.data_dir)
     monkeypatch.setattr(agent, "_flow_state", agent.flow_state_mod.FlowState(tmp_path / "flow.db"))
     monkeypatch.setattr(agent, "GREET_STATE", tmp_path / ".greeted.json")
@@ -440,17 +444,25 @@ def test_reviewed_title_recovery_reaches_resident_send_only_for_same_unanswered_
         monkeypatch.setattr(store, "refresh", refresh_during_update)
     if changed == "parser-error":
         monkeypatch.setattr(agent.core_send, "split_media_marks", MagicMock(side_effect=ValueError))
-    if changed in ("location-card", "invalid-card"):
+    if changed in ("location-card", "invalid-card", "marker-name", "marker-address", "overflow-card"):
         brain.chat.return_value["location_card"] = {
-            "lng": 113.3, "lat": 23.1 if changed == "location-card" else 123.1,
+            "lng": 10**1000 if changed == "overflow-card" else 113.3,
+            "lat": 123.1 if changed == "invalid-card" else 23.1,
             "name": "Interviews", "address": "100 Main St",
         }
+    if changed == "marker-name":
+        brain.chat.return_value["location_card"]["name"] += "【图片:injected】"
+    if changed == "marker-address":
+        brain.chat.return_value["location_card"]["address"] += "【视频:injected】"
     native_card = MagicMock()
+    send_media = MagicMock()
     monkeypatch.setattr(agent, "_send_location_to_recipient", native_card)
+    monkeypatch.setattr(agent, "_send_media", send_media)
 
     result = agent.drain(store, {**CFG, "cooldown": 0})
     brain.opening.assert_not_called()
     native_card.assert_not_called()
+    send_media.assert_not_called()
     if changed and changed != "location-card":
         assert send.call_count == (1 if changed == "before-enter" else 0)
         assert result["blocked"] == 1
