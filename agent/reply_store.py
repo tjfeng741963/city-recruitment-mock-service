@@ -153,9 +153,21 @@ _RECIPIENT_UNSENT = f"""selected.attempts=0 AND {_HAS_INBOUND_TEXT.format(row="s
     OR ({_MISSING_NAME_SKIP})
 )"""
 _TITLE_RETRY_OPERATOR = "recipient-title-ocr"
+_TITLE_FAILURE = "发送前无法核对企微当前会话，已保留待回复记录"
+_REVIEWED_TITLE_RECOVERY = "reviewed-title-recovery-queued"
+_QUEUED_RECOVERY_STEPS = (
+    "recovery-queued", "recipient-recovery-queued", "name-recovery-queued", "title-recovery-queued",
+    _REVIEWED_TITLE_RECOVERY,
+)
+_QUEUED_RECOVERY_STEPS_SQL = ",".join(f"'{step}'" for step in _QUEUED_RECOVERY_STEPS)
+_UNCERTAIN_CONVERSATION_SEND = """EXISTS (
+    SELECT 1 FROM reply_log AS attempt WHERE attempt.conv_id=selected.conv_id
+      AND (attempt.status='unknown' OR attempt.last_step IN ('sending','partial'))
+      AND MAX(COALESCE(attempt.replied_at,0),COALESCE(attempt.msg_time,0))>=selected.msg_time
+)"""
 _TITLE_RECIPIENT_UNSENT = f"""selected.status='held' AND selected.last_step='held'
     AND selected.attempts=0 AND {_HAS_INBOUND_TEXT.format(row="selected")}
-    AND selected.error='发送前无法核对企微当前会话，已保留待回复记录'
+    AND selected.error='{_TITLE_FAILURE}'
     AND NOT EXISTS (
         SELECT 1 FROM reply_recoveries recovery
         WHERE recovery.conv_id=selected.conv_id AND recovery.message_id=selected.message_id
@@ -163,7 +175,7 @@ _TITLE_RECIPIENT_UNSENT = f"""selected.status='held' AND selected.last_step='hel
     )"""
 _SKIP_SUPERSEDED_RECOVERY = f"""UPDATE reply_log AS selected
     SET status='skipped',last_step='skipped',error='恢复排队后收到更新的消息',replied_at=?
-    WHERE last_step IN ('recovery-queued','recipient-recovery-queued','name-recovery-queued','title-recovery-queued')
+    WHERE last_step IN ({_QUEUED_RECOVERY_STEPS_SQL})
     AND {_RECOVERY_HAS_NEWER_MESSAGE}"""
 _LEGACY_PARTIAL = re.compile(r"^(?:已确认 [1-9]\d* 段文本，|开场第 \d+ 项未完成，已有 [1-9]\d* 项执行成功：)")
 
@@ -428,11 +440,7 @@ def restore_recipient_blocked(conv_id: str, message_id: str, *, conv_name: str,
                       SELECT 1 FROM welcome_deliveries w WHERE w.conv_id=selected.conv_id
                         AND w.state NOT IN ('sent','cancelled')
                   )
-                  AND NOT EXISTS (
-                      SELECT 1 FROM reply_log AS attempt WHERE attempt.conv_id=selected.conv_id
-                        AND (attempt.status='unknown' OR attempt.last_step IN ('sending','partial'))
-                        AND MAX(COALESCE(attempt.replied_at,0),COALESCE(attempt.msg_time,0))>=selected.msg_time
-                  )""",
+                  AND NOT {_UNCERTAIN_CONVERSATION_SEND}""",
             (name, step, str(conv_id), str(message_id), cutoff, outbound_at),
         ).rowcount
         if changed and title_retry:
@@ -453,8 +461,14 @@ def pending(include_failed: bool = True, limit: int = 200) -> list[dict]:
     con = _conn()
     try:
         rows = con.execute(
-            f"SELECT * FROM reply_log WHERE status IN ({marks}) "
-            f"AND last_step<>'recipient-blocked' ORDER BY msg_time ASC, id ASC LIMIT ?",
+            f"""SELECT selected.*,
+                CASE WHEN selected.last_step='{_REVIEWED_TITLE_RECOVERY}' THEN (
+                    SELECT recovery.requested_at FROM reply_recoveries AS recovery
+                    WHERE recovery.conv_id=selected.conv_id AND recovery.message_id=selected.message_id
+                      AND recovery.finished_at IS NULL
+                ) END AS reviewed_title_requested_at
+                FROM reply_log AS selected WHERE status IN ({marks})
+                AND last_step<>'recipient-blocked' ORDER BY msg_time ASC, id ASC LIMIT ?""",
             (*statuses, limit),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -470,7 +484,7 @@ def begin_reply_attempt(message_id: str, conv_id: str, scene: str, reply_text: s
             f"""UPDATE reply_log AS selected SET status='unknown', error=?, scene=?, reply_text=?,
                 last_step='sending', replied_at=? WHERE conv_id=? AND message_id=?
                 AND status IN ('pending','failed') AND last_step<>'recipient-blocked'
-                AND (last_step NOT IN ('recovery-queued','recipient-recovery-queued','name-recovery-queued','title-recovery-queued')
+                AND (last_step NOT IN ({_QUEUED_RECOVERY_STEPS_SQL})
                      OR NOT {_RECOVERY_HAS_NEWER_MESSAGE})""",
             ("发送被中断时请核对企微实际落点", scene, reply_text, time.time(), str(conv_id), str(message_id)),
         )
@@ -628,9 +642,10 @@ def hold_before(cutoff: float) -> int:
     con = _conn()
     try:
         result = con.execute(
-            """UPDATE reply_log SET status='held',last_step='held',
+            f"""UPDATE reply_log SET status='held',last_step='held',
                error='消息已超过自动恢复时限，请人工核对'
-               WHERE status IN ('pending','failed') AND last_step NOT IN ('recovery-queued','recipient-blocked')
+               WHERE status IN ('pending','failed')
+                 AND last_step NOT IN ('recovery-queued','recipient-blocked','{_REVIEWED_TITLE_RECOVERY}')
                  AND msg_time>0 AND msg_time<?""",
             (cutoff,),
         )
@@ -657,7 +672,7 @@ def retry_held() -> int:
 
 
 def queue_reply_recovery(conv_id: str, message_id: str, *, reason: str,
-                         operator: str, legacy_sent: bool = False) -> str:
+                         operator: str, legacy_sent: bool = False, title_recovery: bool = False) -> str:
     """Queue one operator-reviewed message and save its prior state in the same transaction."""
     reason = reason.strip()
     if not conv_id.strip() or not message_id.strip() or not reason or not operator.strip():
@@ -666,12 +681,12 @@ def queue_reply_recovery(conv_id: str, message_id: str, *, reason: str,
     try:
         con.execute("BEGIN IMMEDIATE")
         row = con.execute(
-            "SELECT id,status,last_step,error,msg_time,in_text FROM reply_log WHERE conv_id=? AND message_id=?",
+            "SELECT id,status,last_step,error,msg_time,in_text,attempts,scene FROM reply_log WHERE conv_id=? AND message_id=?",
             (conv_id, message_id),
         ).fetchone()
         if row is None:
             return "not_found"
-        if row["last_step"] in ("recovery-queued", "recipient-recovery-queued", "name-recovery-queued", "title-recovery-queued"):
+        if row["last_step"] in _QUEUED_RECOVERY_STEPS:
             return "already_queued"
         if row["last_step"] == "sending":
             return "in_progress"
@@ -681,8 +696,15 @@ def queue_reply_recovery(conv_id: str, message_id: str, *, reason: str,
             row["status"] == "unknown" and _LEGACY_PARTIAL.match(row["error"] or "")
         ):
             return "partial"
-        eligible = (row["status"] in ("held", "unknown") if not legacy_sent
-                    else row["status"] == "sent" and row["last_step"] != "sent-confirmed")
+        if title_recovery:
+            eligible = (
+                not legacy_sent and conv_id.startswith("S:") and row["status"] == "held"
+                and row["last_step"] == "held" and row["attempts"] == 0
+                and row["error"] == _TITLE_FAILURE and row["scene"] != "开场" and (row["msg_time"] or 0) > 0
+            )
+        else:
+            eligible = (row["status"] in ("held", "unknown") if not legacy_sent
+                        else row["status"] == "sent" and row["last_step"] != "sent-confirmed")
         if not eligible or not (row["in_text"] or "").strip():
             return "not_eligible"
         if con.execute(
@@ -696,15 +718,28 @@ def queue_reply_recovery(conv_id: str, message_id: str, *, reason: str,
             (conv_id,),
         ).fetchone():
             return "welcome_pending"
+        if title_recovery:
+            blocker = con.execute(
+                f"""SELECT 1 FROM reply_log AS selected WHERE id=? AND (
+                    {_UNCERTAIN_CONVERSATION_SEND} OR EXISTS (
+                        SELECT 1 FROM reply_recoveries AS recovery
+                        WHERE recovery.conv_id=selected.conv_id AND recovery.message_id=selected.message_id
+                          AND recovery.finished_at IS NULL
+                    ))""", (row["id"],),
+            ).fetchone()
+            if blocker:
+                return "not_eligible"
+        # Insert the audit after changing the state so the existing trigger can
+        # retain it as active until the reviewed recovery runs.
+        con.execute(
+            "UPDATE reply_log SET status='pending',error=NULL,last_step=? WHERE id=?",
+            (_REVIEWED_TITLE_RECOVERY if title_recovery else "recovery-queued", row["id"]),
+        )
         con.execute(
             """INSERT INTO reply_recoveries
                (conv_id,message_id,operator,reason,previous_status,previous_error,requested_at)
                VALUES (?,?,?,?,?,?,?)""",
             (conv_id, message_id, operator, reason, row["status"], row["error"], time.time()),
-        )
-        con.execute(
-            "UPDATE reply_log SET status='pending',error=NULL,last_step='recovery-queued' WHERE id=?",
-            (row["id"],),
         )
         con.commit()
         return "queued"

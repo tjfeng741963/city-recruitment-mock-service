@@ -8,6 +8,7 @@ import unittest
 SOURCE = Path(__file__).resolve().parents[2] / "agent" / "reply_store.py"
 CONVERSATION = "S:employee_customer"
 LEGACY_REASON = "会话没有可搜索的名字"
+TITLE_REASON = "发送前无法核对企微当前会话，已保留待回复记录"
 
 
 class RecipientRecoveryTest(unittest.TestCase):
@@ -149,6 +150,56 @@ class RecipientRecoveryTest(unittest.TestCase):
                          [CONVERSATION, "S:employee_legacy"])
         self.assertEqual(self.store.recipient_blocked_conversations(176), [CONVERSATION])
         self.assertEqual(self.store.recipient_blocked_conversations(201), [])
+
+    def reviewed_title(self, message_id="1", **kwargs):
+        return self.store.queue_reply_recovery(
+            CONVERSATION, message_id, reason="verified WeCom history", operator="operator",
+            title_recovery=True, **kwargs,
+        )
+
+    def test_reviewed_old_title_failure_preserves_scene_and_is_audited(self):
+        self.record("1")
+        self.store.mark_held("1", CONVERSATION, TITLE_REASON, "Agent")
+        self.assertEqual(self.store.recipient_blocked_conversations(201, title_retry=True), [])
+        self.assertEqual(self.reviewed_title(), "queued")
+        self.store = self.load_store()
+        self.assertEqual(self.reviewed_title(), "already_queued")
+        self.assertEqual(self.store.hold_before(201), 0)
+        row, = self.store.pending()
+        self.assertEqual((row["scene"], row["last_step"], row["attempts"]),
+                         ("Agent", "reviewed-title-recovery-queued", 0))
+        receipt, = self.store.recent_reply_recoveries()
+        self.assertIsNone(receipt["finished_at"])
+        self.assertEqual(row["reviewed_title_requested_at"], receipt["requested_at"])
+        self.assertEqual((receipt["operator"], receipt["previous_error"]), ("operator", TITLE_REASON))
+        self.record("2", sent_at=201)
+        self.assertFalse(self.store.begin_reply_attempt("1", CONVERSATION, "Agent"))
+        self.assertEqual(self.store.recent_reply_recoveries()[0]["outcome"], "skipped")
+
+    def test_reviewed_title_failure_rejects_other_states_and_unresolved_delivery(self):
+        self.record("1")
+        self.store.mark_held("1", CONVERSATION, "生成失败")
+        self.assertEqual(self.reviewed_title(), "not_eligible")
+        self.store.mark_held("1", CONVERSATION, TITLE_REASON, "Agent")
+        self.assertEqual(self.reviewed_title(legacy_sent=True), "not_eligible")
+        self.store.begin_welcome(CONVERSATION, "1", False)
+        self.assertEqual(self.reviewed_title(), "welcome_pending")
+        self.store.cancel_welcomes()
+
+        self.record("other-attempt", sent_at=199, text="")
+        self.store.mark_unknown("other-attempt", CONVERSATION, "未确认", partial=True)
+        self.assertEqual(self.reviewed_title(), "not_eligible")
+        self.assertEqual(self.store.pending(), [])
+
+    def test_reviewed_title_does_not_queue_opening_or_attempted_reply(self):
+        self.record("1")
+        self.store.mark_held("1", CONVERSATION, TITLE_REASON, "开场")
+        self.assertEqual(self.reviewed_title(), "not_eligible")
+        self.record("2", sent_at=201)
+        self.store.mark_failed("2", CONVERSATION, "送达未确认")
+        self.store.mark_held("2", CONVERSATION, TITLE_REASON)
+        self.assertEqual(self.reviewed_title("2"), "not_eligible")
+        self.assertEqual(self.store.pending(), [])
 
     def test_generic_recovery_cannot_bypass_recipient_hold(self):
         self.record("1")

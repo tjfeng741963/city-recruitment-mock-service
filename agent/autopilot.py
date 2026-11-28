@@ -41,6 +41,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import threading
 from copy import deepcopy
 import time
@@ -254,6 +255,7 @@ GREET_STATE = ROOT / ".greeted.json"
 GREET_STATE_LIMIT = 2000                     # 只留最近 N 个会话，文件不会无限长
 REPORT_INTERVAL = 30.0                       # 心跳/上报间隔（按时间戳判断，不 sleep）
 RECOVERY_REPLY_MAX_AGE = 3600
+REVIEWED_TITLE_RETRY_WINDOW = 15 * 60
 REPORT_MAX_MESSAGES = 50                     # 单次上报最多条数
 REPORT_FIRST_WINDOW = 24 * 3600              # 首次没有游标时只补最近 24 小时
 
@@ -1946,15 +1948,16 @@ def _missing_name_recovery_history(store: Store, account: str, cid: str, row: di
     peer = _recipient_other(account, cid)
     if not peer:
         return None
+    reviewed = row.get("last_step") == "reviewed-title-recovery-queued"
+    permitted = "" if reviewed else "AND content_type IN (0,2,573) AND length(content)>0"
     try:
         database = store._conn("message.db")
         if database is None:
             return None
         with closing(database):
             latest = database.execute(
-                """SELECT message_id,send_time FROM message_table
-                   WHERE conversation_id=? AND CAST(sender_id AS TEXT)=?
-                     AND content_type IN (0,2,573) AND length(content)>0
+                f"""SELECT message_id,send_time,content_type,content FROM message_table
+                   WHERE conversation_id=? AND CAST(sender_id AS TEXT)=? {permitted}
                    ORDER BY send_time DESC,message_id DESC LIMIT 1""", (cid, peer),
             ).fetchone()
             outbound = database.execute(
@@ -1962,6 +1965,12 @@ def _missing_name_recovery_history(store: Store, account: str, cid: str, row: di
                 (cid, account),
             ).fetchone()
         if latest and str(latest[0]) == str(row["message_id"]) and float(latest[1]) == float(row["msg_time"]):
+            if reviewed:
+                if latest[2] not in (0, 2, 573):
+                    return None
+                text = _fragmented_outbound_text(latest[3]) if latest[2] == 0 else _pb_text(latest[3])
+                if not text or text.strip() != (row["in_text"] or "").strip():
+                    return None
             return float(outbound[0] or 0) if outbound else None
     except (OSError, ValueError, TypeError, sqlite3.Error):
         pass
@@ -2001,17 +2010,36 @@ def _recover_missing_direct_names(store: Store, cfg: dict, account: str) -> None
 
 
 def _recovered_name_still_safe(store: Store, account: str, cid: str, row: dict, name: str) -> bool:
+    reviewed = row["last_step"] == "reviewed-title-recovery-queued"
+    if reviewed:
+        data_dir = getattr(store, "data_dir", None)
+        try:
+            current = find_data_dir()
+            if (not isinstance(data_dir, Path) or not current or data_dir.resolve() != current.resolve()
+                    or not (data_dir / "message.db").is_file()):
+                return False
+            source_stamp = wal_signature(data_dir)
+        except (OSError, RuntimeError, KeyError):
+            return False
     try:
         refresh_store(store)
     except (OSError, RuntimeError, sqlite3.Error):
         return False
     if _recipient_account(store) != account or _local_recipient_term(store, cid) != name:
         return False
+    if reviewed:
+        requested_at = float(row.get("reviewed_title_requested_at") or 0)
+        if not 0 <= time.time() - requested_at < REVIEWED_TITLE_RETRY_WINDOW:
+            return False
+        if cid in remote_cfg.takeover_sessions() or cid in remote_cfg.abandoned_sessions():
+            return False
+    elif float(row["msg_time"] or 0) < time.time() - RECOVERY_REPLY_MAX_AGE:
+        return False
     outbound = _missing_name_recovery_history(store, account, cid, row)
-    if row["last_step"] == "title-recovery-queued" and row["scene"] == "开场" and outbound != 0:
+    if reviewed and (store.data_dir != data_dir or wal_signature(data_dir) != source_stamp):
         return False
-    if float(row["msg_time"] or 0) < time.time() - RECOVERY_REPLY_MAX_AGE:
-        return False
+    if row["last_step"] == "title-recovery-queued" and row["scene"] == "开场":
+        return outbound == 0
     return outbound is not None and outbound < float(row["msg_time"] or 0)
 
 
@@ -2050,7 +2078,7 @@ def _refresh_recipient_recoveries(store: Store) -> None:
 _guard_recipient = False
 _recipient_binding_enabled = False
 _TitleRaster = tuple[int, int, bytes]
-_RecipientHeading = tuple[int, bytes, bytes, _TitleRaster]
+_RecipientHeading = tuple[int, bytes, bytes, _TitleRaster, bool]
 _recipient_proof: tuple[str, _RecipientHeading] | None = None
 _RECIPIENT_BLOCKED = "发送前无法核对企微当前会话，已保留待回复记录"
 
@@ -2068,6 +2096,31 @@ def _recipient_key(name: str) -> str:
     # OCR renders fullwidth ASCII punctuation and digits as halfwidth.
     width_normalized = name.translate(_RECIPIENT_WIDTH)
     return "".join(re.split(r"[\s_]+", width_normalized.casefold()))
+
+
+# This full-color patch includes the gap, the rainbow and the external badge.
+# Require the exact WeCom rendering instead of guessing from the color or text alone.
+_RAINBOW_BADGE_DIGEST = "d482f25c57594d2023a67f601dd51ad51f50580b59d6107c98dd54398264936b"
+_RAINBOW = "\U0001f308"
+
+
+def _han_title_key(value: str) -> str:
+    # Compare visually equivalent aliases only for collision detection. This
+    # intentionally discards format controls, symbols and combining marks.
+    return "".join(character for character in unicodedata.normalize("NFKC", value)
+                   if "\u3400" <= character <= "\u9fff")
+
+
+def _has_rainbow_badge(pixels: bytes, width: int, height: int, right: int, top: int) -> bool:
+    left, upper = right + 1, top - 6
+    if upper < 0 or upper + 27 > height or left + 66 > width:
+        return False
+    patch = bytearray()
+    for y in range(upper, upper + 27):
+        for x in range(left, left + 66):
+            offset = 4 * (y * width + x)
+            patch.extend(pixels[offset:offset + 3][::-1])
+    return sha256(patch).hexdigest() == _RAINBOW_BADGE_DIGEST
 
 
 def _recipient_heading() -> _RecipientHeading | None:
@@ -2134,7 +2187,8 @@ def _recipient_heading() -> _RecipientHeading | None:
                 pair = bytes((shade, shade, shade, 255)) * 2
                 gray[point:point + 8] = pair
                 gray[point + gw * 4:point + gw * 4 + 8] = pair
-        return hwnd, encode_png(w, h, image), encode_png(gw, gh, gray), (nw, nh, bytes(native))
+        return (hwnd, encode_png(w, h, image), encode_png(gw, gh, gray), (nw, nh, bytes(native)),
+                _has_rainbow_badge(pixels, width, height, right, top))
     except Exception:
         return None
 
@@ -2292,9 +2346,29 @@ def _verified_recipient_heading(heading: _RecipientHeading | None, name: str,
     if not expected:
         return False
     primary = _recipient_key(_recognize_recipient_heading(heading, name))
+    rainbow_visible = len(heading) == 5 and heading[4]
+    if rainbow_visible or _RAINBOW in expected:
+        if not rainbow_visible or expected.count(_RAINBOW) != 1 or not expected.endswith(_RAINBOW):
+            return False
+        base = expected.removesuffix(_RAINBOW)
+        if not base or _han_title_key(base) != base or not account or _recipient_account(store) != account:
+            return False
+        names = _recipient_names(store)
+        other = _recipient_other(account, cid)
+        if not names or not other or names[2].get(expected) != {other}:
+            return False
+        if any(owners - {other} for key, owners in names[2].items() if _han_title_key(key) == base):
+            return False
+        if primary == base:
+            return True
+        # Do not override a primary result that identifies a different contact.
+        if names[2].get(primary, set()) - {other}:
+            return False
+        native, _ = _read_native_title_words(heading[3], _recipient_ocr_language(name))
+        return _recipient_key(native) == base
     if primary == expected:
         return True
-    if len(heading) != 4:
+    if len(heading) < 4:
         return False
     if primary and not name.isascii():
         names = _recipient_names(store, allow_missing_remarks=True)
@@ -2368,7 +2442,7 @@ def _recipient_unchanged(store: Store, cid: str) -> bool:
 
 def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
                log_fn, readback_before: dict[str, str] | None = None,
-               require_recipient: bool = False, authorize=None, open_only: bool = False,
+               require_recipient: bool = False, authorize=None, authorize_before_paste=None, open_only: bool = False,
                **context: object) -> tuple[str, str, str]:
     """Run the existing sender and classify its send or navigation evidence."""
     global _recipient_proof, _recipient_send_blocked
@@ -2443,7 +2517,9 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
         return _recipient_search_field() == search
 
     def authorize_body_paste() -> bool:
-        return phase == "search" or (phase == "chat" and recipient_still_current())
+        return phase == "search" or (
+            phase == "chat" and (authorize_before_paste is None or authorize_before_paste()) and recipient_still_current()
+        )
 
     def on_step(message: str) -> None:
         nonlocal heading, search_before, phase, send_enter_dispatched
@@ -3432,8 +3508,9 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     rlog.mark_skipped(entry["message_id"], cid, "同会话合并到最新一条")
                 stats["merged"] += 1
         recovery_step = it.get("last_step")
-        title_recovery = recovery_step == "title-recovery-queued"
-        recovering = recovery_step in ("recovery-queued", "recipient-recovery-queued") or (
+        reviewed_title_recovery = recovery_step == "reviewed-title-recovery-queued"
+        title_recovery = recovery_step == "title-recovery-queued" or reviewed_title_recovery
+        recovering = reviewed_title_recovery or recovery_step in ("recovery-queued", "recipient-recovery-queued") or (
             title_recovery and it.get("scene") != "开场"
         )
         preview = (it["in_text"] or "").strip()[:20].replace("\n", " ") or f"[type={it['in_type']}]"
@@ -3477,7 +3554,9 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             or (local_recipient and recovery_step == "recipient-recovery-queued")
         )
         if recovered_name:
-            if not _recipient_guard_enabled(cid) or not _recovered_name_still_safe(store, account, cid, it, name):
+            if (not _recipient_guard_enabled(cid)
+                    or (reviewed_title_recovery and not match_target(it, cfg["target"]))
+                    or not _recovered_name_still_safe(store, account, cid, it, name)):
                 rlog.mark_held(mid, cid, "入站或出站记录发生变化，等待核对")
                 stats["blocked"] += 1
                 continue
@@ -3952,6 +4031,17 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             text, scene = pick_reply(cid, cfg)
             parts = [text]
 
+        if reviewed_title_recovery:
+            try:
+                plain_text = not (dify_plan or agent_medias or agent_card or len(parts) != 1
+                                  or core_send.split_media_marks(parts[0])[1])
+            except Exception:
+                plain_text = False
+            if not plain_text:
+                rlog.mark_held(mid, cid, "旧回复未确认是单条纯文本，待核对", scene)
+                stats["blocked"] += 1
+                continue
+
         # 冷却按“距上次企微键鼠操作”计算，与成败无关（见 _consecutive_send_failures
         # 处的注释）；连续失败再把间隔拉长，最多 4 倍 cooldown。
         backoff = 1 + min(_consecutive_send_failures, 3)
@@ -4012,6 +4102,13 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
         if not rlog.begin_reply_attempt(mid, cid, scene, text):
             stats["blocked"] += 1
             continue
+        reviewed_send_options = {}
+        if reviewed_title_recovery:
+            def authorize_reviewed_send() -> bool:
+                return (match_target(it, cfg["target"]) and _reply_source_identity() == chat_source
+                        and _recovered_name_still_safe(store, account, cid, it, name))
+
+            reviewed_send_options = {"authorize": authorize_reviewed_send, "authorize_before_paste": authorize_reviewed_send}
         confirmed_parts = 0
         text_recorded = False
         try:
@@ -4044,7 +4141,7 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
                     status, detail, _ = _send_text(
                         store, name, cid, body, route="auto",
                         log_fn=lambda s: log(f"    {s}", scope="send", message_id=mid, trace_id=trace),
-                        message_id=mid, trace_id=trace, part=idx + 1, parts=len(parts),
+                        message_id=mid, trace_id=trace, part=idx + 1, parts=len(parts), **reviewed_send_options,
                     )
                     if status != "sent":
                         break
@@ -5152,6 +5249,7 @@ def main() -> int:
     ap.add_argument("--retry-held", action="store_true", help="重新排队生成回复前就暂停的 Agent 记录")
     ap.add_argument("--retry-message", nargs=2, metavar=("CONV_ID", "MESSAGE_ID"), help="登记单条消息恢复")
     ap.add_argument("--verified-unsent", action="store_true", help="已核对企微记录，确认可恢复该条")
+    ap.add_argument("--title-recovery", action="store_true", help="仅恢复写入前的聊天标题核验失败")
     ap.add_argument("--legacy-sent", action="store_true", help="账本旧版已发记录经人工确认有误")
     ap.add_argument("--reason", help="单条恢复的核对说明")
     ap.add_argument("--flush-receipts", action="store_true", help="仅补传人工回执后退出，不操作企微")
@@ -5162,6 +5260,8 @@ def main() -> int:
     if args.retry_message:
         if not args.verified_unsent or not (args.reason or "").strip():
             ap.error("--retry-message 需要 --verified-unsent 和 --reason")
+        if args.title_recovery and args.legacy_sent:
+            ap.error("--title-recovery 与 --legacy-sent 不能同时使用")
         if any((args.list, args.reset, args.retry_held, args.flush_receipts, args.once, args.watch, args.dry)):
             ap.error("--retry-message 必须单独执行")
         conv_id, message_id = (value.strip() for value in args.retry_message)
@@ -5169,7 +5269,8 @@ def main() -> int:
             ap.error("会话编号和消息编号不能为空")
         rlog.init()
         result = rlog.queue_reply_recovery(conv_id, message_id, reason=args.reason,
-                                           operator=getpass.getuser(), legacy_sent=args.legacy_sent)
+                                           operator=getpass.getuser(), legacy_sent=args.legacy_sent,
+                                           title_recovery=args.title_recovery)
         messages = {
             "queued": "消息已重新排队，等待客户端处理",
             "already_queued": "这条消息已在恢复队列",
@@ -5183,8 +5284,8 @@ def main() -> int:
         log(messages[result], scope="send", event="reply_recovery_request", outcome=result,
             conv_id=conv_id, message_id=message_id)
         return 0 if result in ("queued", "already_queued") else 1
-    if args.verified_unsent or args.legacy_sent or args.reason is not None:
-        ap.error("--verified-unsent、--legacy-sent 和 --reason 仅用于 --retry-message")
+    if args.verified_unsent or args.title_recovery or args.legacy_sent or args.reason is not None:
+        ap.error("恢复选项仅用于 --retry-message")
 
     # 单实例：只要这次运行会碰企微（发消息 / 抢前台），就必须过同一把锁。
     # 这些命令不发送、不按键鼠，允许并行：

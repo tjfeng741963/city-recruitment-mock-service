@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 from contextlib import closing
@@ -22,6 +23,7 @@ CFG = {"target": "all"}
 class WeComSnapshot:
     def __init__(self, path):
         self.path = path
+        self.data_dir = path
         self.account = ACCOUNT
         self.names = {PEER: "Asky"}
         self.recent_rows = []
@@ -388,3 +390,66 @@ def test_new_contact_recovers_first_opening_once_after_unique_remark(client, mon
     assert send.call_args.kwargs["route"] == "opening"
     brain.chat.assert_not_called()
     assert CID in agent._load_greeted()
+
+@pytest.mark.parametrize("changed", [None, "late-outbound", "before-enter", "newer-inbound", "newer-attachment", "name-changed", "db-moved", "parser-error"])
+def test_reviewed_title_recovery_reaches_resident_send_only_for_same_unanswered_turn(client, monkeypatch, tmp_path, changed):
+    agent, store, ledger = client
+    stamp = int(time.time()) - 4 * 3600
+    name = store.names[PEER]
+    inbound = {**message(1, stamp, text="\u5c97\u4f4d\u5728\u54ea\u91cc"), "conv_name": name}
+    store.add(inbound)
+    assert ledger.record_incoming(inbound)
+    ledger.mark_held(1, CID, agent._RECIPIENT_BLOCKED, "Agent")
+    assert ledger.queue_reply_recovery(CID, "1", reason="verified", operator="ops", title_recovery=True) == "queued"
+    brain = MagicMock(reply_provider="agent")
+    brain.flow.return_value = {"nodes": []}
+    brain.chat.return_value = {"ok": True, "reply": "Office address", "trace_id": "reply-trace"}
+    send = MagicMock(return_value=("sent", "confirmed", "3"))
+    monkeypatch.setattr(agent, "_brain", brain)
+    monkeypatch.setattr(agent, "_guard_recipient", True)
+    monkeypatch.setattr(agent, "_send_text", send)
+    monkeypatch.setattr(agent.core_send, "split_media_marks", lambda text: (text, []))
+    monkeypatch.setattr(agent, "find_data_dir", lambda: store.data_dir)
+    monkeypatch.setattr(agent, "_flow_state", agent.flow_state_mod.FlowState(tmp_path / "flow.db"))
+    monkeypatch.setattr(agent, "GREET_STATE", tmp_path / ".greeted.json")
+    monkeypatch.setattr(agent.remote_cfg, "takeover_sessions", set)
+    monkeypatch.setattr(agent.remote_cfg, "abandoned_sessions", set)
+    if changed == "late-outbound":
+        def response_after_outbound(*args, **kwargs):
+            store.add(message(2, stamp + 1, sender=ACCOUNT))
+            return brain.chat.return_value
+        brain.chat.side_effect = response_after_outbound
+    if changed == "before-enter":
+        def send_after_outbound(*args, authorize, **kwargs):
+            store.add(message(2, stamp + 1, sender=ACCOUNT))
+            assert not authorize()
+            return "blocked", agent._RECIPIENT_BLOCKED, ""
+        send.side_effect = send_after_outbound
+    if changed == "newer-inbound":
+        store.add(message(2, stamp + 1))
+    if changed == "newer-attachment":
+        store.add(message(2, stamp + 1, kind=101, text="image payload"))
+    if changed == "name-changed":
+        store.names[PEER] = "Changed title"
+    if changed == "db-moved":
+        def refresh_during_update():
+            db = store.data_dir / "message.db"
+            old_stamp = db.stat().st_mtime_ns
+            os.utime(db, ns=(old_stamp, old_stamp + 1_000_000_000))
+            return {"failed": 0}
+        monkeypatch.setattr(store, "refresh", refresh_during_update)
+    if changed == "parser-error":
+        monkeypatch.setattr(agent.core_send, "split_media_marks", MagicMock(side_effect=ValueError))
+
+    result = agent.drain(store, {**CFG, "cooldown": 0})
+    brain.opening.assert_not_called()
+    if changed:
+        assert send.call_count == (1 if changed == "before-enter" else 0)
+        assert result["blocked"] == 1
+        assert ledger.recent()[0]["status"] == "held"
+    else:
+        assert result["sent"] == 1
+        assert send.call_args.args[1:] == (name, CID, "Office address")
+        assert ledger.recent()[0]["last_step"] == "sent-confirmed"
+        assert agent.drain(store, {**CFG, "cooldown": 0})["sent"] == 0
+        send.assert_called_once()
