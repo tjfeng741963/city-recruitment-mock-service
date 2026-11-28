@@ -398,3 +398,25 @@ def test_live_mode_reports_title_failure_without_pausing_the_resident_sender(rec
     assert state["ready"] is True
     assert any(call.kwargs.get("verification_stage") == "heading_unreadable_or_mismatch"
                for call in events.call_args_list)
+
+@pytest.mark.parametrize(("name", "primary", "suffix", "competitor", "verified"), [
+    ("山河如画🌈", "山河如画", True, "", True),
+    ("山河如画🌈", "山河如画", False, "", False),
+    ("山河如画🌈", "山河", True, "", False),
+    ("山河如画🌈", "山河如画", True, "山河如画", False),
+    ("山河如画🌈", "山河如画", True, "山河如画🌈\ufe0f", False),
+    ("山河如画🌈", "山河如画", True, "山河\u200b如画🌈", False),
+    ("山河如画🌈", "山河如画", True, "山河\ufe0f如画🌈", False),
+    ("山河如画🌈", "山河如画", True, "山河🌤如画🌈", False),
+    ("山河如画", "山河如画", True, "", False),
+])
+def test_recipient_verification_requires_full_text_and_rendered_rainbow_suffix(
+    recipient, monkeypatch, name, primary, suffix, competitor, verified,
+):
+    agent, store, _ = recipient
+    store.contacts.return_value = {"one": name, "two": competitor}
+    raster, _ = title_raster("dot")
+    monkeypatch.setattr(agent, "_recognize_recipient_heading", lambda *_: primary)
+    monkeypatch.setattr(agent, "_read_native_title_words", lambda *_: (primary, []))
+    heading = (1, b"mono", b"gray", raster, suffix)
+    assert agent._verified_recipient_heading(heading, name, store, "self", "S:self_one") is verified
