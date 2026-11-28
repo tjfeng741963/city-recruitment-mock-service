@@ -177,3 +177,81 @@ def test_start_requires_confirmation_and_running_client_blocks_install(window, m
     settle(app)
     assert app.install_button.instate(["disabled"])
     assert not app.stop_button.instate(["disabled"])
+
+
+@pytest.mark.parametrize(("startup_status", "mode", "label", "enabled"), [
+    ("ready", {"ready": True, "age": 0}, "回复已启动", False),
+    ("ready", {"ready": True, "age": 21}, "恢复回复", True),
+    ("ready", {"ready": False, "age": 0}, "恢复回复", True),
+    ("ready", None, "恢复回复", True),
+    ("failed", None, "恢复回复", True),
+    ("starting", None, "回复启动中", False),
+    ("initializing", None, "回复启动中", False),
+    ("waiting_login", None, "等待企微登录", False),
+    ("waiting_wecom", None, "等待打开企微", False),
+])
+def test_start_button_reports_active_reply_status(window, startup_status, mode, label, enabled):
+    app, service = window
+    settle(app)
+    state = {**service.status(), "running": 1, "startup_status": startup_status}
+    if mode is not None:
+        state["reply_mode"] = {"ready": mode["ready"], "local_at": time.time() - mode["age"]}
+    app._apply_state(state)
+    app._buttons()
+    assert app.start_button.cget("text") == label
+    assert app.start_button.instate(["!disabled"]) is enabled
+    assert app.restart_button.instate(["!disabled"])
+    assert app.stop_button.instate(["!disabled"])
+
+    app._apply_state(service.status())
+    app._buttons()
+    assert app.start_button.cget("text") == "启动回复"
+    assert app.start_button.instate(["!disabled"])
+
+
+@pytest.mark.parametrize(("running", "other_running"), [(2, 0), (1, 1), (0, 1)])
+def test_start_button_does_not_offer_recovery_with_conflicting_processes(window, running, other_running):
+    app, service = window
+    settle(app)
+    app._apply_state({**service.status(), "running": running, "other_running": other_running,
+                      "startup_status": "ready"})
+    app._buttons()
+    assert app.start_button.cget("text") != "恢复回复"
+    assert app.start_button.instate(["disabled"])
+
+
+def test_start_button_recovery_confirms_and_restarts_existing_process(window, monkeypatch):
+    app, service = window
+    settle(app)
+    module = importlib.import_module("client_manager")
+    service.running = 1
+    app._apply_state({**service.status(), "startup_status": "ready"})
+    app._buttons()
+
+    monkeypatch.setattr(module.messagebox, "askyesno", lambda *a, **kw: False)
+    app.start_button.invoke()
+    assert "restart" not in service.calls
+    monkeypatch.setattr(module.messagebox, "askyesno", lambda *a, **kw: True)
+    app.start_button.invoke()
+    settle(app)
+    assert service.calls.count("restart") == 1
+    assert "start" not in service.calls
+
+
+def test_recipient_verification_block_is_visible_even_with_fresh_reply_mode(window):
+    app, service = window
+    settle(app)
+    app._apply_state({
+        **service.status(),
+        "running": 1,
+        "startup_status": "ready",
+        "reply_mode": {
+            "ready": True, "local_at": time.time(), "effective": "agent",
+            "send_issue": "recipient_verification",
+        },
+    })
+    app._buttons()
+
+    assert app.runtime_text.get() == "发送受阻：未通过企微收件人核验"
+    assert app.start_button.cget("text") == "恢复回复"
+    assert app.start_button.instate(["!disabled"])

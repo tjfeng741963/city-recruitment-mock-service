@@ -39,6 +39,14 @@ def friendly_error(exc: Exception) -> str:
     return text or type(exc).__name__
 
 
+def _reply_mode_ready(mode: dict | None) -> bool:
+    return bool(mode and mode.get("ready") and time.time() - (mode.get("local_at") or 0) <= 20)
+
+
+def _recipient_verification_blocked(mode: dict | None) -> bool:
+    return bool(mode and mode.get("send_issue") == "recipient_verification")
+
+
 def reply_mode_text(state: dict | None, now: float | None = None) -> str:
     if not state or not state.get("running"):
         return ""
@@ -190,8 +198,24 @@ class ManagerWindow:
         self.install_button.state(["!disabled"] if can_install else ["disabled"])
         self.import_button.state(["!disabled"] if not self.busy and stopped else ["disabled"])
         self.restart_button.state(["!disabled"] if not self.busy and self.state and self.state["running"] and not self.state.get("other_running") else ["disabled"])
-        self.start_button.state(["!disabled"] if not self.busy and stopped else ["disabled"])
+        start_label, start_action = self._start_control()
+        self.start_button.configure(text=start_label)
+        self.start_button.state(["!disabled"] if not self.busy and start_action else ["disabled"])
         self.stop_button.state(["!disabled"] if not self.busy and self.state and self.state["running"] else ["disabled"])
+
+    def _start_control(self) -> tuple[str, str | None]:
+        if self.state is None or self.state.get("other_running") or self.state["running"] > 1:
+            return "启动回复", None
+        if not self.state["running"]:
+            return "启动回复", "start"
+        startup = self.state.get("startup_status")
+        mode = self.state.get("reply_mode")
+        if startup == "ready" and _reply_mode_ready(mode) and not _recipient_verification_blocked(mode):
+            return "回复已启动", None
+        if startup in {"ready", "failed"}:
+            return "恢复回复", "restart"
+        labels = {"waiting_login": "等待企微登录", "waiting_wecom": "等待打开企微"}
+        return labels.get(startup, "回复启动中"), None
 
     def _record(self, text):
         self.details.configure(state="normal")
@@ -246,10 +270,15 @@ class ManagerWindow:
         if state.get("startup_detail") and (not watched or startup_status == "failed"):
             self.message_text.set(state["startup_detail"])
         mode = state.get("reply_mode")
-        if startup_status == "ready" and mode and (not mode.get("ready") or time.time() - (mode.get("local_at") or 0) > 20):
-            self.runtime_text.set("自动回复等待确认")
-        self.runtime_label.configure(fg="#15724a" if startup_status == "ready" and count == 1
-                                     and mode and mode.get("ready") and time.time() - (mode.get("local_at") or 0) <= 20 else INK)
+        healthy = False
+        if startup_status == "ready" and count == 1:
+            if _recipient_verification_blocked(mode):
+                self.runtime_text.set("发送受阻：未通过企微收件人核验")
+            elif _reply_mode_ready(mode):
+                healthy = True
+            else:
+                self.runtime_text.set("自动回复等待确认")
+        self.runtime_label.configure(fg="#15724a" if healthy else INK)
         enabled = state["task_enabled"]
         schedule = "登录自动启动已启用" if enabled is True else "登录自动启动已暂停" if enabled is False else "未能读取登录自动启动任务"
         if state.get("other_running"):
@@ -384,6 +413,12 @@ class ManagerWindow:
 
     def start(self):
         if self.busy:
+            return
+        _, action = self._start_control()
+        if action == "restart":
+            self.restart()
+            return
+        if action != "start":
             return
         if messagebox.askyesno("启动自动回复", "启动后将开始处理客户消息。\n请确认错会话等未解决问题已复核。\n\n是否现在启动？", parent=self.window):
             self._run("start", self.service.start)

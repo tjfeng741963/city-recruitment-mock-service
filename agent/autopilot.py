@@ -259,6 +259,7 @@ REPORT_FIRST_WINDOW = 24 * 3600              # 首次没有游标时只补最近
 
 # 最近一次发送错误，随心跳上报（契约里截断 200 字）
 _last_error = ""
+_recipient_send_blocked = False
 # 上一次"因掉线暂停发送"的日志时间，避免每轮刷屏
 _last_block_log = 0.0
 _last_contact_scan_error_at = 0.0
@@ -1987,16 +1988,12 @@ def _recover_missing_direct_names(store: Store, cfg: dict, account: str) -> None
             continue
         local_remark = name == next((value for value in names[1].get(peer, ()) if value), None)
         legacy_hold = row["last_step"] == "held" and row["error"] == _RECIPIENT_BLOCKED
-        if legacy_hold and not (local_remark or _has_disputed_title_glyph(name)):
-            continue
         outbound = _missing_name_recovery_history(store, account, cid, row)
-        if legacy_hold and not local_remark and row["scene"] == "开场" and outbound != 0:
-            continue
-        remark_reply = local_remark and bool(outbound)
+        reply_only = bool(outbound) and (local_remark or legacy_hold)
         if rlog.restore_recipient_blocked(
             cid, row["message_id"], conv_name=name, cutoff=cutoff, outbound_at=outbound,
             missing_name=row["error"] == "会话没有可搜索的名字" and row["status"] == "skipped",
-            title_retry=legacy_hold, remark_reply=remark_reply,
+            title_retry=legacy_hold, reply_only=reply_only,
             first_contact=row["last_step"] == "recipient-blocked" and outbound == 0,
         ):
             log("recipient_recovery_queued", scope="send", conv_id=cid, message_id=row["message_id"],
@@ -2232,19 +2229,22 @@ def _read_recipient_ocr(images: tuple[bytes, ...], language: str, *, words: bool
     return ""
 
 
-def _recognize_recipient_heading(heading: tuple[int, bytes] | _RecipientHeading, name: str) -> str:
+def _recipient_ocr_language(name: str) -> str:
     # Chinese OCR can misread short Latin names and issued remark codes.
-    language = "en-US" if name.isascii() and re.search(r"[A-Za-z]", name) else "zh-Hans-CN"
-    return _read_recipient_ocr(heading[1:2] if name.isascii() else heading[1:3], language)
+    return "en-US" if name.isascii() and re.search(r"[A-Za-z]", name) else "zh-Hans-CN"
 
 
-def _read_native_title_words(raster: _TitleRaster) -> tuple[str, list]:
+def _recognize_recipient_heading(heading: tuple[int, bytes] | _RecipientHeading, name: str) -> str:
+    return _read_recipient_ocr(heading[1:2] if name.isascii() else heading[1:3], _recipient_ocr_language(name))
+
+
+def _read_native_title_words(raster: _TitleRaster, language: str = "zh-Hans-CN") -> tuple[str, list]:
     from screenshot import encode_png
 
     width, height, pixels = raster
     bgra = b"".join(bytes((shade, shade, shade, 255)) for shade in pixels)
     try:
-        result = json.loads(_read_recipient_ocr((encode_png(width, height, bgra),), "zh-Hans-CN", words=True))
+        result = json.loads(_read_recipient_ocr((encode_png(width, height, bgra),), language, words=True))
         return result["text"], result["dots"]
     except (ValueError, TypeError, KeyError):
         return "", []
@@ -2293,13 +2293,14 @@ def _verified_recipient_heading(heading: _RecipientHeading | None, name: str,
         return False
     if _recipient_key(_recognize_recipient_heading(heading, name)) == expected:
         return True
-    if len(heading) != 4 or not _has_disputed_title_glyph(name):
+    if len(heading) != 4:
         return False
-    # Windows OCR can read the rest of a mixed title at the native scale while
-    # misclassifying its tilde as a dot. Verify the exact disputed glyph in
-    # the same image and exclude competing searchable nicknames and remarks.
-    recognized, dots = _read_native_title_words(heading[3])
-    if _recipient_key(recognized) != expected.replace("~", "·") or len(dots) != 1:
+    recognized, dots = _read_native_title_words(heading[3], _recipient_ocr_language(name))
+    native = _recipient_key(recognized)
+    if native == expected:
+        return True
+    # Verify the exact disputed tilde glyph and exclude competing aliases.
+    if not _has_disputed_title_glyph(name) or native != expected.replace("~", "·") or len(dots) != 1:
         return False
     if not _title_glyph_is_wave(heading[3], dots[0]):
         return False
@@ -2360,7 +2361,7 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
                require_recipient: bool = False, authorize=None, open_only: bool = False,
                **context: object) -> tuple[str, str, str]:
     """Run the existing sender and classify its send or navigation evidence."""
-    global _recipient_proof
+    global _recipient_proof, _recipient_send_blocked
     _recipient_proof = None
     require_recipient = require_recipient or open_only
     strict_search = _recipient_binding_enabled or open_only
@@ -2448,9 +2449,12 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
         if guard and step == "步骤1":
             phase = "chat"
             heading = _recipient_heading()
-            if (not _verified_recipient_heading(heading, name, store, account, cid)
-                    or not recipient_still_current()):
-                raise _RecipientUnverified
+            if not heading:
+                raise _RecipientUnverified("heading_capture")
+            if not _verified_recipient_heading(heading, name, store, account, cid):
+                raise _RecipientUnverified("heading_unreadable_or_mismatch")
+            if not recipient_still_current():
+                raise _RecipientUnverified("changed_after_heading")
         if guard and step == "步骤3":
             phase = "send"
             if not heading or _recipient_heading() != heading:
@@ -2481,9 +2485,11 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
             else:
                 result = core_send.send(store, name, body, expect_id=cid if cid.startswith(("S:", "R:")) else "",
                                         verify_db=True, log=on_step)
-    except _RecipientUnverified:
+    except _RecipientUnverified as exc:
+        if not open_only and route in {"auto", "opening"}:
+            _recipient_send_blocked = True
         event("result", level="warning", outcome="blocked", reason_code="recipient_unverified",
-              duration_ms=int((monotonic() - started) * 1000))
+              verification_stage=str(exc) or phase, duration_ms=int((monotonic() - started) * 1000))
         return "blocked", _RECIPIENT_BLOCKED, ""
     except Exception as exc:
         event("result", level="warning", outcome="unknown", reason_code="sender_exception",
@@ -2544,6 +2550,8 @@ def _send_text(store: Store, name: str, cid: str, body: str, *, route: str,
             detail = "未回读到目标会话中唯一的新消息，请核对实际落点"
     if guard and status == "sent" and heading:
         _recipient_proof = (cid, heading)
+        if route in {"auto", "opening"}:
+            _recipient_send_blocked = False
     event("result", level="info" if status == "sent" else "warning", outcome=status, reason_code=reason,
           has_conversation=bool(observed_cid), target_match=target_match, outbound_id=message_id.rpartition(":")[2],
           duration_ms=int((monotonic() - started) * 1000))
@@ -3182,7 +3190,8 @@ def _check_reply_mode(wecom_state: str, reporter=None) -> bool:
             receipts_ready = False
     desktop = _reply_desktop_active()
     ready = _brain.sync_reply_mode(wecom_state == "online", can_prepare=receipts_ready, desktop=desktop)
-    status = {**_brain.reply_mode_status, "pid": os.getpid(), "ready": ready, "local_at": time.time()}
+    status = {**_brain.reply_mode_status, "pid": os.getpid(), "ready": ready, "local_at": time.time(),
+              "send_issue": "recipient_verification" if _recipient_send_blocked else ""}
     try:
         target = CLIENT_STATE_PATH.with_name("reply-mode-state.json")
         temporary = target.with_suffix(".tmp")
@@ -5349,7 +5358,7 @@ def main() -> int:
                 if not desktop_send_ready("health")[0]:
                     reason = "desktop_unavailable"
                 else:
-                    reason = "auto_send_failed" if _consecutive_send_failures else "ready"
+                    reason = "auto_send_failed" if _consecutive_send_failures or _recipient_send_blocked else "ready"
             else:
                 reason = "reply_paused"
             runtime_heartbeat.observe(state, str(store.self_id() or ""), reason, reporter)

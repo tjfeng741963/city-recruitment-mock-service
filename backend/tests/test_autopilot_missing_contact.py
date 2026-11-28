@@ -237,10 +237,11 @@ def test_recovery_leaves_unsafe_or_out_of_scope_skips_untouched(client, guard):
 
 
 @pytest.mark.parametrize("changed", [None, "newer-inbound", "already-replied"])
-def test_recent_title_hold_automatically_requeues_once_with_fresh_history(client, monkeypatch, changed):
+@pytest.mark.parametrize("title", ["小e（工作时间09~18点）", "松下11/30温志添"])
+def test_recent_title_hold_automatically_requeues_once_with_fresh_history(client, monkeypatch, changed, title):
     agent, store, ledger = client
     stamp = int(time.time()) - 5
-    store.names[PEER] = "小e（工作时间09~18点）"
+    store.names[PEER] = title
     row = {**message(1, stamp), "conv_name": store.names[PEER]}
     store.add(row)
     ledger.record_incoming(row)

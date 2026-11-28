@@ -22,7 +22,7 @@ $assets = @(
     @{ Source = Join-Path $sourceRoot 'client_updater.py'; Name = 'client_updater.py'; Sha256 = '907a2f6a0be9e521922da17469b4ac69052a4e27d7c7788af73b67064b48a7f1' },
     @{ Source = Join-Path $sourceRoot 'client-startup.cmd'; Name = 'client-startup.cmd'; Sha256 = '4057d85559265c872f32e75d0c5b582618a9280b3e01974c34d53f6e9155a1db' },
     @{ Source = Join-Path $sourceRoot 'frozen-core-sha256.json'; Name = 'frozen-core-sha256.json'; Sha256 = '61082634b8843eeb7c51db974b803bb0cf650ac21ed6df7e9fed9aacb51dbc6e' },
-    @{ Source = Join-Path $sourceRoot 'client_manager.py'; Name = 'client_manager.py'; Sha256 = '1da663203ee6c7a0127a70887252bed520608031b8a305bfa503b482584b8e80' },
+    @{ Source = Join-Path $sourceRoot 'client_manager.py'; Name = 'client_manager.py'; Sha256 = '00452e3b008dc882b72866f12677b608dcc1ae3c1eb626a48bf3a22aaeca2180' },
     @{ Source = Join-Path $sourceRoot 'client_manager_service.py'; Name = 'client_manager_service.py'; Sha256 = '9c808163d489ad5d0970eb4404a91d648f35c9104e7361b78ec1dd44a5a0f9d1' },
     @{ Source = Join-Path $sourceRoot 'client-manager.vbs'; Name = 'client-manager.vbs'; Sha256 = '37da1603a7749499a394b3b9c6e2d1144ff426c295d1f1f18d324fd6ed8e558b' }
 )

@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -328,3 +329,49 @@ def test_title_width_equivalent_contacts_are_ambiguous():
     store.self_id.return_value = "self"
     store.contacts.return_value = {"one": "小e（工作时间09~18点）", "two": "小e(工作时间09~18点)"}
     assert not agent._local_recipient_term(store, "S:self_one")
+
+@pytest.mark.parametrize(("name", "native", "verified"), [
+    ("松下11/30温志添", "松 下 11 / 30 温 志 添", True),
+    ("松下11/30温志添", "松 下 11 / 30 志 添", False),
+    ("O_o", "0 0", False),
+])
+def test_current_heading_can_use_exact_native_size_ocr_only(recipient, monkeypatch, name, native, verified):
+    agent, store, _ = recipient
+    raster, _ = title_raster("dot")
+    read_native = MagicMock(return_value=(native, []))
+    monkeypatch.setattr(agent, "_recognize_recipient_heading", lambda *_: "")
+    monkeypatch.setattr(agent, "_read_native_title_words", read_native)
+    assert agent._verified_recipient_heading((1, b"mono", b"gray", raster), name, store, "self", "S:self_one") is verified
+    read_native.assert_called_once()
+
+
+def test_live_mode_reports_title_failure_without_pausing_the_resident_sender(recipient, monkeypatch, tmp_path):
+    agent, store, _ = recipient
+    monkeypatch.setattr(agent, "_guard_recipient", True)
+    monkeypatch.setattr(agent, "_recipient_heading", lambda: (1, b"heading"))
+    monkeypatch.setattr(agent, "_recognize_recipient_heading", lambda *_: "Wrong chat")
+    monkeypatch.setattr(agent, "_reply_desktop_active", lambda: True)
+    monkeypatch.setattr(agent, "_outbound_snapshot", lambda *_: {})
+    monkeypatch.setattr(agent, "CLIENT_STATE_PATH", tmp_path / "client-state.json")
+    brain = MagicMock(reply_mode_status={"effective": "agent"})
+    brain.sync_reply_mode.return_value = True
+    monkeypatch.setattr(agent, "_brain", brain)
+    events = MagicMock()
+    monkeypatch.setattr(agent, "log", events)
+    monkeypatch.setattr(agent.win, "tap", MagicMock(), raising=False)
+
+    def desktop_sender(_store, _term, _body, *, expect_id, verify_db, log):
+        log("步骤0 前台就位")
+        agent.win.tap("enter")
+        log("步骤1 已回车进入会话")
+        raise AssertionError("Sending must stop before body input")
+
+    agent.core_send.send.side_effect = desktop_sender
+    status, *_ = agent._send_text(store, "Same", "S:self_one", "response", route="auto", log_fn=MagicMock())
+    assert status == "blocked"
+    assert agent._check_reply_mode("online") is True
+    state = json.loads((tmp_path / "reply-mode-state.json").read_text(encoding="utf-8"))
+    assert state["send_issue"] == "recipient_verification"
+    assert state["ready"] is True
+    assert any(call.kwargs.get("verification_stage") == "heading_unreadable_or_mismatch"
+               for call in events.call_args_list)
