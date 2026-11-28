@@ -201,6 +201,17 @@ class RecipientRecoveryTest(unittest.TestCase):
         self.assertEqual(self.reviewed_title("2"), "not_eligible")
         self.assertEqual(self.store.pending(), [])
 
+    def test_reviewed_title_can_retry_pre_send_shape_hold_linked_to_title_failure(self):
+        self.record("1")
+        shape_hold = "旧回复未确认是单条纯文本，待核对"
+        self.store.mark_held("1", CONVERSATION, shape_hold, "Agent")
+        self.assertEqual(self.reviewed_title(), "not_eligible")
+        self.store.mark_held("1", CONVERSATION, TITLE_REASON, "Agent")
+        self.assertEqual(self.reviewed_title(), "queued")
+        self.store.mark_held("1", CONVERSATION, shape_hold, "Agent")
+        self.assertEqual(self.reviewed_title(), "queued")
+        self.assertEqual(len(self.store.recent_reply_recoveries()), 2)
+
     def test_generic_recovery_cannot_bypass_recipient_hold(self):
         self.record("1")
         self.store.mark_recipient_blocked("1", CONVERSATION, "同名联系人")

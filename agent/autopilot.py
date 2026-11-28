@@ -2987,6 +2987,10 @@ def _location_value(card: object) -> dict | None:
         return None
 
 
+def _location_navigation_text(point: dict) -> str:
+    return f"{point['name']}：{point['address']}\n导航：https://uri.amap.com/marker?position={point['lng']},{point['lat']}"
+
+
 def _send_flow_part(store: Store, name: str, cid: str, part: dict, log_fn, *,
                     node_key: str, part_index: int) -> tuple[str, str]:
     """Send one flow part through the existing guarded core sender."""
@@ -3071,7 +3075,7 @@ def _run_flow(store: Store, cfg: dict, cid: str, name: str, flow: dict, *, node_
                 # card snapshot. Continue using the same location as a link.
                 point = _location_value(part.get("location"))
                 if point:
-                    part = {**part, "body": f"{point['name']}：{point['address']}\n导航：https://uri.amap.com/marker?position={point['lng']},{point['lat']}"}
+                    part = {**part, "body": _location_navigation_text(point)}
             if not state.claim_step(cid, key, idx, body=str(part.get("body") or ""), media_name=str(part.get("media_name") or "")):
                 prior = next((row for row in state.outbox(cid, key) if row["part_index"] == idx), {})
                 if prior.get("status") != "sent":
@@ -4032,15 +4036,24 @@ def drain(store: Store, cfg: dict, *, dry: bool = False, wecom_state: str = "onl
             parts = [text]
 
         if reviewed_title_recovery:
+            point = _location_value(agent_card) if agent_card else None
             try:
-                plain_text = not (dify_plan or agent_medias or agent_card or len(parts) != 1
+                plain_text = not (dify_plan or agent_medias or len(parts) != 1
                                   or core_send.split_media_marks(parts[0])[1])
             except Exception:
                 plain_text = False
-            if not plain_text:
-                rlog.mark_held(mid, cid, "旧回复未确认是单条纯文本，待核对", scene)
+            if not plain_text or (agent_card and not point):
+                detail = rlog.REVIEWED_TITLE_SHAPE_HOLD
+                rlog.mark_held(mid, cid, detail, scene)
+                if _brain is not None:
+                    _brain.log_delivery(agent_trace_id, "failed", session_key=cid, detail=detail)
                 stats["blocked"] += 1
                 continue
+            if point:
+                navigation = _location_navigation_text(point)
+                text = f"{parts[0]}\n{navigation}"
+                parts = [text]
+                agent_card = None
 
         # 冷却按“距上次企微键鼠操作”计算，与成败无关（见 _consecutive_send_failures
         # 处的注释）；连续失败再把间隔拉长，最多 4 倍 cooldown。
