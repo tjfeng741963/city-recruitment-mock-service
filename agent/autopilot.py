@@ -2291,10 +2291,20 @@ def _verified_recipient_heading(heading: _RecipientHeading | None, name: str,
     expected = _recipient_key(name)
     if not expected:
         return False
-    if _recipient_key(_recognize_recipient_heading(heading, name)) == expected:
+    primary = _recipient_key(_recognize_recipient_heading(heading, name))
+    if primary == expected:
         return True
     if len(heading) != 4:
         return False
+    if primary and not name.isascii():
+        names = _recipient_names(store, allow_missing_remarks=True)
+        other = _recipient_other(account, cid)
+        if names and other and names[2].get(expected) == {other}:
+            if names[2].get(primary, set()) - {other}:
+                return False
+            grayscale = _read_recipient_ocr((heading[2],), _recipient_ocr_language(name))
+            if _recipient_key(grayscale) == expected:
+                return True
     recognized, dots = _read_native_title_words(heading[3], _recipient_ocr_language(name))
     native = _recipient_key(recognized)
     if native == expected:

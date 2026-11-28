@@ -345,6 +345,29 @@ def test_current_heading_can_use_exact_native_size_ocr_only(recipient, monkeypat
     read_native.assert_called_once()
 
 
+@pytest.mark.parametrize(("primary", "gray", "verified"), [
+    ("林绿", "林 缘", True),
+    ("林绿", "林", False),
+    ("同名联系人", "林 缘", False),
+])
+def test_grayscale_recovers_nonempty_misread_but_not_a_competing_contact(
+    recipient, monkeypatch, primary, gray, verified,
+):
+    agent, store, _ = recipient
+    store.contacts.return_value = {"one": "林缘", "two": "同名联系人"}
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
+    raster, _ = title_raster("dot")
+    monkeypatch.setattr(agent, "_read_native_title_words", lambda *_: ("", []))
+
+    def recognize(command, *, env, **_):
+        frame = Path(env["CITY_RECRUIT_HEADING_IMAGE"]).read_bytes()
+        return CompletedProcess(command, 0, stdout=(primary if frame == b"mono" else gray).encode("utf-8"))
+
+    monkeypatch.setattr(agent.subprocess, "run", recognize)
+    heading = (1, b"mono", b"gray", raster)
+    assert agent._verified_recipient_heading(heading, "林缘", store, "self", "S:self_one") is verified
+
+
 def test_live_mode_reports_title_failure_without_pausing_the_resident_sender(recipient, monkeypatch, tmp_path):
     agent, store, _ = recipient
     monkeypatch.setattr(agent, "_guard_recipient", True)
