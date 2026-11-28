@@ -154,6 +154,7 @@ _RECIPIENT_UNSENT = f"""selected.attempts=0 AND {_HAS_INBOUND_TEXT.format(row="s
 )"""
 _TITLE_RETRY_OPERATOR = "recipient-title-ocr"
 _TITLE_FAILURE = "发送前无法核对企微当前会话，已保留待回复记录"
+REVIEWED_TITLE_SHAPE_HOLD = "旧回复未确认是单条纯文本，待核对"
 _REVIEWED_TITLE_RECOVERY = "reviewed-title-recovery-queued"
 _QUEUED_RECOVERY_STEPS = (
     "recovery-queued", "recipient-recovery-queued", "name-recovery-queued", "title-recovery-queued",
@@ -697,10 +698,18 @@ def queue_reply_recovery(conv_id: str, message_id: str, *, reason: str,
         ):
             return "partial"
         if title_recovery:
+            title_failure = row["error"] == _TITLE_FAILURE
+            if row["error"] == REVIEWED_TITLE_SHAPE_HOLD:
+                title_failure = con.execute(
+                    """SELECT 1 FROM reply_recoveries WHERE conv_id=? AND message_id=?
+                       AND previous_error=? AND outcome='held' AND outcome_error=?
+                       AND finished_at IS NOT NULL LIMIT 1""",
+                    (conv_id, message_id, _TITLE_FAILURE, REVIEWED_TITLE_SHAPE_HOLD),
+                ).fetchone() is not None
             eligible = (
                 not legacy_sent and conv_id.startswith("S:") and row["status"] == "held"
                 and row["last_step"] == "held" and row["attempts"] == 0
-                and row["error"] == _TITLE_FAILURE and row["scene"] != "开场" and (row["msg_time"] or 0) > 0
+                and title_failure and row["scene"] != "开场" and (row["msg_time"] or 0) > 0
             )
         else:
             eligible = (row["status"] in ("held", "unknown") if not legacy_sent
